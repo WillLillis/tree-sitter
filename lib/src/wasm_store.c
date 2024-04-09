@@ -1231,6 +1231,7 @@ const TSLanguage *ts_wasm_store_load_language(
 
   *language = (TSLanguage) {
     .version = wasm_language.version,
+    .commit_hash = wasm_language.commit_hash,
     .symbol_count = wasm_language.symbol_count,
     .alias_count = wasm_language.alias_count,
     .token_count = wasm_language.token_count,

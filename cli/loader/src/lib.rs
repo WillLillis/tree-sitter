@@ -823,12 +823,36 @@ impl Loader {
 
         let output_name = "output.wasm";
 
+        let commit_hash = if let Ok(output) = Command::new("git")
+            .args(&[
+                "-C",
+                &src_path.as_os_str().to_string_lossy(),
+                "rev-parse",
+                "--short",
+                "HEAD",
+            ])
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            if output.status.success() {
+                String::from_utf8(output.stdout).unwrap_or_default()
+            } else {
+                String::default()
+            }
+        } else {
+            String::default()
+        };
+
+        let commit_hash = u32::from_str_radix(commit_hash.trim(), 16).unwrap_or_default();
+
         command.args([
             "-o",
             output_name,
             "-Os",
             "-s",
             "WASM=1",
+            "-D",
+            &format!("COMMIT_HASH={}", commit_hash),
             "-s",
             "SIDE_MODULE=2",
             "-s",

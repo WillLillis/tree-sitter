@@ -22,6 +22,7 @@ let tree;
 
   const codeInput = document.getElementById('code-input');
   const languageSelect = document.getElementById('language-select');
+  const languageHash = document.getElementById('language-commit-hash');
   const loggingCheckbox = document.getElementById('logging-checkbox');
   const outputContainer = document.getElementById('output-container');
   const outputContainerScroll = document.getElementById('output-container-scroll');
@@ -86,6 +87,7 @@ let tree;
       languageSelect.disabled = true;
       try {
         languagesByName[newLanguageName] = await TreeSitter.Language.load(url);
+        languageHash.innerText = languagesByName[newLanguageName].commitHash();
       } catch (e) {
         console.error(e);
         languageSelect.value = languageName;
@@ -94,6 +96,7 @@ let tree;
         languageSelect.disabled = false;
       }
     }
+    console.log(languagesByName[newLanguageName].version)
 
     tree = null;
     languageName = newLanguageName;

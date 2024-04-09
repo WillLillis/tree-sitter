@@ -56,6 +56,7 @@ macro_rules! dedent {
     };
 }
 
+// TODO: Add commit hash here, then #define it in generated code?
 struct Generator {
     buffer: String,
     indent_level: usize,
@@ -77,6 +78,7 @@ struct Generator {
 
     #[allow(unused)]
     abi_version: usize,
+    commit_hash: u32,
 }
 
 struct TransitionSummary {
@@ -304,6 +306,8 @@ impl Generator {
             .count();
 
         add_line!(self, "#define LANGUAGE_VERSION {}", self.abi_version);
+        // TODO: Add #define for commit_hash here?
+        add_line!(self, "#define COMMIT_HASH {}", self.commit_hash);
         add_line!(
             self,
             "#define STATE_COUNT {}",
@@ -1365,6 +1369,7 @@ impl Generator {
         add_line!(self, "static const TSLanguage language = {{");
         indent!(self);
         add_line!(self, ".version = LANGUAGE_VERSION,");
+        add_line!(self, ".commit_hash = COMMIT_HASH,");
 
         // Quantities
         add_line!(self, ".symbol_count = SYMBOL_COUNT,");
@@ -1700,6 +1705,7 @@ pub fn render_c_code(
     lexical_grammar: LexicalGrammar,
     default_aliases: AliasMap,
     abi_version: usize,
+    commit_hash: u32,
 ) -> String {
     assert!(
         (ABI_VERSION_MIN..=ABI_VERSION_MAX).contains(&abi_version),
@@ -1725,6 +1731,7 @@ pub fn render_c_code(
         unique_aliases: Vec::new(),
         field_names: Vec::new(),
         abi_version,
+        commit_hash,
     }
     .generate()
 }

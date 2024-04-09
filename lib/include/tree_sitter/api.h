@@ -1051,6 +1051,12 @@ TSSymbol ts_language_symbol_for_name(
   bool is_named
 );
 
+
+/**
+ * Get the hash of the commit the language's grammar was built at.
+ */
+uint32_t ts_language_commit_hash(const TSLanguage *self);
+
 /**
  * Get the number of distinct field names in the language.
  */

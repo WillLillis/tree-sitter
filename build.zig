@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
         .optimize = b.standardOptimizeOption(.{}),
     });
 
+    std.debug.print("Hey, it's printing");
+
     lib.linkLibC();
     lib.addCSourceFile(.{ .file = .{ .path = "lib/src/lib.c" }, .flags = &.{"-std=c11"} });
     lib.addIncludePath(.{ .path = "lib/include" });

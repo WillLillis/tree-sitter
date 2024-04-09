@@ -12,6 +12,8 @@ else
   tree_sitter=${root_dir}/target/release/tree-sitter
 fi
 
+echo $tree_sitter
+
 build_wasm_args=
 if [[ $1 == "--docker" ]]; then
   build_wasm_args="--docker"
