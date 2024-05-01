@@ -46,7 +46,6 @@ enum Commands {
 #[command(about = "Generate a default config file")]
 struct InitConfig;
 
-
 #[derive(Args)]
 #[command(about = "Generate a parser", alias = "gen", alias = "g")]
 struct Generate {
