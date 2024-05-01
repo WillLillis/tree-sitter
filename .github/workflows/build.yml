@@ -81,6 +81,7 @@ jobs:
         version: ${{ env.EMSCRIPTEN_VERSION }}
 
     - run: rustup toolchain install stable --profile minimal
+    - run: rustup toolchain install nightly --profile minimal
     - run: rustup target add ${{ matrix.target }}
     - uses: Swatinem/rust-cache@v2
 
