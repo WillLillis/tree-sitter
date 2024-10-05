@@ -1517,7 +1517,7 @@ impl Generator {
     fn metadata_for_symbol(&self, symbol: Symbol) -> (&str, VariableType) {
         match symbol.kind {
             SymbolType::End | SymbolType::EndOfNonTerminalExtra => ("end", VariableType::Hidden),
-            SymbolType::NonTerminal => {
+            SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => {
                 let variable = &self.syntax_grammar.variables[symbol.index];
                 (&variable.name, variable.kind)
             }

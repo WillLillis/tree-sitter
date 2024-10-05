@@ -60,6 +60,7 @@ pub(super) fn extract_tokens(
                 }
             }
         }
+        // TODO: Check for non-terminals here, push ref_extra if it's referenced
         variables.push(variable);
     }
 
@@ -96,12 +97,44 @@ pub(super) fn extract_tokens(
     let mut separators = Vec::new();
     let mut extra_symbols = Vec::new();
     for rule in grammar.extra_symbols {
+        println!("Rule: {:#?}", &rule);
         if let Rule::Symbol(symbol) = rule {
             extra_symbols.push(symbol_replacer.replace_symbol(symbol));
         } else if let Some(index) = lexical_variables.iter().position(|v| v.rule == rule) {
             extra_symbols.push(Symbol::terminal(index));
         } else {
             separators.push(rule);
+        }
+    }
+    // TODO:
+    // Iterate through all non-terminal extra symbols
+    // If it references another non-extra non-terminal symbol, find it in variables(?)
+    // and swap for SymbolType::NonTerminalRefExtra
+    // It looks like we can identify symbols by index, Rules by name, and I'm sure there's ways
+    // for the other variants/ we can just ignore them
+    //
+    // Now go through the proper place later on and add ShiftExtra actions
+    for extra in extra_symbols.iter() {
+        if let Symbol {
+            kind: SymbolType::NonTerminal,
+            index: extra_index,
+        } = extra
+        {
+            for variable in variables.iter_mut() {
+                let rule = variable.rule.clone();
+                if let Rule::Symbol(Symbol {
+                    kind: SymbolType::NonTerminal,
+                    index: var_index,
+                }) = rule
+                {
+                    if *extra_index == var_index {
+                        variable.rule = Rule::Symbol(Symbol {
+                            kind: SymbolType::NonTerminalRefExtra,
+                            index: var_index,
+                        })
+                    }
+                }
+            }
         }
     }
 

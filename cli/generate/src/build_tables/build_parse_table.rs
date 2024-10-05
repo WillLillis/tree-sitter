@@ -405,19 +405,25 @@ impl<'a> ParseTableBuilder<'a> {
         }
         // Add actions for the start tokens of each non-terminal extra rule.
         else {
-            for (terminal, state_id) in &self.non_terminal_extra_states {
-                state
-                    .terminal_entries
-                    .entry(*terminal)
-                    .or_insert(ParseTableEntry {
-                        reusable: true,
-                        actions: vec![ParseAction::Shift {
-                            state: *state_id,
-                            is_repetition: false,
-                        }],
-                    });
+            for (symbol, state_id) in &self.non_terminal_extra_states {
+                if symbol.is_non_terminal() {
+                    state
+                        .nonterminal_entries
+                        .entry(*symbol)
+                        .or_insert(GotoAction::ShiftExtra);
+                } else {
+                    state
+                        .terminal_entries
+                        .entry(*symbol)
+                        .or_insert(ParseTableEntry {
+                            reusable: true,
+                            actions: vec![ParseAction::Shift {
+                                state: *state_id,
+                                is_repetition: false,
+                            }],
+                        });
+                }
             }
-
             // Add ShiftExtra actions for the terminal extra tokens. These actions
             // are added to every state except for those at the ends of non-terminal
             // extras.
@@ -920,7 +926,7 @@ impl<'a> ParseTableBuilder<'a> {
             SymbolType::External => self.syntax_grammar.external_tokens[symbol.index]
                 .name
                 .clone(),
-            SymbolType::NonTerminal => self.syntax_grammar.variables[symbol.index].name.clone(),
+            SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => self.syntax_grammar.variables[symbol.index].name.clone(),
             SymbolType::Terminal => {
                 let variable = &self.lexical_grammar.variables[symbol.index];
                 if variable.kind == VariableType::Named {

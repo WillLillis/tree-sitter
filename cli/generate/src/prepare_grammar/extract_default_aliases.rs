@@ -35,7 +35,7 @@ pub(super) fn extract_default_aliases(
             for step in &production.steps {
                 let status = match step.symbol.kind {
                     SymbolType::External => &mut external_status_list[step.symbol.index],
-                    SymbolType::NonTerminal => &mut non_terminal_status_list[step.symbol.index],
+                    SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => &mut non_terminal_status_list[step.symbol.index],
                     SymbolType::Terminal => &mut terminal_status_list[step.symbol.index],
                     SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
                         panic!("Unexpected end token")
@@ -67,7 +67,7 @@ pub(super) fn extract_default_aliases(
     for symbol in &syntax_grammar.extra_symbols {
         let status = match symbol.kind {
             SymbolType::External => &mut external_status_list[symbol.index],
-            SymbolType::NonTerminal => &mut non_terminal_status_list[symbol.index],
+            SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => &mut non_terminal_status_list[symbol.index],
             SymbolType::Terminal => &mut terminal_status_list[symbol.index],
             SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
                 panic!("Unexpected end token")
@@ -123,7 +123,7 @@ pub(super) fn extract_default_aliases(
             for (j, step) in production.steps.iter().enumerate() {
                 let status = match step.symbol.kind {
                     SymbolType::External => &mut external_status_list[step.symbol.index],
-                    SymbolType::NonTerminal => &mut non_terminal_status_list[step.symbol.index],
+                    SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => &mut non_terminal_status_list[step.symbol.index],
                     SymbolType::Terminal => &mut terminal_status_list[step.symbol.index],
                     SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
                         panic!("Unexpected end token")

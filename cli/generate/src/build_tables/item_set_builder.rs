@@ -296,7 +296,7 @@ impl fmt::Debug for ParseItemSetBuilder<'_> {
         writeln!(f, "  first_sets: {{")?;
         for (symbol, first_set) in &self.first_sets {
             let name = match symbol.kind {
-                SymbolType::NonTerminal => &self.syntax_grammar.variables[symbol.index].name,
+                SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => &self.syntax_grammar.variables[symbol.index].name,
                 SymbolType::External => &self.syntax_grammar.external_tokens[symbol.index].name,
                 SymbolType::Terminal => &self.lexical_grammar.variables[symbol.index].name,
                 SymbolType::End | SymbolType::EndOfNonTerminalExtra => "END",
@@ -312,7 +312,7 @@ impl fmt::Debug for ParseItemSetBuilder<'_> {
         writeln!(f, "  last_sets: {{")?;
         for (symbol, last_set) in &self.last_sets {
             let name = match symbol.kind {
-                SymbolType::NonTerminal => &self.syntax_grammar.variables[symbol.index].name,
+                SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => &self.syntax_grammar.variables[symbol.index].name,
                 SymbolType::External => &self.syntax_grammar.external_tokens[symbol.index].name,
                 SymbolType::Terminal => &self.lexical_grammar.variables[symbol.index].name,
                 SymbolType::End | SymbolType::EndOfNonTerminalExtra => "END",

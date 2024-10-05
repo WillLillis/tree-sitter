@@ -11,6 +11,7 @@ pub enum SymbolType {
     EndOfNonTerminalExtra,
     Terminal,
     NonTerminal,
+    NonTerminalRefExtra,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -210,7 +211,7 @@ impl Symbol {
 
     #[must_use]
     pub fn is_non_terminal(&self) -> bool {
-        self.kind == SymbolType::NonTerminal
+        self.kind == SymbolType::NonTerminal || self.kind == SymbolType::NonTerminalRefExtra
     }
 
     #[must_use]
@@ -227,6 +228,15 @@ impl Symbol {
     pub const fn non_terminal(index: usize) -> Self {
         Self {
             kind: SymbolType::NonTerminal,
+            index,
+        }
+    }
+
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn non_terminal_ref_extra(index: usize) -> Self {
+        Self {
+            kind: SymbolType::NonTerminalRefExtra,
             index,
         }
     }
@@ -328,7 +338,9 @@ impl TokenSet {
 
     pub fn contains(&self, symbol: &Symbol) -> bool {
         match symbol.kind {
-            SymbolType::NonTerminal => panic!("Cannot store non-terminals in a TokenSet"),
+            SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => {
+                panic!("Cannot store non-terminals in a TokenSet")
+            }
             SymbolType::Terminal => self.terminal_bits.get(symbol.index).unwrap_or(false),
             SymbolType::External => self.external_bits.get(symbol.index).unwrap_or(false),
             SymbolType::End => self.eof,
@@ -342,7 +354,9 @@ impl TokenSet {
 
     pub fn insert(&mut self, other: Symbol) {
         let vec = match other.kind {
-            SymbolType::NonTerminal => panic!("Cannot store non-terminals in a TokenSet"),
+            SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => {
+                panic!("Cannot store non-terminals in a TokenSet")
+            }
             SymbolType::Terminal => &mut self.terminal_bits,
             SymbolType::External => &mut self.external_bits,
             SymbolType::End => {
@@ -362,7 +376,9 @@ impl TokenSet {
 
     pub fn remove(&mut self, other: &Symbol) -> bool {
         let vec = match other.kind {
-            SymbolType::NonTerminal => panic!("Cannot store non-terminals in a TokenSet"),
+            SymbolType::NonTerminal | SymbolType::NonTerminalRefExtra => {
+                panic!("Cannot store non-terminals in a TokenSet")
+            }
             SymbolType::Terminal => &mut self.terminal_bits,
             SymbolType::External => &mut self.external_bits,
             SymbolType::End => {
