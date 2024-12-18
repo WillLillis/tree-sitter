@@ -707,49 +707,6 @@ fn count_subtests(test_entry: &TestEntry) -> usize {
     }
 }
 
-/// Runs the parsing tests while recording adjusted parse rates. A parse's
-/// success or failure is ignored
-pub fn get_test_parsing_rate(
-    parser: &mut Parser,
-    test_entry: TestEntry,
-    adj_parse_rates: &mut Vec<f64>,
-    languages: &BTreeMap<&str, &Language>,
-) -> Result<()> {
-    match test_entry {
-        TestEntry::Example {
-            input, attributes, ..
-        } => {
-            if attributes.skip || !attributes.platform {
-                return Ok(());
-            }
-
-            for (i, language_name) in attributes.languages.iter().enumerate() {
-                if !language_name.is_empty() {
-                    let language = languages
-                        .get(language_name.as_ref())
-                        .ok_or_else(|| anyhow!("Language not found: {language_name}"))?;
-                    parser.set_language(language)?;
-                }
-                let start = std::time::Instant::now();
-                let tree = parser.parse(&input, None).unwrap();
-                let parse_time = start.elapsed();
-                adj_parse_rates.push(adjusted_parse_rate(&tree, parse_time));
-
-                if i == attributes.languages.len() - 1 {
-                    // reset to the first language
-                    parser.set_language(languages.values().next().unwrap())?;
-                }
-            }
-        }
-        TestEntry::Group { children, .. } => {
-            for child in children {
-                get_test_parsing_rate(parser, child, adj_parse_rates, languages)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 // Parse time is interpreted in μs before converting to ms to avoid truncation issues
 // Parse rates often have several outliers, leading to a large standard deviation. Taking
 // the log of these rates serves to "flatten" out the distribution, yielding a more
