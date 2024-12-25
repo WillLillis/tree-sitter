@@ -13,7 +13,7 @@ use std::{
 
 pub use c_lib as c;
 use lazy_static::lazy_static;
-use streaming_iterator::StreamingIterator;
+pub use streaming_iterator::{StreamingIterator, StreamingIteratorMut};
 use thiserror::Error;
 use tree_sitter::{
     ffi, Language, LossyUtf8, Node, ParseOptions, Parser, Point, Query, QueryCapture,

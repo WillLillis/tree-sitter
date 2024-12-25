@@ -15,7 +15,7 @@ use std::{
 
 use memchr::memchr;
 use regex::Regex;
-use streaming_iterator::StreamingIterator;
+pub use streaming_iterator::{StreamingIterator, StreamingIteratorMut};
 use thiserror::Error;
 use tree_sitter::{
     Language, LossyUtf8, ParseOptions, Parser, Point, Query, QueryCursor, QueryError,
