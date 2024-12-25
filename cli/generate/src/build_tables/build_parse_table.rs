@@ -390,6 +390,18 @@ impl<'a> ParseTableBuilder<'a> {
                 .insert(symbol, GotoAction::Goto(next_state_id));
         }
 
+        // struct Interpretation {
+        //     pub preceding_symbols: Vec<String>,
+        //     pub
+        //
+        // }
+        //
+        // struct UnresolvedConflict {
+        //     pub symbol_name: String,
+        //     pub conflicting_lookahead: String,
+        //     pub possible_interpretations: Interpretation,
+        //     pub possible_resolutions: Vec<String>,
+        // }
         // For any symbol with multiple actions, perform conflict resolution.
         // This will either
         // * choose one action over the others using precedence or associativity
