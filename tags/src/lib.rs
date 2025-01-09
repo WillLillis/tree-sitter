@@ -18,7 +18,7 @@ use regex::Regex;
 use streaming_iterator::StreamingIterator;
 use thiserror::Error;
 use tree_sitter::{
-    Language, LossyUtf8, ParseOptions, Parser, Point, Query, QueryCursor, QueryError,
+    Language, ParseOptions, Parser, Point, Query, QueryCursor, QueryError,
     QueryPredicateArg, Tree,
 };
 
@@ -641,8 +641,8 @@ fn line_range(
 }
 
 fn utf16_len(bytes: &[u8]) -> usize {
-    LossyUtf8::new(bytes)
-        .flat_map(|chunk| chunk.chars().map(char::len_utf16))
+    bytes.utf8_chunks()
+        .flat_map(|chunk| chunk.valid().chars().map(char::len_utf16))
         .sum()
 }
 

@@ -16,7 +16,7 @@ use lazy_static::lazy_static;
 use streaming_iterator::StreamingIterator;
 use thiserror::Error;
 use tree_sitter::{
-    ffi, Language, LossyUtf8, Node, ParseOptions, Parser, Point, Query, QueryCapture,
+    ffi, Language, Node, ParseOptions, Parser, Point, Query, QueryCapture,
     QueryCaptures, QueryCursor, QueryError, QueryMatch, Range, TextProvider, Tree,
 };
 
@@ -1193,7 +1193,7 @@ impl HtmlRenderer {
         }
 
         let mut last_char_was_cr = false;
-        for c in LossyUtf8::new(src).flat_map(|p| p.bytes()) {
+        for c in src.utf8_chunks().flat_map(|p| p.valid().bytes()) {
             // Don't render carriage return characters, but allow lone carriage returns (not
             // followed by line feeds) to be styled via the attribute callback.
             if c == b'\r' {

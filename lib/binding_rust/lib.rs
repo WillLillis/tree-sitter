@@ -380,13 +380,6 @@ enum TextPredicateCapture {
     AnyString(u32, Box<[Box<str>]>, bool),
 }
 
-// TODO: Remove this struct at some point. If `core::str::lossy::Utf8Lossy`
-// is ever stabilized.
-pub struct LossyUtf8<'a> {
-    bytes: &'a [u8],
-    in_replacement: bool,
-}
-
 impl Language {
     #[must_use]
     pub fn new(builder: LanguageFn) -> Self {
@@ -3601,53 +3594,6 @@ impl From<&'_ InputEdit> for ffi::TSInputEdit {
             start_point: val.start_position.into(),
             old_end_point: val.old_end_position.into(),
             new_end_point: val.new_end_position.into(),
-        }
-    }
-}
-
-impl<'a> LossyUtf8<'a> {
-    #[must_use]
-    pub const fn new(bytes: &'a [u8]) -> Self {
-        LossyUtf8 {
-            bytes,
-            in_replacement: false,
-        }
-    }
-}
-
-impl<'a> Iterator for LossyUtf8<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<&'a str> {
-        if self.bytes.is_empty() {
-            return None;
-        }
-        if self.in_replacement {
-            self.in_replacement = false;
-            return Some("\u{fffd}");
-        }
-        match core::str::from_utf8(self.bytes) {
-            Ok(valid) => {
-                self.bytes = &[];
-                Some(valid)
-            }
-            Err(error) => {
-                if let Some(error_len) = error.error_len() {
-                    let error_start = error.valid_up_to();
-                    if error_start > 0 {
-                        let result =
-                            unsafe { core::str::from_utf8_unchecked(&self.bytes[..error_start]) };
-                        self.bytes = &self.bytes[(error_start + error_len)..];
-                        self.in_replacement = true;
-                        Some(result)
-                    } else {
-                        self.bytes = &self.bytes[error_len..];
-                        Some("\u{fffd}")
-                    }
-                } else {
-                    None
-                }
-            }
         }
     }
 }

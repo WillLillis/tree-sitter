@@ -670,23 +670,6 @@ fn test_highlighting_with_all_captures_applied() {
     );
 }
 
-#[test]
-fn test_decode_utf8_lossy() {
-    use tree_sitter::LossyUtf8;
-
-    let parts = LossyUtf8::new(b"hi").collect::<Vec<_>>();
-    assert_eq!(parts, vec!["hi"]);
-
-    let parts = LossyUtf8::new(b"hi\xc0\xc1bye").collect::<Vec<_>>();
-    assert_eq!(parts, vec!["hi", "\u{fffd}", "\u{fffd}", "bye"]);
-
-    let parts = LossyUtf8::new(b"\xc0\xc1bye").collect::<Vec<_>>();
-    assert_eq!(parts, vec!["\u{fffd}", "\u{fffd}", "bye"]);
-
-    let parts = LossyUtf8::new(b"hello\xc0\xc1").collect::<Vec<_>>();
-    assert_eq!(parts, vec!["hello", "\u{fffd}", "\u{fffd}"]);
-}
-
 fn c_string(s: &str) -> CString {
     CString::new(s.as_bytes().to_vec()).unwrap()
 }
