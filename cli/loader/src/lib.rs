@@ -948,17 +948,66 @@ impl Loader {
         Ok(())
     }
 
-    #[cfg(windows)]
-    fn check_external_scanner(&self, _name: &str, _library_path: &Path) -> Result<()> {
-        // TODO: there's no nm command on windows, whoever wants to implement this can and should :)
+    // #[cfg(windows)]
+    fn check_external_scanner_win(&self, name: &str, library_path: &Path) -> Result<()> {
+        let mut must_have = vec![
+            format!("tree_sitter_{name}_external_scanner_create"),
+            format!("tree_sitter_{name}_external_scanner_destroy"),
+            format!("tree_sitter_{name}_external_scanner_serialize"),
+            format!("tree_sitter_{name}_external_scanner_deserialize"),
+            format!("tree_sitter_{name}_external_scanner_scan"),
+        ];
 
-        // let mut must_have = vec![
-        //     format!("tree_sitter_{name}_external_scanner_create"),
-        //     format!("tree_sitter_{name}_external_scanner_destroy"),
-        //     format!("tree_sitter_{name}_external_scanner_serialize"),
-        //     format!("tree_sitter_{name}_external_scanner_deserialize"),
-        //     format!("tree_sitter_{name}_external_scanner_scan"),
-        // ];
+        let command = Command::new("cmd.exe").args(
+            &[
+                "/k", 
+                &format!(
+                    r#"""C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat" && dumpbin /exports {}""#,
+                    library_path.display()
+                )
+            ])
+            .output();
+        if let Ok(output) = command {
+            if output.status.success() {
+                let mut found_non_static = false;
+                for line in String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .skip_while(|line| !line.trim().starts_with("ordinal hint RVA"))
+                    .skip(1)
+                    .take_while(|line| !line.is_empty())
+                    .map(|line| line.trim())
+                {
+                    // TODO: Figure out a way to wade through the vomit of output that
+                    // dumpbin gives us...
+                        if let Some(function_name) =
+                            line.split_whitespace().collect::<Vec<_>>().get(2)
+                        {
+                        }
+                }
+                if found_non_static {
+                    eprintln!("Consider making these functions static, they can cause conflicts when another tree-sitter project uses the same function name");
+                }
+
+                if !must_have.is_empty() {
+                    let missing = must_have
+                        .iter()
+                        .map(|f| format!("  `{f}`"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    return Err(anyhow!(format!(
+                        indoc! {"
+                            Missing required functions in the external scanner, parsing won't work without these!
+
+                            {}
+
+                            You can read more about this at https://tree-sitter.github.io/tree-sitter/creating-parsers/4-external-scanners
+                        "},
+                        missing,
+                    )));
+                }
+            }
+        }
 
         Ok(())
     }
