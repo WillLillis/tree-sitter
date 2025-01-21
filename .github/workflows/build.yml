@@ -157,14 +157,32 @@ jobs:
       env:
         WASMTIME_REPO: https://github.com/bytecodealliance/wasmtime
 
+    - name: Install MinGW and Clang (Windows x64)
+      if: ${{ matrix.platform == 'windows-x64' }}
+      uses: msys2/setup-msys2@v2
+      with:
+        update: true
+        install: >
+          mingw-w64-x86_64-clang
+          mingw-w64-x86_64-make
+          mingw-w64-x86_64-cmake
+
+    - name: Add MinGW to PATH (Windows x64)
+      if: ${{ matrix.platform == 'windows-x64' }}
+      run: |
+        echo "C:\msys64\mingw64\bin" >> $env:GITHUB_PATH
+        echo "C:\msys64\usr\bin" >> $env:GITHUB_PATH
+
     - name: Build C library (make)
-      if: ${{ runner.os != 'Windows' }}
+      if: ${{ runner.os != 'Windows' || matrix.platform == 'windows-x64' }}
+      shell: ${{ matrix.platform == 'windows-x64' && 'msys2 {0}' || 'bash' }}
       run: make.sh -j CFLAGS="$CFLAGS"
       env:
         CFLAGS: -g -Werror -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
 
     - name: Build C library (CMake)
-      if: ${{ !matrix.use-cross }}
+      if: ${{ !matrix.use-cross || matrix.platform == 'windows-x64' }}
+      shell: ${{ matrix.platform == 'windows-x64' && 'msys2 {0}' || 'bash' }}
       run: |
         cmake -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
