@@ -167,13 +167,6 @@ jobs:
           mingw-w64-x86_64-make
           mingw-w64-x86_64-cmake
 
-    - name: Add MinGW to PATH (Windows x64)
-      if: ${{ matrix.platform == 'windows-x64' }}
-      shell: msys2 {0}
-      run: |
-        export PATH=/c/mingw64/bin:$PATH
-        export PATH=/c/mingw64/usr/bin:$PATH
-
     - name: Build C library (make)
       if: ${{ runner.os != 'Windows' }}
       run: make.sh -j CFLAGS="$CFLAGS"
