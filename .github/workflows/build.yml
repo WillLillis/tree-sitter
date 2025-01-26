@@ -188,10 +188,10 @@ jobs:
       if: ${{ matrix.platform == 'windows-x64' }}
       shell: msys2 {0}
       run: |
-        export PATH=/mingw64/bin:$PATH
-        export PATH=/mingw64/usr/bin:$PATH
+        export PATH=/c/mingw64/bin:$PATH
+        export PATH=/c/mingw64/usr/bin:$PATH
         echo $PATH
-        CC=clang C:/mingw64/bin/make.exe -j CFLAGS="$CFLAGS"
+        CC=clang make -j CFLAGS="$CFLAGS"
       env:
         CFLAGS: -g -Werror -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
 
