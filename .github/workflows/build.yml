@@ -181,6 +181,30 @@ jobs:
         AR: x86_64-w64-mingw32-ar
         CFLAGS: -g -Werror -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
 
+    - name: Build C library (Windows x64 MSYS2 CMake)
+      if: ${{ matrix.platform == 'windows-x64' }}
+      shell: msys2 {0}
+      run: |
+        cmake -S lib -B build/static \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+          -DTREE_SITTER_FEATURE_WASM=$WASM \
+          -DCMAKE_C_COMPILER=clang
+        cmake --build build/static --verbose
+        rm -rf build/static
+
+        cmake -S lib -B build/shared \
+          -DBUILD_SHARED_LIBS=ON \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+          -DTREE_SITTER_FEATURE_WASM=$WASM \
+          -DCMAKE_C_COMPILER=clang
+        cmake --build build/shared --verbose
+        rm -rf build/shared
+      env:
+        WASM: ${{ contains(matrix.features, 'wasm') && 'ON' || 'OFF' }}
+
     - name: Build C library (CMake)
       if: ${{ !matrix.use-cross }}
       run: |
@@ -201,33 +225,6 @@ jobs:
         CC: ${{ contains(matrix.target, 'linux') && 'clang' || '' }}
         WASM: ${{ contains(matrix.features, 'wasm') && 'ON' || 'OFF' }}
 
-    - name: Build C library (Windows x64 CMake)
-      if: ${{ matrix.platform == 'windows-x64' }}
-      shell: msys2 {0}
-      run: |
-        rm build/static/CMakeCache.txt
-        rm -rf build/static/CMakeFiles
-        cmake -G "MinGW Makefiles" \
-          -S lib -B build/static \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-          -DTREE_SITTER_FEATURE_WASM=$WASM \
-          -DCMAKE_C_COMPILER=clang
-        cmake --build build/static --verbose
-
-        rm build/shared/CMakeCache.txt
-        rm -rf build/shared/CMakeFiles
-        cmake -G "MinGW Makefiles" \
-          -S lib -B build/shared \
-          -DBUILD_SHARED_LIBS=ON \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-          -DTREE_SITTER_FEATURE_WASM=$WASM \
-          -DCMAKE_C_COMPILER=clang
-        cmake --build build/shared --verbose
-      env:
-        WASM: ${{ contains(matrix.features, 'wasm') && 'ON' || 'OFF' }}
 
     - name: Build wasm library
       # No reason to build on the same Github runner hosts many times
