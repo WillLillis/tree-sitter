@@ -205,8 +205,8 @@ jobs:
       if: ${{ matrix.platform == 'windows-x64' }}
       shell: msys2 {0}
       run: |
-        which clang
-        which cmake
+        rm build/static/CMakeCache.txt
+        rm -rf build/static/CMakeFiles
         cmake -G "MinGW Makefiles" \
           -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
@@ -216,6 +216,8 @@ jobs:
           -DCMAKE_C_COMPILER=clang
         cmake --build build/static --verbose
 
+        rm build/shared/CMakeCache.txt
+        rm -rf build/shared/CMakeFiles
         cmake -G "MinGW Makefiles" \
           -S lib -B build/shared \
           -DBUILD_SHARED_LIBS=ON \
