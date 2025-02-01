@@ -206,6 +206,7 @@ jobs:
       shell: msys2 {0}
       run: |
         which clang
+        which cmake
         cmake -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_BUILD_TYPE=Debug \
