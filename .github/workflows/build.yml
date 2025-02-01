@@ -205,6 +205,7 @@ jobs:
       if: ${{ matrix.platform == 'windows-x64' }}
       shell: msys2 {0}
       run: |
+        which clang
         cmake -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_BUILD_TYPE=Debug \
