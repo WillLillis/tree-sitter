@@ -173,21 +173,6 @@ jobs:
       env:
         CFLAGS: -g -Werror -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
 
-    - name: Find Make (Windows)
-      if: ${{ matrix.platform == 'windows-x64' }}
-      run: where make
-      shell: cmd
-
-    - name: Build C library (Windows x64 make)
-      if: ${{ matrix.platform == 'windows-x64' }}
-      shell: msys2 {0}
-      run: |
-        export PATH=/c/mingw64/bin:$PATH
-        export PATH=/c/mingw64/usr/bin:$PATH
-        CC=clang make -j CFLAGS="$CFLAGS"
-      env:
-        CFLAGS: -g -Werror -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
-
     - name: Build C library (Windows x64 MSYS2 CMake)
       if: ${{ matrix.platform == 'windows-x64' }}
       shell: msys2 {0}
