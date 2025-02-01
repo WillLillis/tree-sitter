@@ -207,7 +207,8 @@ jobs:
       run: |
         which clang
         which cmake
-        cmake -S lib -B build/static \
+        cmake -G "MinGW Makefiles" \
+          -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
@@ -215,7 +216,8 @@ jobs:
           -DCMAKE_C_COMPILER=clang
         cmake --build build/static --verbose
 
-        cmake -S lib -B build/shared \
+        cmake -G "MinGW Makefiles" \
+          -S lib -B build/shared \
           -DBUILD_SHARED_LIBS=ON \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
