@@ -205,19 +205,21 @@ jobs:
       if: ${{ matrix.platform == 'windows-x64' }}
       shell: msys2 {0}
       run: |
-        CC=clang cmake -S lib -B build/static \
+        cmake -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-          -DTREE_SITTER_FEATURE_WASM=$WASM
-        CC=clang cmake --build build/static --verbose
+          -DTREE_SITTER_FEATURE_WASM=$WASM \
+          -DCMAKE_C_COMPILER=clang
+        cmake -DCMAKE_C_COMPILER=clang --build build/static --verbose
 
-        CC=clang cmake -S lib -B build/shared \
+        cmake -S lib -B build/shared \
           -DBUILD_SHARED_LIBS=ON \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-          -DTREE_SITTER_FEATURE_WASM=$WASM
-        CC=clang cmake --build build/shared --verbose
+          -DTREE_SITTER_FEATURE_WASM=$WASM \
+          -DCMAKE_C_COMPILER=clang
+        cmake -DCMAKE_COMPILER=clang --build build/shared --verbose
       env:
         CC: ${{ contains(matrix.target, 'linux') && 'clang' || '' }}
         WASM: ${{ contains(matrix.features, 'wasm') && 'ON' || 'OFF' }}
