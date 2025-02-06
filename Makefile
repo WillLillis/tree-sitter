@@ -1,5 +1,7 @@
 ifeq ($(OS),Windows_NT)
+ifneq ($(shell uname -o),Msys)
 $(error Windows is not supported)
+endif
 endif
 
 VERSION := 0.25.0
