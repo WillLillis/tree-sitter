@@ -157,6 +157,26 @@ jobs:
       env:
         WASMTIME_REPO: https://github.com/bytecodealliance/wasmtime
 
+    - name: Build wasmtime library
+      if: ${{ matrix.platform == 'windows-x64' }}
+      # shell: msys2 {0} # Hopefully don't have to install all this stuff again...
+      run: |
+        mkdir -p target
+        WASMTIME_VERSION=$(cargo metadata --format-version=1 --locked --features wasm | \
+                           jq -r '.packages[] | select(.name == "wasmtime-c-api-impl") | .version')
+        curl -LSs "$WASMTIME_REPO/archive/refs/tags/v${WASMTIME_VERSION}.tar.gz" | tar xzf - -C target
+        cd target/wasmtime-${WASMTIME_VERSION}
+        cmake -S crates/c-api -B target/c-api \
+          -DCMAKE_INSTALL_PREFIX="$PWD/artifacts" \
+          -DWASMTIME_DISABLE_ALL_FEATURES=ON \
+          -DCMAKE_C_COMPILER=clang \
+          -DWASMTIME_FEATURE_CRANELIFT=ON \
+          -DWASMTIME_TARGET='${{ matrix.target }}'
+        cmake --build target/c-api && cmake --install target/c-api
+        printf 'CMAKE_PREFIX_PATH=%s\n' "$PWD/artifacts" >> $GITHUB_ENV
+      env:
+        WASMTIME_REPO: https://github.com/bytecodealliance/wasmtime
+
     - name: Install MinGW and Clang (Windows x64 MSYS2)
       if: ${{ matrix.platform == 'windows-x64' }}
       uses: msys2/setup-msys2@v2
