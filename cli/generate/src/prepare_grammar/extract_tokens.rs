@@ -7,7 +7,7 @@ use thiserror::Error;
 use super::{ExtractedLexicalGrammar, ExtractedSyntaxGrammar, InternedGrammar};
 use crate::{
     grammars::{ExternalToken, ReservedWordContext, Variable, VariableType},
-    rules::{MetadataParams, Rule, Symbol, SymbolType},
+    rules::{MetadataParams, Precedence, Rule, Symbol, SymbolType},
 };
 
 pub type ExtractTokensResult<T> = Result<T, ExtractTokensError>;
@@ -28,7 +28,9 @@ unless they are used only as the grammar's start rule.
     NonSymbolExternalToken,
     #[error("Non-terminal symbol '{0}' cannot be used as the word token, because its rule is duplicated in '{1}'")]
     NonTerminalWordToken(String, String),
-    #[error("Reserved word '{0}' must be a token")]
+    // #[error("Reserved word '{0}' must be a token")]
+    // NonTokenReservedWord(String),
+    #[error("Invalid rule '{0}', reserved words must be an immediate token")]
     NonTokenReservedWord(String),
 }
 
@@ -188,12 +190,43 @@ pub(super) fn extract_tokens(
             {
                 reserved_words.push(Symbol::terminal(index));
             } else {
-                let token_name = match &reserved_rule {
-                    Rule::String(s) => s.clone(),
-                    Rule::Pattern(p, _) => p.clone(),
-                    _ => "unknown".to_string(),
+                let rule = match &reserved_rule {
+                    Rule::String(s) | Rule::Pattern(s, _) | Rule::NamedSymbol(s) => {
+                        format!("'{s}'")
+                    }
+                    Rule::Blank => "`blank`".to_string(),
+                    Rule::Choice(c) => {
+                        if c.len() == 2 && matches!((&c[0], &c[1]), (Rule::Repeat(_), Rule::Blank))
+                        {
+                            "`repeat`".to_string()
+                        } else if c.len() == 2 && matches!(&c[1], Rule::Blank) {
+                            "`optional`".to_string()
+                        } else {
+                            "`choice`".to_string()
+                        }
+                    }
+                    Rule::Repeat(_) => "`repeat1`".to_string(),
+                    Rule::Seq(_) => "`seq`".to_string(),
+                    Rule::Metadata { params, .. } => {
+                        if params.alias.is_some() {
+                            "`alias`".to_string()
+                        } else if params.field_name.is_some() {
+                            "`field`".to_string()
+                        } else if params.associativity.is_some()
+                            || params.precedence != Precedence::None
+                            || params.dynamic_precedence != 0
+                        {
+                            "`prec`".to_string()
+                        } else if params.is_token {
+                            "`token`".to_string()
+                        } else {
+                            "<unexpected rule>".to_string() // couldn't get this to show up...
+                        }
+                    }
+                    // ...or this
+                    Rule::Symbol(_) | Rule::Reserved { .. } => "<unexpected rule>".to_string(),
                 };
-                Err(ExtractTokensError::NonTokenReservedWord(token_name))?;
+                Err(ExtractTokensError::NonTokenReservedWord(rule))?;
             }
         }
         reserved_word_contexts.push(ReservedWordContext {
