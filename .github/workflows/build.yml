@@ -350,3 +350,8 @@ jobs:
           lib/binding_web/src/*.ts
         if-no-files-found: error
         retention-days: 7
+    # Uncomment this to ssh into the runner and debug if needed
+    - name: Setup tmate session
+      if: ${{ always() && matrix.platform == 'windows-x64' }}
+      uses: mxschmitt/action-tmate@v3
+
