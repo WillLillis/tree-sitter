@@ -6,6 +6,7 @@ HOMEPAGE_URL := https://tree-sitter.github.io/tree-sitter/
 PREFIX ?= /usr/local
 INCLUDEDIR ?= $(PREFIX)/include
 LIBDIR ?= $(PREFIX)/lib
+BINDIR ?= $(PREFIX)/bin
 PCLIBDIR ?= $(LIBDIR)/pkgconfig
 
 # collect sources
@@ -61,6 +62,9 @@ ifneq ($(STRIP),)
 	$(STRIP) $@
 endif
 
+# For MinGW-w64 targets
+libtree-sitter.dll.a: libtree-sitter.$(SOEXT)
+
 tree-sitter.pc: lib/tree-sitter.pc.in
 	sed -e 's|@PROJECT_VERSION@|$(VERSION)|' \
 		-e 's|@CMAKE_INSTALL_LIBDIR@|$(LIBDIR:$(PREFIX)/%=%)|' \
@@ -70,6 +74,7 @@ tree-sitter.pc: lib/tree-sitter.pc.in
 		-e 's|@CMAKE_INSTALL_PREFIX@|$(PREFIX)|' $< > $@
 
 clean:
+	$(RM) $(OBJ) tree-sitter.pc libtree-sitter.a libtree-sitter.$(SOEXT) libtree-stitter.dll.a
 	$(RM) $(OBJ) tree-sitter.pc libtree-sitter.a libtree-sitter.$(SOEXT) libtree-stitter.lib
 
 install: all
@@ -77,9 +82,15 @@ install: all
 	install -m644 lib/include/tree_sitter/api.h '$(DESTDIR)$(INCLUDEDIR)'/tree_sitter/api.h
 	install -m644 tree-sitter.pc '$(DESTDIR)$(PCLIBDIR)'/tree-sitter.pc
 	install -m644 libtree-sitter.a '$(DESTDIR)$(LIBDIR)'/libtree-sitter.a
+ifneq ($(findstring mingw32,$(shell $(CC) -dumpmachine)),)
+	install -d '$(DESTDIR)$(BINDIR)'
+	install -m755 libtree-sitter.dll '$(DESTDIR)$(BINDIR)'/libtree-sitter.dll
+	install -m755 libtree-sitter.dll.a '$(DESTDIR)$(LIBDIR)'/libtree-sitter.dll.a
+else
 	install -m755 libtree-sitter.$(SOEXT) '$(DESTDIR)$(LIBDIR)'/libtree-sitter.$(SOEXTVER)
-	ln -sf libtree-sitter.$(SOEXTVER) '$(DESTDIR)$(LIBDIR)'/libtree-sitter.$(SOEXTVER_MAJOR)
-	ln -sf libtree-sitter.$(SOEXTVER_MAJOR) '$(DESTDIR)$(LIBDIR)'/libtree-sitter.$(SOEXT)
+	cd '$(DESTDIR)$(LIBDIR)' && ln -sf libtree-sitter.$(SOEXTVER) libtree-sitter.$(SOEXTVER_MAJOR)
+	cd '$(DESTDIR)$(LIBDIR)' && ln -sf libtree-sitter.$(SOEXTVER_MAJOR) libtree-sitter.$(SOEXT)
+endif
 
 uninstall:
 	$(RM) '$(DESTDIR)$(LIBDIR)'/libtree-sitter.a \
