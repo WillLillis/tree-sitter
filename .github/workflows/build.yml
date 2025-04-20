@@ -142,6 +142,11 @@ jobs:
     - name: Build wasmtime library
       if: ${{ !matrix.use-cross && contains(matrix.features, 'wasm') }}
       run: |
+        if [ "${{ matrix.platform }}" == "windows-x64" ]; then
+          echo "WASMTIME_TARGET=x86_64-pc-windows-gnu" >> $GITHUB_ENV
+        else
+          echo "WASMTIME_TARGET=${{ matrix.target }}" >> $GITHUB_ENV
+        fi
         mkdir -p target
         WASMTIME_VERSION=$(cargo metadata --format-version=1 --locked --features wasm | \
                            jq -r '.packages[] | select(.name == "wasmtime-c-api-impl") | .version')
@@ -151,9 +156,7 @@ jobs:
           -DCMAKE_INSTALL_PREFIX="$PWD/artifacts" \
           -DWASMTIME_DISABLE_ALL_FEATURES=ON \
           -DWASMTIME_FEATURE_CRANELIFT=ON \
-          -DWASMTIME_TARGET='${{ matrix.platform == "windows-x64" && "x86_64-pc-windows-gnu" || matrix.target }}' \
-          -DWASMTIME_TARGET='${{ matrix.platform == "windows-x64" && x86_64-pc-windows-gnu || matrix.target }}' \
-          # -DWASMTIME_TARGET='${{ matrix.target }}'
+          -DWASMTIME_TARGET='${{ env.WASMTIME_TARGET }}'
         cmake --build target/c-api && cmake --install target/c-api
         printf 'CMAKE_PREFIX_PATH=%s\n' "$PWD/artifacts" >> $GITHUB_ENV
       env:
