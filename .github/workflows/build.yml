@@ -192,7 +192,7 @@ jobs:
       if: ${{ matrix.platform == 'windows-x64' }}
       shell: msys2 {0}
       run: |
-        cmake -S lib -B build/static \
+        cmake -G Ninja -S lib -B build/static \
           -DBUILD_SHARED_LIBS=OFF \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
@@ -201,7 +201,7 @@ jobs:
         cmake --build build/static --verbose
         rm -rf build/static
 
-        cmake -S lib -B build/shared \
+        cmake -G Ninja -S lib -B build/shared \
           -DBUILD_SHARED_LIBS=ON \
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
