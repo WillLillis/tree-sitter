@@ -30,11 +30,15 @@ if(MSVC)
                          /wd4701 # disable 'potentially uninitialized local variable'
                          /we4022 # treat 'incompatible types' as an error
                          /W4)
+elseif(MINGW AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+  target_compile_options(tree-sitter PRIVATE
+                         -Wall -Wextra -Wshadow -Wpedantic
+                         -Werror=incompatible-pointer-types
+                         -Wno-static-in-inline)
 else()
   target_compile_options(tree-sitter PRIVATE
                          -Wall -Wextra -Wshadow -Wpedantic
                          -Werror=incompatible-pointer-types)
-                         # -Wno-static-in-inline)
 endif()
 
 if(TREE_SITTER_FEATURE_WASM)
