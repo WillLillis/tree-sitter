@@ -151,30 +151,12 @@ jobs:
           -DCMAKE_INSTALL_PREFIX="$PWD/artifacts" \
           -DWASMTIME_DISABLE_ALL_FEATURES=ON \
           -DWASMTIME_FEATURE_CRANELIFT=ON \
-          -DWASMTIME_TARGET='${{ matrix.platform == "windows-x64" && x86_64-pc-windows-gnu || matrix.target }}'
+          -DWASMTIME_TARGET='${{ matrix.platform == "windows-x64" && x86_64-pc-windows-gnu || matrix.target }}' \
           # -DWASMTIME_TARGET='${{ matrix.target }}'
         cmake --build target/c-api && cmake --install target/c-api
         printf 'CMAKE_PREFIX_PATH=%s\n' "$PWD/artifacts" >> $GITHUB_ENV
       env:
         WASMTIME_REPO: https://github.com/bytecodealliance/wasmtime
-
-    # - name: Build wasmtime library (Windows x64 MSYS2)
-    #   if: ${{ !matrix.use-cross && contains(matrix.features, 'wasm') && matrix.platform == 'windows-x64' }}
-    #   run: |
-    #     mkdir -p target
-    #     WASMTIME_VERSION=$(cargo metadata --format-version=1 --locked --features wasm | \
-    #                        jq -r '.packages[] | select(.name == "wasmtime-c-api-impl") | .version')
-    #     curl -LSs "$WASMTIME_REPO/archive/refs/tags/v${WASMTIME_VERSION}.tar.gz" | tar xzf - -C target
-    #     cd target/wasmtime-${WASMTIME_VERSION}
-    #     cmake -S crates/c-api -B target/c-api \
-    #       -DCMAKE_INSTALL_PREFIX="$PWD/artifacts" \
-    #       -DWASMTIME_DISABLE_ALL_FEATURES=ON \
-    #       -DWASMTIME_FEATURE_CRANELIFT=ON \
-    #       # -DWASMTIME_TARGET='x86_64-pc-windows-gnu'
-    #     cmake --build target/c-api && cmake --install target/c-api
-    #     printf 'CMAKE_PREFIX_PATH=%s\n' "$PWD/artifacts" >> $GITHUB_ENV
-    #   env:
-    #     WASMTIME_REPO: https://github.com/bytecodealliance/wasmtime
 
     - name: Install MinGW and Clang (Windows x64 MSYS2)
       if: ${{ matrix.platform == 'windows-x64' }}
@@ -348,4 +330,3 @@ jobs:
           lib/binding_web/src/*.ts
         if-no-files-found: error
         retention-days: 7
-
