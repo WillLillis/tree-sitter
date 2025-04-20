@@ -211,30 +211,6 @@ jobs:
         AR: x86_64-w64-mingw32-ar
         CFLAGS: -g -Werror -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
 
-    - name: Build C library (Windows x64 MSYS2 CMake)
-      if: ${{ matrix.platform == 'windows-x64' }}
-      shell: msys2 {0}
-      run: |
-        cmake -S lib -B build/static \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-          -DTREE_SITTER_FEATURE_WASM=$WASM \
-          -DCMAKE_C_COMPILER=clang
-        cmake --build build/static --verbose
-        rm -rf build/static
-
-        cmake -S lib -B build/shared \
-          -DBUILD_SHARED_LIBS=ON \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
-          -DTREE_SITTER_FEATURE_WASM=$WASM \
-          -DCMAKE_C_COMPILER=clang
-        cmake --build build/shared --verbose
-        rm -rf build/shared
-      env:
-        WASM: ${{ contains(matrix.features, 'wasm') && 'ON' || 'OFF' }}
-
     - name: Build C library (CMake)
       if: ${{ !matrix.use-cross }}
       run: |
