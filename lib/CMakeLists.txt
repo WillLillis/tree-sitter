@@ -33,8 +33,8 @@ if(MSVC)
 else()
   target_compile_options(tree-sitter PRIVATE
                          -Wall -Wextra -Wshadow -Wpedantic
-                         -Werror=incompatible-pointer-types
-                         -Wno-static-in-inline)
+                         -Werror=incompatible-pointer-types)
+                         # -Wno-static-in-inline)
 endif()
 
 if(TREE_SITTER_FEATURE_WASM)
