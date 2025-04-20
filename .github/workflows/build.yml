@@ -151,6 +151,7 @@ jobs:
           -DCMAKE_INSTALL_PREFIX="$PWD/artifacts" \
           -DWASMTIME_DISABLE_ALL_FEATURES=ON \
           -DWASMTIME_FEATURE_CRANELIFT=ON \
+          -DWASMTIME_TARGET='${{ matrix.platform == "windows-x64" && "x86_64-pc-windows-gnu" || matrix.target }}' \
           -DWASMTIME_TARGET='${{ matrix.platform == "windows-x64" && x86_64-pc-windows-gnu || matrix.target }}' \
           # -DWASMTIME_TARGET='${{ matrix.target }}'
         cmake --build target/c-api && cmake --install target/c-api
