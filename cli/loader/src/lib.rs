@@ -1102,7 +1102,7 @@ impl Loader {
             let ps_command = format!(
                 "cd '{}'; tar -xzf '{}' --strip-components=1",
                 wasi_sdk_dir.to_str().unwrap(),
-                temp_tar_path.to_str().unwrap()
+                temp_tar_path.canonicalize()?.to_str().unwrap()
             );
 
             let status = Command::new("powershell")
