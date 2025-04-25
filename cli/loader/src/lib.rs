@@ -1078,7 +1078,7 @@ impl Loader {
             .context("Failed to flush downloaded file")?;
         eprintln!("Extracting wasi-sdk to {}...", wasi_sdk_dir.display());
 
-        #[cfg(unix)]
+        #[cfg(all(unix, not(windows)))]
         {
             let status = Command::new("tar")
                 .args([
@@ -1096,7 +1096,7 @@ impl Loader {
             }
         }
 
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             // On Windows, use PowerShell to extract the tar.gz file directly
             let ps_command = format!(
