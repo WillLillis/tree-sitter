@@ -2979,9 +2979,7 @@ const TSQueryPredicateStep *ts_query_predicates_for_pattern(
 ) {
   Slice slice = array_get(&self->patterns, pattern_index)->predicate_steps;
   *step_count = slice.length;
-  if (self->predicate_steps.contents == NULL) {
-    return NULL;
-  }
+  if (slice.length == 0) return NULL;
   return array_get(&self->predicate_steps, slice.offset);
 }
 
