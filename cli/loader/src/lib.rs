@@ -547,6 +547,11 @@ impl Loader {
                 extensions.reverse();
                 self.language_configuration_ids_by_file_type
                     .get(&extensions.join("."))
+                    .or_else(|| {
+                        // allow for for equal treatment between "a.x.ext" and "a.ext"
+                        self.language_configuration_ids_by_file_type
+                            .get(extensions.first().unwrap_or(&String::new()))
+                    })
             });
 
         if let Some(configuration_ids) = configuration_ids {
