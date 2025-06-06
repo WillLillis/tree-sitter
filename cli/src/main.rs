@@ -1749,6 +1749,12 @@ fn run() -> Result<()> {
     .map_or_else(|| env::current_dir().unwrap(), |p| p.clone());
 
     let loader = loader::Loader::new()?;
+    println!(
+        "curr path: {:#?}",
+        loader.language_configuration_in_current_path
+    );
+    // TODO: Pass in current_dir to `language_configuration_for_file_name` and friends
+    // (via `select_language`) and make sure that one gets checked first
 
     match command {
         Commands::InitConfig(_) => InitConfig::run()?,

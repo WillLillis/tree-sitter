@@ -330,7 +330,7 @@ pub struct Loader {
     languages_by_id: Vec<(PathBuf, OnceCell<Language>, Option<Vec<PathBuf>>)>,
     language_configurations: Vec<LanguageConfiguration<'static>>,
     language_configuration_ids_by_file_type: HashMap<String, Vec<usize>>,
-    language_configuration_in_current_path: Option<usize>,
+    pub language_configuration_in_current_path: Option<usize>,
     language_configuration_ids_by_first_line_regex: HashMap<String, Vec<usize>>,
     #[cfg(feature = "tree-sitter-highlight")]
     highlight_names: Box<Mutex<Vec<String>>>,
@@ -1375,6 +1375,9 @@ impl Loader {
         } else if let Some(id) = self.language_configuration_in_current_path {
             Ok(self.language_for_id(self.language_configurations[id].language_id)?)
         } else if let Some(lang) = self
+            // TODO(WILL): See if we can bump this up, either conditionally based
+            // off of whether `--grammar-path` was specified, or unconditionally
+            // if it doesn't break anything
             .languages_at_path(current_dir)
             .with_context(|| "Failed to load language in current directory")?
             .first()
