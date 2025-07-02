@@ -810,7 +810,7 @@ impl<'a> ParseTableBuilder<'a> {
         }
 
         // Determine the set of parent symbols involved in this conflict.
-        let mut actual_conflict = Vec::new();
+        let mut actual_conflict = Vec::with_capacity(conflicting_items.len());
         for item in &conflicting_items {
             let symbol = Symbol::non_terminal(item.variable_index as usize);
             if self.syntax_grammar.variables[symbol.index].is_auxiliary() {

@@ -28,6 +28,7 @@ impl InlinedProductionMapBuilder {
     fn build(mut self, grammar: &SyntaxGrammar) -> InlinedProductionMap {
         let mut step_ids_to_process = Vec::new();
         for (variable_index, variable) in grammar.variables.iter().enumerate() {
+            step_ids_to_process.reserve(variable.productions.len());
             for production_index in 0..variable.productions.len() {
                 step_ids_to_process.push(ProductionStepId {
                     variable_index: Some(variable_index),
