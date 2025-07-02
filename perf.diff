@@ -1,0 +1,229 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 45245189..e7bb3b5a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -77,6 +77,9 @@ unused_self = "allow"
+ used_underscore_items = "allow"
+ obfuscated_if_else = "allow"
+ 
++# [workspace.lints.rust]
++# mismatched_lifetime_syntaxes = "allow"
++
+ [profile.optimize]
+ inherits = "release"
+ strip = true         # Automatically strip symbols from the binary.
+diff --git a/crates/generate/src/build_tables/build_parse_table.rs b/crates/generate/src/build_tables/build_parse_table.rs
+index c41c4838..ed22dfc5 100644
+--- a/crates/generate/src/build_tables/build_parse_table.rs
++++ b/crates/generate/src/build_tables/build_parse_table.rs
+@@ -810,7 +810,7 @@ impl<'a> ParseTableBuilder<'a> {
+         }
+ 
+         // Determine the set of parent symbols involved in this conflict.
+-        let mut actual_conflict = Vec::new();
++        let mut actual_conflict = Vec::with_capacity(conflicting_items.len());
+         for item in &conflicting_items {
+             let symbol = Symbol::non_terminal(item.variable_index as usize);
+             if self.syntax_grammar.variables[symbol.index].is_auxiliary() {
+diff --git a/crates/generate/src/node_types.rs b/crates/generate/src/node_types.rs
+index 95a89b52..74ee7977 100644
+--- a/crates/generate/src/node_types.rs
++++ b/crates/generate/src/node_types.rs
+@@ -632,15 +632,15 @@ pub fn generate_node_types_json(
+         let mut next_kinds = top_sort.pop_all();
+         match (next_kinds.is_empty(), top_sort.is_empty()) {
+             (true, true) => break,
++            (false, _) => {
++                next_kinds.sort();
++                sorted_kinds.extend(next_kinds);
++            }
+             (true, false) => {
+                 let mut items = top_sort.collect::<Vec<String>>();
+                 items.sort();
+                 return Err(SuperTypeCycleError { items });
+             }
+-            (false, _) => {
+-                next_kinds.sort();
+-                sorted_kinds.extend(next_kinds);
+-            }
+         }
+     }
+     subtype_map.sort_by(|a, b| {
+diff --git a/crates/generate/src/parse_grammar.rs b/crates/generate/src/parse_grammar.rs
+index 0b8de958..3448ed30 100644
+--- a/crates/generate/src/parse_grammar.rs
++++ b/crates/generate/src/parse_grammar.rs
+@@ -272,12 +272,11 @@ pub(crate) fn parse_grammar(input: &str) -> ParseGrammarResult<InputGrammar> {
+         .reserved
+         .into_iter()
+         .map(|(name, rule_values)| {
+-            let mut reserved_words = Vec::new();
+-
+             let Value::Array(rule_values) = rule_values else {
+                 Err(ParseGrammarError::InvalidReservedWordSet)?
+             };
+ 
++            let mut reserved_words = Vec::with_capacity(rule_values.len());
+             for value in rule_values {
+                 reserved_words.push(parse_rule(serde_json::from_value(value)?, false)?);
+             }
+diff --git a/crates/generate/src/prepare_grammar/expand_tokens.rs b/crates/generate/src/prepare_grammar/expand_tokens.rs
+index ed4774d4..9c0ce2ec 100644
+--- a/crates/generate/src/prepare_grammar/expand_tokens.rs
++++ b/crates/generate/src/prepare_grammar/expand_tokens.rs
+@@ -82,6 +82,7 @@ pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult
+         is_sep: true,
+         precedence_stack: vec![0],
+     };
++    builder.nfa.states.reserve(grammar.variables.len());
+ 
+     let separator_rule = if grammar.separators.is_empty() {
+         Rule::Blank
+@@ -90,7 +91,7 @@ pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult
+         Rule::repeat(Rule::choice(grammar.separators))
+     };
+ 
+-    let mut variables = Vec::new();
++    let mut variables = Vec::with_capacity(grammar.variables.len());
+     for (i, variable) in grammar.variables.into_iter().enumerate() {
+         if variable.rule.is_empty() {
+             Err(ExpandTokensError::EmptyString(variable.name.clone()))?;
+@@ -195,7 +196,7 @@ impl NfaBuilder {
+                 Ok(!s.is_empty())
+             }
+             Rule::Choice(elements) => {
+-                let mut alternative_state_ids = Vec::new();
++                let mut alternative_state_ids = Vec::with_capacity(elements.len());
+                 for element in elements {
+                     if self.expand_rule(element, next_state_id)? {
+                         alternative_state_ids.push(self.nfa.last_state_id());
+@@ -338,7 +339,7 @@ impl NfaBuilder {
+                 Ok(result)
+             }
+             HirKind::Alternation(alternations) => {
+-                let mut alternative_state_ids = Vec::new();
++                let mut alternative_state_ids = Vec::with_capacity(alternations.len());
+                 for hir in alternations {
+                     if self.expand_regex(hir, next_state_id)? {
+                         alternative_state_ids.push(self.nfa.last_state_id());
+diff --git a/crates/generate/src/prepare_grammar/extract_tokens.rs b/crates/generate/src/prepare_grammar/extract_tokens.rs
+index c66b7029..182da3e7 100644
+--- a/crates/generate/src/prepare_grammar/extract_tokens.rs
++++ b/crates/generate/src/prepare_grammar/extract_tokens.rs
+@@ -153,7 +153,7 @@ pub(super) fn extract_tokens(
+         }
+     }
+ 
+-    let mut external_tokens = Vec::new();
++    let mut external_tokens = Vec::with_capacity(grammar.external_tokens.len());
+     for external_token in grammar.external_tokens {
+         let rule = symbol_replacer.replace_symbols_in_rule(&external_token.rule);
+         if let Rule::Symbol(symbol) = rule {
+@@ -200,9 +200,9 @@ pub(super) fn extract_tokens(
+         word_token = Some(token);
+     }
+ 
+-    let mut reserved_word_contexts = Vec::new();
++    let mut reserved_word_contexts = Vec::with_capacity(grammar.reserved_word_sets.len());
+     for reserved_word_context in grammar.reserved_word_sets {
+-        let mut reserved_words = Vec::new();
++        let mut reserved_words = Vec::with_capacity(reserved_word_context.reserved_words.len());
+         for reserved_rule in reserved_word_context.reserved_words {
+             if let Rule::Symbol(symbol) = reserved_rule {
+                 reserved_words.push(symbol_replacer.replace_symbol(symbol));
+diff --git a/crates/generate/src/prepare_grammar/flatten_grammar.rs b/crates/generate/src/prepare_grammar/flatten_grammar.rs
+index bffd3ef9..d897f031 100644
+--- a/crates/generate/src/prepare_grammar/flatten_grammar.rs
++++ b/crates/generate/src/prepare_grammar/flatten_grammar.rs
+@@ -195,7 +195,7 @@ fn extract_choices(rule: Rule) -> Vec<Rule> {
+             let mut result = vec![Rule::Blank];
+             for element in elements {
+                 let extraction = extract_choices(element);
+-                let mut next_result = Vec::new();
++                let mut next_result = Vec::with_capacity(result.len());
+                 for entry in result {
+                     for extraction_entry in &extraction {
+                         next_result.push(Rule::Seq(vec![entry.clone(), extraction_entry.clone()]));
+@@ -206,7 +206,7 @@ fn extract_choices(rule: Rule) -> Vec<Rule> {
+             result
+         }
+         Rule::Choice(elements) => {
+-            let mut result = Vec::new();
++            let mut result = Vec::with_capacity(elements.len());
+             for element in elements {
+                 for rule in extract_choices(element) {
+                     result.push(rule);
+diff --git a/crates/generate/src/prepare_grammar/intern_symbols.rs b/crates/generate/src/prepare_grammar/intern_symbols.rs
+index 6301e462..41a5b56e 100644
+--- a/crates/generate/src/prepare_grammar/intern_symbols.rs
++++ b/crates/generate/src/prepare_grammar/intern_symbols.rs
+@@ -65,7 +65,7 @@ pub(super) fn intern_symbols(grammar: &InputGrammar) -> InternSymbolsResult<Inte
+ 
+     let mut reserved_words = Vec::with_capacity(grammar.reserved_words.len());
+     for reserved_word_set in &grammar.reserved_words {
+-        let mut interned_set = Vec::new();
++        let mut interned_set = Vec::with_capacity(reserved_word_set.reserved_words.len());
+         for rule in &reserved_word_set.reserved_words {
+             interned_set.push(interner.intern_rule(rule, None)?);
+         }
+@@ -75,7 +75,7 @@ pub(super) fn intern_symbols(grammar: &InputGrammar) -> InternSymbolsResult<Inte
+         });
+     }
+ 
+-    let mut expected_conflicts = Vec::new();
++    let mut expected_conflicts = Vec::with_capacity(grammar.expected_conflicts.len());
+     for conflict in &grammar.expected_conflicts {
+         let mut interned_conflict = Vec::with_capacity(conflict.len());
+         for name in conflict {
+diff --git a/crates/generate/src/prepare_grammar/process_inlines.rs b/crates/generate/src/prepare_grammar/process_inlines.rs
+index 085e6732..faf5e5df 100644
+--- a/crates/generate/src/prepare_grammar/process_inlines.rs
++++ b/crates/generate/src/prepare_grammar/process_inlines.rs
+@@ -28,6 +28,7 @@ impl InlinedProductionMapBuilder {
+     fn build(mut self, grammar: &SyntaxGrammar) -> InlinedProductionMap {
+         let mut step_ids_to_process = Vec::new();
+         for (variable_index, variable) in grammar.variables.iter().enumerate() {
++            step_ids_to_process.reserve(variable.productions.len());
+             for production_index in 0..variable.productions.len() {
+                 step_ids_to_process.push(ProductionStepId {
+                     variable_index: Some(variable_index),
+diff --git a/crates/generate/src/render.rs b/crates/generate/src/render.rs
+index aabf978d..256f4de7 100644
+--- a/crates/generate/src/render.rs
++++ b/crates/generate/src/render.rs
+@@ -680,7 +680,7 @@ impl Generator {
+             &mut next_flat_field_map_index,
+         );
+ 
+-        let mut field_map_ids = Vec::new();
++        let mut field_map_ids = Vec::with_capacity(self.parse_table.production_infos.len());
+         for production_info in &self.parse_table.production_infos {
+             if production_info.field_map.is_empty() {
+                 field_map_ids.push((0, 0));
+@@ -1352,7 +1352,12 @@ impl Generator {
+             indent!(self);
+ 
+             let mut next_table_index = 0;
+-            let mut small_state_indices = Vec::new();
++            let mut small_state_indices = Vec::with_capacity(
++                self.parse_table
++                    .states
++                    .len()
++                    .saturating_sub(self.large_state_count),
++            );
+             let mut symbols_by_value = HashMap::<(usize, SymbolType), Vec<Symbol>>::new();
+             for state in self.parse_table.states.iter().skip(self.large_state_count) {
+                 small_state_indices.push(next_table_index);
+diff --git a/lib/binding_rust/lib.rs b/lib/binding_rust/lib.rs
+index 21f24836..394376ae 100644
+--- a/lib/binding_rust/lib.rs
++++ b/lib/binding_rust/lib.rs
+@@ -2721,7 +2721,7 @@ impl Query {
+                         }
+ 
+                         let is_positive = operator_name == "any-of?";
+-                        let mut values = Vec::new();
++                        let mut values = Vec::with_capacity(p.len() - 2);
+                         for arg in &p[2..] {
+                             if arg.type_ == TYPE_CAPTURE {
+                                 return Err(predicate_error(row, format!(

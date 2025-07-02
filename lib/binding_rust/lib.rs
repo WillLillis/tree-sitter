@@ -2721,7 +2721,7 @@ impl Query {
                         }
 
                         let is_positive = operator_name == "any-of?";
-                        let mut values = Vec::new();
+                        let mut values = Vec::with_capacity(p.len() - 2);
                         for arg in &p[2..] {
                             if arg.type_ == TYPE_CAPTURE {
                                 return Err(predicate_error(row, format!(

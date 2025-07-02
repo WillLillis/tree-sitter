@@ -195,7 +195,7 @@ fn extract_choices(rule: Rule) -> Vec<Rule> {
             let mut result = vec![Rule::Blank];
             for element in elements {
                 let extraction = extract_choices(element);
-                let mut next_result = Vec::new();
+                let mut next_result = Vec::with_capacity(result.len());
                 for entry in result {
                     for extraction_entry in &extraction {
                         next_result.push(Rule::Seq(vec![entry.clone(), extraction_entry.clone()]));
@@ -206,7 +206,7 @@ fn extract_choices(rule: Rule) -> Vec<Rule> {
             result
         }
         Rule::Choice(elements) => {
-            let mut result = Vec::new();
+            let mut result = Vec::with_capacity(elements.len());
             for element in elements {
                 for rule in extract_choices(element) {
                     result.push(rule);

@@ -657,14 +657,14 @@ pub fn generate_node_types_json(
         let mut next_kinds = top_sort.pop_all();
         match (next_kinds.is_empty(), top_sort.is_empty()) {
             (true, true) => break,
+            (false, _) => {
+                next_kinds.sort();
+                sorted_kinds.extend(next_kinds);
+            }
             (true, false) => {
                 let mut items = top_sort.collect::<Vec<String>>();
                 items.sort();
                 return Err(SuperTypeCycleError { items });
-            }
-            (false, _) => {
-                next_kinds.sort();
-                sorted_kinds.extend(next_kinds);
             }
         }
     }

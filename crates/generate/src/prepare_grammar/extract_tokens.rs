@@ -153,7 +153,7 @@ pub(super) fn extract_tokens(
         }
     }
 
-    let mut external_tokens = Vec::new();
+    let mut external_tokens = Vec::with_capacity(grammar.external_tokens.len());
     for external_token in grammar.external_tokens {
         let rule = symbol_replacer.replace_symbols_in_rule(&external_token.rule);
         if let Rule::Symbol(symbol) = rule {
@@ -200,9 +200,9 @@ pub(super) fn extract_tokens(
         word_token = Some(token);
     }
 
-    let mut reserved_word_contexts = Vec::new();
+    let mut reserved_word_contexts = Vec::with_capacity(grammar.reserved_word_sets.len());
     for reserved_word_context in grammar.reserved_word_sets {
-        let mut reserved_words = Vec::new();
+        let mut reserved_words = Vec::with_capacity(reserved_word_context.reserved_words.len());
         for reserved_rule in reserved_word_context.reserved_words {
             if let Rule::Symbol(symbol) = reserved_rule {
                 reserved_words.push(symbol_replacer.replace_symbol(symbol));
