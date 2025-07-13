@@ -1,4 +1,4 @@
-use log::{LevelFilter, Log, Metadata, Record};
+use log::{Level, LevelFilter, Log, Metadata, Record};
 
 #[allow(dead_code)]
 struct Logger {
@@ -11,14 +11,18 @@ impl Log for Logger {
     }
 
     fn log(&self, record: &Record) {
-        eprintln!(
-            "[{}] {}",
-            record
-                .module_path()
-                .unwrap_or_default()
-                .trim_start_matches("rust_tree_sitter_cli::"),
-            record.args()
-        );
+        match record.level() {
+            Level::Error => eprintln!("Error: {}", record.args()),
+            Level::Warn => eprintln!("Warning: {}", record.args()),
+            _ => eprintln!(
+                "[{}] {}",
+                record
+                    .module_path()
+                    .unwrap_or_default()
+                    .trim_start_matches("rust_tree_sitter_cli::"),
+                record.args()
+            ),
+        }
     }
 
     fn flush(&self) {}
