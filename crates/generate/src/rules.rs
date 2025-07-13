@@ -73,6 +73,15 @@ pub enum Rule {
     },
 }
 
+#[derive(Default, Copy, Clone, PartialEq, Eq, Hash)]
+enum TokenSetData {
+    #[default]
+    NoEOFNoEndOfNonTerminalExtra,
+    EOFNoEndOfNonTerminalExtra,
+    NoEOFEndOfNonTerminalExtra,
+    EOFEndOfNonTerminalExtra,
+}
+
 // Because tokens are represented as small (~400 max) unsigned integers,
 // sets of tokens can be efficiently represented as bit vectors with each
 // index corresponding to a token, and each value representing whether or not
@@ -81,8 +90,81 @@ pub enum Rule {
 pub struct TokenSet {
     terminal_bits: SmallBitVec,
     external_bits: SmallBitVec,
-    eof: bool,
-    end_of_nonterminal_extra: bool,
+    data: TokenSetData,
+}
+
+impl TokenSet {
+    pub fn eof(&self) -> bool {
+        matches!(
+            self.data,
+            TokenSetData::EOFNoEndOfNonTerminalExtra | TokenSetData::EOFEndOfNonTerminalExtra
+        )
+    }
+
+    pub fn end_of_nonterminal_extra(&self) -> bool {
+        matches!(
+            self.data,
+            TokenSetData::NoEOFEndOfNonTerminalExtra | TokenSetData::EOFEndOfNonTerminalExtra
+        )
+    }
+
+    pub fn set_end_of_nonterminal_extra(&mut self, value: bool) {
+        self.data = match (self.data, value) {
+            (TokenSetData::NoEOFNoEndOfNonTerminalExtra, true) => {
+                TokenSetData::NoEOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::NoEOFNoEndOfNonTerminalExtra, false) => {
+                TokenSetData::NoEOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFNoEndOfNonTerminalExtra, true) => {
+                TokenSetData::EOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFNoEndOfNonTerminalExtra, false) => {
+                TokenSetData::EOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::NoEOFEndOfNonTerminalExtra, true) => {
+                TokenSetData::NoEOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::NoEOFEndOfNonTerminalExtra, false) => {
+                TokenSetData::NoEOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFEndOfNonTerminalExtra, true) => {
+                TokenSetData::EOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFEndOfNonTerminalExtra, false) => {
+                TokenSetData::EOFNoEndOfNonTerminalExtra
+            }
+        };
+    }
+
+    pub fn set_eof(&mut self, value: bool) {
+        self.data = match (self.data, value) {
+            (TokenSetData::NoEOFNoEndOfNonTerminalExtra, true) => {
+                TokenSetData::EOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::NoEOFNoEndOfNonTerminalExtra, false) => {
+                TokenSetData::NoEOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFNoEndOfNonTerminalExtra, true) => {
+                TokenSetData::EOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFNoEndOfNonTerminalExtra, false) => {
+                TokenSetData::NoEOFNoEndOfNonTerminalExtra
+            }
+            (TokenSetData::NoEOFEndOfNonTerminalExtra, true) => {
+                TokenSetData::EOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::NoEOFEndOfNonTerminalExtra, false) => {
+                TokenSetData::NoEOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFEndOfNonTerminalExtra, true) => {
+                TokenSetData::EOFEndOfNonTerminalExtra
+            }
+            (TokenSetData::EOFEndOfNonTerminalExtra, false) => {
+                TokenSetData::NoEOFEndOfNonTerminalExtra
+            }
+        };
+    }
 }
 
 impl fmt::Debug for TokenSet {
@@ -103,10 +185,10 @@ impl Ord for TokenSet {
             .iter()
             .cmp(other.terminal_bits.iter())
             .then_with(|| self.external_bits.iter().cmp(other.external_bits.iter()))
-            .then_with(|| self.eof.cmp(&other.eof))
+            .then_with(|| self.eof().cmp(&other.eof()))
             .then_with(|| {
-                self.end_of_nonterminal_extra
-                    .cmp(&other.end_of_nonterminal_extra)
+                self.end_of_nonterminal_extra()
+                    .cmp(&other.end_of_nonterminal_extra())
             })
     }
 }
@@ -317,8 +399,7 @@ impl TokenSet {
         Self {
             terminal_bits: SmallBitVec::new(),
             external_bits: SmallBitVec::new(),
-            eof: false,
-            end_of_nonterminal_extra: false,
+            data: TokenSetData::NoEOFNoEndOfNonTerminalExtra,
         }
     }
 
@@ -345,8 +426,12 @@ impl TokenSet {
                         }
                     }),
             )
-            .chain(if self.eof { Some(Symbol::end()) } else { None })
-            .chain(if self.end_of_nonterminal_extra {
+            .chain(if self.eof() {
+                Some(Symbol::end())
+            } else {
+                None
+            })
+            .chain(if self.end_of_nonterminal_extra() {
                 Some(Symbol::end_of_nonterminal_extra())
             } else {
                 None
@@ -371,8 +456,8 @@ impl TokenSet {
             SymbolType::NonTerminal => panic!("Cannot store non-terminals in a TokenSet"),
             SymbolType::Terminal => self.terminal_bits.get(symbol.index).unwrap_or(false),
             SymbolType::External => self.external_bits.get(symbol.index).unwrap_or(false),
-            SymbolType::End => self.eof,
-            SymbolType::EndOfNonTerminalExtra => self.end_of_nonterminal_extra,
+            SymbolType::End => self.eof(),
+            SymbolType::EndOfNonTerminalExtra => self.end_of_nonterminal_extra(),
         }
     }
 
@@ -386,11 +471,11 @@ impl TokenSet {
             SymbolType::Terminal => &mut self.terminal_bits,
             SymbolType::External => &mut self.external_bits,
             SymbolType::End => {
-                self.eof = true;
+                self.set_eof(true);
                 return;
             }
             SymbolType::EndOfNonTerminalExtra => {
-                self.end_of_nonterminal_extra = true;
+                self.set_end_of_nonterminal_extra(true);
                 return;
             }
         };
@@ -406,16 +491,16 @@ impl TokenSet {
             SymbolType::Terminal => &mut self.terminal_bits,
             SymbolType::External => &mut self.external_bits,
             SymbolType::End => {
-                return if self.eof {
-                    self.eof = false;
+                return if self.eof() {
+                    self.set_eof(false);
                     true
                 } else {
                     false
                 }
             }
             SymbolType::EndOfNonTerminalExtra => {
-                return if self.end_of_nonterminal_extra {
-                    self.end_of_nonterminal_extra = false;
+                return if self.end_of_nonterminal_extra() {
+                    self.set_end_of_nonterminal_extra(false);
                     true
                 } else {
                     false
@@ -433,15 +518,15 @@ impl TokenSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.eof
-            && !self.end_of_nonterminal_extra
+        !self.eof()
+            && !self.end_of_nonterminal_extra()
             && !self.terminal_bits.iter().any(|a| a)
             && !self.external_bits.iter().any(|a| a)
     }
 
     pub fn len(&self) -> usize {
-        self.eof as usize
-            + self.end_of_nonterminal_extra as usize
+        self.eof() as usize
+            + self.end_of_nonterminal_extra() as usize
             + self.terminal_bits.iter().filter(|b| *b).count()
             + self.external_bits.iter().filter(|b| *b).count()
     }
@@ -476,13 +561,13 @@ impl TokenSet {
 
     pub fn insert_all(&mut self, other: &Self) -> bool {
         let mut result = false;
-        if other.eof {
-            result |= !self.eof;
-            self.eof = true;
+        if other.eof() {
+            result |= !self.eof();
+            self.set_eof(true);
         }
-        if other.end_of_nonterminal_extra {
-            result |= !self.end_of_nonterminal_extra;
-            self.end_of_nonterminal_extra = true;
+        if other.end_of_nonterminal_extra() {
+            result |= !self.end_of_nonterminal_extra();
+            self.set_end_of_nonterminal_extra(true);
         }
         result |= self.insert_all_terminals(other);
         result |= self.insert_all_externals(other);
