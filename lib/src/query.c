@@ -1531,6 +1531,7 @@ static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
   // one of the parent nodes, such that their children appear to belong to the
   // parent.
   AnalysisSubgraphArray subgraphs = array_new();
+  array_reserve(&subgraphs, parent_step_indices.size);
   for (unsigned i = 0; i < parent_step_indices.size; i++) {
     uint32_t parent_step_index = *array_get(&parent_step_indices, i);
     TSSymbol parent_symbol = array_get(&self->steps, parent_step_index)->symbol;
@@ -1905,6 +1906,7 @@ static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
       TSSymbolMetadata metadata = ts_language_symbol_metadata(self->language, subgraph->symbol);
       if (metadata.visible || metadata.named) continue;
 
+      array_reserve(&analysis.states, analysis.states.size + subgraph->start_states.size);
       for (uint32_t k = 0; k < subgraph->start_states.size; k++) {
         TSStateId parse_state = *array_get(&subgraph->start_states, k);
         analysis_state_set__push(&analysis.states, &analysis.state_pool, &((AnalysisState) {
@@ -2034,7 +2036,11 @@ static TSQueryError ts_query__parse_string_literal(
   const char *prev_position = stream->input;
 
   bool is_escaped = false;
+
+  // TODO: Account for escaped quotes?
   array_clear(&self->string_buffer);
+  const unsigned len = strchr(stream->input, '"') - stream->input;
+  array_reserve(&self->string_buffer, self->string_buffer.size + len);
   for (;;) {
     if (is_escaped) {
       is_escaped = false;

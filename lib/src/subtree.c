@@ -611,7 +611,9 @@ int ts_subtree_compare(Subtree left, Subtree right, SubtreePool *pool) {
       return result;
     }
 
-    for (uint32_t i = ts_subtree_child_count(left); i > 0; i--) {
+    uint32_t left_child_count = ts_subtree_child_count(left);
+    array_reserve(&pool->tree_stack, pool->tree_stack.size + (left_child_count * 2));
+    for (uint32_t i = left_child_count; i > 0; i--) {
       Subtree left_child = ts_subtree_children(left)[i - 1];
       Subtree right_child = ts_subtree_children(right)[i - 1];
       array_push(&pool->tree_stack, ts_subtree_to_mut_unsafe(left_child));

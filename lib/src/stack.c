@@ -379,6 +379,7 @@ static StackSliceArray stack__iter(
         continue;
       }
 
+      array_reserve(&self->iterators, self->iterators.size + node->link_count - 2);
       for (uint32_t j = 1; j <= node->link_count; j++) {
         StackIterator *next_iterator;
         StackLink link;
@@ -827,6 +828,7 @@ bool ts_stack_print_dot_graph(Stack *self, const TSLanguage *language, FILE *f) 
   while (!all_iterators_done) {
     all_iterators_done = true;
 
+    array_reserve(&visited_nodes, visited_nodes.size + self->iterators.size);
     for (uint32_t i = 0; i < self->iterators.size; i++) {
       StackIterator iterator = *array_get(&self->iterators, i);
       StackNode *node = iterator.node;
@@ -864,6 +866,7 @@ bool ts_stack_print_dot_graph(Stack *self, const TSLanguage *language, FILE *f) 
         node->dynamic_precedence
       );
 
+      array_reserve(&self->iterators, self->iterators.size + node->link_count - 1);
       for (int j = 0; j < node->link_count; j++) {
         StackLink link = node->links[j];
         fprintf(f, "node_%p -> node_%p [", (void *)node, (void *)link.node);
