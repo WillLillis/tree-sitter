@@ -23,6 +23,7 @@ use etcetera::BaseStrategy as _;
 use fs4::fs_std::FileExt;
 use indoc::indoc;
 use libloading::{Library, Symbol};
+use log::warn;
 use once_cell::unsync::OnceCell;
 use regex::{Regex, RegexBuilder};
 use semver::Version;
@@ -494,10 +495,12 @@ impl Loader {
 
     pub fn find_all_languages(&mut self, config: &Config) -> Result<()> {
         if config.parser_directories.is_empty() {
-            eprintln!("Warning: You have not configured any parser directories!");
-            eprintln!("Please run `tree-sitter init-config` and edit the resulting");
-            eprintln!("configuration file to indicate where we should look for");
-            eprintln!("language grammars.\n");
+            warn!(
+                "Warning: You have not configured any parser directories!
+Please run `tree-sitter init-config` and edit the resulting
+configuration file to indicate where we should look for
+language grammars.\n"
+            );
         }
         for parser_container_dir in &config.parser_directories {
             if let Ok(entries) = fs::read_dir(parser_container_dir) {
@@ -970,9 +973,10 @@ impl Loader {
                             line.split_whitespace().collect::<Vec<_>>().get(2)
                         {
                             if !line.contains("tree_sitter_") {
+                                // TODO: Start log rework here
                                 if !found_non_static {
                                     found_non_static = true;
-                                    eprintln!("Warning: Found non-static non-tree-sitter functions in the external scannner");
+                                    warn!("Warning: Found non-static non-tree-sitter functions in the external scannner");
                                 }
                                 eprintln!("  `{function_name}`");
                             } else {
