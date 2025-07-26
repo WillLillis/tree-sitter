@@ -2098,6 +2098,7 @@ dependencies = [
  "fs4",
  "indoc",
  "libloading",
+ "log",
  "once_cell",
  "path-slash",
  "regex",

@@ -35,6 +35,7 @@ flate2.workspace = true
 fs4.workspace = true
 indoc.workspace = true
 libloading.workspace = true
+log.workspace = true
 once_cell.workspace = true
 path-slash.workspace = true
 regex.workspace = true
