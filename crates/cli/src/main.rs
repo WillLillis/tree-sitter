@@ -10,7 +10,7 @@ use clap::{crate_authors, Args, Command, FromArgMatches as _, Subcommand, ValueE
 use clap_complete::generate;
 use dialoguer::{theme::ColorfulTheme, Confirm, FuzzySelect, Input, MultiSelect};
 use heck::ToUpperCamelCase;
-use log::LevelFilter;
+use log::{error, warn, LevelFilter};
 use regex::Regex;
 use semver::Version as SemverVersion;
 use tree_sitter::{ffi, Parser, Point};
@@ -859,7 +859,7 @@ impl Generate {
             self.stage != GenerationStage::Json,
         ) {
             if self.json {
-                eprintln!("{}", serde_json::to_string_pretty(&err)?);
+                error!("{}", serde_json::to_string_pretty(&err)?);
                 // Exit early to prevent errors from being printed a second time in the caller
                 std::process::exit(1);
             } else {
@@ -883,7 +883,7 @@ impl Build {
         let grammar_path = current_dir.join(self.path.unwrap_or_default());
 
         if self.docker {
-            eprintln!("Warning: --docker flag is no longer used, and will be removed in a future release.");
+            warn!("--docker flag is no longer used, and will be removed in a future release.");
         }
 
         if self.wasm {
@@ -1540,7 +1540,7 @@ impl Highlight {
                                 {
                                     (lang, lang_config)
                                 } else {
-                                    eprintln!(
+                                    warn!(
                                         "{}",
                                         util::lang_not_found_for_path(&path, &loader_config)
                                     );
@@ -1561,7 +1561,7 @@ impl Highlight {
                             &options,
                         )?;
                     } else {
-                        eprintln!(
+                        error!(
                             "No syntax highlighting config found for path {}",
                             path.display()
                         );
@@ -1592,7 +1592,7 @@ impl Highlight {
                 {
                     highlight::highlight(&loader, &path, &name, highlight_config, false, &options)?;
                 } else {
-                    eprintln!("No syntax highlighting config found for test {name}");
+                    error!("No syntax highlighting config found for test {name}");
                 }
                 fs::remove_file(path)?;
             }
@@ -1632,7 +1632,7 @@ impl Highlight {
                         &options,
                     )?;
                 } else {
-                    eprintln!(
+                    error!(
                         "No syntax highlighting config found for path {}",
                         current_dir.display()
                     );
@@ -1690,7 +1690,7 @@ impl Tags {
                                 {
                                     (lang, lang_config)
                                 } else {
-                                    eprintln!(
+                                    error!(
                                         "{}",
                                         util::lang_not_found_for_path(&path, &loader_config)
                                     );
@@ -1708,7 +1708,7 @@ impl Tags {
                             &options,
                         )?;
                     } else {
-                        eprintln!("No tags config found for path {}", path.display());
+                        error!("No tags config found for path {}", path.display());
                     }
                 }
             }
@@ -1734,7 +1734,7 @@ impl Tags {
                 if let Some(tags_config) = language_config.tags_config(language)? {
                     tags::generate_tags(&path, &name, tags_config, false, &options)?;
                 } else {
-                    eprintln!("No tags config found for test {name}");
+                    error!("No tags config found for test {name}");
                 }
                 fs::remove_file(path)?;
             }
@@ -1765,7 +1765,7 @@ impl Tags {
                 if let Some(tags_config) = language_config.tags_config(language)? {
                     tags::generate_tags(&path, "stdin", tags_config, false, &options)?;
                 } else {
-                    eprintln!("No tags config found for path {}", current_dir.display());
+                    error!("No tags config found for path {}", current_dir.display());
                 }
                 fs::remove_file(path)?;
             }
