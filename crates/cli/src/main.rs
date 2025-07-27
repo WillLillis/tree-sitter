@@ -170,6 +170,13 @@ struct Parse {
     /// The path to the tree-sitter grammar directory
     #[arg(long, short = 'p')]
     pub grammar_path: Option<PathBuf>,
+    /// The path to the parser's dynamic library
+    #[arg(long, short = 'l')]
+    pub lib_path: Option<PathBuf>,
+    /// If `--lib_path` is used, the name of the language used to extract the
+    /// library's language function
+    #[arg(long)]
+    pub language_name: Option<String>,
     /// Select a language by the scope instead of a file extension
     #[arg(long)]
     pub scope: Option<String>,
@@ -352,6 +359,13 @@ struct Query {
     /// The path to the tree-sitter grammar directory
     #[arg(long, short = 'p')]
     pub grammar_path: Option<PathBuf>,
+    /// The path to the parser's dynamic library
+    #[arg(long, short = 'l')]
+    pub lib_path: Option<PathBuf>,
+    /// If `--lib_path` is used, the name of the language used to extract the
+    /// library's language function
+    #[arg(long)]
+    pub language_name: Option<String>,
     /// Measure execution time
     #[arg(long, short)]
     pub time: bool,
@@ -986,6 +1000,8 @@ impl Parse {
             has_error |= !parse_result.successful;
         };
 
+        let lib_info = get_lib_info(self.lib_path.as_ref(), self.language_name.as_ref());
+
         let input = get_input(
             self.paths_file.as_deref(),
             self.paths,
@@ -1002,8 +1018,12 @@ impl Parse {
 
                 for path in &paths {
                     let path = Path::new(&path);
-                    let language =
-                        loader.select_language(path, current_dir, self.scope.as_deref())?;
+                    let language = loader.select_language(
+                        path,
+                        current_dir,
+                        self.scope.as_deref(),
+                        lib_info.as_ref(),
+                    )?;
 
                     parse::parse_file_at_path(
                         &mut parser,
@@ -1049,7 +1069,8 @@ impl Parse {
 
                 let path = get_tmp_source_file(&contents)?;
                 let name = "stdin";
-                let language = loader.select_language(&path, current_dir, None)?;
+                let language =
+                    loader.select_language(&path, current_dir, None, lib_info.as_ref())?;
 
                 parse::parse_file_at_path(
                     &mut parser,
@@ -1278,6 +1299,8 @@ impl Query {
 
         let cancellation_flag = util::cancel_on_signal();
 
+        let lib_info = get_lib_info(self.lib_path.as_ref(), self.language_name.as_ref());
+
         let input = get_input(
             self.paths_file.as_deref(),
             self.paths,
@@ -1291,6 +1314,7 @@ impl Query {
                     Path::new(&paths[0]),
                     current_dir,
                     self.scope.as_deref(),
+                    lib_info.as_ref(),
                 )?;
 
                 for path in paths {
@@ -1342,7 +1366,8 @@ impl Query {
                 println!();
 
                 let path = get_tmp_source_file(&contents)?;
-                let language = loader.select_language(&path, current_dir, None)?;
+                let language =
+                    loader.select_language(&path, current_dir, None, lib_info.as_ref())?;
                 query::query_file_at_path(
                     &language,
                     &path,
@@ -1817,4 +1842,25 @@ const fn get_styles() -> clap::builder::Styles {
                 .fg_color(Some(Color::Ansi(AnsiColor::Green))),
         )
         .placeholder(Style::new().fg_color(Some(Color::Ansi(AnsiColor::White))))
+}
+
+/// Utility to extract the shared library path and language function name from user-provided
+/// arguments if provided.
+fn get_lib_info<'a>(
+    lib_path: Option<&'a PathBuf>,
+    language_name: Option<&'a String>,
+) -> Option<(&'a Path, &'a str)> {
+    if let Some(lib_path) = lib_path {
+        // Use the user-specified name if present, otherwise try to derive it from
+        // the lib path
+        match (
+            language_name.map(|s| s.as_str()),
+            lib_path.file_stem().and_then(|s| s.to_str()),
+        ) {
+            (Some(name), _) | (None, Some(name)) => Some((lib_path.as_path(), name)),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
