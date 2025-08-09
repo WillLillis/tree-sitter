@@ -5,6 +5,7 @@ use std::{
     sync::LazyLock,
 };
 
+use log::error;
 use rand::Rng;
 use regex::Regex;
 use tree_sitter::{Language, Parser};
@@ -108,12 +109,12 @@ pub fn fuzz_language_corpus(
     let corpus_dir = grammar_dir.join(subdir).join("test").join("corpus");
 
     if !corpus_dir.exists() || !corpus_dir.is_dir() {
-        eprintln!("No corpus directory found, ensure that you have a `test/corpus` directory in your grammar directory with at least one test file.");
+        error!("No corpus directory found, ensure that you have a `test/corpus` directory in your grammar directory with at least one test file.");
         return;
     }
 
     if std::fs::read_dir(&corpus_dir).unwrap().count() == 0 {
-        eprintln!("No corpus files found in `test/corpus`, ensure that you have at least one test file in your corpus directory.");
+        error!("No corpus files found in `test/corpus`, ensure that you have at least one test file in your corpus directory.");
         return;
     }
 

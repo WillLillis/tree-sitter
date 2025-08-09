@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::Context;
 use tree_sitter::{Language, Parser, Query};
+use tree_sitter_cli::logger;
 use tree_sitter_loader::{CompileConfig, Loader};
 
 include!("../src/tests/helpers/dirs.rs");
@@ -71,6 +72,7 @@ static EXAMPLE_AND_QUERY_PATHS_BY_LANGUAGE_DIR: LazyLock<
 });
 
 fn main() {
+    logger::init();
     let max_path_length = EXAMPLE_AND_QUERY_PATHS_BY_LANGUAGE_DIR
         .values()
         .flat_map(|(e, q)| {
