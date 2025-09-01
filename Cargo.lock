@@ -1714,8 +1714,28 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
- "tree-sitter-language",
+ "tree-sitter-language 0.1.4",
  "wasmtime-c-api-impl",
+]
+
+[[package]]
+name = "tree-sitter-bash"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871b0606e667e98a1237ebdc1b0d7056e0aebfdc3141d12b399865d4cb6ed8a6"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-c"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a3aad8f0129083a59fe8596157552d2bb7148c492d44c21558d68ca1c722707"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
 ]
 
 [[package]]
@@ -1757,10 +1777,21 @@ dependencies = [
  "tiny_http",
  "topological-sort",
  "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
  "tree-sitter-config",
+ "tree-sitter-cpp",
+ "tree-sitter-embedded-template",
  "tree-sitter-generate",
  "tree-sitter-highlight",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
  "tree-sitter-loader",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
  "tree-sitter-tags",
  "tree-sitter-tests-proc-macro",
  "unindent",
@@ -1779,6 +1810,26 @@ dependencies = [
  "etcetera",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tree-sitter-cpp"
+version = "0.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-embedded-template"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "833d528e8fcb4e49ddb04d4d6450ddb8ac08f282a58fec94ce981c9c5dbf7e3a"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
 ]
 
 [[package]]
@@ -1814,8 +1865,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-html"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "261b708e5d92061ede329babaaa427b819329a9d427a1d710abb0f67bbef63ee"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-java"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-javascript"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf40bf599e0416c16c125c3cec10ee5ddc7d1bb8b0c60fa5c4de249ad34dc1b1"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-json"
+version = "0.24.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
 name = "tree-sitter-language"
 version = "0.1.4"
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4013970217383f67b18aef68f6fb2e8d409bc5755227092d32efb0422ba24b8"
 
 [[package]]
 name = "tree-sitter-loader"
@@ -1838,6 +1935,36 @@ dependencies = [
  "tree-sitter-highlight",
  "tree-sitter-tags",
  "url",
+]
+
+[[package]]
+name = "tree-sitter-python"
+version = "0.23.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d065aaa27f3aaceaf60c1f0e0ac09e1cb9eb8ed28e7bcdaa52129cffc7f4b04"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-ruby"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be0484ea4ef6bb9c575b4fdabde7e31340a8d2dbc7d52b321ac83da703249f95"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
+]
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b9b18034c684a2420722be8b2a91c9c44f2546b631c039edf575ccba8c61be1"
+dependencies = [
+ "cc",
+ "tree-sitter-language 0.1.5",
 ]
 
 [[package]]

@@ -166,12 +166,7 @@ pub fn test_language_corpus(
 
     let mut skipped = skipped.map(|x| x.iter().map(|x| (*x, 0)).collect::<HashMap<&str, usize>>());
 
-    let language_path = if language_dir.is_empty() {
-        language_name.to_string()
-    } else {
-        format!("{language_name}/{language_dir}")
-    };
-    let language = get_language(&language_path);
+    let language = get_language(language_name);
     let mut failure_count = 0;
 
     let log_seed = env::var("TREE_SITTER_LOG_SEED").is_ok();

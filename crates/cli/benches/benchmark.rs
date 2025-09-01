@@ -224,3 +224,18 @@ fn get_language(path: &Path) -> Language {
         .with_context(|| format!("Failed to load language at path {}", src_path.display()))
         .unwrap()
 }
+
+// Hack around version mismatches between the current state of the crate and the
+// tree-sitter-language dependency of fixture grammars' rust bindings.
+fn get_language2(language_name: &str) -> Language {
+    type DependencyLanguageFn = unsafe extern "C" fn() -> *const tree_sitter::ffi::TSLanguage;
+
+    let foreign_builder = match language_name {
+        "rust" => tree_sitter_rust::LANGUAGE,
+        _ => panic!("Unknown fixture grammar \"{language_name}\""),
+    };
+    let local_builder: DependencyLanguageFn = unsafe { std::mem::transmute(foreign_builder) };
+    let ptr = unsafe { local_builder() };
+    assert!(!ptr.is_null());
+    unsafe { tree_sitter::Language::from_raw(ptr) }
+}

@@ -80,6 +80,18 @@ tree-sitter-tags.workspace = true
 encoding_rs = "0.8.35"
 widestring = "1.2.0"
 tree_sitter_proc_macro = { path = "src/tests/proc_macro", package = "tree-sitter-tests-proc-macro" }
+# Fixture grammars
+tree-sitter-bash = "0.25.0"
+tree-sitter-c = "0.24.1"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-embedded-template = "0.25.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.23.1"
+tree-sitter-json = "0.24.8"
+tree-sitter-python = "0.23.6"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-rust = "0.24.0"
 
 tempfile.workspace = true
 pretty_assertions.workspace = true

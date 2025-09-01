@@ -35,11 +35,29 @@ pub fn scratch_dir() -> &'static Path {
     &SCRATCH_DIR
 }
 
-pub fn get_language(name: &str) -> Language {
-    let src_dir = GRAMMARS_DIR.join(name).join("src");
-    let mut config = CompileConfig::new(&src_dir, None, None);
-    config.header_paths.push(&HEADER_DIR);
-    TEST_LOADER.load_language_at_path(config).unwrap()
+// Hack around version mismatches between the current state of the crate and the
+// tree-sitter-language dependency of fixture grammars' rust bindings.
+pub fn get_language(language_name: &str) -> Language {
+    type DependencyLanguageFn = unsafe extern "C" fn() -> *const tree_sitter::ffi::TSLanguage;
+
+    let foreign_builder = match language_name {
+        "bash" => tree_sitter_bash::LANGUAGE,
+        "c" => tree_sitter_c::LANGUAGE,
+        "cpp" => tree_sitter_cpp::LANGUAGE,
+        "embedded-template" => tree_sitter_embedded_template::LANGUAGE,
+        "html" => tree_sitter_html::LANGUAGE,
+        "javascript" => tree_sitter_javascript::LANGUAGE,
+        "java" => tree_sitter_java::LANGUAGE,
+        "json" => tree_sitter_json::LANGUAGE,
+        "python" => tree_sitter_python::LANGUAGE,
+        "ruby" => tree_sitter_ruby::LANGUAGE,
+        "rust" => tree_sitter_rust::LANGUAGE,
+        _ => panic!("Unknown fixture grammar \"{language_name}\""),
+    };
+    let local_builder: DependencyLanguageFn = unsafe { std::mem::transmute(foreign_builder) };
+    let ptr = unsafe { local_builder() };
+    assert!(!ptr.is_null());
+    unsafe { tree_sitter::Language::from_raw(ptr) }
 }
 
 pub fn get_test_fixture_language(name: &str) -> Language {
