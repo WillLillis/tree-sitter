@@ -205,13 +205,23 @@ window.initializePlayground = async (opts) => {
 
     tree = null;
     languageName = newLanguageName;
+    // TODO: Fix this, I don't fucking know
 
-    const metadata = Language.metadata();
-    const languageVersion = "";
+    const metadata = languagesByName[languageName].metadata;
+    var languageVersion = "";
+    // const version = languageName[languageName].abiVersion;
     if (metadata) {
       languageVersion = `${metadata.major_version}.${metadata.minor_version}.${metadata.patch_version}`;
+    } else {
+      console.warn("No metadata (wtf)")
+      // console.warn(`Version: ${version}`)
     }
-    document.title = document.title.replace("THE_LANGUAGE_VERSION", languageVersion);
+    const languageNameSpan = document.querySelector(".language-name");
+    if (languageNameSpan) {
+      languageNameSpan.textContent = languageNameSpan.textContent.replace("THE_LANGUAGE_VERSION", languageVersion);
+    } else {
+      console.warn("Could not find .language-name span in the DOM");
+    }
 
     parser.setLanguage(languagesByName[newLanguageName]);
     handleCodeChange();
@@ -627,10 +637,10 @@ window.initializePlayground = async (opts) => {
 
   function debounce(func, wait, immediate) {
     var timeout;
-    return function () {
+    return function() {
       var context = this,
         args = arguments;
-      var later = function () {
+      var later = function() {
         timeout = null;
         if (!immediate) func.apply(context, args);
       };
