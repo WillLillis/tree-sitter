@@ -205,6 +205,14 @@ window.initializePlayground = async (opts) => {
 
     tree = null;
     languageName = newLanguageName;
+
+    const metadata = Language.metadata();
+    const languageVersion = "";
+    if (metadata) {
+      languageVersion = `${metadata.major_version}.${metadata.minor_version}.${metadata.patch_version}`;
+    }
+    document.title = document.title.replace("THE_LANGUAGE_VERSION", languageVersion);
+
     parser.setLanguage(languagesByName[newLanguageName]);
     handleCodeChange();
     handleQueryChange();
