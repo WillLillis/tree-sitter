@@ -20,7 +20,6 @@ use std::{
 use anyhow::Error;
 use anyhow::{anyhow, Context, Result};
 use etcetera::BaseStrategy as _;
-use fs4::fs_std::FileExt;
 use libloading::{Library, Symbol};
 use log::{error, info, warn};
 use once_cell::unsync::OnceCell;
@@ -805,10 +804,11 @@ impl Loader {
 
         if let Ok(lock_file) = fs::OpenOptions::new().write(true).open(&lock_path) {
             recompile = false;
-            if lock_file.try_lock_exclusive().is_err() {
+            // if lock_file.try_lock_exclusive().is_err() {
+            if lock_file.try_lock().is_err() {
                 // if we can't acquire the lock, another process is compiling the parser, wait for
                 // it and don't recompile
-                lock_file.lock_exclusive()?;
+                lock_file.lock()?;
                 recompile = false;
             } else {
                 // if we can acquire the lock, check if the lock file is older than 30 seconds, a
@@ -834,7 +834,7 @@ impl Loader {
                 .truncate(true)
                 .write(true)
                 .open(&lock_path)?;
-            lock_file.lock_exclusive()?;
+            lock_file.lock()?;
 
             self.compile_parser_to_dylib(&config, &lock_file, &lock_path)?;
 
@@ -948,9 +948,7 @@ impl Loader {
             let _ = fs::remove_dir_all(temp_dir);
         }
 
-        println!("unlocking lock_file: {:#?}", lock_file);
-        FileExt::unlock(lock_file)?;
-        println!("removing lock_path: {}", lock_path.display());
+        lock_file.unlock()?;
         fs::remove_file(lock_path)?;
 
         if output.status.success() {
