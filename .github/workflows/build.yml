@@ -272,6 +272,10 @@ jobs:
       if: inputs.run-test && !matrix.no-run
       run: cargo test --target='${{ matrix.target }}' --features='${{ matrix.features }}'
 
+    - name: Setup tmate session
+      if: always()
+      uses: mxschmitt/action-tmate@v3
+
     - name: Run Wasm tests
       if: inputs.run-test && !matrix.no-run && contains(matrix.features, 'wasm')
       run: cargo run -p xtask --target='${{ matrix.target }}' -- test-wasm
