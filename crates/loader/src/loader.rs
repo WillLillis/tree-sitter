@@ -948,7 +948,9 @@ impl Loader {
             let _ = fs::remove_dir_all(temp_dir);
         }
 
+        println!("unlocking lock_file: {:#?}", lock_file);
         FileExt::unlock(lock_file)?;
+        println!("removing lock_path: {}", lock_path.display());
         fs::remove_file(lock_path)?;
 
         if output.status.success() {
