@@ -42,6 +42,7 @@ pub fn get_language(name: &str) -> Language {
     let src_dir = GRAMMARS_DIR.join(name).join("src");
     let mut config = CompileConfig::new(&src_dir, None, None);
     config.header_paths.push(&HEADER_DIR);
+    println!("Trying to load language with path: {}", src_dir.display());
     TEST_LOADER.load_language_at_path(config).unwrap()
 }
 
