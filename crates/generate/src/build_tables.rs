@@ -12,6 +12,7 @@ pub use build_lex_table::LARGE_CHARACTER_RANGE_COUNT;
 use build_parse_table::BuildTableResult;
 pub use build_parse_table::ParseTableBuilderError;
 use log::{debug, info};
+use serde::Serialize;
 
 use self::{
     build_lex_table::build_lex_table,
@@ -22,10 +23,10 @@ use self::{
     token_conflicts::TokenConflictMap,
 };
 use crate::{
-    grammars::{InlinedProductionMap, LexicalGrammar, SyntaxGrammar},
+    grammars::{InlinedProductionMap, LexicalGrammar, ReservedWordSetId, SyntaxGrammar},
     nfa::{CharacterSet, NfaCursor},
     node_types::VariableInfo,
-    rules::{AliasMap, Symbol, SymbolType, TokenSet},
+    rules::{AliasMap, Associativity, Precedence, Symbol, SymbolType, TokenSet},
     tables::{LexTable, ParseAction, ParseTable, ParseTableEntry},
     OptLevel,
 };
@@ -43,7 +44,7 @@ pub fn build_tables(
     simple_aliases: &AliasMap,
     variable_info: &[VariableInfo],
     inlines: &InlinedProductionMap,
-    report_symbol_name: Option<&str>,
+    report_symbol_name: (Option<&str>, bool),
     optimizations: OptLevel,
 ) -> BuildTableResult<Tables> {
     let item_set_builder = ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines);
@@ -93,13 +94,14 @@ pub fn build_tables(
     populate_external_lex_states(&mut parse_table, syntax_grammar);
     mark_fragile_tokens(&mut parse_table, lexical_grammar, &token_conflict_map);
 
-    if let Some(report_symbol_name) = report_symbol_name {
+    if let (Some(report_symbol_name), json) = report_symbol_name {
         report_state_info(
             syntax_grammar,
             lexical_grammar,
             &parse_table,
             &parse_state_info,
             report_symbol_name,
+            json,
         );
     }
 
@@ -454,13 +456,142 @@ fn mark_fragile_tokens(
     }
 }
 
+// `ParseItemSetDiplay` and friends cannot be serialized because of its used of
+// `smallbitvec`, so we translate the relevant information into a serializable form here
+#[derive(Serialize, Default)]
+struct StateInfo {
+    pub symbols_with_state_indices: Vec<(String, usize)>,
+    pub state_indices: Option<Vec<ReportStateIndex>>,
+}
+
+impl StateInfo {
+    fn new(
+        symbols_with_state_indices: &Vec<(Symbol, BTreeSet<usize>)>,
+        state_indices: Option<&BTreeSet<usize>>,
+        // maybe
+        syntax_grammar: &SyntaxGrammar,
+        lexical_grammar: &LexicalGrammar,
+        parse_table: &ParseTable,
+        parse_state_info: &[ParseStateInfo<'a>],
+    ) -> Self {
+
+        let symbols_with_state_indices = symbols_with_state_indices
+            .iter()
+            .map(|(symbol, states)| {
+                let name = &syntax_grammar.variables[symbol.index].name;
+                let num_states = states.len();
+                (name.clone(), num_states)
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(state_indices) = state_indices {
+            let mut state_indices = state_indices.iter().copied().collect::<Vec<_>>();
+            state_indices.sort_unstable_by_key(|i| (parse_table.states[*i].core_id, *i));
+            let mut json_state_indices = Vec::new();
+
+            for state_index in state_indices {
+                let id = parse_table.states[state_index].id;
+                let (preceding_symbols, item_set) = &parse_state_info[id];
+                let symbol_sequence = preceding_symbols
+                    .iter()
+                    .map(|symbol| {
+                        if symbol.is_terminal() {
+                            lexical_grammar.variables[symbol.index].name.clone()
+                        } else if symbol.is_external() {
+                            syntax_grammar.external_tokens[symbol.index].name.clone()
+                        } else {
+                            syntax_grammar.variables[symbol.index].name.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let items = {};
+                // need item_set, syntax_grammar, lexical_grammar
+                json_state_indices.push(ReportStateIndex {
+                    state_index,
+                    state_id: id,
+                    symbol_sequence,
+                    items: todo!(),
+                });
+            }
+        }
+
+        todo!()
+    }
+}
+
+#[derive(Serialize)]
+struct ReportStateIndex {
+    pub state_index: usize,
+    pub state_id: usize,
+    pub symbol_sequence: Vec<String>,
+    pub items: Vec<ParseItemSetDisplayEntry>,
+}
+
+impl ReportStateIndex {
+    fn new(
+        state_index: usize,
+        state_id: usize,
+        symbol_sequence: Vec<String>,
+        item_set: &item::ParseItemSet<'_>,
+        syntax_grammar: &SyntaxGrammar,
+        lexical_grammar: &LexicalGrammar,
+    ) -> Self {
+        for entry in item_set {
+            write!(
+                f,
+                "{}\t{}",
+                ParseItemDisplay(&entry.item, self.1, self.2),
+                TokenSetDisplay(&entry.lookaheads, self.1, self.2),
+            )?;
+            if entry.following_reserved_word_set != ReservedWordSetId::default() {
+                write!(
+                    f,
+                    "\treserved word set: {}",
+                    entry.following_reserved_word_set
+                )?;
+            }
+            writeln!(f)?;
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ParseItemSetDisplayEntry {
+    pub left: ParseItemSetDisplayEntryInner,
+    pub right: ParseItemSetDisplayEntryInner,
+    pub reserved_word_set: ReservedWordSetId,
+}
+
+#[derive(Serialize)]
+struct ParseItemSetDisplayEntryInner {
+    pub start: String,
+    pub curr_step: Option<ParseItemDisplayStepInfo>,
+    pub steps: Vec<StepIdk>,
+    pub done: Option<ParseItemDisplayStepInfo>,
+}
+
+#[derive(Serialize)]
+struct ParseItemDisplayStepInfo {
+    pub precedence: Precedence,
+    pub associativity: Associativity,
+    pub reserved_word_set: ReservedWordSetId,
+}
+
+#[derive(Serialize, Default)]
+struct StepIdk {
+    pub name: String,
+    pub alias: Option<String>,
+}
+
 fn report_state_info<'a>(
     syntax_grammar: &SyntaxGrammar,
     lexical_grammar: &LexicalGrammar,
     parse_table: &ParseTable,
     parse_state_info: &[ParseStateInfo<'a>],
     report_symbol_name: &'a str,
+    json: bool,
 ) {
+    let mut json_info = StateInfo::default();
     let mut all_state_indices = BTreeSet::new();
     let mut symbols_with_state_indices = (0..syntax_grammar.variables.len())
         .map(|i| (Symbol::non_terminal(i), BTreeSet::new()))
@@ -487,14 +618,24 @@ fn report_state_info<'a>(
         .max()
         .unwrap();
     for (symbol, states) in &symbols_with_state_indices {
-        info!(
-            "{:width$}\t{}",
-            syntax_grammar.variables[symbol.index].name,
-            states.len(),
-            width = max_symbol_name_length
-        );
+        let name = &syntax_grammar.variables[symbol.index].name;
+        let num_states = states.len();
+        if json {
+            json_info
+                .symbols_with_state_indices
+                .push((name.clone(), num_states));
+        } else {
+            info!(
+                "{:width$}\t{}",
+                syntax_grammar.variables[symbol.index].name,
+                num_states,
+                width = max_symbol_name_length
+            );
+        }
     }
-    info!("");
+    if !json {
+        info!("");
+    }
 
     let state_indices = if report_symbol_name == "*" {
         Some(&all_state_indices)
@@ -513,32 +654,40 @@ fn report_state_info<'a>(
     if let Some(state_indices) = state_indices {
         let mut state_indices = state_indices.iter().copied().collect::<Vec<_>>();
         state_indices.sort_unstable_by_key(|i| (parse_table.states[*i].core_id, *i));
+        let mut json_state_indices = Vec::new();
 
         for state_index in state_indices {
             let id = parse_table.states[state_index].id;
             let (preceding_symbols, item_set) = &parse_state_info[id];
-            info!("state index: {state_index}");
-            info!("state id: {id}");
-            info!(
-                "symbol sequence: {}",
-                preceding_symbols
-                    .iter()
-                    .map(|symbol| {
-                        if symbol.is_terminal() {
-                            lexical_grammar.variables[symbol.index].name.clone()
-                        } else if symbol.is_external() {
-                            syntax_grammar.external_tokens[symbol.index].name.clone()
-                        } else {
-                            syntax_grammar.variables[symbol.index].name.clone()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            info!(
-                "\nitems:\n{}",
-                item::ParseItemSetDisplay(item_set, syntax_grammar, lexical_grammar),
-            );
+            let symbol_sequence = preceding_symbols
+                .iter()
+                .map(|symbol| {
+                    if symbol.is_terminal() {
+                        lexical_grammar.variables[symbol.index].name.clone()
+                    } else if symbol.is_external() {
+                        syntax_grammar.external_tokens[symbol.index].name.clone()
+                    } else {
+                        syntax_grammar.variables[symbol.index].name.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            if json {
+                let items = {};
+                json_state_indices.push(ReportStateIndex {
+                    state_index,
+                    state_id: id,
+                    symbol_sequence,
+                    items: todo!(),
+                });
+            } else {
+                info!("state index: {state_index}");
+                info!("state id: {id}");
+                info!("symbol sequence: {}", symbol_sequence.join(" "));
+                info!(
+                    "\nitems:\n{}",
+                    item::ParseItemSetDisplay(item_set, syntax_grammar, lexical_grammar),
+                );
+            }
         }
     }
 }

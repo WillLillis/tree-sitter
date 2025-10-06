@@ -140,7 +140,7 @@ struct Generate {
     /// Produce a report of the states for the given rule, use `-` to report every rule
     #[arg(long)]
     pub report_states_for_rule: Option<String>,
-    /// Report conflicts in a JSON format
+    /// Report conflicts or rule states in a JSON format
     #[arg(long)]
     pub json: bool,
     /// The name or path of the JavaScript runtime to use for generating parsers
@@ -871,7 +871,7 @@ impl Generate {
             self.output.as_deref(),
             self.grammar_path.as_deref(),
             abi_version,
-            self.report_states_for_rule.as_deref(),
+            (self.report_states_for_rule.as_deref(), self.json),
             self.js_runtime.as_deref(),
             self.emit != GenerationEmit::Json,
             if self.disable_optimizations {

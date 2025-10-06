@@ -1,11 +1,13 @@
 use std::{collections::HashMap, fmt};
 
+use serde::Serialize;
+
 use super::{
     nfa::Nfa,
     rules::{Alias, Associativity, Precedence, Rule, Symbol, TokenSet},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum VariableType {
     Hidden,
     Auxiliary,
@@ -50,7 +52,7 @@ pub struct ReservedWordContext<T> {
 
 // Extracted lexical grammar
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct LexicalVariable {
     pub name: String,
     pub kind: VariableType,
@@ -58,7 +60,7 @@ pub struct LexicalVariable {
     pub start_state: u32,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize)]
 pub struct LexicalGrammar {
     pub nfa: Nfa,
     pub variables: Vec<LexicalVariable>,
@@ -66,7 +68,7 @@ pub struct LexicalGrammar {
 
 // Extracted syntax grammar
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct ProductionStep {
     pub symbol: Symbol,
     pub precedence: Precedence,
@@ -76,7 +78,7 @@ pub struct ProductionStep {
     pub reserved_word_set_id: ReservedWordSetId,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct ReservedWordSetId(pub usize);
 
 impl fmt::Display for ReservedWordSetId {
@@ -87,7 +89,7 @@ impl fmt::Display for ReservedWordSetId {
 
 pub const NO_RESERVED_WORDS: ReservedWordSetId = ReservedWordSetId(usize::MAX);
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Production {
     pub steps: Vec<ProductionStep>,
     pub dynamic_precedence: i32,
@@ -113,7 +115,7 @@ pub struct ExternalToken {
     pub corresponding_internal_token: Option<Symbol>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct SyntaxGrammar {
     pub variables: Vec<SyntaxVariable>,
     pub extra_symbols: Vec<Symbol>,

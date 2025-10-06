@@ -7,14 +7,16 @@ use std::{
     ops::{Range, RangeInclusive},
 };
 
+use serde::Serialize;
+
 /// A set of characters represented as a vector of ranges.
-#[derive(Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, Hash, Serialize)]
 pub struct CharacterSet {
     ranges: Vec<Range<u32>>,
 }
 
 /// A state in an NFA representing a regular grammar.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum NfaState {
     Advance {
         chars: CharacterSet,
@@ -29,7 +31,7 @@ pub enum NfaState {
     },
 }
 
-#[derive(PartialEq, Eq, Default)]
+#[derive(PartialEq, Eq, Default, Serialize)]
 pub struct Nfa {
     pub states: Vec<NfaState>,
 }

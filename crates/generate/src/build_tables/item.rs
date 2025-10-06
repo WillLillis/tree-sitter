@@ -5,6 +5,8 @@ use std::{
     sync::LazyLock,
 };
 
+use serde::Serialize;
+
 use crate::{
     grammars::{
         LexicalGrammar, Production, ProductionStep, ReservedWordSetId, SyntaxGrammar,
@@ -29,7 +31,7 @@ static START_PRODUCTION: LazyLock<Production> = LazyLock::new(|| Production {
 });
 
 /// A [`ParseItem`] represents an in-progress match of a single production in a grammar.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct ParseItem<'a> {
     /// The index of the parent rule within the grammar.
     pub variable_index: u32,
@@ -57,12 +59,12 @@ pub struct ParseItem<'a> {
 /// grammar, and for each in-progress match, a set of "lookaheads" - tokens that
 /// are allowed to *follow* the in-progress rule. This object corresponds directly
 /// to a state in the final parse table.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize)]
 pub struct ParseItemSet<'a> {
     pub entries: Vec<ParseItemSetEntry<'a>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ParseItemSetEntry<'a> {
     pub item: ParseItem<'a>,
     pub lookaheads: TokenSet,
@@ -88,6 +90,7 @@ pub struct TokenSetDisplay<'a>(
     pub &'a LexicalGrammar,
 );
 
+#[derive(Serialize)]
 pub struct ParseItemSetDisplay<'a>(
     pub &'a ParseItemSet<'a>,
     pub &'a SyntaxGrammar,
@@ -238,15 +241,20 @@ impl fmt::Display for ParseItemDisplay<'_> {
         if self.0.is_done() {
             write!(f, " •")?;
             if let Some(step) = self.0.production.steps.last() {
+                write!(f, " (")?;
                 if let Some(associativity) = step.associativity {
                     if step.precedence.is_none() {
-                        write!(f, " ({associativity:?})")?;
+                        write!(f, " {associativity:?}")?;
                     } else {
-                        write!(f, " ({} {associativity:?})", step.precedence)?;
+                        write!(f, " {} {associativity:?}", step.precedence)?;
                     }
                 } else if !step.precedence.is_none() {
-                    write!(f, " ({})", step.precedence)?;
+                    write!(f, " {}", step.precedence)?;
                 }
+                if step.reserved_word_set_id != ReservedWordSetId::default() {
+                    write!(f, "reserved: {}", step.reserved_word_set_id)?;
+                }
+                write!(f, " )")?;
             }
         }
 

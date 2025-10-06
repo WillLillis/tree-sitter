@@ -212,7 +212,7 @@ pub fn generate_parser_in_directory<T, U, V>(
     out_path: Option<U>,
     grammar_path: Option<V>,
     mut abi_version: usize,
-    report_symbol_name: Option<&str>,
+    report_symbol_name: (Option<&str>, bool),
     js_runtime: Option<&str>,
     generate_parser: bool,
     optimizations: OptLevel,
@@ -350,7 +350,7 @@ fn generate_parser_for_grammar_with_opts(
     input_grammar: &InputGrammar,
     abi_version: usize,
     semantic_version: Option<(u8, u8, u8)>,
-    report_symbol_name: Option<&str>,
+    report_symbol_name: (Option<&str>, bool),
     optimizations: OptLevel,
 ) -> GenerateResult<GeneratedParser> {
     let JSONOutput {

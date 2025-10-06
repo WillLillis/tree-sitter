@@ -77,7 +77,7 @@ pub enum Rule {
 // sets of tokens can be efficiently represented as bit vectors with each
 // index corresponding to a token, and each value representing whether or not
 // the token is present in the set.
-#[derive(Default, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct TokenSet {
     terminal_bits: SmallBitVec,
     external_bits: SmallBitVec,
