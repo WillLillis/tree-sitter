@@ -227,15 +227,15 @@ where
     // Populate a new empty grammar directory.
     let grammar_path = if let Some(path) = grammar_path {
         let path_buf: PathBuf = path.into();
-        if !path_buf
+        if path_buf
             .try_exists()
             .map_err(|e| GenerateError::GrammarPath(e.to_string()))?
         {
+            path_buf
+        } else {
             fs::create_dir_all(&path_buf)?;
             repo_path = path_buf;
             repo_path.join("grammar.js")
-        } else {
-            path_buf
         }
     } else {
         repo_path.join("grammar.js")
@@ -558,6 +558,13 @@ fn load_js_grammar_file(grammar_path: &Path, js_runtime: Option<&str>) -> JSResu
     }
 }
 
+/// Convenience wrapper to write a file and convert any IO errors into
+/// [`GenerateError::IO`].
+///
+/// # Errors
+///
+/// Returns `std::io:::Error` wrapped in `GenerateError::IO` if the file could
+/// not be written.
 #[cfg(feature = "load")]
 pub fn write_file(path: &Path, body: impl AsRef<[u8]>) -> GenerateResult<()> {
     fs::write(path, body)

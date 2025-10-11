@@ -644,7 +644,7 @@ pub fn generate_node_types_json(
                 populate_field_info_json(
                     node_type_json
                         .children
-                        .get_or_insert(FieldInfoJSON::default()),
+                        .get_or_insert_with(|| FieldInfoJSON::default()),
                     &info.children_without_fields,
                 );
             }

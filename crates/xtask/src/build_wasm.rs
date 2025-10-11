@@ -93,7 +93,7 @@ pub fn run_wasm(args: &BuildWasm) -> Result<()> {
             let mut command = match source {
                 EmccSource::Docker => Command::new("docker"),
                 EmccSource::Podman => Command::new("podman"),
-                _ => unreachable!(),
+                EmccSource::Native => unreachable!(),
             };
             command.args(["run", "--rm"]);
 
