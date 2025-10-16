@@ -321,6 +321,18 @@ static void ts_stack__add_slice(
   array_push(&self->slices, slice);
 }
 
+void dbgStackNode(StackNode* node) {
+    // printf("StackNode %p\n", (void*)node);
+    printf("  state: %d\n", node->state);
+    printf("  position: %u bytes, extent.row: %u, extent.col: %u\n",
+        node->position.bytes, node->position.extent.row, node->position.extent.column);
+    printf("  link_count: %u\n", node->link_count);
+    printf("  ref_count: %u\n", node->ref_count);
+    printf("  error_cost: %u\n", node->error_cost);
+    printf("  node_count: %u\n", node->node_count);
+    printf("  dynamic_precedence: %d\n", node->dynamic_precedence);
+}
+
 static StackSliceArray stack__iter(
   Stack *self,
   StackVersion version,
@@ -348,11 +360,16 @@ static StackSliceArray stack__iter(
   array_push(&self->iterators, new_iterator);
 
   while (self->iterators.size > 0) {
+    printf("while loop top: self->iterators.size = %u\n", self->iterators.size);
     for (uint32_t i = 0, size = self->iterators.size; i < size; i++) {
+      printf("\touter for loop top: i = %u, size = %u\n", i, size);
       StackIterator *iterator = &self->iterators.contents[i];
+      printf("stack__iter: iterator->subtree_count = %u, is_pending = %u\n", iterator->subtree_count, iterator->is_pending);
       StackNode *node = iterator->node;
+      dbgStackNode(node);
 
       StackAction action = callback(payload, iterator);
+      printf("  action: %u\n", action);
       bool should_pop = action & StackActionPop;
       bool should_stop = action & StackActionStop || node->link_count == 0;
 
@@ -371,26 +388,39 @@ static StackSliceArray stack__iter(
       }
 
       if (should_stop) {
+        printf("should_stop\n");
         if (!should_pop) {
+          printf("\t!should_pop\n");
           ts_subtree_array_delete(self->subtree_pool, &iterator->subtrees);
         }
+        printf("\tarray_erase: i = %u, size = %u\n", i, size);
         array_erase(&self->iterators, i);
         i--, size--;
+        printf("\tcontinue: i = %u, size = %u\n", i, size);
         continue;
       }
 
       for (uint32_t j = 1; j <= node->link_count; j++) {
+        printf("\tinner for loop top: j = %u, link_count = %u\n", j, node->link_count);
         StackIterator *next_iterator;
         StackLink link;
         if (j == node->link_count) {
           link = node->links[0];
           next_iterator = &self->iterators.contents[i];
+          printf("next_iterator->subtree_count = %u, is_pending = %u\n", next_iterator->subtree_count, next_iterator->is_pending);
+          printf("next_iterator node:\n");
         } else {
           if (self->iterators.size >= MAX_ITERATOR_COUNT) continue;
           link = node->links[j];
           StackIterator current_iterator = self->iterators.contents[i];
+          printf("current_iterator->subtree_count = %u, is_pending = %u\n",
+              current_iterator.subtree_count, current_iterator.is_pending);
+          printf("current_iterator node:\n");
+          dbgStackNode(current_iterator.node);
           array_push(&self->iterators, current_iterator);
           next_iterator = array_back(&self->iterators);
+          printf("next_iterator node:\n");
+          dbgStackNode(next_iterator->node);
           ts_subtree_array_copy(next_iterator->subtrees, &next_iterator->subtrees);
         }
 
