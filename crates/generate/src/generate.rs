@@ -185,12 +185,12 @@ impl From<semver::Error> for JSError {
     }
 }
 
-#[cfg(feature = "qjs-rt")]
-impl From<rquickjs::Error> for JSError {
-    fn from(value: rquickjs::Error) -> Self {
-        Self::QuickJS(value.to_string())
-    }
-}
+// #[cfg(feature = "qjs-rt")]
+// impl From<rquickjs::Error> for JSError {
+//     fn from(value: rquickjs::Error) -> Self {
+//         Self::QuickJS(value.to_string())
+//     }
+// }
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -461,7 +461,8 @@ fn load_js_grammar_file(grammar_path: &Path, js_runtime: Option<&str>) -> JSResu
 
     #[cfg(feature = "qjs-rt")]
     if js_runtime == Some("native") {
-        return quickjs::execute_native_runtime(&grammar_path);
+        println!("No f128's, L bozo");
+        // return quickjs::execute_native_runtime(&grammar_path);
     }
 
     // The "file:///" prefix is incompatible with the quickjs runtime, but is required
