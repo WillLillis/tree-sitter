@@ -38,6 +38,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
     }
 
+    config.compiler("clang");
     config
         .flag_if_supported("-std=c11")
         .flag_if_supported("-fvisibility=hidden")
