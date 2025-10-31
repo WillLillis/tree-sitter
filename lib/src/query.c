@@ -450,7 +450,6 @@ static const CaptureList *capture_list_pool_get(const CaptureListPool *self, uin
 }
 
 static CaptureList *capture_list_pool_get_mut(CaptureListPool *self, uint16_t id) {
-  ts_assert(id < self->list.size);
   return array_get(&self->list, id);
 }
 
