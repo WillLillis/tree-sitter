@@ -3,6 +3,7 @@
  * from the namespace; however, we need non-standard symbols for
  * endian.h.
  */
+#include <stdio.h>
 #if defined(__NetBSD__) && defined(_POSIX_C_SOURCE)
 #undef _POSIX_C_SOURCE
 #endif
@@ -1467,6 +1468,56 @@ static void ts_query__perform_analysis(
   }
 }
 
+// TODO: Figure this shit out
+static bool ts_query__validate_supertypes(TSQuery *self, TSSymbol desired_symbol, QueryStep* step,
+    unsigned int i, unsigned *error_offset) {
+  // Look at the child steps to see if any aren't valid subtypes for this supertype.
+  uint32_t subtype_length;
+  const TSSymbol *subtypes = ts_language_subtypes(
+    self->language,
+    step->supertype_symbol,
+    &subtype_length
+  );
+  printf("subtype length: %u\n", subtype_length);
+
+  for (unsigned j = i + 1; j < self->steps.size; j++) {
+    QueryStep *child_step = array_get(&self->steps, j);
+    if (child_step->depth == PATTERN_DONE_MARKER || child_step->depth <= step->depth) {
+      break;
+    }
+    if (child_step->depth == step->depth + 1 && child_step->symbol != WILDCARD_SYMBOL) {
+      bool is_valid_subtype = false;
+      printf("Supertype symbol: %s\n", self->language->symbol_names[step->supertype_symbol]);
+      printf("Child step symbol: %s\n", self->language->symbol_names[child_step->symbol]);
+      for (uint32_t k = 0; k < subtype_length; k++) {
+        printf("Checking subtype: %s\n", self->language->symbol_names[subtypes[k]]);
+        if (child_step->symbol == subtypes[k]) {
+          is_valid_subtype = true;
+          break;
+        }
+        // The child isn't a supertype itself, so we just need to see if the desired symbol
+        // is a child rule of the current child step
+        if (!ts_query__validate_supertypes(self, child_step, j, error_offset)) {
+          // TODO: Propagate/reset rerror offset
+          *error_offset = 0;
+        }
+      }
+
+      if (!is_valid_subtype) {
+        for (unsigned offset_idx = 0; offset_idx < self->step_offsets.size; offset_idx++) {
+          StepOffset *step_offset = array_get(&self->step_offsets, offset_idx);
+          if (step_offset->step_index >= j) {
+            *error_offset = step_offset->byte_offset;
+            return false;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
 static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
   Array(uint16_t) non_rooted_pattern_start_steps = array_new();
   for (unsigned i = 0; i < self->pattern_map.size; i++) {
@@ -1515,39 +1566,9 @@ static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
       if (!is_wildcard) {
         array_push(&parent_step_indices, i);
       } else if (step->supertype_symbol && self->language->abi_version >= LANGUAGE_VERSION_WITH_RESERVED_WORDS) {
-        // Look at the child steps to see if any aren't valid subtypes for this supertype.
-        uint32_t subtype_length;
-        const TSSymbol *subtypes = ts_language_subtypes(
-          self->language,
-          step->supertype_symbol,
-          &subtype_length
-        );
-
-        for (unsigned j = i + 1; j < self->steps.size; j++) {
-          QueryStep *child_step = array_get(&self->steps, j);
-          if (child_step->depth == PATTERN_DONE_MARKER || child_step->depth <= step->depth) {
-            break;
-          }
-          if (child_step->depth == step->depth + 1 && child_step->symbol != WILDCARD_SYMBOL) {
-            bool is_valid_subtype = false;
-            for (uint32_t k = 0; k < subtype_length; k++) {
-              if (child_step->symbol == subtypes[k]) {
-                is_valid_subtype = true;
-                break;
-              }
-            }
-
-            if (!is_valid_subtype) {
-              for (unsigned offset_idx = 0; offset_idx < self->step_offsets.size; offset_idx++) {
-                StepOffset *step_offset = array_get(&self->step_offsets, offset_idx);
-                if (step_offset->step_index >= j) {
-                  *error_offset = step_offset->byte_offset;
-                  all_patterns_are_valid = false;
-                  goto supertype_cleanup;
-                }
-              }
-            }
-          }
+        if (!ts_query__validate_supertypes(self, step, i, error_offset)) {
+          all_patterns_are_valid = false;
+          goto supertype_cleanup;
         }
       }
     }
