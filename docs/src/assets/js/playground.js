@@ -422,7 +422,7 @@ window.initializePlayground = async (opts) => {
               {
                 inclusiveLeft: true,
                 inclusiveRight: true,
-                css: `color: ${colorForCaptureName(match[1])}`,
+                css: getCaptureCSS(match[1]),
               },
             );
           }
