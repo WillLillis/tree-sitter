@@ -2258,6 +2258,8 @@ static TSQueryError ts_query__parse_pattern(
     Array(uint32_t) branch_step_indices = array_new();
     CaptureQuantifiers branch_capture_quantifiers = capture_quantifiers_new();
     for (;;) {
+      printf("Pushing, step count: %u, stream->next: %c\n", self->steps.size, stream->next);
+      array_push(&self->steps, query_step__new(0, depth, false));
       uint32_t start_index = self->steps.size;
       TSQueryError e = ts_query__parse_pattern(
         self,
@@ -2297,11 +2299,30 @@ static TSQueryError ts_query__parse_pattern(
     for (unsigned i = 0; i < branch_step_indices.size - 1; i++) {
       uint32_t step_index = *array_get(&branch_step_indices, i);
       uint32_t next_step_index = *array_get(&branch_step_indices, i + 1);
-      QueryStep *start_step = array_get(&self->steps, step_index);
-      QueryStep *end_step = array_get(&self->steps, next_step_index - 1);
-      start_step->alternative_index = next_step_index;
+      uint32_t pre_step_index = step_index - 1;
+
+      QueryStep *pre_step = array_get(&self->steps, pre_step_index); // step pushed before parsing in the above loop
+      QueryStep *start_step = array_get(&self->steps, step_index); // starting step from the branch
+      QueryStep *end_step = array_get(&self->steps, next_step_index - 1); // next branch step
+
+      *pre_step = *start_step; // the pre step goes to the next branch if it fails
+      pre_step->alternative_index = next_step_index;
+      start_step->alternative_index = self->steps.size; // the actual step goes to the end if it fails
       end_step->alternative_index = self->steps.size;
       end_step->is_dead_end = true;
+    }
+    // fixup the last branch
+    {
+      unsigned i = branch_step_indices.size - 1;
+      uint32_t step_index = *array_get(&branch_step_indices, i);
+      uint32_t pre_step_index = step_index - 1;
+
+      QueryStep *pre_step = array_get(&self->steps, pre_step_index);
+      QueryStep *start_step = array_get(&self->steps, step_index);
+
+      *pre_step = *start_step; // copy the last true step to its pre step
+      // vvv remove the redundant copy, need to fix up other step's alternative indices if we do this though vvv
+      // (void)array_pop(&self->steps);
     }
 
     capture_quantifiers_delete(&branch_capture_quantifiers);
@@ -3193,6 +3214,7 @@ void ts_query_cursor_set_match_limit(TSQueryCursor *self, uint32_t limit) {
   self->capture_list_pool.max_capture_list_count = limit;
 }
 
+#define DEBUG_EXECUTE_QUERY
 #ifdef DEBUG_EXECUTE_QUERY
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 #else
