@@ -26,7 +26,7 @@ static REPETITION_COUNT: LazyLock<usize> = LazyLock::new(|| {
 static TEST_LOADER: LazyLock<Loader> =
     LazyLock::new(|| Loader::with_parser_lib_path(SCRATCH_DIR.clone()));
 
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 static EXAMPLE_AND_QUERY_PATHS_BY_LANGUAGE_DIR: LazyLock<
     BTreeMap<PathBuf, (Vec<PathBuf>, Vec<PathBuf>)>,
 > = LazyLock::new(|| {

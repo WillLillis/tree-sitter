@@ -133,19 +133,19 @@ impl Console {
         Console {}
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn log(&self, args: rquickjs::function::Rest<Value<'_>>) -> rquickjs::Result<()> {
         info!("{}", Self::format_args(&args));
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn warn(&self, args: rquickjs::function::Rest<Value<'_>>) -> rquickjs::Result<()> {
         warn!("{}", Self::format_args(&args));
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     pub fn error(&self, args: rquickjs::function::Rest<Value<'_>>) -> rquickjs::Result<()> {
         error!("Error: {}", Self::format_args(&args));
         Ok(())
@@ -214,7 +214,7 @@ fn try_resolve_path(path: &Path) -> rquickjs::Result<PathBuf> {
     ))
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 fn require_from_module<'a>(
     ctx: Ctx<'a>,
     module_path: String,

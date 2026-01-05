@@ -223,7 +223,7 @@ impl Default for OptLevel {
 }
 
 #[cfg(feature = "load")]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn generate_parser_in_directory<T, U, V>(
     repo_path: T,
     out_path: Option<U>,

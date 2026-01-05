@@ -57,7 +57,7 @@ impl CharacterSet {
     }
 
     /// Create a character set with a given *inclusive* range of characters.
-    #[allow(clippy::single_range_in_vec_init)]
+    #[expect(clippy::single_range_in_vec_init)]
     #[cfg(test)]
     fn from_range(mut first: char, mut last: char) -> Self {
         if first > last {
@@ -69,7 +69,7 @@ impl CharacterSet {
     }
 
     /// Create a character set with a single character.
-    #[allow(clippy::single_range_in_vec_init)]
+    #[expect(clippy::single_range_in_vec_init)]
     pub fn from_char(c: char) -> Self {
         Self {
             ranges: vec![(c as u32)..(c as u32 + 1)],
@@ -1061,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::single_range_in_vec_init)]
+    #[expect(clippy::single_range_in_vec_init)]
     fn test_character_set_simplify_ignoring() {
         struct Row {
             chars: Vec<char>,

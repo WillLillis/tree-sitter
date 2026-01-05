@@ -508,7 +508,7 @@ impl<'a> HighlightIterLayer<'a> {
     /// In the event that the new layer contains "combined injections" (injections where multiple
     /// disjoint ranges are parsed as one syntax tree), these will be eagerly processed and
     /// added to the returned vector.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new<F: FnMut(&str) -> Option<&'a HighlightConfiguration> + 'a>(
         source: &'a [u8],
         parent_name: Option<&str>,

@@ -266,7 +266,7 @@ impl TestResultHierarchy {
             return;
         }
 
-        #[allow(clippy::manual_let_else)]
+        #[expect(clippy::manual_let_else)]
         let mut curr_group = match self.root_group[self.traversal_idxs[0]].info {
             TestInfo::Group { ref mut children } => children,
             _ => unreachable!(),
@@ -286,7 +286,7 @@ impl TestResultHierarchy {
             return self.root_group.len();
         }
 
-        #[allow(clippy::manual_let_else)]
+        #[expect(clippy::manual_let_else)]
         let mut curr_group = match self.root_group[self.traversal_idxs[0]].info {
             TestInfo::Group { ref children } => children,
             _ => unreachable!(),
@@ -300,7 +300,7 @@ impl TestResultHierarchy {
         curr_group.len()
     }
 
-    #[allow(clippy::iter_without_into_iter)]
+    #[expect(clippy::iter_without_into_iter)]
     #[must_use]
     pub fn iter(&self) -> TestResultIterWithDepth<'_> {
         let mut stack = Vec::with_capacity(self.root_group.len());

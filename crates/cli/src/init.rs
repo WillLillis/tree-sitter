@@ -1466,7 +1466,7 @@ where
     Missing(P),
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 impl<P> PathState<P>
 where
     P: AsRef<Path>,

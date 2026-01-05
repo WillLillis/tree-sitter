@@ -747,7 +747,7 @@ fn to_html<'a>(
         .collect())
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn to_token_vector<'a>(
     src: &'a str,
     language_config: &'a HighlightConfiguration,

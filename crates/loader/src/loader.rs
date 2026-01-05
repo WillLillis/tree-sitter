@@ -1981,7 +1981,7 @@ impl LanguageConfiguration<'_> {
         })
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     #[cfg(any(feature = "tree-sitter-highlight", feature = "tree-sitter-tags"))]
     fn read_queries(
         &self,

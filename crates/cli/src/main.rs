@@ -214,7 +214,7 @@ struct Parse {
     pub scope: Option<String>,
     /// Show parsing debug log
     #[arg(long, short = 'd')] // TODO: Rework once clap adds `default_missing_value_t`
-    #[allow(clippy::option_option)]
+    #[expect(clippy::option_option)]
     pub debug: Option<Option<ParseDebugType>>,
     /// Compile a parser in debug mode
     #[arg(long, short = '0')]
@@ -246,7 +246,7 @@ struct Parse {
     /// Suppress main output
     #[arg(long, short)]
     pub quiet: bool,
-    #[allow(clippy::doc_markdown)]
+    #[expect(clippy::doc_markdown)]
     /// Apply edits in the format: \"row,col|position delcount insert_text\", can be supplied
     /// multiple times
     #[arg(

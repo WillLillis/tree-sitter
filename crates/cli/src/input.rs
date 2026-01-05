@@ -146,7 +146,6 @@ pub fn get_input(
     }
 }
 
-#[allow(clippy::type_complexity)]
 pub fn get_test_info(
     test_entry: &TestEntry,
     target_test: u32,

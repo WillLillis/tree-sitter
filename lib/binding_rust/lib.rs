@@ -322,7 +322,7 @@ pub struct TreeCursor<'cursor>(ffi::TSTreeCursor, PhantomData<&'cursor ()>);
 /// A set of patterns that match nodes in a syntax tree.
 #[doc(alias = "TSQuery")]
 #[derive(Debug)]
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub struct Query {
     ptr: NonNull<ffi::TSQuery>,
     capture_names: Box<[&'static str]>,

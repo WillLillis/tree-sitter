@@ -2167,7 +2167,7 @@ fn test_query_matches_with_supertypes() {
 }
 
 #[test]
-#[allow(clippy::reversed_empty_ranges)]
+#[expect(clippy::reversed_empty_ranges)]
 fn test_query_matches_within_byte_range() {
     allocations::record(|| {
         let language = get_language("javascript");
@@ -5559,7 +5559,7 @@ fn test_query_execution_with_points_causing_underflow() {
     let mut parser = Parser::new();
     parser.set_language(&language).unwrap();
 
-    #[allow(clippy::literal_string_with_formatting_args)]
+    #[expect(clippy::literal_string_with_formatting_args)]
     let code = r#"fn main() {
     println!("{:?}", foo());
 }"#;

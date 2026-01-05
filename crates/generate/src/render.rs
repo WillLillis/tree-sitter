@@ -1932,7 +1932,7 @@ impl Generator {
 /// * `abi_version` - The language ABI version that should be generated. Usually you want
 ///   Tree-sitter's current version, but right after making an ABI change, it may be useful to
 ///   generate code with the previous ABI.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_c_code(
     name: &str,
     tables: Tables,
