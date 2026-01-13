@@ -44,3 +44,7 @@ jobs:
 
   build:
     uses: ./.github/workflows/build.yml
+
+  check-wasm-stdlib:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/wasm_stdlib.yml
