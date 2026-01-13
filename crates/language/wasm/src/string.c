@@ -1,5 +1,6 @@
 #include <string.h>
 
+// Hey this file got changed!
 int memcmp(const void *lhs, const void *rhs, size_t count) {
   const unsigned char *l = lhs;
   const unsigned char *r = rhs;
