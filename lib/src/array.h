@@ -1,6 +1,7 @@
 #ifndef TREE_SITTER_ARRAY_H_
 #define TREE_SITTER_ARRAY_H_
 
+#include <stdio.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,9 +59,15 @@ extern "C" {
     array_elem_size(self), new_capacity)         \
   )
 
+#define get_cont(self) (self) ? (self)->contents : NULL
+
 /// Free any memory allocated for this array. Note that this does not free any
 /// memory allocated for the array's contents.
-#define array_delete(self) _array__delete((self), (void *)(self)->contents, sizeof(*self))
+#define array_delete(self) \
+  do {\
+  _array__delete((self), (void *)(self)->contents, sizeof(*self)); \
+  (self)->contents = NULL; \
+  } while (0)
 
 /// Push a new `element` onto the end of the array.
 #define array_push(self, element)                                 \
@@ -192,8 +199,8 @@ extern "C" {
 static inline void _array__delete(void *self, void *contents, size_t self_size) {
   if (contents) {
     ts_free(contents);
+    // memset(self, 0, self_size);
   }
-  memset(self, 0, self_size);
 }
 
 /// This is not what you're looking for, see `array_erase`.
@@ -210,13 +217,18 @@ static inline void _array__erase(void* self_contents, uint32_t *size,
 static inline void *_array__reserve(void *contents, uint32_t *capacity,
                                   size_t element_size, uint32_t new_capacity) {
   void *new_contents = contents;
+  printf("new: %u, curr: %u", new_capacity, *capacity);
   if (new_capacity > *capacity) {
     if (contents) {
+      printf("Wtf realloc");
       new_contents = ts_realloc(contents, new_capacity * element_size);
     } else {
+      printf("Wtf malloc");
       new_contents = ts_malloc(new_capacity * element_size);
     }
     *capacity = new_capacity;
+  } else {
+    printf("Hey nope\n");
   }
   return new_contents;
 }

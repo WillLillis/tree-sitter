@@ -1,6 +1,7 @@
 #ifndef TREE_SITTER_ARRAY_H_
 #define TREE_SITTER_ARRAY_H_
 
+#include <stdio.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,14 +54,23 @@ extern "C" {
 /// Reserve `new_capacity` elements of space in the array. If `new_capacity` is
 /// less than the array's current capacity, this function has no effect.
 #define array_reserve(self, new_capacity)        \
-  ((self)->contents = _array__reserve(           \
+  (self)->contents = _array__reserve(           \
     (void *)(self)->contents, &(self)->capacity, \
-    array_elem_size(self), new_capacity)         \
+    array_elem_size(self), new_capacity \
   )
+  
 
 /// Free any memory allocated for this array. Note that this does not free any
 /// memory allocated for the array's contents.
-#define array_delete(self) _array__delete((self), (void *)(self)->contents, sizeof(*self))
+#define array_delete(self) \
+  do {\
+  _array__delete((self), (void *)(self)->contents, sizeof(*self)); \
+  // if (self) {\
+  //   (self)->contents = NULL; \
+  //   (self)->size = 0; \
+  //   (self)->capacity = 0; \
+  // }\
+  } while (0)
 
 /// Push a new `element` onto the end of the array.
 #define array_push(self, element)                                 \
@@ -190,10 +200,14 @@ extern "C" {
 
 /// This is not what you're looking for, see `array_delete`.
 static inline void _array__delete(void *self, void *contents, size_t self_size) {
+  printf("Deleting, self: %p, contents: %p, size: %zu\n", self, contents, self_size);
   if (contents) {
     ts_free(contents);
+    // memset(self, 0, self_size);
   }
-  memset(self, 0, self_size);
+  if (self) {
+    memset(self, 0, self_size);
+  }
 }
 
 /// This is not what you're looking for, see `array_erase`.
@@ -210,13 +224,18 @@ static inline void _array__erase(void* self_contents, uint32_t *size,
 static inline void *_array__reserve(void *contents, uint32_t *capacity,
                                   size_t element_size, uint32_t new_capacity) {
   void *new_contents = contents;
+  printf("HEYnew: %u, curr: %u\n", new_capacity, *capacity);
   if (new_capacity > *capacity) {
     if (contents) {
+      printf("Hey realloc\n");
       new_contents = ts_realloc(contents, new_capacity * element_size);
     } else {
+      printf("Hey malloc\n");
       new_contents = ts_malloc(new_capacity * element_size);
     }
     *capacity = new_capacity;
+  } else {
+    printf("Hey nope\n");
   }
   return new_contents;
 }
