@@ -1357,7 +1357,8 @@ impl Loader {
     }
 
     #[cfg(windows)]
-    fn check_external_scanner(&self, _name: &str, _library_path: &Path) -> LoaderResult<()> {
+    fn check_external_scanner(&self, _name: &str, library_path: &Path) -> LoaderResult<()> {
+        warn!("Unable to verify symbols in {}", library_path.display());
         // TODO: there's no nm command on windows, whoever wants to implement this can and should :)
 
         // let mut must_have = vec![
