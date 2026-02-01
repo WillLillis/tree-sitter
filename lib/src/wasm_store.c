@@ -89,6 +89,8 @@ typedef struct {
   uint32_t at_exit;
   uint32_t args_get;
   uint32_t args_sizes_get;
+  uint32_t environ_sizes_get;
+  uint32_t environ_get;
 } BuiltinFunctionIndices;
 
 // TSWasmStore - A struct that allows a given `Parser` to use Wasm-backed
@@ -488,6 +490,44 @@ static wasmtime_extern_t get_builtin_extern(
   };
 }
 
+static wasm_trap_t *callback__environ_sizes_get(
+  void *env,
+  wasmtime_caller_t* caller,
+  wasmtime_val_raw_t *args_and_results,
+  size_t args_and_results_len
+) {
+  wasmtime_context_t *context = wasmtime_caller_context(caller);
+  ts_assert(args_and_results_len == 3);
+  TSWasmStore *store = env;
+
+  uint32_t count_ptr = args_and_results[0].i32;
+  uint32_t size_ptr = args_and_results[1].i32;
+
+  uint8_t *memory = wasmtime_memory_data(context, &store->memory);
+  // Write 0 to the count and size pointers in memory (no env vars)
+  if (count_ptr + sizeof(uint32_t) <= wasmtime_memory_data_size(context, &store->memory)) {
+    *(uint32_t *)(memory + count_ptr) = 0;
+  }
+  if (size_ptr + sizeof(uint32_t) <= wasmtime_memory_data_size(context, &store->memory)) {
+    *(uint32_t *)(memory + size_ptr) = 0;
+  }
+
+  args_and_results[2].i32 = 0;
+  return NULL;
+}
+
+static wasm_trap_t *callback__environ_get(
+  void *env,
+  wasmtime_caller_t* caller,
+  wasmtime_val_raw_t *args_and_results,
+  size_t args_and_results_len
+) {
+  ts_assert(args_and_results_len == 3);
+  // No-op since sizes are always 0; return success to avoid traps
+  args_and_results[2].i32 = 0;
+  return NULL;
+}
+
 static bool ts_wasm_store__provide_builtin_import(
   TSWasmStore *self,
   const wasm_name_t *import_name,
@@ -534,6 +574,10 @@ static bool ts_wasm_store__provide_builtin_import(
     *import = get_builtin_extern(&self->function_table, self->builtin_fn_indices.notify_memory_growth);
   } else if (name_eq(import_name, "tree_sitter_debug_message")) {
     *import = get_builtin_extern(&self->function_table, self->builtin_fn_indices.debug_message);
+  } else if (name_eq(import_name, "environ_sizes_get")) {
+    *import = get_builtin_extern(&self->function_table, self->builtin_fn_indices.environ_sizes_get);
+  } else if (name_eq(import_name, "environ_get")) {
+    *import = get_builtin_extern(&self->function_table, self->builtin_fn_indices.environ_get);
   } else {
     return false;
   }
@@ -650,6 +694,16 @@ TSWasmStore *ts_wasm_store_new(TSWasmEngine *engine, TSWasmError *wasm_error) {
     {
       &builtin_fn_indices.args_sizes_get,
       callback__noop,
+      wasm_functype_new_2_1(wasm_valtype_new_i32(), wasm_valtype_new_i32(), wasm_valtype_new_i32())
+    },
+    {
+      &builtin_fn_indices.environ_sizes_get,
+      callback__environ_sizes_get,
+      wasm_functype_new_2_1(wasm_valtype_new_i32(), wasm_valtype_new_i32(), wasm_valtype_new_i32())
+    },
+    {
+      &builtin_fn_indices.environ_get,
+      callback__environ_get,
       wasm_functype_new_2_1(wasm_valtype_new_i32(), wasm_valtype_new_i32(), wasm_valtype_new_i32())
     },
   };

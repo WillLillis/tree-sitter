@@ -579,6 +579,10 @@ pub fn run_wasm_stdlib() -> Result<()> {
             "-Os",
             "-fPIC",
             "-DTREE_SITTER_FEATURE_WASM",
+            // wasi's implementation of `setlocale` depends on `malloc` and friends,
+            // which conflicts with our own implementation in `stdlib.c`. This flag
+            // allows the linker to ignore multiple definitions and still use our implementation.
+            "-Wl,--allow-multiple-definition",
             "-Wl,--no-entry",
             "-Wl,--stack-first",
             "-Wl,-z",
@@ -593,7 +597,6 @@ pub fn run_wasm_stdlib() -> Result<()> {
         ])
         .args(&export_flags)
         .arg("crates/language/wasm/src/stdlib.c")
-        .arg("crates/language/wasm/src/wctype.c")
         .output()?;
 
     bail_on_err(

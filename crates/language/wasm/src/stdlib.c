@@ -70,6 +70,8 @@ void reset_heap(void *new_heap_start) {
 }
 
 void *malloc(size_t size) {
+  // Using this to pass out characters from scanners for debugging purposes
+  tree_sitter_debug_message("malloc char:", size);
   if (size == 0) return NULL;
 
   Region *prev = NULL;
