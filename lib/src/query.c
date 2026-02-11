@@ -1823,6 +1823,83 @@ static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
         step->root_pattern_guaranteed = false;
       }
     }
+
+    // The main analysis only validates the first branch of each alternation
+    // among the child steps. Individually check each remaining branch to ensure
+    // it can also match at least one child of the parent node.
+    for (unsigned j = parent_step_index + 1; j < self->steps.size; j++) {
+      QueryStep *child_step = array_get(&self->steps, j);
+      if (child_step->depth == PATTERN_DONE_MARKER || child_step->depth <= parent_depth) break;
+      if (child_step->depth != parent_depth + 1) continue;
+      if (child_step->is_dead_end || child_step->is_pass_through) continue;
+      if (child_step->alternative_index == NONE) continue;
+
+      // Distinguish alternation branches from quantifier alternatives.
+      // In alternations, the step just before the alternative is a dead-end
+      // placeholder. Quantifiers (?, *, +) set alternative_index without
+      // inserting such a placeholder.
+      if (
+        child_step->alternative_index < 1 ||
+        !array_get(&self->steps, child_step->alternative_index - 1)->is_dead_end
+      ) continue;
+
+      // This step starts an alternation. Validate each non-first branch.
+      uint32_t alt_step_index = child_step->alternative_index;
+      while (alt_step_index < self->steps.size) {
+        QueryStep *alt_step = array_get(&self->steps, alt_step_index);
+
+        // Skip dead-end placeholders between branches.
+        if (alt_step->is_dead_end) {
+          if (alt_step->alternative_index != NONE && alt_step->alternative_index > alt_step_index) {
+            alt_step_index = alt_step->alternative_index;
+          } else {
+            break;
+          }
+          continue;
+        }
+
+        // Run the analysis starting from this branch.
+        analysis_state_set__clear(&analysis.states, &analysis.state_pool);
+        analysis_state_set__clear(&analysis.deeper_states, &analysis.state_pool);
+        for (unsigned k = 0; k < subgraph->start_states.size; k++) {
+          TSStateId parse_state = *array_get(&subgraph->start_states, k);
+          analysis_state_set__push(&analysis.states, &analysis.state_pool, &((AnalysisState) {
+            .step_index = alt_step_index,
+            .stack = {
+              [0] = {
+                .parse_state = parse_state,
+                .parent_symbol = parent_symbol,
+                .child_index = 0,
+                .field_id = 0,
+                .done = false,
+              },
+            },
+            .depth = 1,
+            .root_symbol = parent_symbol,
+          }));
+        }
+        analysis.did_abort = false;
+        ts_query__perform_analysis(self, &subgraphs, &analysis);
+
+        if (!analysis.did_abort && analysis.finished_parent_symbols.size == 0) {
+          uint32_t k, exists_k;
+          array_search_sorted_by(&self->step_offsets, .step_index, alt_step_index, &k, &exists_k);
+          if (k >= self->step_offsets.size) k = self->step_offsets.size - 1;
+          *error_offset = array_get(&self->step_offsets, k)->byte_offset;
+          all_patterns_are_valid = false;
+          break;
+        }
+
+        // Move to the next alternative branch.
+        if (alt_step->alternative_index != NONE && alt_step->alternative_index > alt_step_index) {
+          alt_step_index = alt_step->alternative_index;
+        } else {
+          break;
+        }
+      }
+      if (!all_patterns_are_valid) break;
+    }
+    if (!all_patterns_are_valid) break;
   }
 
   // Mark as indefinite any step with captures that are used in predicates.
