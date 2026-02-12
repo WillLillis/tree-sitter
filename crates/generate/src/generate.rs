@@ -28,6 +28,7 @@ pub mod parse_grammar;
 mod prepare_grammar;
 #[cfg(feature = "qjs-rt")]
 mod quickjs;
+mod bitvec;
 mod render;
 mod rules;
 mod tables;
