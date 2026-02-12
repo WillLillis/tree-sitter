@@ -1,7 +1,10 @@
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 use serde::Serialize;
-use smallbitvec::SmallBitVec;
 
 use super::grammars::VariableType;
 
@@ -73,14 +76,190 @@ pub enum Rule {
     },
 }
 
+// A bit vector backed by Vec<u64> that supports efficient word-level bulk
+// operations. Token sets (~400 bits) are OR'd together millions of times
+// during parser generation, and doing this at the word level rather than
+// bit-by-bit is a major performance win.
+#[derive(Clone, Default)]
+struct BitVec {
+    data: Vec<u64>,
+    num_bits: usize,
+}
+
+impl BitVec {
+    const fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            num_bits: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.num_bits
+    }
+
+    fn get(&self, index: usize) -> Option<bool> {
+        if index >= self.num_bits {
+            return None;
+        }
+        Some(self.data[index / 64] >> (index % 64) & 1 != 0)
+    }
+
+    fn set(&mut self, index: usize, val: bool) {
+        let word_idx = index / 64;
+        let bit_idx = index % 64;
+        if val {
+            self.data[word_idx] |= 1u64 << bit_idx;
+        } else {
+            self.data[word_idx] &= !(1u64 << bit_idx);
+        }
+    }
+
+    fn resize(&mut self, new_len: usize, val: bool) {
+        let fill = if val { !0u64 } else { 0u64 };
+        self.data.resize((new_len + 63) / 64, fill);
+        self.num_bits = new_len;
+    }
+
+    fn last(&self) -> Option<bool> {
+        if self.num_bits == 0 {
+            return None;
+        }
+        self.get(self.num_bits - 1)
+    }
+
+    fn pop(&mut self) -> Option<bool> {
+        if self.num_bits == 0 {
+            return None;
+        }
+        self.num_bits -= 1;
+        let word_idx = self.num_bits / 64;
+        let bit_idx = self.num_bits % 64;
+        let val = self.data[word_idx] >> bit_idx & 1 != 0;
+        if val {
+            self.data[word_idx] &= !(1u64 << bit_idx);
+        }
+        self.data.truncate((self.num_bits + 63) / 64);
+        Some(val)
+    }
+
+    fn iter(&self) -> BitVecIter<'_> {
+        BitVecIter {
+            vec: self,
+            index: 0,
+        }
+    }
+
+    /// Word-level OR: self |= other. Returns true if any new bits were set.
+    fn insert_all(&mut self, other: &Self) -> bool {
+        if other.data.len() > self.data.len() {
+            self.data.resize(other.data.len(), 0);
+        }
+        if other.num_bits > self.num_bits {
+            self.num_bits = other.num_bits;
+        }
+        let mut changed = false;
+        for (sw, &ow) in self.data.iter_mut().zip(other.data.iter()) {
+            let new_bits = ow & !*sw;
+            if new_bits != 0 {
+                *sw |= ow;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+impl PartialEq for BitVec {
+    fn eq(&self, other: &Self) -> bool {
+        let max_len = self.data.len().max(other.data.len());
+        for i in 0..max_len {
+            if self.data.get(i).copied().unwrap_or(0) != other.data.get(i).copied().unwrap_or(0) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Eq for BitVec {}
+
+impl Hash for BitVec {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let effective_len = self
+            .data
+            .iter()
+            .rposition(|&w| w != 0)
+            .map_or(0, |i| i + 1);
+        self.data[..effective_len].hash(state);
+    }
+}
+
+impl Ord for BitVec {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let max_len = self.data.len().max(other.data.len());
+        for i in 0..max_len {
+            let a = self.data.get(i).copied().unwrap_or(0);
+            let b = other.data.get(i).copied().unwrap_or(0);
+            if a != b {
+                let first_diff = (a ^ b).trailing_zeros();
+                return if (a >> first_diff) & 1 != 0 {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                };
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+}
+
+impl PartialOrd for BitVec {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::ops::Index<usize> for BitVec {
+    type Output = bool;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        static TRUE: bool = true;
+        static FALSE: bool = false;
+        if self.data[index / 64] >> (index % 64) & 1 != 0 {
+            &TRUE
+        } else {
+            &FALSE
+        }
+    }
+}
+
+struct BitVecIter<'a> {
+    vec: &'a BitVec,
+    index: usize,
+}
+
+impl Iterator for BitVecIter<'_> {
+    type Item = bool;
+
+    fn next(&mut self) -> Option<bool> {
+        if self.index >= self.vec.num_bits {
+            return None;
+        }
+        let val = self.vec.data[self.index / 64] >> (self.index % 64) & 1 != 0;
+        self.index += 1;
+        Some(val)
+    }
+}
+
 // Because tokens are represented as small (~400 max) unsigned integers,
 // sets of tokens can be efficiently represented as bit vectors with each
 // index corresponding to a token, and each value representing whether or not
 // the token is present in the set.
 #[derive(Default, Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
-    terminal_bits: SmallBitVec,
-    external_bits: SmallBitVec,
+    terminal_bits: BitVec,
+    external_bits: BitVec,
     eof: bool,
     end_of_nonterminal_extra: bool,
 }
@@ -100,9 +279,8 @@ impl PartialOrd for TokenSet {
 impl Ord for TokenSet {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.terminal_bits
-            .iter()
-            .cmp(other.terminal_bits.iter())
-            .then_with(|| self.external_bits.iter().cmp(other.external_bits.iter()))
+            .cmp(&other.terminal_bits)
+            .then_with(|| self.external_bits.cmp(&other.external_bits))
             .then_with(|| self.eof.cmp(&other.eof))
             .then_with(|| {
                 self.end_of_nonterminal_extra
@@ -315,8 +493,8 @@ impl TokenSet {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            terminal_bits: SmallBitVec::new(),
-            external_bits: SmallBitVec::new(),
+            terminal_bits: BitVec::new(),
+            external_bits: BitVec::new(),
             eof: false,
             end_of_nonterminal_extra: false,
         }
@@ -435,43 +613,33 @@ impl TokenSet {
     pub fn is_empty(&self) -> bool {
         !self.eof
             && !self.end_of_nonterminal_extra
-            && !self.terminal_bits.iter().any(|a| a)
-            && !self.external_bits.iter().any(|a| a)
+            && self.terminal_bits.data.iter().all(|&w| w == 0)
+            && self.external_bits.data.iter().all(|&w| w == 0)
     }
 
     pub fn len(&self) -> usize {
         self.eof as usize
             + self.end_of_nonterminal_extra as usize
-            + self.terminal_bits.iter().filter(|b| *b).count()
-            + self.external_bits.iter().filter(|b| *b).count()
+            + self
+                .terminal_bits
+                .data
+                .iter()
+                .map(|w| w.count_ones() as usize)
+                .sum::<usize>()
+            + self
+                .external_bits
+                .data
+                .iter()
+                .map(|w| w.count_ones() as usize)
+                .sum::<usize>()
     }
 
     pub fn insert_all_terminals(&mut self, other: &Self) -> bool {
-        let mut result = false;
-        if other.terminal_bits.len() > self.terminal_bits.len() {
-            self.terminal_bits.resize(other.terminal_bits.len(), false);
-        }
-        for (i, element) in other.terminal_bits.iter().enumerate() {
-            if element {
-                result |= !self.terminal_bits[i];
-                self.terminal_bits.set(i, element);
-            }
-        }
-        result
+        self.terminal_bits.insert_all(&other.terminal_bits)
     }
 
     fn insert_all_externals(&mut self, other: &Self) -> bool {
-        let mut result = false;
-        if other.external_bits.len() > self.external_bits.len() {
-            self.external_bits.resize(other.external_bits.len(), false);
-        }
-        for (i, element) in other.external_bits.iter().enumerate() {
-            if element {
-                result |= !self.external_bits[i];
-                self.external_bits.set(i, element);
-            }
-        }
-        result
+        self.external_bits.insert_all(&other.external_bits)
     }
 
     pub fn insert_all(&mut self, other: &Self) -> bool {
