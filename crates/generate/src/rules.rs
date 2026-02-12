@@ -143,13 +143,6 @@ impl BitVec {
         Some(val)
     }
 
-    fn iter(&self) -> BitVecIter<'_> {
-        BitVecIter {
-            vec: self,
-            index: 0,
-        }
-    }
-
     /// Word-level OR: self |= other. Returns true if any new bits were set.
     fn insert_all(&mut self, other: &Self) -> bool {
         if other.data.len() > self.data.len() {
@@ -234,21 +227,38 @@ impl std::ops::Index<usize> for BitVec {
     }
 }
 
-struct BitVecIter<'a> {
-    vec: &'a BitVec,
-    index: usize,
+/// Iterator that yields only the indices of set bits, skipping zero words
+/// entirely and using `trailing_zeros()` within each word.
+struct SetBitsIter<'a> {
+    data: &'a [u64],
+    word_idx: usize,
+    current_word: u64,
 }
 
-impl Iterator for BitVecIter<'_> {
-    type Item = bool;
-
-    fn next(&mut self) -> Option<bool> {
-        if self.index >= self.vec.num_bits {
-            return None;
+impl<'a> SetBitsIter<'a> {
+    fn new(data: &'a [u64]) -> Self {
+        Self {
+            data,
+            word_idx: 0,
+            current_word: data.first().copied().unwrap_or(0),
         }
-        let val = self.vec.data[self.index / 64] >> (self.index % 64) & 1 != 0;
-        self.index += 1;
-        Some(val)
+    }
+}
+
+impl Iterator for SetBitsIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        while self.current_word == 0 {
+            self.word_idx += 1;
+            if self.word_idx >= self.data.len() {
+                return None;
+            }
+            self.current_word = self.data[self.word_idx];
+        }
+        let bit = self.current_word.trailing_zeros() as usize;
+        self.current_word &= self.current_word - 1; // clear lowest set bit
+        Some(self.word_idx * 64 + bit)
     }
 }
 
@@ -501,28 +511,9 @@ impl TokenSet {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Symbol> + '_ {
-        self.terminal_bits
-            .iter()
-            .enumerate()
-            .filter_map(|(i, value)| {
-                if value {
-                    Some(Symbol::terminal(i))
-                } else {
-                    None
-                }
-            })
-            .chain(
-                self.external_bits
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, value)| {
-                        if value {
-                            Some(Symbol::external(i))
-                        } else {
-                            None
-                        }
-                    }),
-            )
+        SetBitsIter::new(&self.terminal_bits.data)
+            .map(Symbol::terminal)
+            .chain(SetBitsIter::new(&self.external_bits.data).map(Symbol::external))
             .chain(if self.eof { Some(Symbol::end()) } else { None })
             .chain(if self.end_of_nonterminal_extra {
                 Some(Symbol::end_of_nonterminal_extra())
@@ -532,16 +523,7 @@ impl TokenSet {
     }
 
     pub fn terminals(&self) -> impl Iterator<Item = Symbol> + '_ {
-        self.terminal_bits
-            .iter()
-            .enumerate()
-            .filter_map(|(i, value)| {
-                if value {
-                    Some(Symbol::terminal(i))
-                } else {
-                    None
-                }
-            })
+        SetBitsIter::new(&self.terminal_bits.data).map(Symbol::terminal)
     }
 
     pub fn contains(&self, symbol: &Symbol) -> bool {
