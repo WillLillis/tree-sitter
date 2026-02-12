@@ -253,6 +253,7 @@ typedef struct {
   AnalysisStateSet state_pool;
   Array(uint16_t) final_step_indices;
   Array(TSSymbol) finished_parent_symbols;
+  Array(uint16_t) matched_step_indices;
   bool did_abort;
 } QueryAnalysis;
 
@@ -1041,6 +1042,7 @@ static inline QueryAnalysis query_analysis__new(void) {
     .state_pool = array_new(),
     .final_step_indices = array_new(),
     .finished_parent_symbols = array_new(),
+    .matched_step_indices = array_new(),
     .did_abort = false,
   };
 }
@@ -1052,6 +1054,7 @@ static inline void query_analysis__delete(QueryAnalysis *self) {
   analysis_state_set__delete(&self->state_pool);
   array_delete(&self->final_step_indices);
   array_delete(&self->finished_parent_symbols);
+  array_delete(&self->matched_step_indices);
 }
 
 /***********************
@@ -1166,6 +1169,7 @@ static void ts_query__perform_analysis(
   unsigned prev_final_step_count = 0;
   array_clear(&analysis->final_step_indices);
   array_clear(&analysis->finished_parent_symbols);
+  array_clear(&analysis->matched_step_indices);
 
   for (unsigned iteration = 0;; iteration++) {
     if (iteration == MAX_ANALYSIS_ITERATION_COUNT) {
@@ -1404,6 +1408,8 @@ static void ts_query__perform_analysis(
           // over any descendant steps of the current child.
           const QueryStep *next_step = step;
           if (does_match) {
+            uint16_t matched_index = (uint16_t)state->step_index;
+            array_insert_sorted_by(&analysis->matched_step_indices, , matched_index);
             for (;;) {
               next_state.step_index++;
               next_step = array_get(&self->steps, next_state.step_index);
@@ -1742,26 +1748,41 @@ static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
     }
 
     // Initialize an analysis state at every parse state in the table where
-    // this parent symbol can occur.
+    // this parent symbol can occur. If the first child step is part of an
+    // alternation, create states for all branches so that each branch is
+    // independently validated.
     AnalysisSubgraph *subgraph = array_get(&subgraphs, subgraph_index);
     analysis_state_set__clear(&analysis.states, &analysis.state_pool);
     analysis_state_set__clear(&analysis.deeper_states, &analysis.state_pool);
     for (unsigned j = 0; j < subgraph->start_states.size; j++) {
       TSStateId parse_state = *array_get(&subgraph->start_states, j);
-      analysis_state_set__push(&analysis.states, &analysis.state_pool, &((AnalysisState) {
-        .step_index = parent_step_index + 1,
-        .stack = {
-          [0] = {
-            .parse_state = parse_state,
-            .parent_symbol = parent_symbol,
-            .child_index = 0,
-            .field_id = 0,
-            .done = false,
+      uint16_t branch_step_index = parent_step_index + 1;
+      for (;;) {
+        analysis_state_set__push(&analysis.states, &analysis.state_pool, &((AnalysisState) {
+          .step_index = branch_step_index,
+          .stack = {
+            [0] = {
+              .parse_state = parse_state,
+              .parent_symbol = parent_symbol,
+              .child_index = 0,
+              .field_id = 0,
+              .done = false,
+            },
           },
-        },
-        .depth = 1,
-        .root_symbol = parent_symbol,
-      }));
+          .depth = 1,
+          .root_symbol = parent_symbol,
+        }));
+        QueryStep *branch_step = array_get(&self->steps, branch_step_index);
+        if (
+          branch_step->alternative_index != NONE &&
+          branch_step->alternative_index > branch_step_index &&
+          array_get(&self->steps, branch_step->alternative_index - 1)->is_dead_end
+        ) {
+          branch_step_index = branch_step->alternative_index;
+        } else {
+          break;
+        }
+      }
     }
 
     #ifdef DEBUG_ANALYZE_QUERY
@@ -1822,6 +1843,46 @@ static bool ts_query__analyze_patterns(TSQuery *self, unsigned *error_offset) {
         step->parent_pattern_guaranteed = false;
         step->root_pattern_guaranteed = false;
       }
+    }
+
+    // Check for impossible alternation branches among the direct children.
+    // Each branch of an alternation should have been matched by at least one
+    // grammar child during analysis. If not, the branch is structurally impossible.
+    for (unsigned j = parent_step_index + 1; j < self->steps.size; j++) {
+      QueryStep *child_step = array_get(&self->steps, j);
+      if (child_step->depth == PATTERN_DONE_MARKER || child_step->depth <= parent_depth) break;
+      if (child_step->depth != parent_depth + 1) continue;
+      if (
+        child_step->alternative_index == NONE ||
+        child_step->alternative_index <= j ||
+        !array_get(&self->steps, child_step->alternative_index - 1)->is_dead_end
+      ) continue;
+
+      // This step starts an alternation. Check all branches.
+      uint16_t branch_index = j;
+      for (;;) {
+        uint32_t k, matched;
+        array_search_sorted_by(&analysis.matched_step_indices, , (uint16_t)branch_index, &k, &matched);
+        if (!matched) {
+          uint32_t m, offset_exists;
+          array_search_sorted_by(&self->step_offsets, .step_index, (uint16_t)branch_index, &m, &offset_exists);
+          if (m >= self->step_offsets.size) m = self->step_offsets.size - 1;
+          *error_offset = array_get(&self->step_offsets, m)->byte_offset;
+          all_patterns_are_valid = false;
+          break;
+        }
+        QueryStep *branch = array_get(&self->steps, branch_index);
+        if (
+          branch->alternative_index != NONE &&
+          branch->alternative_index > branch_index &&
+          array_get(&self->steps, branch->alternative_index - 1)->is_dead_end
+        ) {
+          branch_index = branch->alternative_index;
+        } else {
+          break;
+        }
+      }
+      if (!all_patterns_are_valid) break;
     }
   }
 
@@ -2253,6 +2314,15 @@ static TSQueryError ts_query__parse_pattern(
   if (stream->next == '[') {
     stream_advance(stream);
     stream_skip_whitespace(stream);
+
+    // Update the step offset for the first branch so that it points to the
+    // branch pattern itself rather than any enclosing context (e.g. a field name).
+    if (
+      self->step_offsets.size > 0 &&
+      array_back(&self->step_offsets)->step_index == starting_step_index
+    ) {
+      array_back(&self->step_offsets)->byte_offset = stream_offset(stream);
+    }
 
     // Parse each branch, and add a placeholder step in between the branches.
     Array(uint32_t) branch_step_indices = array_new();

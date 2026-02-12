@@ -507,6 +507,43 @@ fn test_query_errors_on_impossible_patterns() {
             })
         );
 
+        // Issue #5144: alternation validation should detect impossible branches
+        // regardless of the order of branches.
+        assert_eq!(
+            Query::new(
+                &js_lang,
+                "(function_declaration name: [(identifier) (statement_block)])",
+            ),
+            Err(QueryError {
+                kind: QueryErrorKind::Structure,
+                row: 0,
+                offset: 42,
+                column: 42,
+                message: [
+                    "(function_declaration name: [(identifier) (statement_block)])",
+                    "                                          ^",
+                ]
+                .join("\n")
+            })
+        );
+        assert_eq!(
+            Query::new(
+                &js_lang,
+                "(function_declaration name: [(statement_block) (identifier)])",
+            ),
+            Err(QueryError {
+                kind: QueryErrorKind::Structure,
+                row: 0,
+                offset: 29,
+                column: 29,
+                message: [
+                    "(function_declaration name: [(statement_block) (identifier)])",
+                    "                             ^",
+                ]
+                .join("\n")
+            })
+        );
+
         assert_eq!(
             Query::new(&js_lang, "(identifier (identifier))",),
             Err(QueryError {
