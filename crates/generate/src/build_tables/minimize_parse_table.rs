@@ -15,6 +15,10 @@ use crate::{
     tables::{GotoAction, ParseAction, ParseState, ParseStateId, ParseTable, ParseTableEntry},
 };
 
+/// Index into `SyntaxGrammar::variables`. All nonterminal `Symbol`s share
+/// the same `kind`, so storing the index alone is sufficient for ordering.
+type NonterminalIndex = usize;
+
 pub fn minimize_parse_table(
     parse_table: &mut ParseTable,
     syntax_grammar: &SyntaxGrammar,
@@ -192,17 +196,19 @@ impl Minimizer<'_> {
             })
             .collect();
 
-        let nonterminal_maps: Vec<Vec<(Symbol, GotoAction)>> = self
+        // Store only the symbol index: all nonterminal entries share the same kind,
+        // so index alone is sufficient for sorting and comparison.
+        let nonterminal_maps: Vec<Vec<(NonterminalIndex, GotoAction)>> = self
             .parse_table
             .states
             .iter()
             .map(|state| {
-                let mut entries: Vec<(Symbol, GotoAction)> = state
+                let mut entries: Vec<(NonterminalIndex, GotoAction)> = state
                     .nonterminal_entries
                     .iter()
-                    .map(|(sym, action)| (*sym, *action))
+                    .map(|(sym, action)| (sym.index, *action))
                     .collect();
-                entries.sort_unstable_by_key(|&(sym, _)| sym);
+                entries.sort_unstable_by_key(|&(idx, _)| idx);
                 entries
             })
             .collect();
@@ -331,7 +337,7 @@ impl Minimizer<'_> {
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
         shift_maps: &[Vec<(Symbol, ParseStateId)>],
-        nonterminal_maps: &[Vec<(Symbol, GotoAction)>],
+        nonterminal_maps: &[Vec<(usize, GotoAction)>],
     ) -> bool {
         let shifts1 = &shift_maps[state1.id];
         let shifts2 = &shift_maps[state2.id];
@@ -370,7 +376,7 @@ impl Minimizer<'_> {
                 Ordering::Less => i += 1,
                 Ordering::Greater => j += 1,
                 Ordering::Equal => {
-                    let (symbol, s1) = nonterms1[i];
+                    let (sym_idx, s1) = nonterms1[i];
                     let s2 = nonterms2[j].1;
                     match (s1, s2) {
                         (GotoAction::ShiftExtra, GotoAction::ShiftExtra) => {}
@@ -382,7 +388,7 @@ impl Minimizer<'_> {
                                     "split states {} {} - successors for {} are split: {s1} {s2}",
                                     state1.id,
                                     state2.id,
-                                    self.symbol_name(&symbol),
+                                    self.syntax_grammar.variables[sym_idx].name,
                                 );
                                 return true;
                             }
