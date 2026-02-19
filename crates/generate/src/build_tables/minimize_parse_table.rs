@@ -11,13 +11,58 @@ use crate::{
     OptLevel,
     dedup::split_state_id_groups,
     grammars::{LexicalGrammar, SyntaxGrammar, VariableType},
-    rules::{AliasMap, Symbol, TokenSet},
+    rules::{AliasMap, Symbol, SymbolType, TokenSet},
     tables::{GotoAction, ParseAction, ParseState, ParseStateId, ParseTable, ParseTableEntry},
 };
 
 /// Index into `SyntaxGrammar::variables`. All nonterminal `Symbol`s share
 /// the same `kind`, so storing the index alone is sufficient for ordering.
 type NonterminalIndex = usize;
+
+/// A `Symbol` packed into a `u64` for O(1) sort-key comparison.
+/// Produced by `symbol_key`; decode back with `key_symbol`.
+type SymbolKey = u64;
+
+/// Pack a `Symbol` into a `SymbolKey` for O(1) sort-key comparison in merge-joins.
+///
+/// Layout: high 3 bits = `kind` discriminant (5 variants fit in 3 bits), low 61 bits = `index`.
+/// This preserves `Symbol`'s derived `Ord` ordering (kind first, then index)
+/// as a single integer comparison, and halves each entry's size vs `(Symbol, _)`.
+const KEY_TAG_SHIFT: u32 = 61;
+const KEY_INDEX_MASK: u64 = (1u64 << KEY_TAG_SHIFT) - 1;
+
+#[inline(always)]
+fn symbol_key(sym: Symbol) -> SymbolKey {
+    debug_assert!(sym.index as u64 <= KEY_INDEX_MASK, "symbol index too large");
+    (sym.kind as u64) << KEY_TAG_SHIFT | sym.index as u64
+}
+
+/// Reconstruct a `Symbol` from a key produced by `symbol_key`.
+#[inline(always)]
+fn key_symbol(key: SymbolKey) -> Symbol {
+    let kind = match key >> KEY_TAG_SHIFT {
+        0 => SymbolType::External,
+        1 => SymbolType::End,
+        2 => SymbolType::EndOfNonTerminalExtra,
+        3 => SymbolType::Terminal,
+        _ => SymbolType::NonTerminal,
+    };
+    Symbol {
+        kind,
+        index: (key & KEY_INDEX_MASK) as usize,
+    }
+}
+
+#[inline(always)]
+fn key_is_terminal(key: SymbolKey) -> bool {
+    (key >> KEY_TAG_SHIFT) == SymbolType::Terminal as u64
+}
+
+#[allow(dead_code)]
+#[inline(always)]
+fn key_is_non_terminal(key: SymbolKey) -> bool {
+    (key >> KEY_TAG_SHIFT) == SymbolType::NonTerminal as u64
+}
 
 pub fn minimize_parse_table(
     parse_table: &mut ParseTable,
@@ -140,26 +185,30 @@ impl Minimizer<'_> {
 
         // Initially group the states by their parse item set core.
         let mut group_ids_by_state_id = Vec::with_capacity(self.parse_table.states.len());
-        let mut state_ids_by_group_id = vec![Vec::<ParseStateId>::new(); core_count];
+        // Pre-allocate for the maximum possible number of groups (one per state) to
+        // avoid reallocs as split_state_id_groups pushes new groups.
+        let mut state_ids_by_group_id = Vec::with_capacity(self.parse_table.states.len());
+        state_ids_by_group_id.resize(core_count, Vec::new());
         for (i, state) in self.parse_table.states.iter().enumerate() {
             state_ids_by_group_id[state.core_id].push(i);
             group_ids_by_state_id.push(state.core_id);
         }
 
         // Precompute sorted terminal entry indices for merge-join in states_conflict.
-        // entry_maps[state_id][i] = (symbol, index_into_terminal_entries)
-        let entry_maps: Vec<Vec<(Symbol, usize)>> = self
+        // entry_maps[state_id][i] = (symbol_key, index_into_terminal_entries)
+        // Keys are packed u64s (symbol_key) for single-instruction comparison.
+        let entry_maps: Vec<Vec<(SymbolKey, usize)>> = self
             .parse_table
             .states
             .iter()
             .map(|state| {
-                let mut entries: Vec<(Symbol, usize)> = state
+                let mut entries: Vec<(SymbolKey, usize)> = state
                     .terminal_entries
                     .iter()
                     .enumerate()
-                    .map(|(idx, (sym, _))| (*sym, idx))
+                    .map(|(idx, (sym, _))| (symbol_key(*sym), idx))
                     .collect();
-                entries.sort_unstable_by_key(|&(sym, _)| sym);
+                entries.sort_unstable_by_key(|&(key, _)| key);
                 entries
             })
             .collect();
@@ -174,24 +223,25 @@ impl Minimizer<'_> {
 
         // Precompute per-state sorted shift actions and nonterminal goto actions.
         // State actions are stable across loop iterations; only group assignments change.
-        let shift_maps: Vec<Vec<(Symbol, ParseStateId)>> = self
+        // Keys are packed u64s (symbol_key) for single-instruction comparison.
+        let shift_maps: Vec<Vec<(SymbolKey, ParseStateId)>> = self
             .parse_table
             .states
             .iter()
             .map(|state| {
-                let mut shifts: Vec<(Symbol, ParseStateId)> = state
+                let mut shifts: Vec<(SymbolKey, ParseStateId)> = state
                     .terminal_entries
                     .iter()
                     .filter_map(|(sym, entry)| {
                         let action = entry.actions.last()?;
                         if let ParseAction::Shift { state: s, .. } = action {
-                            Some((*sym, *s))
+                            Some((symbol_key(*sym), *s))
                         } else {
                             None
                         }
                     })
                     .collect();
-                shifts.sort_unstable_by_key(|&(sym, _)| sym);
+                shifts.sort_unstable_by_key(|&(key, _)| key);
                 shifts
             })
             .collect();
@@ -278,23 +328,25 @@ impl Minimizer<'_> {
         state1: &ParseState,
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
-        entry_maps: &[Vec<(Symbol, usize)>],
+        entry_maps: &[Vec<(SymbolKey, usize)>],
     ) -> bool {
         let entries1 = &entry_maps[state1.id];
         let entries2 = &entry_maps[state2.id];
+        let len1 = entries1.len();
+        let len2 = entries2.len();
         let mut i = 0;
         let mut j = 0;
-        while i < entries1.len() || j < entries2.len() {
-            let ord = if i < entries1.len() && j < entries2.len() {
+        while i < len1 || j < len2 {
+            let ord = if i < len1 && j < len2 {
                 entries1[i].0.cmp(&entries2[j].0)
-            } else if i < entries1.len() {
+            } else if i < len1 {
                 Ordering::Less
             } else {
                 Ordering::Greater
             };
             match ord {
                 Ordering::Equal => {
-                    let token = entries1[i].0;
+                    let token = key_symbol(entries1[i].0);
                     let (_, left_entry) =
                         state1.terminal_entries.get_index(entries1[i].1).unwrap();
                     let (_, right_entry) =
@@ -313,15 +365,15 @@ impl Minimizer<'_> {
                     j += 1;
                 }
                 Ordering::Less => {
-                    let token = entries1[i].0;
-                    if self.token_conflicts(state1.id, state2.id, state2, token) {
+                    let token = key_symbol(entries1[i].0);
+                    if self.token_conflicts(state1.id, state2.id, state2, entries2, token) {
                         return true;
                     }
                     i += 1;
                 }
                 Ordering::Greater => {
-                    let token = entries2[j].0;
-                    if self.token_conflicts(state1.id, state2.id, state1, token) {
+                    let token = key_symbol(entries2[j].0);
+                    if self.token_conflicts(state1.id, state2.id, state1, entries1, token) {
                         return true;
                     }
                     j += 1;
@@ -336,7 +388,7 @@ impl Minimizer<'_> {
         state1: &ParseState,
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
-        shift_maps: &[Vec<(Symbol, ParseStateId)>],
+        shift_maps: &[Vec<(SymbolKey, ParseStateId)>],
         nonterminal_maps: &[Vec<(usize, GotoAction)>],
     ) -> bool {
         let shifts1 = &shift_maps[state1.id];
@@ -348,7 +400,7 @@ impl Minimizer<'_> {
                 Ordering::Less => i += 1,
                 Ordering::Greater => j += 1,
                 Ordering::Equal => {
-                    let (token, s1) = shifts1[i];
+                    let (key, s1) = shifts1[i];
                     let s2 = shifts2[j].1;
                     let group1 = group_ids_by_state_id[s1];
                     let group2 = group_ids_by_state_id[s2];
@@ -357,7 +409,7 @@ impl Minimizer<'_> {
                             "split states {} {} - successors for {} are split: {s1} {s2}",
                             state1.id,
                             state2.id,
-                            self.symbol_name(&token),
+                            self.symbol_name(&key_symbol(key)),
                         );
                         return true;
                     }
@@ -465,6 +517,7 @@ impl Minimizer<'_> {
         left_id: ParseStateId,
         right_id: ParseStateId,
         right_state: &ParseState,
+        right_entry_map: &[(SymbolKey, usize)],
         new_token: Symbol,
     ) -> bool {
         if new_token == Symbol::end_of_nonterminal_extra() {
@@ -501,28 +554,37 @@ impl Minimizer<'_> {
             return true;
         }
 
+        // Hoist loop-invariant word-token comparisons.
+        let word_token = self.syntax_grammar.word_token;
+        let word_key = word_token.map(symbol_key);
+        let new_token_key = symbol_key(new_token);
+        let new_token_is_word = word_key == Some(new_token_key);
+        let new_token_is_keyword = word_token.is_some() && self.keywords.contains(&new_token);
+
         // Do not add a token if it conflicts with an existing token.
-        for token in right_state.terminal_entries.keys().copied() {
-            if !token.is_terminal() {
+        // Iterate the pre-sorted Vec instead of IndexMap keys for cache-friendlier access.
+        for &(key, _) in right_entry_map {
+            if !key_is_terminal(key) {
                 continue;
             }
-            if self.syntax_grammar.word_token == Some(token) && self.keywords.contains(&new_token) {
+            if new_token_is_keyword && word_key == Some(key) {
                 continue;
             }
-            if self.syntax_grammar.word_token == Some(new_token) && self.keywords.contains(&token) {
+            if new_token_is_word && self.keywords.contains(&key_symbol(key)) {
                 continue;
             }
 
+            let token_index = (key & 0xFFFF_FFFF) as usize;
             if self
                 .token_conflict_map
-                .does_conflict(new_token.index, token.index)
+                .does_conflict(new_token.index, token_index)
             {
                 debug!(
                     "split states {} {} - token {} conflicts with {}",
                     left_id,
                     right_id,
                     self.symbol_name(&new_token),
-                    self.symbol_name(&token),
+                    self.symbol_name(&key_symbol(key)),
                 );
                 return true;
             }
