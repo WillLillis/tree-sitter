@@ -168,8 +168,8 @@ impl Minimizer<'_> {
             |left, right, groups| self.states_conflict(left, right, groups, &entry_maps),
         );
 
-        // Precompute per-state shift actions sorted by Symbol. State actions don't
-        // change between iterations of the loop below; only group assignments do.
+        // Precompute per-state sorted shift actions and nonterminal goto actions.
+        // State actions are stable across loop iterations; only group assignments change.
         let shift_maps: Vec<Vec<(Symbol, ParseStateId)>> = self
             .parse_table
             .states
@@ -192,13 +192,34 @@ impl Minimizer<'_> {
             })
             .collect();
 
+        let nonterminal_maps: Vec<Vec<(Symbol, GotoAction)>> = self
+            .parse_table
+            .states
+            .iter()
+            .map(|state| {
+                let mut entries: Vec<(Symbol, GotoAction)> = state
+                    .nonterminal_entries
+                    .iter()
+                    .map(|(sym, action)| (*sym, *action))
+                    .collect();
+                entries.sort_unstable_by_key(|&(sym, _)| sym);
+                entries
+            })
+            .collect();
+
         while split_state_id_groups(
             &self.parse_table.states,
             &mut state_ids_by_group_id,
             &mut group_ids_by_state_id,
             0,
             |left, right, groups| {
-                self.state_successors_differ(left, right, groups, &shift_maps)
+                self.state_successors_differ(
+                    left,
+                    right,
+                    groups,
+                    &shift_maps,
+                    &nonterminal_maps,
+                )
             },
         ) {}
 
@@ -310,6 +331,7 @@ impl Minimizer<'_> {
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
         shift_maps: &[Vec<(Symbol, ParseStateId)>],
+        nonterminal_maps: &[Vec<(Symbol, GotoAction)>],
     ) -> bool {
         let shifts1 = &shift_maps[state1.id];
         let shifts2 = &shift_maps[state2.id];
@@ -339,24 +361,36 @@ impl Minimizer<'_> {
             }
         }
 
-        for (symbol, s1) in &state1.nonterminal_entries {
-            if let Some(s2) = state2.nonterminal_entries.get(symbol) {
-                match (s1, s2) {
-                    (GotoAction::ShiftExtra, GotoAction::ShiftExtra) => {}
-                    (GotoAction::Goto(s1), GotoAction::Goto(s2)) => {
-                        let group1 = group_ids_by_state_id[*s1];
-                        let group2 = group_ids_by_state_id[*s2];
-                        if group1 != group2 {
-                            debug!(
-                                "split states {} {} - successors for {} are split: {s1} {s2}",
-                                state1.id,
-                                state2.id,
-                                self.symbol_name(symbol),
-                            );
-                            return true;
+        let nonterms1 = &nonterminal_maps[state1.id];
+        let nonterms2 = &nonterminal_maps[state2.id];
+        let mut i = 0;
+        let mut j = 0;
+        while i < nonterms1.len() && j < nonterms2.len() {
+            match nonterms1[i].0.cmp(&nonterms2[j].0) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
+                    let (symbol, s1) = nonterms1[i];
+                    let s2 = nonterms2[j].1;
+                    match (s1, s2) {
+                        (GotoAction::ShiftExtra, GotoAction::ShiftExtra) => {}
+                        (GotoAction::Goto(s1), GotoAction::Goto(s2)) => {
+                            let group1 = group_ids_by_state_id[s1];
+                            let group2 = group_ids_by_state_id[s2];
+                            if group1 != group2 {
+                                debug!(
+                                    "split states {} {} - successors for {} are split: {s1} {s2}",
+                                    state1.id,
+                                    state2.id,
+                                    self.symbol_name(&symbol),
+                                );
+                                return true;
+                            }
                         }
+                        _ => return true,
                     }
-                    _ => return true,
+                    i += 1;
+                    j += 1;
                 }
             }
         }
