@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     mem,
 };
@@ -149,12 +150,38 @@ impl Minimizer<'_> {
             |left, right, groups| self.states_conflict(left, right, groups),
         );
 
+        // Precompute per-state shift actions sorted by Symbol. State actions don't
+        // change between iterations of the loop below; only group assignments do.
+        let shift_maps: Vec<Vec<(Symbol, ParseStateId)>> = self
+            .parse_table
+            .states
+            .iter()
+            .map(|state| {
+                let mut shifts: Vec<(Symbol, ParseStateId)> = state
+                    .terminal_entries
+                    .iter()
+                    .filter_map(|(sym, entry)| {
+                        let action = entry.actions.last()?;
+                        if let ParseAction::Shift { state: s, .. } = action {
+                            Some((*sym, *s))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                shifts.sort_unstable_by_key(|&(sym, _)| sym);
+                shifts
+            })
+            .collect();
+
         while split_state_id_groups(
             &self.parse_table.states,
             &mut state_ids_by_group_id,
             &mut group_ids_by_state_id,
             0,
-            |left, right, groups| self.state_successors_differ(left, right, groups),
+            |left, right, groups| {
+                self.state_successors_differ(left, right, groups, &shift_maps)
+            },
         ) {}
 
         let error_group_index = state_ids_by_group_id
@@ -240,22 +267,32 @@ impl Minimizer<'_> {
         state1: &ParseState,
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
+        shift_maps: &[Vec<(Symbol, ParseStateId)>],
     ) -> bool {
-        for (token, entry1) in &state1.terminal_entries {
-            if let ParseAction::Shift { state: s1, .. } = entry1.actions.last().unwrap()
-                && let Some(entry2) = state2.terminal_entries.get(token)
-                && let ParseAction::Shift { state: s2, .. } = entry2.actions.last().unwrap()
-            {
-                let group1 = group_ids_by_state_id[*s1];
-                let group2 = group_ids_by_state_id[*s2];
-                if group1 != group2 {
-                    debug!(
-                        "split states {} {} - successors for {} are split: {s1} {s2}",
-                        state1.id,
-                        state2.id,
-                        self.symbol_name(token),
-                    );
-                    return true;
+        let shifts1 = &shift_maps[state1.id];
+        let shifts2 = &shift_maps[state2.id];
+        let mut i = 0;
+        let mut j = 0;
+        while i < shifts1.len() && j < shifts2.len() {
+            match shifts1[i].0.cmp(&shifts2[j].0) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
+                    let (token, s1) = shifts1[i];
+                    let s2 = shifts2[j].1;
+                    let group1 = group_ids_by_state_id[s1];
+                    let group2 = group_ids_by_state_id[s2];
+                    if group1 != group2 {
+                        debug!(
+                            "split states {} {} - successors for {} are split: {s1} {s2}",
+                            state1.id,
+                            state2.id,
+                            self.symbol_name(&token),
+                        );
+                        return true;
+                    }
+                    i += 1;
+                    j += 1;
                 }
             }
         }
