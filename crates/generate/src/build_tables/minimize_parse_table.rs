@@ -142,12 +142,30 @@ impl Minimizer<'_> {
             group_ids_by_state_id.push(state.core_id);
         }
 
+        // Precompute sorted terminal entry indices for merge-join in states_conflict.
+        // entry_maps[state_id][i] = (symbol, index_into_terminal_entries)
+        let entry_maps: Vec<Vec<(Symbol, usize)>> = self
+            .parse_table
+            .states
+            .iter()
+            .map(|state| {
+                let mut entries: Vec<(Symbol, usize)> = state
+                    .terminal_entries
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (sym, _))| (*sym, idx))
+                    .collect();
+                entries.sort_unstable_by_key(|&(sym, _)| sym);
+                entries
+            })
+            .collect();
+
         split_state_id_groups(
             &self.parse_table.states,
             &mut state_ids_by_group_id,
             &mut group_ids_by_state_id,
             0,
-            |left, right, groups| self.states_conflict(left, right, groups),
+            |left, right, groups| self.states_conflict(left, right, groups, &entry_maps),
         );
 
         // Precompute per-state shift actions sorted by Symbol. State actions don't
@@ -230,35 +248,59 @@ impl Minimizer<'_> {
 
     fn states_conflict(
         &self,
-        left_state: &ParseState,
-        right_state: &ParseState,
+        state1: &ParseState,
+        state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
+        entry_maps: &[Vec<(Symbol, usize)>],
     ) -> bool {
-        for (token, left_entry) in &left_state.terminal_entries {
-            if let Some(right_entry) = right_state.terminal_entries.get(token) {
-                if self.entries_conflict(
-                    left_state.id,
-                    right_state.id,
-                    token,
-                    left_entry,
-                    right_entry,
-                    group_ids_by_state_id,
-                ) {
-                    return true;
+        let entries1 = &entry_maps[state1.id];
+        let entries2 = &entry_maps[state2.id];
+        let mut i = 0;
+        let mut j = 0;
+        while i < entries1.len() || j < entries2.len() {
+            let ord = if i < entries1.len() && j < entries2.len() {
+                entries1[i].0.cmp(&entries2[j].0)
+            } else if i < entries1.len() {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+            match ord {
+                Ordering::Equal => {
+                    let token = entries1[i].0;
+                    let (_, left_entry) =
+                        state1.terminal_entries.get_index(entries1[i].1).unwrap();
+                    let (_, right_entry) =
+                        state2.terminal_entries.get_index(entries2[j].1).unwrap();
+                    if self.entries_conflict(
+                        state1.id,
+                        state2.id,
+                        &token,
+                        left_entry,
+                        right_entry,
+                        group_ids_by_state_id,
+                    ) {
+                        return true;
+                    }
+                    i += 1;
+                    j += 1;
                 }
-            } else if self.token_conflicts(left_state.id, right_state.id, right_state, *token) {
-                return true;
+                Ordering::Less => {
+                    let token = entries1[i].0;
+                    if self.token_conflicts(state1.id, state2.id, state2, token) {
+                        return true;
+                    }
+                    i += 1;
+                }
+                Ordering::Greater => {
+                    let token = entries2[j].0;
+                    if self.token_conflicts(state1.id, state2.id, state1, token) {
+                        return true;
+                    }
+                    j += 1;
+                }
             }
         }
-
-        for token in right_state.terminal_entries.keys() {
-            if !left_state.terminal_entries.contains_key(token)
-                && self.token_conflicts(left_state.id, right_state.id, left_state, *token)
-            {
-                return true;
-            }
-        }
-
         false
     }
 
