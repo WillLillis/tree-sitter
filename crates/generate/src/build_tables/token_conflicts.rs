@@ -1,5 +1,7 @@
 use std::{cmp::Ordering, collections::HashSet, fmt};
 
+use bitflags::bitflags;
+
 use crate::{
     build_tables::item::TokenSetDisplay,
     grammars::{LexicalGrammar, SyntaxGrammar},
@@ -7,14 +9,22 @@ use crate::{
     rules::TokenSet,
 };
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TokenConflictStatus {
-    matches_prefix: bool,
-    does_match_continuation: bool,
-    does_match_valid_continuation: bool,
-    does_match_separators: bool,
-    matches_same_string: bool,
-    matches_different_string: bool,
+bitflags! {
+    /// Per-(i,j) token conflict status, packed into a single byte.
+    ///
+    /// Using a `u8` bitfield instead of a struct of six `bool`s reduces the
+    /// status matrix from `n²·6` bytes to `n²` bytes (6× smaller).  For a
+    /// grammar with 200 tokens that's 240 KB → 40 KB, so a full row fits
+    /// comfortably in L1 cache while scanning in `token_conflicts`.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TokenConflictStatus: u8 {
+        const MATCHES_PREFIX              = 1 << 0;
+        const DOES_MATCH_CONTINUATION     = 1 << 1;
+        const DOES_MATCH_VALID_CONT       = 1 << 2;
+        const DOES_MATCH_SEPARATORS       = 1 << 3;
+        const MATCHES_SAME_STRING         = 1 << 4;
+        const MATCHES_DIFFERENT_STRING    = 1 << 5;
+    }
 }
 
 pub struct TokenConflictMap<'a> {
@@ -39,7 +49,7 @@ impl<'a> TokenConflictMap<'a> {
         let following_chars = get_following_chars(&starting_chars, &following_tokens);
 
         let n = grammar.variables.len();
-        let mut status_matrix = vec![TokenConflictStatus::default(); n * n];
+        let mut status_matrix = vec![TokenConflictStatus::empty(); n * n];
         for i in 0..grammar.variables.len() {
             for j in 0..i {
                 let status = compute_conflict_status(&mut cursor, grammar, &following_chars, i, j);
@@ -68,46 +78,79 @@ impl<'a> TokenConflictMap<'a> {
 
     /// Does token `i` match any strings that token `j` does *not* match?
     pub fn does_match_different_string(&self, i: usize, j: usize) -> bool {
-        self.status_matrix[matrix_index(self.n, i, j)].matches_different_string
+        self.status_matrix[matrix_index(self.n, i, j)]
+            .contains(TokenConflictStatus::MATCHES_DIFFERENT_STRING)
     }
 
     /// Does token `i` match any strings that token `j` also matches, where
     /// token `i` is preferred over token `j`?
     #[inline]
     pub fn does_match_same_string(&self, i: usize, j: usize) -> bool {
-        self.status_matrix[matrix_index(self.n, i, j)].matches_same_string
+        self.status_matrix[matrix_index(self.n, i, j)]
+            .contains(TokenConflictStatus::MATCHES_SAME_STRING)
     }
 
     #[inline]
     pub fn does_conflict(&self, i: usize, j: usize) -> bool {
         debug_assert!(i < self.n && j < self.n, "token indices out of bounds");
-        // Safety: i < n and j < n, so n*i+j < n*n == status_matrix.len().
-        let entry = unsafe { self.status_matrix.get_unchecked(matrix_index(self.n, i, j)) };
-        entry.does_match_valid_continuation
-            || entry.does_match_separators
-            || entry.matches_same_string
+        // Safety: i < n and j < n imply n*i+j < n*n == status_matrix.len().
+        let entry = unsafe { *self.status_matrix.get_unchecked(matrix_index(self.n, i, j)) };
+        entry.intersects(
+            TokenConflictStatus::DOES_MATCH_VALID_CONT
+                | TokenConflictStatus::DOES_MATCH_SEPARATORS
+                | TokenConflictStatus::MATCHES_SAME_STRING,
+        )
+    }
+
+    /// Return the byte offset of row `i` in the status matrix (`n * i`).
+    ///
+    /// Callers in a tight loop (e.g. `token_conflicts`) can hoist this outside
+    /// the loop to eliminate the multiply from every column lookup.
+    #[inline]
+    pub fn row_offset(&self, i: usize) -> usize {
+        debug_assert!(i < self.n, "row index out of bounds");
+        self.n * i
+    }
+
+    /// Check whether the status at `(offset, j)` indicates a conflict,
+    /// where `offset` was produced by `row_offset(i)` for some valid `i`.
+    ///
+    /// Equivalent to `does_conflict(i, j)` but avoids recomputing `n * i`.
+    #[inline]
+    pub fn does_conflict_at(&self, offset: usize, j: usize) -> bool {
+        debug_assert!(offset + j < self.status_matrix.len(), "indices out of bounds");
+        // Safety: offset = n*i for some i < n, and j < n, so offset + j < n*n.
+        let entry = unsafe { *self.status_matrix.get_unchecked(offset + j) };
+        entry.intersects(
+            TokenConflictStatus::DOES_MATCH_VALID_CONT
+                | TokenConflictStatus::DOES_MATCH_SEPARATORS
+                | TokenConflictStatus::MATCHES_SAME_STRING,
+        )
     }
 
     /// Does token `i` match any strings that are *prefixes* of strings matched by `j`?
     #[inline]
     pub fn does_match_prefix(&self, i: usize, j: usize) -> bool {
-        self.status_matrix[matrix_index(self.n, i, j)].matches_prefix
+        self.status_matrix[matrix_index(self.n, i, j)]
+            .contains(TokenConflictStatus::MATCHES_PREFIX)
     }
 
     pub fn does_match_shorter_or_longer(&self, i: usize, j: usize) -> bool {
-        let entry = &self.status_matrix[matrix_index(self.n, i, j)];
-        let reverse_entry = &self.status_matrix[matrix_index(self.n, j, i)];
-        (entry.does_match_valid_continuation || entry.does_match_separators)
-            && !reverse_entry.does_match_separators
+        let entry = self.status_matrix[matrix_index(self.n, i, j)];
+        let reverse_entry = self.status_matrix[matrix_index(self.n, j, i)];
+        entry.intersects(
+            TokenConflictStatus::DOES_MATCH_VALID_CONT | TokenConflictStatus::DOES_MATCH_SEPARATORS,
+        ) && !reverse_entry.contains(TokenConflictStatus::DOES_MATCH_SEPARATORS)
     }
 
     #[inline]
     pub fn does_overlap(&self, i: usize, j: usize) -> bool {
-        let status = &self.status_matrix[matrix_index(self.n, i, j)];
-        status.does_match_separators
-            || status.matches_prefix
-            || status.matches_same_string
-            || status.does_match_continuation
+        self.status_matrix[matrix_index(self.n, i, j)].intersects(
+            TokenConflictStatus::DOES_MATCH_SEPARATORS
+                | TokenConflictStatus::MATCHES_PREFIX
+                | TokenConflictStatus::MATCHES_SAME_STRING
+                | TokenConflictStatus::DOES_MATCH_CONTINUATION,
+        )
     }
 
     pub fn prefer_token(grammar: &LexicalGrammar, left: (i32, usize), right: (i32, usize)) -> bool {
@@ -256,8 +299,8 @@ fn compute_conflict_status(
         grammar.variables[j].start_state,
     ]];
     let mut result = (
-        TokenConflictStatus::default(),
-        TokenConflictStatus::default(),
+        TokenConflictStatus::empty(),
+        TokenConflictStatus::empty(),
     );
 
     while let Some(state_set) = state_set_queue.pop() {
@@ -269,9 +312,9 @@ fn compute_conflict_status(
         let first_live_variable_index = live_variable_indices.next().unwrap();
         if live_variable_indices.count() == 0 {
             if first_live_variable_index == i {
-                result.0.matches_different_string = true;
+                result.0.insert(TokenConflictStatus::MATCHES_DIFFERENT_STRING);
             } else {
-                result.1.matches_different_string = true;
+                result.1.insert(TokenConflictStatus::MATCHES_DIFFERENT_STRING);
             }
             continue;
         }
@@ -285,9 +328,9 @@ fn compute_conflict_status(
         for (id, precedence) in cursor.completions() {
             if within_separator {
                 if id == i {
-                    result.0.does_match_separators = true;
+                    result.0.insert(TokenConflictStatus::DOES_MATCH_SEPARATORS);
                 } else {
-                    result.1.does_match_separators = true;
+                    result.1.insert(TokenConflictStatus::DOES_MATCH_SEPARATORS);
                 }
             }
 
@@ -312,9 +355,9 @@ fn compute_conflict_status(
                 }
 
                 if preferred_id == i {
-                    result.0.matches_same_string = true;
+                    result.0.insert(TokenConflictStatus::MATCHES_SAME_STRING);
                 } else {
-                    result.1.matches_same_string = true;
+                    result.1.insert(TokenConflictStatus::MATCHES_SAME_STRING);
                 }
             } else {
                 completion = Some((id, precedence));
@@ -351,20 +394,20 @@ fn compute_conflict_status(
                     ) {
                         can_advance = true;
                         if advanced_id == i {
-                            result.0.does_match_continuation = true;
+                            result.0.insert(TokenConflictStatus::DOES_MATCH_CONTINUATION);
                             if transition.characters.does_intersect(&following_chars[j]) {
-                                result.0.does_match_valid_continuation = true;
+                                result.0.insert(TokenConflictStatus::DOES_MATCH_VALID_CONT);
                             }
                         } else {
-                            result.1.does_match_continuation = true;
+                            result.1.insert(TokenConflictStatus::DOES_MATCH_CONTINUATION);
                             if transition.characters.does_intersect(&following_chars[i]) {
-                                result.1.does_match_valid_continuation = true;
+                                result.1.insert(TokenConflictStatus::DOES_MATCH_VALID_CONT);
                             }
                         }
                     } else if completed_id == i {
-                        result.0.matches_prefix = true;
+                        result.0.insert(TokenConflictStatus::MATCHES_PREFIX);
                     } else {
-                        result.1.matches_prefix = true;
+                        result.1.insert(TokenConflictStatus::MATCHES_PREFIX);
                     }
                 }
             }
