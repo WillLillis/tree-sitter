@@ -194,19 +194,22 @@ impl Minimizer<'_> {
             group_ids_by_state_id.push(state.core_id);
         }
 
-        // Precompute sorted terminal entry indices for merge-join in states_conflict.
-        // entry_maps[state_id][i] = (symbol_key, index_into_terminal_entries)
+        // Precompute sorted terminal entry pointers for merge-join in states_conflict.
+        // entry_maps[state_id][i] = (symbol_key, *const ParseTableEntry)
         // Keys are packed u64s (symbol_key) for single-instruction comparison.
-        let entry_maps: Vec<Vec<(SymbolKey, usize)>> = self
+        // Storing a raw pointer avoids the IndexMap::get_index call in states_conflict.
+        //
+        // Safety invariant: parse_table.states are not mutated during the grouping phase,
+        // so all pointers remain valid for the lifetime of entry_maps.
+        let entry_maps: Vec<Vec<(SymbolKey, *const ParseTableEntry)>> = self
             .parse_table
             .states
             .iter()
             .map(|state| {
-                let mut entries: Vec<(SymbolKey, usize)> = state
+                let mut entries: Vec<(SymbolKey, *const ParseTableEntry)> = state
                     .terminal_entries
                     .iter()
-                    .enumerate()
-                    .map(|(idx, (sym, _))| (symbol_key(*sym), idx))
+                    .map(|(sym, entry)| (symbol_key(*sym), entry as *const ParseTableEntry))
                     .collect();
                 entries.sort_unstable_by_key(|&(key, _)| key);
                 entries
@@ -328,7 +331,7 @@ impl Minimizer<'_> {
         state1: &ParseState,
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
-        entry_maps: &[Vec<(SymbolKey, usize)>],
+        entry_maps: &[Vec<(SymbolKey, *const ParseTableEntry)>],
     ) -> bool {
         let entries1 = &entry_maps[state1.id];
         let entries2 = &entry_maps[state2.id];
@@ -347,10 +350,10 @@ impl Minimizer<'_> {
             match ord {
                 Ordering::Equal => {
                     let token = key_symbol(entries1[i].0);
-                    let (_, left_entry) =
-                        state1.terminal_entries.get_index(entries1[i].1).unwrap();
-                    let (_, right_entry) =
-                        state2.terminal_entries.get_index(entries2[j].1).unwrap();
+                    // Safety: pointers were taken from the same parse_table.states that
+                    // is not mutated during the grouping phase (see entry_maps comment).
+                    let left_entry = unsafe { &*entries1[i].1 };
+                    let right_entry = unsafe { &*entries2[j].1 };
                     if self.entries_conflict(
                         state1.id,
                         state2.id,
@@ -517,7 +520,7 @@ impl Minimizer<'_> {
         left_id: ParseStateId,
         right_id: ParseStateId,
         right_state: &ParseState,
-        right_entry_map: &[(SymbolKey, usize)],
+        right_entry_map: &[(SymbolKey, *const ParseTableEntry)],
         new_token: Symbol,
     ) -> bool {
         if new_token == Symbol::end_of_nonterminal_extra() {
