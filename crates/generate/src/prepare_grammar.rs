@@ -8,7 +8,7 @@ mod process_inlines;
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap, HashSet, hash_map},
+    collections::{BTreeSet, hash_map},
     mem,
 };
 
@@ -16,6 +16,7 @@ pub use expand_tokens::ExpandTokensError;
 pub use extract_tokens::ExtractTokensError;
 pub use flatten_grammar::FlattenGrammarError;
 use indexmap::IndexMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 pub use intern_symbols::InternSymbolsError;
 pub use process_inlines::ProcessInlinesError;
 use serde::Serialize;
@@ -256,7 +257,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
     fn validate(
         rule_name: &str,
         rule: &Rule,
-        names: &HashSet<&String>,
+        names: &FxHashSet<&String>,
     ) -> ValidatePrecedenceResult<()> {
         match rule {
             Rule::Repeat(rule) => validate(rule_name, rule, names),
@@ -281,7 +282,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
 
     // For any two precedence names `a` and `b`, if `a` comes before `b`
     // in some list, then it cannot come *after* `b` in any list.
-    let mut pairs = HashMap::new();
+    let mut pairs = FxHashMap::default();
     for list in &grammar.precedence_orderings {
         for (i, mut entry1) in list.iter().enumerate() {
             for mut entry2 in list.iter().skip(i + 1) {
@@ -321,7 +322,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
                 None
             }
         })
-        .collect::<HashSet<&String>>();
+        .collect::<FxHashSet<&String>>();
     for variable in &grammar.variables {
         validate(&variable.name, &variable.rule, &precedence_names)?;
     }
