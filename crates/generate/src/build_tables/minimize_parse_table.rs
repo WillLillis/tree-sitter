@@ -340,8 +340,12 @@ impl Minimizer<'_> {
         let mut i = 0;
         let mut j = 0;
         while i < len1 || j < len2 {
+            // SAFETY: each branch only accesses entries1[i] when i < len1
+            // and entries2[j] when j < len2, both of which hold by construction.
             let ord = if i < len1 && j < len2 {
-                entries1[i].0.cmp(&entries2[j].0)
+                unsafe { entries1.get_unchecked(i) }
+                    .0
+                    .cmp(&unsafe { entries2.get_unchecked(j) }.0)
             } else if i < len1 {
                 Ordering::Less
             } else {
@@ -349,11 +353,14 @@ impl Minimizer<'_> {
             };
             match ord {
                 Ordering::Equal => {
-                    let token = key_symbol(entries1[i].0);
+                    // SAFETY: Equal is only reachable when i < len1 && j < len2.
+                    let e1 = unsafe { entries1.get_unchecked(i) };
+                    let e2 = unsafe { entries2.get_unchecked(j) };
+                    let token = key_symbol(e1.0);
                     // Safety: pointers were taken from the same parse_table.states that
                     // is not mutated during the grouping phase (see entry_maps comment).
-                    let left_entry = unsafe { &*entries1[i].1 };
-                    let right_entry = unsafe { &*entries2[j].1 };
+                    let left_entry = unsafe { &*e1.1 };
+                    let right_entry = unsafe { &*e2.1 };
                     if self.entries_conflict(
                         state1.id,
                         state2.id,
@@ -368,14 +375,18 @@ impl Minimizer<'_> {
                     j += 1;
                 }
                 Ordering::Less => {
-                    let token = key_symbol(entries1[i].0);
+                    // SAFETY: Less is only reachable when i < len1.
+                    let e1 = unsafe { entries1.get_unchecked(i) };
+                    let token = key_symbol(e1.0);
                     if self.token_conflicts(state1.id, state2.id, state2, entries2, token) {
                         return true;
                     }
                     i += 1;
                 }
                 Ordering::Greater => {
-                    let token = key_symbol(entries2[j].0);
+                    // SAFETY: Greater is only reachable when j < len2.
+                    let e2 = unsafe { entries2.get_unchecked(j) };
+                    let token = key_symbol(e2.0);
                     if self.token_conflicts(state1.id, state2.id, state1, entries1, token) {
                         return true;
                     }
@@ -399,12 +410,13 @@ impl Minimizer<'_> {
         let mut i = 0;
         let mut j = 0;
         while i < shifts1.len() && j < shifts2.len() {
-            match shifts1[i].0.cmp(&shifts2[j].0) {
+            // SAFETY: loop condition ensures i < shifts1.len() and j < shifts2.len().
+            let (k1, s1) = *unsafe { shifts1.get_unchecked(i) };
+            let (k2, s2) = *unsafe { shifts2.get_unchecked(j) };
+            match k1.cmp(&k2) {
                 Ordering::Less => i += 1,
                 Ordering::Greater => j += 1,
                 Ordering::Equal => {
-                    let (key, s1) = shifts1[i];
-                    let s2 = shifts2[j].1;
                     let group1 = group_ids_by_state_id[s1];
                     let group2 = group_ids_by_state_id[s2];
                     if group1 != group2 {
@@ -412,7 +424,7 @@ impl Minimizer<'_> {
                             "split states {} {} - successors for {} are split: {s1} {s2}",
                             state1.id,
                             state2.id,
-                            self.symbol_name(&key_symbol(key)),
+                            self.symbol_name(&key_symbol(k1)),
                         );
                         return true;
                     }
@@ -427,12 +439,13 @@ impl Minimizer<'_> {
         let mut i = 0;
         let mut j = 0;
         while i < nonterms1.len() && j < nonterms2.len() {
-            match nonterms1[i].0.cmp(&nonterms2[j].0) {
+            // SAFETY: loop condition ensures i < nonterms1.len() and j < nonterms2.len().
+            let (idx1, s1) = *unsafe { nonterms1.get_unchecked(i) };
+            let (idx2, s2) = *unsafe { nonterms2.get_unchecked(j) };
+            match idx1.cmp(&idx2) {
                 Ordering::Less => i += 1,
                 Ordering::Greater => j += 1,
                 Ordering::Equal => {
-                    let (sym_idx, s1) = nonterms1[i];
-                    let s2 = nonterms2[j].1;
                     match (s1, s2) {
                         (GotoAction::ShiftExtra, GotoAction::ShiftExtra) => {}
                         (GotoAction::Goto(s1), GotoAction::Goto(s2)) => {
@@ -443,7 +456,7 @@ impl Minimizer<'_> {
                                     "split states {} {} - successors for {} are split: {s1} {s2}",
                                     state1.id,
                                     state2.id,
-                                    self.syntax_grammar.variables[sym_idx].name,
+                                    self.syntax_grammar.variables[idx1].name,
                                 );
                                 return true;
                             }
