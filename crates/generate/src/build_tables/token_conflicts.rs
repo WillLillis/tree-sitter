@@ -102,32 +102,6 @@ impl<'a> TokenConflictMap<'a> {
         )
     }
 
-    /// Return the byte offset of row `i` in the status matrix (`n * i`).
-    ///
-    /// Callers in a tight loop (e.g. `token_conflicts`) can hoist this outside
-    /// the loop to eliminate the multiply from every column lookup.
-    #[inline]
-    pub fn row_offset(&self, i: usize) -> usize {
-        debug_assert!(i < self.n, "row index out of bounds");
-        self.n * i
-    }
-
-    /// Check whether the status at `(offset, j)` indicates a conflict,
-    /// where `offset` was produced by `row_offset(i)` for some valid `i`.
-    ///
-    /// Equivalent to `does_conflict(i, j)` but avoids recomputing `n * i`.
-    #[inline]
-    pub fn does_conflict_at(&self, offset: usize, j: usize) -> bool {
-        debug_assert!(offset + j < self.status_matrix.len(), "indices out of bounds");
-        // Safety: offset = n*i for some i < n, and j < n, so offset + j < n*n.
-        let entry = unsafe { *self.status_matrix.get_unchecked(offset + j) };
-        entry.intersects(
-            TokenConflictStatus::DOES_MATCH_VALID_CONT
-                | TokenConflictStatus::DOES_MATCH_SEPARATORS
-                | TokenConflictStatus::MATCHES_SAME_STRING,
-        )
-    }
-
     /// Does token `i` match any strings that are *prefixes* of strings matched by `j`?
     #[inline]
     pub fn does_match_prefix(&self, i: usize, j: usize) -> bool {

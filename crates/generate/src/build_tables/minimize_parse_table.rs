@@ -31,6 +31,7 @@ type SymbolKey = u64;
 const KEY_TAG_SHIFT: u32 = 61;
 const KEY_INDEX_MASK: u64 = (1u64 << KEY_TAG_SHIFT) - 1;
 
+
 #[inline(always)]
 fn symbol_key(sym: Symbol) -> SymbolKey {
     debug_assert!(sym.index as u64 <= KEY_INDEX_MASK, "symbol index too large");
@@ -49,8 +50,13 @@ fn key_symbol(key: SymbolKey) -> Symbol {
     };
     Symbol {
         kind,
-        index: (key & KEY_INDEX_MASK) as usize,
+        index: key_index(key),
     }
+}
+
+#[inline(always)]
+fn key_index(key: SymbolKey) -> usize {
+    (key & KEY_INDEX_MASK) as usize
 }
 
 #[inline(always)]
@@ -337,15 +343,17 @@ impl Minimizer<'_> {
         let entries2 = &entry_maps[state2.id];
         let len1 = entries1.len();
         let len2 = entries2.len();
+        // Cache raw pointers to eliminate the Vec → RawVec → NonNull deref chain
+        // that would otherwise occur on every get_unchecked call in the merge-join.
+        let ptr1 = entries1.as_ptr();
+        let ptr2 = entries2.as_ptr();
         let mut i = 0;
         let mut j = 0;
         while i < len1 || j < len2 {
-            // SAFETY: each branch only accesses entries1[i] when i < len1
-            // and entries2[j] when j < len2, both of which hold by construction.
+            // SAFETY: each branch only accesses ptr1[i] when i < len1
+            // and ptr2[j] when j < len2, both of which hold by construction.
             let ord = if i < len1 && j < len2 {
-                unsafe { entries1.get_unchecked(i) }
-                    .0
-                    .cmp(&unsafe { entries2.get_unchecked(j) }.0)
+                unsafe { (*ptr1.add(i)).0.cmp(&(*ptr2.add(j)).0) }
             } else if i < len1 {
                 Ordering::Less
             } else {
@@ -354,8 +362,8 @@ impl Minimizer<'_> {
             match ord {
                 Ordering::Equal => {
                     // SAFETY: Equal is only reachable when i < len1 && j < len2.
-                    let e1 = unsafe { entries1.get_unchecked(i) };
-                    let e2 = unsafe { entries2.get_unchecked(j) };
+                    let e1 = unsafe { &*ptr1.add(i) };
+                    let e2 = unsafe { &*ptr2.add(j) };
                     let token = key_symbol(e1.0);
                     // Safety: pointers were taken from the same parse_table.states that
                     // is not mutated during the grouping phase (see entry_maps comment).
@@ -376,7 +384,7 @@ impl Minimizer<'_> {
                 }
                 Ordering::Less => {
                     // SAFETY: Less is only reachable when i < len1.
-                    let e1 = unsafe { entries1.get_unchecked(i) };
+                    let e1 = unsafe { &*ptr1.add(i) };
                     let token = key_symbol(e1.0);
                     if self.token_conflicts(state1.id, state2.id, state2, entries2, token) {
                         return true;
@@ -385,7 +393,7 @@ impl Minimizer<'_> {
                 }
                 Ordering::Greater => {
                     // SAFETY: Greater is only reachable when j < len2.
-                    let e2 = unsafe { entries2.get_unchecked(j) };
+                    let e2 = unsafe { &*ptr2.add(j) };
                     let token = key_symbol(e2.0);
                     if self.token_conflicts(state1.id, state2.id, state1, entries1, token) {
                         return true;
@@ -407,12 +415,16 @@ impl Minimizer<'_> {
     ) -> bool {
         let shifts1 = &shift_maps[state1.id];
         let shifts2 = &shift_maps[state2.id];
+        // Hoist len and raw pointer to avoid the Vec deref chain on every loop
+        // iteration (both the condition check and the get_unchecked body).
+        let (slen1, sptr1) = (shifts1.len(), shifts1.as_ptr());
+        let (slen2, sptr2) = (shifts2.len(), shifts2.as_ptr());
         let mut i = 0;
         let mut j = 0;
-        while i < shifts1.len() && j < shifts2.len() {
-            // SAFETY: loop condition ensures i < shifts1.len() and j < shifts2.len().
-            let (k1, s1) = *unsafe { shifts1.get_unchecked(i) };
-            let (k2, s2) = *unsafe { shifts2.get_unchecked(j) };
+        while i < slen1 && j < slen2 {
+            // SAFETY: i < slen1 and j < slen2 proven by loop condition.
+            let (k1, s1) = unsafe { *sptr1.add(i) };
+            let (k2, s2) = unsafe { *sptr2.add(j) };
             match k1.cmp(&k2) {
                 Ordering::Less => i += 1,
                 Ordering::Greater => j += 1,
@@ -436,12 +448,14 @@ impl Minimizer<'_> {
 
         let nonterms1 = &nonterminal_maps[state1.id];
         let nonterms2 = &nonterminal_maps[state2.id];
+        let (nlen1, nptr1) = (nonterms1.len(), nonterms1.as_ptr());
+        let (nlen2, nptr2) = (nonterms2.len(), nonterms2.as_ptr());
         let mut i = 0;
         let mut j = 0;
-        while i < nonterms1.len() && j < nonterms2.len() {
-            // SAFETY: loop condition ensures i < nonterms1.len() and j < nonterms2.len().
-            let (idx1, s1) = *unsafe { nonterms1.get_unchecked(i) };
-            let (idx2, s2) = *unsafe { nonterms2.get_unchecked(j) };
+        while i < nlen1 && j < nlen2 {
+            // SAFETY: i < nlen1 and j < nlen2 proven by loop condition.
+            let (idx1, s1) = unsafe { *nptr1.add(i) };
+            let (idx2, s2) = unsafe { *nptr2.add(j) };
             match idx1.cmp(&idx2) {
                 Ordering::Less => i += 1,
                 Ordering::Greater => j += 1,
@@ -590,10 +604,9 @@ impl Minimizer<'_> {
                 continue;
             }
 
-            let token_index = (key & 0xFFFF_FFFF) as usize;
             if self
                 .token_conflict_map
-                .does_conflict(new_token.index, token_index)
+                .does_conflict(new_token.index, key_index(key))
             {
                 debug!(
                     "split states {} {} - token {} conflicts with {}",
