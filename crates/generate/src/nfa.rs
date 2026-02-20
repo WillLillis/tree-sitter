@@ -501,7 +501,7 @@ impl<'a> NfaCursor<'a> {
     fn group_transitions<'b>(
         iter: impl Iterator<Item = (&'b CharacterSet, bool, i32, u32)>,
     ) -> Vec<NfaTransition> {
-        let mut result = Vec::<NfaTransition>::new();
+        let mut result = Vec::<NfaTransition>::with_capacity(8);
         for (chars, is_sep, prec, state) in iter {
             let mut chars = chars.clone();
             let mut i = 0;
@@ -551,7 +551,7 @@ impl<'a> NfaCursor<'a> {
                 {
                     let characters = mem::take(&mut result[j].characters);
                     result[j].characters = characters.add(&result[i].characters);
-                    result.remove(i);
+                    result.swap_remove(i);
                     i -= 1;
                     break;
                 }

@@ -269,6 +269,17 @@ fn get_following_chars(
         .collect()
 }
 
+/// Hash a sorted slice of NFA state IDs to a single `u64` for use as a
+/// visited-set key.  The collision probability per pair is ~1/2^64, which is
+/// negligible for any practical grammar.
+#[inline]
+fn hash_state_set(states: &[u32]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = rustc_hash::FxHasher::default();
+    states.hash(&mut h);
+    h.finish()
+}
+
 fn compute_conflict_status(
     cursor: &mut NfaCursor,
     grammar: &LexicalGrammar,
@@ -277,11 +288,12 @@ fn compute_conflict_status(
     i: usize,
     j: usize,
 ) -> (TokenConflictStatus, TokenConflictStatus) {
-    let mut visited_state_sets = FxHashSet::default();
-    let mut state_set_queue = vec![vec![
+    let mut visited_state_sets = FxHashSet::<u64>::default();
+    let mut state_set_queue = Vec::with_capacity(4);
+    state_set_queue.push(vec![
         grammar.variables[i].start_state,
         grammar.variables[j].start_state,
-    ]];
+    ]);
     let mut result = (
         TokenConflictStatus::empty(),
         TokenConflictStatus::empty(),
@@ -359,12 +371,18 @@ fn compute_conflict_status(
             if let Some((completed_id, completed_precedence)) = completion {
                 let mut advanced_id = None;
                 let mut successor_contains_completed_id = false;
-                for variable_id in grammar.variable_indices_for_nfa_states(&transition.states) {
-                    if variable_id == completed_id {
+                let mut prev_var = None;
+                for &state_id in &transition.states {
+                    let var_id = nfa_state_to_var[state_id as usize];
+                    if prev_var == Some(var_id) {
+                        continue;
+                    }
+                    prev_var = Some(var_id);
+                    if var_id == completed_id {
                         successor_contains_completed_id = true;
                         break;
                     }
-                    advanced_id = Some(variable_id);
+                    advanced_id = Some(var_id);
                 }
 
                 // Determine which action is preferred: matching the already complete
@@ -397,8 +415,9 @@ fn compute_conflict_status(
                 }
             }
 
-            if can_advance && !visited_state_sets.contains(&transition.states) {
-                visited_state_sets.insert(transition.states.clone());
+            if can_advance
+                && visited_state_sets.insert(hash_state_set(&transition.states))
+            {
                 state_set_queue.push(transition.states);
             }
         }
