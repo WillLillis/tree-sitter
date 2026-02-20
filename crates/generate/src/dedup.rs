@@ -14,8 +14,7 @@ pub fn split_state_id_groups<S>(
     let mut group_id = start_group_id;
     while group_id < state_ids_by_group_id.len() {
         let state_ids = &state_ids_by_group_id[group_id];
-        // Pre-allocate for the worst case (entire group splits) to avoid reallocs.
-        let mut split_state_ids = Vec::with_capacity(state_ids.len());
+        let mut split_state_ids = Vec::new();
 
         let mut i = 0;
         while i < state_ids.len() {
@@ -39,6 +38,11 @@ pub fn split_state_id_groups<S>(
                 let right_state = &states[right_state_id];
 
                 if should_split(left_state, right_state, group_ids_by_state_id) {
+                    // Reserve on first split to cover the rest of the group in one
+                    // allocation, avoiding all subsequent reallocs for this group.
+                    if split_state_ids.is_empty() {
+                        split_state_ids.reserve(state_ids.len());
+                    }
                     split_state_ids.push(right_state_id);
                     is_split[right_state_id] = true;
                 }
