@@ -508,7 +508,12 @@ impl<'a> NfaCursor<'a> {
             while i < result.len() && !chars.is_empty() {
                 let intersection = result[i].characters.remove_intersection(&mut chars);
                 if !intersection.is_empty() {
-                    let mut intersection_states = result[i].states.clone();
+                    let chars_is_empty = result[i].characters.is_empty();
+                    let mut intersection_states = if chars_is_empty {
+                        mem::take(&mut result[i].states)
+                    } else {
+                        result[i].states.clone()
+                    };
                     if let Err(j) = intersection_states.binary_search(&state) {
                         intersection_states.insert(j, state);
                     }
@@ -518,7 +523,7 @@ impl<'a> NfaCursor<'a> {
                         precedence: max(result[i].precedence, prec),
                         states: intersection_states,
                     };
-                    if result[i].characters.is_empty() {
+                    if chars_is_empty {
                         result[i] = intersection_transition;
                     } else {
                         result.insert(i, intersection_transition);

@@ -50,11 +50,18 @@ impl<'a> TokenConflictMap<'a> {
         let starting_chars = get_starting_chars(&mut cursor, grammar);
         let following_chars = get_following_chars(&starting_chars, &following_tokens);
 
+        // Pre-compute O(1) lookup: NFA state ID → owning variable index.
+        // Replaces repeated O(log n) binary searches in compute_conflict_status.
+        let nfa_state_to_var: Vec<usize> = (0..grammar.nfa.states.len())
+            .map(|id| grammar.variable_index_for_nfa_state(id as u32))
+            .collect();
+
         let n = grammar.variables.len();
         let mut status_matrix = vec![TokenConflictStatus::empty(); n * n];
         for i in 0..grammar.variables.len() {
             for j in 0..i {
-                let status = compute_conflict_status(&mut cursor, grammar, &following_chars, i, j);
+                let status =
+                    compute_conflict_status(&mut cursor, grammar, &following_chars, &nfa_state_to_var, i, j);
                 status_matrix[matrix_index(n, i, j)] = status.0;
                 status_matrix[matrix_index(n, j, i)] = status.1;
             }
@@ -266,6 +273,7 @@ fn compute_conflict_status(
     cursor: &mut NfaCursor,
     grammar: &LexicalGrammar,
     following_chars: &[CharacterSet],
+    nfa_state_to_var: &[usize],
     i: usize,
     j: usize,
 ) -> (TokenConflictStatus, TokenConflictStatus) {
@@ -280,13 +288,14 @@ fn compute_conflict_status(
     );
 
     while let Some(state_set) = state_set_queue.pop() {
-        let mut live_variable_indices = grammar.variable_indices_for_nfa_states(&state_set);
-
         // If only one of the two tokens could possibly match from this state, then
         // there is no reason to analyze any of its successors. Just record the fact
         // that the token matches a string that the other token does not match.
-        let first_live_variable_index = live_variable_indices.next().unwrap();
-        if live_variable_indices.count() == 0 {
+        let first_live_variable_index = nfa_state_to_var[state_set[0] as usize];
+        if state_set
+            .iter()
+            .all(|&s| nfa_state_to_var[s as usize] == first_live_variable_index)
+        {
             if first_live_variable_index == i {
                 result.0.insert(TokenConflictStatus::MATCHES_DIFFERENT_STRING);
             } else {
@@ -388,7 +397,8 @@ fn compute_conflict_status(
                 }
             }
 
-            if can_advance && visited_state_sets.insert(transition.states.clone()) {
+            if can_advance && !visited_state_sets.contains(&transition.states) {
+                visited_state_sets.insert(transition.states.clone());
                 state_set_queue.push(transition.states);
             }
         }
