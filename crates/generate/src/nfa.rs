@@ -501,9 +501,13 @@ impl<'a> NfaCursor<'a> {
     fn group_transitions<'b>(
         iter: impl Iterator<Item = (&'b CharacterSet, bool, i32, u32)>,
     ) -> Vec<NfaTransition> {
-        let mut result = Vec::<NfaTransition>::with_capacity(8);
-        for (chars, is_sep, prec, state) in iter {
-            let mut chars = chars.clone();
+        let mut result = Vec::<NfaTransition>::new();
+        // Reuse a single CharacterSet buffer across iterations to avoid one
+        // malloc per raw transition. `assign` refills it in-place; `mem::take`
+        // donates the allocation to a result entry when chars has a remainder.
+        let mut chars = CharacterSet::empty();
+        for (input_chars, is_sep, prec, state) in iter {
+            chars.assign(input_chars);
             let mut i = 0;
             while i < result.len() && !chars.is_empty() {
                 let intersection = result[i].characters.remove_intersection(&mut chars);
@@ -526,15 +530,20 @@ impl<'a> NfaCursor<'a> {
                     if chars_is_empty {
                         result[i] = intersection_transition;
                     } else {
-                        result.insert(i, intersection_transition);
-                        i += 1;
+                        // Push to the tail instead of inserting at i (which
+                        // would be O(n)).  After remove_intersection, the new
+                        // `chars` (C') and `intersection` (I = A∩C) are
+                        // disjoint, so when the loop later reaches I at the
+                        // tail, remove_intersection(I, C'') will be a no-op.
+                        // The final sort makes mid-loop ordering irrelevant.
+                        result.push(intersection_transition);
                     }
                 }
                 i += 1;
             }
             if !chars.is_empty() {
                 result.push(NfaTransition {
-                    characters: chars,
+                    characters: mem::take(&mut chars),
                     precedence: prec,
                     states: vec![state],
                     is_separator: is_sep,
