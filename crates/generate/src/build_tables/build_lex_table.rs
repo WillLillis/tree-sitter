@@ -199,9 +199,13 @@ impl<'a> LexTableBuilder<'a> {
 
     fn add_state(&mut self, nfa_states: Vec<u32>, eof_valid: bool) -> (usize, bool) {
         self.cursor.reset(nfa_states);
+        // Move cursor.state_ids out as the key instead of cloning it.
+        // The cursor is always rebuilt via reset() before its state is needed
+        // again, so leaving it empty here is safe.
+        let key_states = mem::take(&mut self.cursor.state_ids);
         match self
             .state_ids_by_nfa_state_set
-            .entry((self.cursor.state_ids.clone(), eof_valid))
+            .entry((key_states, eof_valid))
         {
             Entry::Occupied(o) => (*o.get(), false),
             Entry::Vacant(v) => {
@@ -236,8 +240,7 @@ impl<'a> LexTableBuilder<'a> {
             completion = Some((id, prec));
         }
 
-        let transitions = self.cursor.transitions();
-        let has_sep = self.cursor.transition_chars().any(|(_, sep)| sep);
+        let (transitions, has_sep) = self.cursor.transitions_and_any_sep();
 
         // If EOF is a valid lookahead token, add a transition predicated on the null
         // character that leads to the empty set of NFA states.

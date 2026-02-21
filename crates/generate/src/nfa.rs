@@ -482,6 +482,18 @@ impl<'a> NfaCursor<'a> {
         Self::group_transitions(self.raw_transitions())
     }
 
+    /// Like `transitions()` but also returns whether any raw NFA transition
+    /// is a separator — computed in the same pass, avoiding a second iteration
+    /// over `state_ids` for callers that need both.
+    pub fn transitions_and_any_sep(&self) -> (Vec<NfaTransition>, bool) {
+        let mut any_sep = false;
+        let result = Self::group_transitions(self.raw_transitions().map(|(chars, is_sep, prec, state)| {
+            any_sep |= is_sep;
+            (chars, is_sep, prec, state)
+        }));
+        (result, any_sep)
+    }
+
     fn raw_transitions(&self) -> impl Iterator<Item = (&CharacterSet, bool, i32, u32)> {
         self.state_ids.iter().filter_map(move |id| {
             if let NfaState::Advance {

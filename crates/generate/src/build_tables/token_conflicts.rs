@@ -318,12 +318,17 @@ fn compute_conflict_status(
 
         // Don't pursue states where there's no potential for conflict.
         cursor.reset(state_set);
-        let within_separator = cursor.transition_chars().any(|(_, sep)| sep);
+
+        // Compute lazily: most BFS states have no completions, so
+        // `within_separator` is never needed in those iterations.
+        let mut within_separator = None::<bool>;
 
         // Examine each possible completed token in this state.
         let mut completion = None;
         for (id, precedence) in cursor.completions() {
-            if within_separator {
+            let sep = *within_separator
+                .get_or_insert_with(|| cursor.transition_chars().any(|(_, sep)| sep));
+            if sep {
                 if id == i {
                     result.0.insert(TokenConflictStatus::DOES_MATCH_SEPARATORS);
                 } else {
@@ -393,7 +398,7 @@ fn compute_conflict_status(
                         &transition,
                         completed_id,
                         completed_precedence,
-                        within_separator,
+                        within_separator.unwrap_or(false),
                     ) {
                         can_advance = true;
                         if advanced_id == i {
