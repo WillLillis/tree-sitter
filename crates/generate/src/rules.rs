@@ -300,6 +300,7 @@ impl BitVec {
     }
 
     /// Word-level OR: self |= other. Returns true if any new bits were set.
+    #[inline]
     fn insert_all(&mut self, other: &Self) -> bool {
         let other_words = other.words_in_use();
         if other_words == 0 {
@@ -758,6 +759,12 @@ impl TokenSet {
     #[inline]
     pub fn contains_terminal(&self, index: usize) -> bool {
         self.terminal_bits.get(index).unwrap_or(false)
+    }
+
+    /// Raw u64 word slice backing the terminal bitset.
+    #[inline]
+    pub fn terminal_bits_words(&self) -> &[u64] {
+        self.terminal_bits.as_slice()
     }
 
     pub fn insert(&mut self, other: Symbol) {

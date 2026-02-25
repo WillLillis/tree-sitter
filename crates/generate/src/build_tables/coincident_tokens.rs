@@ -11,6 +11,11 @@ pub struct CoincidentTokenIndex<'a> {
     /// Flat bitset for fast `contains()` checks. Indexed as `a * n + b`
     /// (both `(a,b)` and `(b,a)` bits are set, so no min/max normalization needed).
     contains_bits: Vec<u64>,
+    /// Word-aligned per-row bitsets for vectorized intersection checks.
+    /// Row `a` spans `[a * row_words .. (a+1) * row_words]`.
+    /// Bit `b` is set iff tokens `a` and `b` are coincident in some parse state.
+    pub row_bits: Vec<u64>,
+    pub row_words: usize,
     grammar: &'a LexicalGrammar,
     n: usize,
 }
@@ -18,11 +23,14 @@ pub struct CoincidentTokenIndex<'a> {
 impl<'a> CoincidentTokenIndex<'a> {
     pub fn new(table: &ParseTable, lexical_grammar: &'a LexicalGrammar) -> Self {
         let n = lexical_grammar.variables.len();
+        let row_words = n.div_ceil(64);
         let mut result = Self {
             n,
+            row_words,
             grammar: lexical_grammar,
             entries: vec![Vec::new(); n * n],
             contains_bits: vec![0u64; (n * n).div_ceil(64)],
+            row_bits: vec![0u64; n * row_words],
         };
         let mut terminal_indices = Vec::new();
         for (i, state) in table.states.iter().enumerate() {
@@ -46,6 +54,9 @@ impl<'a> CoincidentTokenIndex<'a> {
                     result.contains_bits[ab / 64] |= 1u64 << (ab % 64);
                     let ba = b * n + a;
                     result.contains_bits[ba / 64] |= 1u64 << (ba % 64);
+                    // Also populate the word-aligned row bitsets.
+                    result.row_bits[a * row_words + b / 64] |= 1u64 << (b % 64);
+                    result.row_bits[b * row_words + a / 64] |= 1u64 << (a % 64);
                 }
             }
         }
