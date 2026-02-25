@@ -8,6 +8,9 @@ use crate::{
 
 pub struct CoincidentTokenIndex<'a> {
     entries: Vec<Vec<ParseStateId>>,
+    /// Flat bitset for fast `contains()` checks. Indexed as `a * n + b`
+    /// (both `(a,b)` and `(b,a)` bits are set, so no min/max normalization needed).
+    contains_bits: Vec<u64>,
     grammar: &'a LexicalGrammar,
     n: usize,
 }
@@ -19,6 +22,7 @@ impl<'a> CoincidentTokenIndex<'a> {
             n,
             grammar: lexical_grammar,
             entries: vec![Vec::new(); n * n],
+            contains_bits: vec![0u64; (n * n).div_ceil(64)],
         };
         let mut terminal_indices = Vec::new();
         for (i, state) in table.states.iter().enumerate() {
@@ -36,6 +40,12 @@ impl<'a> CoincidentTokenIndex<'a> {
                     if result.entries[index].last().copied() != Some(i) {
                         result.entries[index].push(i);
                     }
+                    // Set both (a,b) and (b,a) bits so `contains()` needs
+                    // no min/max normalization.
+                    let ab = a * n + b;
+                    result.contains_bits[ab / 64] |= 1u64 << (ab % 64);
+                    let ba = b * n + a;
+                    result.contains_bits[ba / 64] |= 1u64 << (ba % 64);
                 }
             }
         }
@@ -47,7 +57,8 @@ impl<'a> CoincidentTokenIndex<'a> {
     }
 
     pub fn contains(&self, a: Symbol, b: Symbol) -> bool {
-        !self.entries[self.index(a.index, b.index)].is_empty()
+        let bit_index = a.index * self.n + b.index;
+        self.contains_bits[bit_index / 64] & (1u64 << (bit_index % 64)) != 0
     }
 
     #[must_use]
