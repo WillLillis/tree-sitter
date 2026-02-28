@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, sync::LazyLock};
+use std::path::Path;
 #[cfg(feature = "load")]
 use std::{
     env, fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
