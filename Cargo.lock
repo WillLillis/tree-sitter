@@ -2192,6 +2192,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "log",
+ "memchr",
  "pathdiff",
  "regex",
  "regex-syntax",
