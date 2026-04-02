@@ -29,6 +29,7 @@ bitflags = "2.11.1"
 dunce = "1.0.5"
 indexmap.workspace = true
 log.workspace = true
+memchr.workspace = true
 pathdiff = { optional = true, version = "0.2.3" }
 regex.workspace = true
 regex-syntax.workspace = true
@@ -44,6 +45,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 topological-sort.workspace = true
+
+[[bin]]
+name = "bench-native-dsl"
+path = "src/bin/bench_native_dsl.rs"
 
 [dev-dependencies]
 tempfile.workspace = true

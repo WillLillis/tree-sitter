@@ -21,6 +21,7 @@ mod bitvec;
 mod build_tables;
 mod dedup;
 mod grammars;
+pub mod nativedsl;
 mod nfa;
 mod node_types;
 pub mod parse_grammar;
@@ -126,12 +127,14 @@ pub type LoadGrammarFileResult<T> = Result<T, LoadGrammarError>;
 #[cfg(feature = "load")]
 #[derive(Debug, Error, Serialize)]
 pub enum LoadGrammarError {
-    #[error("Path to a grammar file with `.js` or `.json` extension is required")]
+    #[error("Path to a grammar file with `.js`, `.json`, or `.grammar` extension is required")]
     InvalidPath,
     #[error("Failed to load grammar.js -- {0}")]
     LoadJSGrammarFile(#[from] JSError),
     #[error("Failed to load grammar.json -- {0}")]
     IO(IoError),
+    #[error("Failed to load native DSL grammar -- {0}")]
+    NativeDsl(#[from] nativedsl::DslError),
     #[error("Unknown grammar file extension: {0:?}")]
     FileExtension(PathBuf),
 }
@@ -450,6 +453,11 @@ pub fn load_grammar_file(
         Some("js") => Ok(load_js_grammar_file(grammar_path, js_runtime)?),
         Some("json") => Ok(fs::read_to_string(grammar_path)
             .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?),
+        Some("grammar") => {
+            let source = fs::read_to_string(grammar_path)
+                .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
+            Ok(nativedsl::parse_native_dsl_to_json(&source)?)
+        }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
     }
 }

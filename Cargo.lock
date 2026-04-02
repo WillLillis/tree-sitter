@@ -2039,6 +2039,7 @@ dependencies = [
  "dunce",
  "indexmap",
  "log",
+ "memchr",
  "pathdiff",
  "regex",
  "regex-syntax",
