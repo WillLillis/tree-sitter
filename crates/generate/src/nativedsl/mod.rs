@@ -1,6 +1,6 @@
 //! Native DSL front-end for tree-sitter grammar definitions.
 //!
-//! This module implements a five-stage pipeline that compiles `.grammar` source
+//! This module implements a five-stage pipeline that compiles `.tsg` source
 //! files into the same [`InputGrammar`] representation produced by parsing
 //! `grammar.json`:
 //!
@@ -18,6 +18,8 @@ pub mod lower;
 mod parser;
 mod resolve;
 mod typecheck;
+
+use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
 
@@ -98,6 +100,102 @@ impl DslError {
             Self::Lower(e) => e.span,
         }
     }
+}
+
+/// A DSL pipeline error bundled with the source text and file path needed
+/// for rich diagnostic rendering.
+///
+/// This is the error type produced by [`crate::LoadGrammarError::NativeDsl`].
+/// Its [`Display`](std::fmt::Display) impl renders a Rust-style diagnostic
+/// with source context, line numbers, and underline pointers.
+#[derive(Debug, Error, Serialize)]
+#[error("{}", render_diagnostic(error, source_text, path))]
+pub struct NativeDslError {
+    pub error: DslError,
+    #[serde(skip)]
+    pub source_text: String,
+    #[serde(skip)]
+    pub path: PathBuf,
+}
+
+fn paint(color: anstyle::AnsiColor, text: &str) -> String {
+    let style = anstyle::Style::new().fg_color(Some(color.into())).bold();
+    format!("{style}{text}{style:#}")
+}
+
+fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String {
+    use std::fmt::Write;
+
+    use anstyle::AnsiColor;
+
+    let span = error.span();
+    let offset = span.start as usize;
+    let bytes = source_text.as_bytes();
+
+    // Find line boundaries and line number
+    let mut line_start = 0;
+    let mut prev_line_start = None;
+    let mut line_num = 1;
+    for (i, &b) in bytes.iter().enumerate().take(offset) {
+        if b == b'\n' {
+            prev_line_start = Some(line_start);
+            line_start = i + 1;
+            line_num += 1;
+        }
+    }
+    let line_end =
+        memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |pos| line_start + pos);
+    let col = offset - line_start + 1;
+
+    let line_text = &source_text[line_start..line_end];
+    let span_start_in_line = col.saturating_sub(1);
+    let span_len = (span.end - span.start) as usize;
+    let underline_len = span_len
+        .max(1)
+        .min(line_text.len().saturating_sub(span_start_in_line));
+
+    let path = path.display();
+    let gutter_width = digit_count(line_num);
+    let pipe = paint(AnsiColor::Cyan, "|");
+    let underline = paint(AnsiColor::Red, &"^".repeat(underline_len));
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{}: {error}", paint(AnsiColor::Red, "error"));
+    let _ = writeln!(
+        out,
+        " {} {path}:{line_num}:{col}",
+        paint(AnsiColor::Cyan, "-->")
+    );
+    let _ = writeln!(out, " {:>gutter_width$} {pipe}", "");
+    if let Some(prev_start) = prev_line_start {
+        let prev_end =
+            memchr::memchr(b'\n', &bytes[prev_start..]).map_or(bytes.len(), |pos| prev_start + pos);
+        let prev_num = line_num - 1;
+        let _ = writeln!(
+            out,
+            " {} {pipe} {}",
+            paint(AnsiColor::Cyan, &prev_num.to_string()),
+            &source_text[prev_start..prev_end],
+        );
+    }
+    let _ = writeln!(
+        out,
+        " {} {pipe} {line_text}",
+        paint(AnsiColor::Cyan, &line_num.to_string()),
+    );
+    let _ = write!(
+        out,
+        " {:>gutter_width$} {pipe} {:>span_start_in_line$}{underline}",
+        "", "",
+    );
+    out
+}
+
+fn digit_count(n: usize) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    ((n as f64).log10().floor() as usize) + 1
 }
 
 #[cfg(test)]
@@ -423,7 +521,7 @@ mod tests {
     }
 
     fn read_native_grammar(name: &str) -> String {
-        let path = test_grammars_dir().join(name).join("grammar.grammar");
+        let path = test_grammars_dir().join(name).join("grammar.tsg");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
     }
