@@ -71,7 +71,7 @@ impl Locals<'_> {
     fn contains(&self, ctx: &AstContext<'_>, name: &str) -> bool {
         let found = match &self.scope {
             LocalScope::Empty => false,
-            LocalScope::FnParams(params) => params.iter().any(|p| ctx.text(p.name) == name),
+            LocalScope::FnParams(params) => params.iter().any(|p| ctx.node_text(p.name) == name),
             LocalScope::ForBindings(bindings) => {
                 bindings.iter().any(|(span, _)| ctx.text(*span) == name)
             }
@@ -148,21 +148,25 @@ fn collect_names(ast: &Ast<'_>) -> Result<Names, ResolveError> {
         let span = ast.span(item_id);
         match ast.node(item_id) {
             Node::Rule { name, .. } => {
-                names.insert(ast.text(*name), Decl::Rule, span)?;
+                names.insert(ast.node_text(*name), Decl::Rule, span)?;
             }
             Node::Let { name, .. } => {
-                names.insert(ast.text(*name), Decl::Var, span)?;
+                names.insert(ast.node_text(*name), Decl::Var, span)?;
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                names.insert(ast.text(config.name), Decl::Fn, span)?;
+                names.insert(ast.node_text(config.name), Decl::Fn, span)?;
             }
             Node::Grammar => {
                 if let Some(config) = &ast.context.grammar_config {
                     for j in 0..config.externals.len() {
                         let ext_id = config.externals[j];
-                        if let Node::Ident(s) = ast.node(ext_id) {
-                            names.insert(ast.text(*s), Decl::Rule, ast.span(ext_id))?;
+                        if let Node::Ident = ast.node(ext_id) {
+                            names.insert(
+                                ast.text(ast.span(ext_id)),
+                                Decl::Rule,
+                                ast.span(ext_id),
+                            )?;
                         }
                     }
                 }
@@ -234,15 +238,15 @@ fn resolve_expr(
     locals: &Locals<'_>,
 ) -> Result<(), ResolveError> {
     // Handle Ident mutation first
-    if let Node::Ident(span) = &nodes[id.index()] {
-        let span = *span;
+    if let Node::Ident = &nodes[id.index()] {
+        let span = ctx.span(id);
         let name = ctx.text(span);
         if locals.contains(ctx, name) {
-            nodes[id.index()] = Node::VarRef(span);
+            nodes[id.index()] = Node::VarRef;
         } else if let Some(decl) = names.get(name) {
             match decl {
-                Decl::Var => nodes[id.index()] = Node::VarRef(span),
-                Decl::Rule | Decl::Fn => nodes[id.index()] = Node::RuleRef(span),
+                Decl::Var => nodes[id.index()] = Node::VarRef,
+                Decl::Rule | Decl::Fn => nodes[id.index()] = Node::RuleRef,
             }
         } else {
             return Err(ResolveError {
@@ -257,9 +261,8 @@ fn resolve_expr(
     if let Node::Alias { content, target } = &nodes[id.index()] {
         let (content, target) = (*content, *target);
         resolve_expr(nodes, ctx, names, content, locals)?;
-        if let Node::Ident(span) = &nodes[target.index()] {
-            let span = *span;
-            nodes[target.index()] = Node::RuleRef(span);
+        if let Node::Ident = &nodes[target.index()] {
+            nodes[target.index()] = Node::RuleRef;
         } else {
             resolve_expr(nodes, ctx, names, target, locals)?;
         }
