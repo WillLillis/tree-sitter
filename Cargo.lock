@@ -2232,6 +2232,7 @@ dependencies = [
 name = "tree-sitter-generate"
 version = "0.28.0"
 dependencies = [
+ "anstyle",
  "bitflags",
  "dunce",
  "hashbrown 0.17.1",

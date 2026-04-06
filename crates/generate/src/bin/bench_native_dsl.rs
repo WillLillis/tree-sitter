@@ -3,7 +3,7 @@ use std::time::Instant;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: bench-native-dsl <grammar.grammar>");
+        eprintln!("usage: bench-native-dsl <grammar.tsg>");
         std::process::exit(1);
     });
     let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {

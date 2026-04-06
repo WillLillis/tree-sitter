@@ -357,6 +357,20 @@ pub enum Node {
     Unreachable,
 }
 
+impl Node {
+    /// Returns the child node list for variadic nodes (`Seq`, `Choice`,
+    /// `List`, `Tuple`, `Concat`), or `None` for other variants.
+    #[must_use]
+    pub fn children(&self) -> Option<&[NodeId]> {
+        match self {
+            Self::Seq(c) | Self::Choice(c) | Self::List(c) | Self::Tuple(c) | Self::Concat(c) => {
+                Some(c)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Configuration from the `grammar { ... }` block at the top of a source file.
 ///
 /// All identifier-like fields (extras, externals, word, conflicts, etc.) store
