@@ -206,8 +206,9 @@ mod tests {
 
     #[test]
     fn test_minimal_grammar() {
-        // Largest payload: Span(8) + ChildRange(8) = 16, plus 4-byte tag = 20
-        assert_eq!(std::mem::size_of::<ast::Node>(), 20);
+        // Largest payload: NodeId(4) + Option<NodeId>(4) + NodeId(4) = 12, plus 4-byte tag = 16
+        // 4 nodes per 64-byte cache line
+        assert_eq!(std::mem::size_of::<ast::Node>(), 16);
         let input = r#"
             grammar {
                 language: "test",

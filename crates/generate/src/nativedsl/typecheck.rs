@@ -184,7 +184,7 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Rule { name, .. } => {
-                env.insert_var(ast.text(*name), Ty::Rule);
+                env.insert_var(ast.node_text(*name), Ty::Rule);
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
@@ -193,14 +193,14 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
                     .iter()
                     .map(|param| {
                         Ok((
-                            ast.text(param.name).to_string(),
+                            ast.node_text(param.name).to_string(),
                             ast_type_to_ty(ast, param.ty)?,
                         ))
                     })
                     .collect::<Result<_, TypeError>>()?;
                 let return_ty = ast_type_to_ty(ast, config.return_ty)?;
                 env.fns
-                    .insert(ast.text(config.name), FnSig { params, return_ty });
+                    .insert(ast.node_text(config.name), FnSig { params, return_ty });
             }
             _ => {}
         }
@@ -229,7 +229,7 @@ fn check_item<'src>(
                     return Err(mismatch(declared, inferred, ast.span(*value)));
                 }
             }
-            env.insert_var(ast.text(*name), inferred);
+            env.insert_var(ast.node_text(*name), inferred);
             Ok(())
         }
         Node::Fn(fn_idx) => {
@@ -239,7 +239,7 @@ fn check_item<'src>(
                 .iter()
                 .map(|param| {
                     Ok((
-                        ast.text(param.name).to_string(),
+                        ast.node_text(param.name).to_string(),
                         ast_type_to_ty(ast, param.ty)?,
                     ))
                 })
@@ -250,7 +250,7 @@ fn check_item<'src>(
             let fn_name_span = config.name;
 
             env.fns.insert(
-                ast.text(fn_name_span),
+                ast.node_text(fn_name_span),
                 FnSig {
                     params,
                     return_ty: return_ty.clone(),
@@ -260,7 +260,7 @@ fn check_item<'src>(
             env.push_scope();
             for param in &config.params {
                 let ty = ast_type_to_ty(ast, param.ty)?;
-                env.insert_var(ast.text(param.name), ty);
+                env.insert_var(ast.node_text(param.name), ty);
             }
 
             let body_ty = type_of(ast, body, env)?;
@@ -365,20 +365,21 @@ fn type_of<'src>(
     match ast.node(id) {
         Node::IntLit(_) => Ok(Ty::Int),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
-        Node::RuleRef(_) | Node::Blank => Ok(Ty::Rule),
-        Node::Ident(_) => {
+        Node::RuleRef | Node::Blank => Ok(Ty::Rule),
+        Node::Ident => {
             unreachable!("resolve pass should have replaced all Ident nodes")
         }
-        Node::VarRef(span) => {
-            let name = ast.text(*span);
+        Node::VarRef => {
+            let var_span = ast.span(id);
+            let name = ast.text(var_span);
             env.get_var(name).cloned().ok_or_else(|| TypeError {
                 kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
-                span: *span,
+                span: var_span,
             })
         }
         Node::FieldAccess { obj, field } => {
             let obj_ty = type_of(ast, *obj, env)?;
-            let field_name = ast.text(*field);
+            let field_name = ast.node_text(*field);
             match &obj_ty {
                 Ty::Object(fields) => fields
                     .iter()
@@ -478,7 +479,7 @@ fn type_of<'src>(
         Node::Alias { content, target } => {
             expect_rule(ast, *content, env)?;
             let target_ty = type_of(ast, *target, env)?;
-            if !matches!(ast.node(*target), Node::RuleRef(_) | Node::VarRef(_))
+            if !matches!(ast.node(*target), Node::RuleRef | Node::VarRef)
                 && target_ty != Ty::Str
                 && target_ty != Ty::Rule
             {
@@ -506,7 +507,7 @@ fn type_of<'src>(
             Ok(Ty::Rule)
         }
         Node::Call { name, args } => {
-            let fn_name = ast.text(*name);
+            let fn_name = ast.node_text(*name);
             let sig = env
                 .fns
                 .get(fn_name)
