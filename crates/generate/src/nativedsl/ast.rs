@@ -77,7 +77,6 @@ impl Span {
 /// by later passes (e.g. resolve) while `context` remains shared/immutable.
 pub struct Ast<'src> {
     pub nodes: Vec<Node>,
-    pub spans: Vec<Span>,
     pub root_items: Vec<NodeId>,
     pub context: AstContext<'src>,
 }
@@ -93,12 +92,20 @@ pub struct AstContext<'src> {
     pub for_configs: Vec<ForConfig>,
     /// Flat storage for object field (key, value) pairs, indexed by `ChildRange`.
     pub object_fields: Vec<(Span, NodeId)>,
+    pub spans: Vec<Span>,
     /// Shared storage for variadic node children (Seq, Choice, List, etc.).
     pub children: Vec<NodeId>,
     source: &'src str,
 }
 
 impl AstContext<'_> {
+    /// Look up the span for a node.
+    #[inline]
+    #[must_use]
+    pub fn span(&self, id: NodeId) -> Span {
+        self.spans[id.index()]
+    }
+
     /// Look up a function config by its index (stored in `Node::Fn(idx)`).
     #[must_use]
     pub fn get_fn(&self, idx: u32) -> &FnConfig {
@@ -136,6 +143,13 @@ impl AstContext<'_> {
     pub fn text(&self, span: Span) -> &str {
         span.resolve(self.source)
     }
+
+    /// Look up the source text for a node by its ID.
+    #[inline]
+    #[must_use]
+    pub fn node_text(&self, id: NodeId) -> &str {
+        self.text(self.span(id))
+    }
 }
 
 impl<'src> Ast<'src> {
@@ -152,13 +166,13 @@ impl<'src> Ast<'src> {
         spans.push(Span::new(0, 0));
         Self {
             nodes,
-            spans,
             root_items: Vec::new(),
             context: AstContext {
                 grammar_config: None,
                 fn_configs: Vec::new(),
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
+                spans,
                 children: Vec::with_capacity(estimated_nodes),
                 source,
             },
@@ -175,7 +189,7 @@ impl<'src> Ast<'src> {
         let index = self.nodes.len() as u32;
         let id = NodeId(NonZeroU32::new(index).expect("AST overflow"));
         self.nodes.push(node);
-        self.spans.push(span);
+        self.context.spans.push(span);
         id
     }
 
@@ -193,7 +207,7 @@ impl<'src> Ast<'src> {
     #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
-        self.spans[id.index()]
+        self.context.spans[id.index()]
     }
 
     /// Store a function config and return its index for `Node::Fn(idx)`.
@@ -242,6 +256,13 @@ impl<'src> Ast<'src> {
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         self.context.text(span)
+    }
+
+    /// Look up the source text for a node by its ID.
+    #[inline]
+    #[must_use]
+    pub fn node_text(&self, id: NodeId) -> &str {
+        self.context.node_text(id)
     }
 
     /// Push a list of child NodeIds into the shared children vector,
@@ -325,13 +346,12 @@ pub enum Node {
     // ---- Items ----
     /// Marker node - actual config stored in `Ast::grammar_config`.
     Grammar,
-    /// `name` is a Span into source (static identifier).
     Rule {
-        name: Span,
+        name: NodeId,
         body: NodeId,
     },
     Let {
-        name: Span,
+        name: NodeId,
         ty: Option<NodeId>,
         value: NodeId,
     },
@@ -348,14 +368,15 @@ pub enum Node {
     },
     IntLit(i32),
     /// Unresolved identifier - replaced by name resolution pass.
-    Ident(Span),
+    /// Span comes from the parallel spans vec.
+    Ident,
     /// Resolved: reference to a grammar rule.
-    RuleRef(Span),
+    RuleRef,
     /// Resolved: reference to a variable (let binding, fn param, for binding).
-    VarRef(Span),
+    VarRef,
     FieldAccess {
         obj: NodeId,
-        field: Span,
+        field: NodeId,
     },
     Seq(ChildRange),
     Choice(ChildRange),
@@ -363,9 +384,8 @@ pub enum Node {
     Repeat1(NodeId),
     Optional(NodeId),
     Blank,
-    /// field(name, content) - name is a span for the field name identifier.
     Field {
-        name: Span,
+        name: NodeId,
         content: NodeId,
     },
     Alias {
@@ -390,9 +410,8 @@ pub enum Node {
         value: NodeId,
         content: NodeId,
     },
-    /// reserved("context", content) - context is a span of the string literal (between quotes).
     Reserved {
-        context: Span,
+        context: NodeId,
         content: NodeId,
     },
     Concat(ChildRange),
@@ -403,7 +422,7 @@ pub enum Node {
     /// Index into `Ast::for_configs`.
     For(u32),
     Call {
-        name: Span,
+        name: NodeId,
         args: ChildRange,
     },
     List(ChildRange),
@@ -485,7 +504,7 @@ pub struct ReservedWordSet {
 /// from `Node::Fn(idx)`.
 #[derive(Clone, Debug)]
 pub struct FnConfig {
-    pub name: Span,
+    pub name: NodeId,
     pub params: Vec<Param>,
     pub return_ty: NodeId,
     pub body: NodeId,
@@ -494,7 +513,7 @@ pub struct FnConfig {
 /// A function parameter: `name: type`.
 #[derive(Clone, Debug)]
 pub struct Param {
-    pub name: Span,
+    pub name: NodeId,
     pub ty: NodeId,
 }
 

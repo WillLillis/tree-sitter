@@ -330,14 +330,14 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
             Node::Grammar => {}
             Node::Let { name, value, .. } => {
                 let val = eval.eval_expr(*value)?;
-                eval.bind(ast.text(*name), val);
+                eval.bind(ast.node_text(*name), val);
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                eval.fns.insert(ast.text(config.name), item_id);
+                eval.fns.insert(ast.node_text(config.name), item_id);
             }
             Node::Rule { name, body } => {
-                let rule_name = ast.text(*name).to_string();
+                let rule_name = ast.node_text(*name).to_string();
                 let rule_id = eval.lower_to_rule(*body)?;
                 rule_entries.push((rule_name, rule_id));
             }
@@ -469,22 +469,22 @@ impl Evaluator<'_> {
                 };
                 Ok(self.alloc_val(Value::Int(-*n)))
             }
-            Node::Ident(_) => {
+            Node::Ident => {
                 unreachable!("resolve pass should have replaced all Ident nodes")
             }
-            Node::RuleRef(ident_span) => {
-                let sid = self.strings.intern_span(*ident_span);
+            Node::RuleRef => {
+                let sid = self.strings.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
-            Node::VarRef(ident_span) => {
-                let name = ast.text(*ident_span);
+            Node::VarRef => {
+                let name = ast.text(span);
                 Ok(self.lookup(name).expect("resolve pass validated this"))
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
                 let obj_id = self.eval_expr(obj)?;
-                let field_name = ast.text(field);
+                let field_name = ast.node_text(field);
                 // Typecheck ensures obj is an object with the right fields
                 let Value::Object(map) = self.get_val(obj_id) else {
                     unreachable!();
@@ -546,7 +546,7 @@ impl Evaluator<'_> {
                 for &arg_id in arg_ids {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
-                self.eval_fn_call_with_vals(ast.text(name), &arg_vals)
+                self.eval_fn_call_with_vals(ast.node_text(name), &arg_vals)
             }
             _ => {
                 let rule_id = self.eval_combinator(id)?;
@@ -655,15 +655,15 @@ impl Evaluator<'_> {
             Node::Field { name, content } => {
                 let (name, content) = (*name, *content);
                 let inner = self.lower_to_rule(content)?;
-                let sid = self.strings.intern_span(name);
+                let sid = self.strings.intern_span(ast.span(name));
                 Ok(self.alloc_rule(ARule::Field(sid, inner)))
             }
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
                 let inner = self.lower_to_rule(content)?;
                 match ast.node(target) {
-                    Node::RuleRef(s) | Node::VarRef(s) => {
-                        let sid = self.strings.intern_span(*s);
+                    Node::RuleRef | Node::VarRef => {
+                        let sid = self.strings.intern_span(ast.span(target));
                         Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
                     }
                     _ => {
@@ -721,7 +721,7 @@ impl Evaluator<'_> {
             Node::Reserved { context, content } => {
                 let (context, content) = (*context, *content);
                 let inner = self.lower_to_rule(content)?;
-                let sid = self.strings.intern_span(context);
+                let sid = self.strings.intern_span(ast.span(context));
                 Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
             _ => unreachable!(),
@@ -741,12 +741,12 @@ impl Evaluator<'_> {
         let &fn_id = self.fns.get(name).unwrap();
 
         let config = self.get_fn_config(fn_id);
-        let param_names: Vec<Span> = config.params.iter().map(|param| param.name).collect();
+        let param_names: Vec<NodeId> = config.params.iter().map(|param| param.name).collect();
         let body = config.body;
 
         self.push_scope();
-        for (name_span, val_id) in param_names.iter().zip(arg_vals.iter()) {
-            self.bind(self.ast.text(*name_span), *val_id);
+        for (name_id, val_id) in param_names.iter().zip(arg_vals.iter()) {
+            self.bind(self.ast.node_text(*name_id), *val_id);
         }
 
         let result = self.eval_expr(body);
