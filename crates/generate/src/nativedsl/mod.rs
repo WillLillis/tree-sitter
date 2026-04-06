@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn test_minimal_grammar() {
-        // Node: 24 bytes (Vec variants) + 8 byte tag/padding = 32
-        assert_eq!(std::mem::size_of::<ast::Node>(), 32);
+        // Largest payload: Span(8) + ChildRange(8) = 16, plus 4-byte tag = 20
+        assert_eq!(std::mem::size_of::<ast::Node>(), 20);
         let input = r#"
             grammar {
                 language: "test",
@@ -401,6 +401,81 @@ mod tests {
                     ])
                 ),
             ])
+        );
+    }
+
+    #[test]
+    fn test_for_single_binding() {
+        let input = r#"
+            grammar {
+                language: "test",
+            }
+
+            rule keywords {
+                choice(
+                    for (kw: str) in ["if", "else", "while"] {
+                        kw
+                    }
+                )
+            }
+        "#;
+        let grammar = parse_native_dsl(input).unwrap();
+        assert_eq!(
+            grammar.variables[0].rule,
+            Rule::choice(vec![
+                Rule::String("if".into()),
+                Rule::String("else".into()),
+                Rule::String("while".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_for_single_element_tuple_destructure() {
+        let input = r#"
+            grammar {
+                language: "test",
+            }
+
+            rule keywords {
+                choice(
+                    for (kw: str) in [("if"), ("else"), ("while")] {
+                        kw
+                    }
+                )
+            }
+        "#;
+        let grammar = parse_native_dsl(input).unwrap();
+        assert_eq!(
+            grammar.variables[0].rule,
+            Rule::choice(vec![
+                Rule::String("if".into()),
+                Rule::String("else".into()),
+                Rule::String("while".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_for_binding_count_mismatch() {
+        let input = r#"
+            grammar {
+                language: "test",
+            }
+
+            rule bad {
+                choice(
+                    for (a: str, b: int) in [("x")] {
+                        a
+                    }
+                )
+            }
+        "#;
+        let err = parse_native_dsl(input).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("bindings"),
+            "error should mention binding count mismatch: {msg}",
         );
     }
 

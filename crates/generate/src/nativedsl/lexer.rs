@@ -26,7 +26,7 @@ pub enum TokenKind {
     RawStringLit {
         hash_count: u8,
     },
-    IntLit(i64),
+    IntLit(i32),
 
     // Structural keywords
     KwGrammar,
@@ -221,7 +221,7 @@ impl<'src> Lexer<'src> {
                 }
             }
             b'"' => self.lex_string(start)?,
-            b'0'..=b'9' => self.lex_int(start),
+            b'0'..=b'9' => self.lex_int(start)?,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(start)?,
             _ => {
                 return Err(LexError {
@@ -335,14 +335,18 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::RawStringLit { hash_count })
     }
 
-    fn lex_int(&mut self, _start: usize) -> TokenKind {
+    fn lex_int(&mut self, start: usize) -> Result<TokenKind, LexError> {
         let int_start = self.pos - 1;
         while let Some(b'0'..=b'9') = self.peek() {
             self.advance();
         }
         // Safe: digits are ASCII
         let text = unsafe { std::str::from_utf8_unchecked(&self.source[int_start..self.pos]) };
-        TokenKind::IntLit(text.parse().unwrap())
+        let value: i32 = text.parse().map_err(|_| LexError {
+            kind: LexErrorKind::IntegerOverflow,
+            span: Span::from_usize(start, self.pos),
+        })?;
+        Ok(TokenKind::IntLit(value))
     }
 
     fn lex_ident(&mut self, start: usize) -> Result<TokenKind, LexError> {
@@ -398,6 +402,7 @@ pub enum LexErrorKind {
     UnexpectedChar(char),
     NewlineInString,
     ExpectedRawStringQuote,
+    IntegerOverflow,
 }
 
 impl std::fmt::Display for LexError {
@@ -416,6 +421,9 @@ impl std::fmt::Display for LexError {
             }
             LexErrorKind::ExpectedRawStringQuote => {
                 write!(f, "expected '\"' after 'r' and '#' delimiters")
+            }
+            LexErrorKind::IntegerOverflow => {
+                write!(f, "integer literal too large (must fit in i32)")
             }
         }
     }
