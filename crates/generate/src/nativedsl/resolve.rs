@@ -296,29 +296,17 @@ fn resolve_children(
     id: NodeId,
     locals: &Locals<'_>,
 ) -> Result<(), ResolveError> {
-    match &nodes[id.index()] {
-        Node::Seq(_) | Node::Choice(_) | Node::List(_) | Node::Tuple(_) | Node::Concat(_) => {
-            let n_children = match &nodes[id.index()] {
-                Node::Seq(children)
-                | Node::Choice(children)
-                | Node::List(children)
-                | Node::Tuple(children)
-                | Node::Concat(children) => children.len(),
-                _ => unreachable!(),
-            };
-            for i in 0..n_children {
-                let child = match &nodes[id.index()] {
-                    Node::Seq(children)
-                    | Node::Choice(children)
-                    | Node::List(children)
-                    | Node::Tuple(children)
-                    | Node::Concat(children) => children[i],
-                    _ => unreachable!(),
-                };
-                resolve_expr(nodes, ctx, names, child, locals)?;
-            }
-            Ok(())
+    // Variadic nodes: Seq, Choice, List, Tuple, Concat
+    #[allow(clippy::redundant_closure_for_method_calls)]
+    if let Some(child_count) = nodes[id.index()].children().map(|c| c.len()) {
+        for i in 0..child_count {
+            let child = nodes[id.index()].children().unwrap()[i];
+            resolve_expr(nodes, ctx, names, child, locals)?;
         }
+        return Ok(());
+    }
+
+    match &nodes[id.index()] {
         Node::Call { .. } => {
             let n_args = match &nodes[id.index()] {
                 Node::Call { args, .. } => args.len(),

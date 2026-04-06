@@ -61,11 +61,11 @@ rule _string_content {
 }
 
 rule string_content {
-    token.immediate(prec(1, regex(r#"[^\\"\n]+"#)))
+    token_immediate(prec(1, regex(r#"[^\\"\n]+"#)))
 }
 
 rule escape_sequence {
-    token.immediate(seq(
+    token_immediate(seq(
         "\\",
         regex(r#"(\"|\\|\/|b|f|n|r|t|u)"#),
     ))
