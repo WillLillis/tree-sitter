@@ -99,6 +99,14 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Eat an identifier and push it as an Ident node, returning its NodeId.
+    fn expect_ident_node(&mut self) -> Result<NodeId, ParseError> {
+        let span = self
+            .eat_kind(&TokenKind::Ident)
+            .ok_or_else(|| self.error(ParseErrorKind::ExpectedIdent))?;
+        Ok(self.ast.push(Node::Ident, span))
+    }
+
     fn expect_ident(&mut self) -> Result<Span, ParseError> {
         self.eat_kind(&TokenKind::Ident)
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedIdent))
@@ -262,7 +270,7 @@ impl<'src> Parser<'src> {
 
     fn parse_rule_def(&mut self) -> Result<NodeId, ParseError> {
         let start = self.expect(&TokenKind::KwRule)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_node()?;
         self.expect(&TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(&TokenKind::RBrace)?;
@@ -271,7 +279,7 @@ impl<'src> Parser<'src> {
 
     fn parse_let_def(&mut self) -> Result<NodeId, ParseError> {
         let start = self.expect(&TokenKind::KwLet)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_node()?;
         let ty = if self.eat(&TokenKind::Colon).is_some() {
             Some(self.parse_type()?)
         } else {
@@ -287,11 +295,11 @@ impl<'src> Parser<'src> {
 
     fn parse_fn_def(&mut self) -> Result<NodeId, ParseError> {
         let start = self.expect(&TokenKind::KwFn)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_node()?;
 
         self.expect(&TokenKind::LParen)?;
         let params = self.comma_sep(&TokenKind::RParen, |this| {
-            let pname = this.expect_ident()?;
+            let pname = this.expect_ident_node()?;
             this.expect(&TokenKind::Colon)?;
             let ty = this.parse_type()?;
             Ok(Param { name: pname, ty })
@@ -441,7 +449,8 @@ impl<'src> Parser<'src> {
     fn parse_field_combinator(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(&TokenKind::LParen)?;
-        let name = self.expect_name()?;
+        let name_span = self.expect_name()?;
+        let name = self.ast.push(Node::Ident, name_span);
         self.expect(&TokenKind::Comma)?;
         let content = self.parse_expr()?;
         let end = self.expect(&TokenKind::RParen)?;
@@ -526,7 +535,8 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         self.expect(&TokenKind::LParen)?;
         let context_span = self.expect_string()?;
-        let context = Span::new(context_span.start + 1, context_span.end - 1);
+        let inner_span = Span::new(context_span.start + 1, context_span.end - 1);
+        let context = self.ast.push(Node::StringLit, inner_span);
         self.expect(&TokenKind::Comma)?;
         let content = self.parse_expr()?;
         let end = self.expect(&TokenKind::RParen)?;
@@ -559,17 +569,18 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_ident_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        let ident_span = self.expect_ident()?;
-        let mut id = self.ast.push(Node::Ident(ident_span), ident_span);
+        let name_id = self.expect_ident_node()?;
+        let mut id = name_id;
 
         loop {
             if self.at(&TokenKind::Dot) {
                 self.pos += 1;
-                let field = self.expect_ident()?;
-                let span = start.merge(field);
+                let field = self.expect_ident_node()?;
+                let field_span = self.ast.span(field);
+                let span = start.merge(field_span);
                 id = self.ast.push(Node::FieldAccess { obj: id, field }, span);
             } else if self.at(&TokenKind::LParen) {
-                if !matches!(self.ast.node(id), Node::Ident(_)) {
+                if !matches!(self.ast.node(id), Node::Ident) {
                     return Err(self.error(ParseErrorKind::OnlySimpleNamesCallable));
                 }
                 self.pos += 1;
@@ -578,7 +589,7 @@ impl<'src> Parser<'src> {
                 let args = self.ast.push_children(args);
                 id = self.ast.push(
                     Node::Call {
-                        name: ident_span,
+                        name: name_id,
                         args,
                     },
                     start.merge(end),
