@@ -15,7 +15,7 @@ use thiserror::Error;
 use super::ast::Span;
 
 /// The kind of a lexer token.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum TokenKind {
     // Identifiers and literals
     Ident,
@@ -48,6 +48,7 @@ pub enum TokenKind {
     KwToken,
     KwPrec,
     KwReserved,
+    KwTokenImmediate,
     KwConcat,
     KwRegex,
 
@@ -68,6 +69,52 @@ pub enum TokenKind {
     Gt,
 
     Eof,
+}
+
+impl std::fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Ident => "identifier",
+            Self::StringLit => "string literal",
+            Self::RawStringLit { .. } => "raw string literal",
+            Self::IntLit(_) => "integer literal",
+            Self::KwGrammar => "'grammar'",
+            Self::KwRule => "'rule'",
+            Self::KwLet => "'let'",
+            Self::KwFn => "'fn'",
+            Self::KwFor => "'for'",
+            Self::KwIn => "'in'",
+            Self::KwSeq => "'seq'",
+            Self::KwChoice => "'choice'",
+            Self::KwRepeat => "'repeat'",
+            Self::KwRepeat1 => "'repeat1'",
+            Self::KwOptional => "'optional'",
+            Self::KwBlank => "'blank'",
+            Self::KwField => "'field'",
+            Self::KwAlias => "'alias'",
+            Self::KwToken => "'token'",
+            Self::KwPrec => "'prec'",
+            Self::KwReserved => "'reserved'",
+            Self::KwTokenImmediate => "'token_immediate'",
+            Self::KwConcat => "'concat'",
+            Self::KwRegex => "'regex'",
+            Self::LBrace => "'{'",
+            Self::RBrace => "'}'",
+            Self::LParen => "'('",
+            Self::RParen => "')'",
+            Self::LBracket => "'['",
+            Self::RBracket => "']'",
+            Self::Comma => "','",
+            Self::Colon => "':'",
+            Self::Dot => "'.'",
+            Self::Arrow => "'->'",
+            Self::Minus => "'-'",
+            Self::Eq => "'='",
+            Self::Lt => "'<'",
+            Self::Gt => "'>'",
+            Self::Eof => "end of file",
+        })
+    }
 }
 
 /// A token produced by the lexer, pairing a kind with its source span.
@@ -326,6 +373,7 @@ impl<'src> Lexer<'src> {
             "token" => TokenKind::KwToken,
             "prec" => TokenKind::KwPrec,
             "reserved" => TokenKind::KwReserved,
+            "token_immediate" => TokenKind::KwTokenImmediate,
             "concat" => TokenKind::KwConcat,
             "regex" => TokenKind::KwRegex,
             _ => TokenKind::Ident,
