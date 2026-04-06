@@ -140,7 +140,7 @@ struct ValueId(u32);
 /// All values are allocated in the evaluator's flat value arena. Rule values
 /// wrap a [`RuleId`] pointing into the separate rule arena.
 enum Value<'src> {
-    Int(i64),
+    Int(i32),
     Str(Str),
     Rule(RuleId),
     Object(FxHashMap<&'src str, ValueId>),
@@ -467,7 +467,7 @@ impl Evaluator<'_> {
                 let Value::Int(n) = self.get_val(vid) else {
                     unreachable!();
                 };
-                Ok(self.alloc_val(Value::Int(-n)))
+                Ok(self.alloc_val(Value::Int(-*n)))
             }
             Node::Ident(_) => {
                 unreachable!("resolve pass should have replaced all Ident nodes")
@@ -491,36 +491,34 @@ impl Evaluator<'_> {
                 };
                 Ok(*map.get(field_name).unwrap())
             }
-            Node::Object(fields) => {
-                let len = fields.len();
+            Node::Object(range) => {
+                let fields = ast.get_object(*range);
                 let mut map = FxHashMap::default();
-                for (key_span, value_id) in fields.iter().take(len) {
-                    let val = self.eval_expr(*value_id)?;
-                    map.insert(ast.text(*key_span), val);
+                for i in 0..fields.len() {
+                    let (key_span, value_id) = ast.get_object(*range)[i];
+                    let val = self.eval_expr(value_id)?;
+                    map.insert(ast.text(key_span), val);
                 }
                 Ok(self.alloc_val(Value::Object(map)))
             }
-            Node::List(items) => {
-                let len = items.len();
-                let mut vals = Vec::with_capacity(len);
-                for item_id in items.iter().take(len) {
-                    vals.push(self.eval_expr(*item_id)?);
+            Node::List(range) | Node::Tuple(range) => {
+                let make = match ast.node(id) {
+                    Node::List(_) => Value::List,
+                    Node::Tuple(_) => Value::Tuple,
+                    _ => unreachable!(),
+                };
+                let items = ast.child_slice(*range);
+                let mut vals = Vec::with_capacity(items.len());
+                for &item_id in items {
+                    vals.push(self.eval_expr(item_id)?);
                 }
-                Ok(self.alloc_val(Value::List(vals)))
+                Ok(self.alloc_val(make(vals)))
             }
-            Node::Tuple(items) => {
-                let len = items.len();
-                let mut vals = Vec::with_capacity(len);
-                for item_id in items.iter().take(len) {
-                    vals.push(self.eval_expr(*item_id)?);
-                }
-                Ok(self.alloc_val(Value::Tuple(vals)))
-            }
-            Node::Concat(parts) => {
-                let len = parts.len();
+            Node::Concat(range) => {
+                let parts = ast.child_slice(*range);
                 let mut result = String::new();
-                for part_id in parts.iter().take(len) {
-                    let vid = self.eval_expr(*part_id)?;
+                for &part_id in parts {
+                    let vid = self.eval_expr(part_id)?;
                     let s = self.get_str_val(vid);
                     result.push_str(self.strings.resolve(s));
                 }
@@ -542,11 +540,11 @@ impl Evaluator<'_> {
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             Node::Call { name, args } => {
-                let name = *name;
-                let len = args.len();
-                let mut arg_vals = Vec::with_capacity(len);
-                for arg_id in args.iter().take(len) {
-                    arg_vals.push(self.eval_expr(*arg_id)?);
+                let (name, args) = (*name, *args);
+                let arg_ids = ast.child_slice(args);
+                let mut arg_vals = Vec::with_capacity(arg_ids.len());
+                for &arg_id in arg_ids {
+                    arg_vals.push(self.eval_expr(arg_id)?);
                 }
                 self.eval_fn_call_with_vals(ast.text(name), &arg_vals)
             }
@@ -588,7 +586,7 @@ impl Evaluator<'_> {
     /// Integers become `APrec::Integer`, strings become `APrec::Name`.
     fn value_to_prec(&self, id: ValueId) -> APrec {
         match self.get_val(id) {
-            Value::Int(n) => APrec::Integer(*n as i32),
+            Value::Int(n) => APrec::Integer(*n),
             Value::Str(s) => APrec::Name(*s),
             // Typecheck ensures only prec-like values reach here
             _ => unreachable!(),
@@ -603,20 +601,20 @@ impl Evaluator<'_> {
     fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
         match ast.node(id) {
-            Node::Seq(members) | Node::Choice(members) => {
+            Node::Seq(range) | Node::Choice(range) => {
                 let is_seq = matches!(ast.node(id), Node::Seq(_));
-                let len = members.len();
+                let members = ast.child_slice(*range);
                 let mut child_ids = Vec::new();
-                for member in members.iter().take(len) {
-                    if matches!(ast.node(*member), Node::For(_)) {
-                        let for_idx = match ast.node(*member) {
+                for &member in members {
+                    if matches!(ast.node(member), Node::For(_)) {
+                        let for_idx = match ast.node(member) {
                             Node::For(idx) => *idx,
                             _ => unreachable!(),
                         };
                         let config = ast.get_for(for_idx);
                         child_ids.extend(self.eval_for_to_rules(config)?);
                     } else {
-                        child_ids.push(self.lower_to_rule(*member)?);
+                        child_ids.push(self.lower_to_rule(member)?);
                     }
                 }
                 let start = self.children_start();
@@ -714,7 +712,7 @@ impl Evaluator<'_> {
                 let (value, content) = (*value, *content);
                 let vid = self.eval_expr(value)?;
                 let prec_value = match self.get_val(vid) {
-                    Value::Int(n) => *n as i32,
+                    Value::Int(n) => *n,
                     _ => unreachable!(),
                 };
                 let inner = self.lower_to_rule(content)?;
@@ -764,29 +762,29 @@ impl Evaluator<'_> {
     fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
         let iterable = config.iterable;
         let body = config.body;
-        let bindings: Vec<_> = config.bindings.clone();
+        let n_bindings = config.bindings.len();
 
         let iter_vid = self.eval_expr(iterable)?;
         // Typecheck ensures iterable is a list
-        let Value::List(item_ids) = self.get_val(iter_vid) else {
-            unreachable!();
+        let n_items = match self.get_val(iter_vid) {
+            Value::List(items) => items.len(),
+            _ => unreachable!(),
         };
-        let item_ids = item_ids.clone();
 
-        let mut results = Vec::new();
-        for item_id in item_ids {
+        let mut results = Vec::with_capacity(n_items);
+        for i in 0..n_items {
+            let item_id = match self.get_val(iter_vid) {
+                Value::List(items) => items[i],
+                _ => unreachable!(),
+            };
             self.push_scope();
-            if let [(name_span, _)] = &bindings[..] {
-                self.bind(self.ast.text(*name_span), item_id);
-            } else {
-                // Typecheck ensures elements are tuples when multi-binding
-                let tuple_ids = match self.get_val(item_id) {
-                    Value::Tuple(ids) => ids.clone(),
-                    _ => unreachable!(),
+            for j in 0..n_bindings {
+                let value_id = match self.get_val(item_id) {
+                    Value::Tuple(ids) => ids[j],
+                    _ => item_id,
                 };
-                for ((name_span, _), val_id) in bindings.iter().zip(tuple_ids.iter()) {
-                    self.bind(self.ast.text(*name_span), *val_id);
-                }
+                let (name_span, _) = config.bindings[j];
+                self.bind(self.ast.text(name_span), value_id);
             }
             results.push(self.lower_to_rule(body)?);
             self.pop_scope();
