@@ -341,7 +341,8 @@ impl<'src> Parser<'src> {
         if self.eat(&TokenKind::LParen).is_some() {
             let elems = self.comma_sep(&TokenKind::RParen, Self::parse_type)?;
             let end = self.expect(&TokenKind::RParen)?;
-            return Ok(self.ast.push(Node::TypeTuple(elems), start.merge(end)));
+            let range = self.ast.push_children(elems);
+            return Ok(self.ast.push(Node::TypeTuple(range), start.merge(end)));
         }
 
         if self.eat(&TokenKind::KwRule).is_some() {
@@ -416,9 +417,10 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LParen)?;
         let args = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RParen)?;
+        let range = self.ast.push_children(args);
         let node = match name {
-            "seq" => Node::Seq(args),
-            "choice" => Node::Choice(args),
+            "seq" => Node::Seq(range),
+            "choice" => Node::Choice(range),
             _ => unreachable!(),
         };
         Ok(self.ast.push(node, start.merge(end)))
@@ -465,7 +467,8 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LParen)?;
         let args = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RParen)?;
-        Ok(self.ast.push(Node::Concat(args), start.merge(end)))
+        let range = self.ast.push_children(args);
+        Ok(self.ast.push(Node::Concat(range), start.merge(end)))
     }
 
     fn parse_dyn_regex(&mut self, start: Span) -> Result<NodeId, ParseError> {
@@ -572,6 +575,7 @@ impl<'src> Parser<'src> {
                 self.pos += 1;
                 let args = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
                 let end = self.expect(&TokenKind::RParen)?;
+                let args = self.ast.push_children(args);
                 id = self.ast.push(
                     Node::Call {
                         name: ident_span,
@@ -591,14 +595,16 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         let items = self.comma_sep(&TokenKind::RBracket, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RBracket)?;
-        Ok(self.ast.push(Node::List(items), start.merge(end)))
+        let range = self.ast.push_children(items);
+        Ok(self.ast.push(Node::List(range), start.merge(end)))
     }
 
     fn parse_tuple_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         let items = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RParen)?;
-        Ok(self.ast.push(Node::Tuple(items), start.merge(end)))
+        let range = self.ast.push_children(items);
+        Ok(self.ast.push(Node::Tuple(range), start.merge(end)))
     }
 
     fn parse_object_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
@@ -610,7 +616,8 @@ impl<'src> Parser<'src> {
             Ok((key, value))
         })?;
         let end = self.expect(&TokenKind::RBrace)?;
-        Ok(self.ast.push(Node::Object(fields), start.merge(end)))
+        let range = self.ast.push_object(fields);
+        Ok(self.ast.push(Node::Object(range), start.merge(end)))
     }
 
     /// Parse a comma-separated list of items up to (but not consuming) `close`.
