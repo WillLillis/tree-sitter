@@ -329,7 +329,7 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
         match ast.node(item_id) {
             Node::Grammar => {}
             Node::Let { name, value, .. } => {
-                let val = eval.eval_expr(*value)?;
+                let val = eval.eval_expr(*value);
                 eval.bind(ast.node_text(*name), val);
             }
             Node::Fn(fn_idx) => {
@@ -338,7 +338,7 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
             }
             Node::Rule { name, body } => {
                 let rule_name = ast.node_text(*name).to_string();
-                let rule_id = eval.lower_to_rule(*body)?;
+                let rule_id = eval.lower_to_rule(*body);
                 rule_entries.push((rule_name, rule_id));
             }
             _ => unreachable!(),
@@ -358,31 +358,28 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
         span: Span::new(0, 0),
     })?;
 
-    let extra_symbols = config
-        .extras
-        .iter()
-        .map(|&id| eval.lower_to_rule(id).map(|rid| eval.build_rule(rid)))
-        .collect::<Result<_, _>>()?;
-    let external_tokens = config
-        .externals
-        .iter()
-        .map(|&id| eval.lower_to_rule(id).map(|rid| eval.build_rule(rid)))
-        .collect::<Result<_, _>>()?;
-    let reserved_words = config
-        .reserved
-        .iter()
-        .map(|rws| {
-            let words = rws
-                .words
-                .iter()
-                .map(|&id| eval.lower_to_rule(id).map(|rid| eval.build_rule(rid)))
-                .collect::<Result<_, _>>()?;
-            Ok(ReservedWordContext {
-                name: ast.text(rws.name).to_string(),
-                reserved_words: words,
-            })
-        })
-        .collect::<Result<_, LowerError>>()?;
+    let mut extra_symbols = Vec::with_capacity(config.extras.len());
+    for &id in &config.extras {
+        let rid = eval.lower_to_rule(id);
+        extra_symbols.push(eval.build_rule(rid));
+    }
+    let mut external_tokens = Vec::with_capacity(config.externals.len());
+    for &id in &config.externals {
+        let rid = eval.lower_to_rule(id);
+        external_tokens.push(eval.build_rule(rid));
+    }
+    let mut reserved_words = Vec::with_capacity(config.reserved.len());
+    for rws in &config.reserved {
+        let mut words = Vec::with_capacity(rws.words.len());
+        for &id in &rws.words {
+            let rid = eval.lower_to_rule(id);
+            words.push(eval.build_rule(rid));
+        }
+        reserved_words.push(ReservedWordContext {
+            name: ast.text(rws.name).to_string(),
+            reserved_words: words,
+        });
+    }
 
     let variables = rule_entries
         .into_iter()
@@ -436,20 +433,20 @@ impl Evaluator<'_> {
     /// Literals become `Value::Int`/`Value::Str`, identifiers are looked up
     /// in the scope chain, combinators are delegated to `eval_combinator`,
     /// and function calls are expanded inline.
-    fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
+    fn eval_expr(&mut self, id: NodeId) -> ValueId {
         let ast = self.ast;
         let span = ast.span(id);
         match ast.node(id) {
-            Node::IntLit(n) => Ok(self.alloc_val(Value::Int(*n))),
+            Node::IntLit(n) => self.alloc_val(Value::Int(*n)),
             Node::StringLit => {
                 let content_span = Span::new(span.start + 1, span.end - 1);
                 let raw = ast.text(content_span);
                 if raw.contains('\\') {
                     let sid = self.strings.intern_owned(unescape_string(raw));
-                    Ok(self.alloc_val(Value::Str(sid)))
+                    self.alloc_val(Value::Str(sid))
                 } else {
                     let sid = self.strings.intern_span(content_span);
-                    Ok(self.alloc_val(Value::Str(sid)))
+                    self.alloc_val(Value::Str(sid))
                 }
             }
             Node::RawStringLit { hash_count } => {
@@ -458,16 +455,16 @@ impl Evaluator<'_> {
                 let suffix_len = 1 + u32::from(hash_count); // " + hashes
                 let content_span = Span::new(span.start + prefix_len, span.end - suffix_len);
                 let sid = self.strings.intern_span(content_span);
-                Ok(self.alloc_val(Value::Str(sid)))
+                self.alloc_val(Value::Str(sid))
             }
             Node::Neg(inner) => {
                 let inner = *inner;
-                let vid = self.eval_expr(inner)?;
+                let vid = self.eval_expr(inner);
                 // Typecheck ensures this is an int
                 let Value::Int(n) = self.get_val(vid) else {
                     unreachable!();
                 };
-                Ok(self.alloc_val(Value::Int(-*n)))
+                self.alloc_val(Value::Int(-*n))
             }
             Node::Ident => {
                 unreachable!("resolve pass should have replaced all Ident nodes")
@@ -475,31 +472,31 @@ impl Evaluator<'_> {
             Node::RuleRef => {
                 let sid = self.strings.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                Ok(self.alloc_val(Value::Rule(rid)))
+                self.alloc_val(Value::Rule(rid))
             }
             Node::VarRef => {
                 let name = ast.text(span);
-                Ok(self.lookup(name).expect("resolve pass validated this"))
+                self.lookup(name).expect("resolve pass validated this")
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
-                let obj_id = self.eval_expr(obj)?;
+                let obj_id = self.eval_expr(obj);
                 let field_name = ast.node_text(field);
                 // Typecheck ensures obj is an object with the right fields
                 let Value::Object(map) = self.get_val(obj_id) else {
                     unreachable!();
                 };
-                Ok(*map.get(field_name).unwrap())
+                *map.get(field_name).unwrap()
             }
             Node::Object(range) => {
                 let fields = ast.get_object(*range);
                 let mut map = FxHashMap::default();
                 for i in 0..fields.len() {
                     let (key_span, value_id) = ast.get_object(*range)[i];
-                    let val = self.eval_expr(value_id)?;
+                    let val = self.eval_expr(value_id);
                     map.insert(ast.text(key_span), val);
                 }
-                Ok(self.alloc_val(Value::Object(map)))
+                self.alloc_val(Value::Object(map))
             }
             Node::List(range) | Node::Tuple(range) => {
                 let make = match ast.node(id) {
@@ -510,47 +507,47 @@ impl Evaluator<'_> {
                 let items = ast.child_slice(*range);
                 let mut vals = Vec::with_capacity(items.len());
                 for &item_id in items {
-                    vals.push(self.eval_expr(item_id)?);
+                    vals.push(self.eval_expr(item_id));
                 }
-                Ok(self.alloc_val(make(vals)))
+                self.alloc_val(make(vals))
             }
             Node::Concat(range) => {
                 let parts = ast.child_slice(*range);
                 let mut result = String::new();
                 for &part_id in parts {
-                    let vid = self.eval_expr(part_id)?;
+                    let vid = self.eval_expr(part_id);
                     let s = self.get_str_val(vid);
                     result.push_str(self.strings.resolve(s));
                 }
                 let sid = self.strings.intern_owned(result);
-                Ok(self.alloc_val(Value::Str(sid)))
+                self.alloc_val(Value::Str(sid))
             }
             Node::DynRegex { pattern, flags } => {
                 let (pattern, flags) = (*pattern, *flags);
-                let pattern_val = self.eval_expr(pattern)?;
+                let pattern_val = self.eval_expr(pattern);
                 let pattern_str = self.get_str_val(pattern_val);
                 let flags_str = match flags {
                     Some(flags_id) => {
-                        let flags_val = self.eval_expr(flags_id)?;
+                        let flags_val = self.eval_expr(flags_id);
                         Some(self.get_str_val(flags_val))
                     }
                     None => None,
                 };
                 let rid = self.alloc_rule(ARule::Pattern(pattern_str, flags_str));
-                Ok(self.alloc_val(Value::Rule(rid)))
+                self.alloc_val(Value::Rule(rid))
             }
             Node::Call { name, args } => {
                 let (name, args) = (*name, *args);
                 let arg_ids = ast.child_slice(args);
                 let mut arg_vals = Vec::with_capacity(arg_ids.len());
                 for &arg_id in arg_ids {
-                    arg_vals.push(self.eval_expr(arg_id)?);
+                    arg_vals.push(self.eval_expr(arg_id));
                 }
                 self.eval_fn_call_with_vals(ast.node_text(name), &arg_vals)
             }
             _ => {
-                let rule_id = self.eval_combinator(id)?;
-                Ok(self.alloc_val(Value::Rule(rule_id)))
+                let rule_id = self.eval_combinator(id);
+                self.alloc_val(Value::Rule(rule_id))
             }
         }
     }
@@ -560,9 +557,9 @@ impl Evaluator<'_> {
     /// This is the main entry point for lowering a rule body or combinator
     /// argument. Evaluates the expression, then converts the resulting value
     /// to a `RuleId` (strings become `ARule::String`).
-    fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
-        let vid = self.eval_expr(id)?;
-        Ok(self.value_to_rule(vid))
+    fn lower_to_rule(&mut self, id: NodeId) -> RuleId {
+        let vid = self.eval_expr(id);
+        self.value_to_rule(vid)
     }
 
     /// Convert an evaluated value to an arena rule ID.
@@ -598,7 +595,7 @@ impl Evaluator<'_> {
     /// Handles `seq`, `choice`, `repeat`, `repeat1`, `optional`, `blank`,
     /// `field`, `alias`, `token`, `prec` variants, and `reserved`. For
     /// `seq`/`choice`, inline `for` expressions are expanded in-place.
-    fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
+    fn eval_combinator(&mut self, id: NodeId) -> RuleId {
         let ast = self.ast;
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
@@ -612,9 +609,9 @@ impl Evaluator<'_> {
                             _ => unreachable!(),
                         };
                         let config = ast.get_for(for_idx);
-                        child_ids.extend(self.eval_for_to_rules(config)?);
+                        child_ids.extend(self.eval_for_to_rules(config));
                     } else {
-                        child_ids.push(self.lower_to_rule(member)?);
+                        child_ids.push(self.lower_to_rule(member));
                     }
                 }
                 let start = self.children_start();
@@ -623,62 +620,62 @@ impl Evaluator<'_> {
                 }
                 let (offset, len) = self.children_range(start);
                 if is_seq {
-                    Ok(self.alloc_rule(ARule::Seq(offset, len)))
+                    self.alloc_rule(ARule::Seq(offset, len))
                 } else {
-                    Ok(self.alloc_rule(ARule::Choice(offset, len)))
+                    self.alloc_rule(ARule::Choice(offset, len))
                 }
             }
             Node::Repeat(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
+                let inner = self.lower_to_rule(*inner);
                 let rep = self.alloc_rule(ARule::Repeat(inner));
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.push_child(rep);
                 self.push_child(blank);
                 let (s, l) = self.children_range(start);
-                Ok(self.alloc_rule(ARule::Choice(s, l)))
+                self.alloc_rule(ARule::Choice(s, l))
             }
             Node::Repeat1(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::Repeat(inner)))
+                let inner = self.lower_to_rule(*inner);
+                self.alloc_rule(ARule::Repeat(inner))
             }
             Node::Optional(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
+                let inner = self.lower_to_rule(*inner);
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.push_child(inner);
                 self.push_child(blank);
                 let (s, l) = self.children_range(start);
-                Ok(self.alloc_rule(ARule::Choice(s, l)))
+                self.alloc_rule(ARule::Choice(s, l))
             }
-            Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
+            Node::Blank => self.alloc_rule(ARule::Blank),
             Node::Field { name, content } => {
                 let (name, content) = (*name, *content);
-                let inner = self.lower_to_rule(content)?;
+                let inner = self.lower_to_rule(content);
                 let sid = self.strings.intern_span(ast.span(name));
-                Ok(self.alloc_rule(ARule::Field(sid, inner)))
+                self.alloc_rule(ARule::Field(sid, inner))
             }
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
-                let inner = self.lower_to_rule(content)?;
+                let inner = self.lower_to_rule(content);
                 match ast.node(target) {
                     Node::RuleRef | Node::VarRef => {
                         let sid = self.strings.intern_span(ast.span(target));
-                        Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
+                        self.alloc_rule(ARule::Alias(sid, true, inner))
                     }
                     _ => {
-                        let vid = self.eval_expr(target)?;
+                        let vid = self.eval_expr(target);
                         match self.get_val(vid) {
                             Value::Str(str_handle) => {
                                 let str_handle = *str_handle;
-                                Ok(self.alloc_rule(ARule::Alias(str_handle, false, inner)))
+                                self.alloc_rule(ARule::Alias(str_handle, false, inner))
                             }
                             Value::Rule(rid) => {
                                 let str_handle = match &self.rules[rid.0 as usize] {
                                     ARule::NamedSymbol(str_handle) => *str_handle,
                                     _ => unreachable!(),
                                 };
-                                Ok(self.alloc_rule(ARule::Alias(str_handle, true, inner)))
+                                self.alloc_rule(ARule::Alias(str_handle, true, inner))
                             }
                             _ => unreachable!(),
                         }
@@ -686,43 +683,43 @@ impl Evaluator<'_> {
                 }
             }
             Node::Token(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::Token(inner)))
+                let inner = self.lower_to_rule(*inner);
+                self.alloc_rule(ARule::Token(inner))
             }
             Node::TokenImmediate(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
+                let inner = self.lower_to_rule(*inner);
+                self.alloc_rule(ARule::ImmediateToken(inner))
             }
             Node::Prec { value, content }
             | Node::PrecLeft { value, content }
             | Node::PrecRight { value, content } => {
                 let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value)?;
+                let vid = self.eval_expr(value);
                 let prec = self.value_to_prec(vid);
-                let inner = self.lower_to_rule(content)?;
+                let inner = self.lower_to_rule(content);
                 let make_rule: fn(APrec, RuleId) -> ARule = match ast.node(id) {
                     Node::Prec { .. } => ARule::Prec,
                     Node::PrecLeft { .. } => ARule::PrecLeft,
                     Node::PrecRight { .. } => ARule::PrecRight,
                     _ => unreachable!(),
                 };
-                Ok(self.alloc_rule(make_rule(prec, inner)))
+                self.alloc_rule(make_rule(prec, inner))
             }
             Node::PrecDynamic { value, content } => {
                 let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value)?;
+                let vid = self.eval_expr(value);
                 let prec_value = match self.get_val(vid) {
                     Value::Int(n) => *n,
                     _ => unreachable!(),
                 };
-                let inner = self.lower_to_rule(content)?;
-                Ok(self.alloc_rule(ARule::PrecDynamic(prec_value, inner)))
+                let inner = self.lower_to_rule(content);
+                self.alloc_rule(ARule::PrecDynamic(prec_value, inner))
             }
             Node::Reserved { context, content } => {
                 let (context, content) = (*context, *content);
-                let inner = self.lower_to_rule(content)?;
+                let inner = self.lower_to_rule(content);
                 let sid = self.strings.intern_span(ast.span(context));
-                Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
+                self.alloc_rule(ARule::Reserved(sid, inner))
             }
             _ => unreachable!(),
         }
@@ -732,11 +729,7 @@ impl Evaluator<'_> {
     ///
     /// Looks up the function by name, pushes a new scope with parameters
     /// bound to the argument values, evaluates the body, then pops the scope.
-    fn eval_fn_call_with_vals(
-        &mut self,
-        name: &str,
-        arg_vals: &[ValueId],
-    ) -> Result<ValueId, LowerError> {
+    fn eval_fn_call_with_vals(&mut self, name: &str, arg_vals: &[ValueId]) -> ValueId {
         // Resolve pass ensures all called functions are registered
         let &fn_id = self.fns.get(name).unwrap();
 
@@ -759,12 +752,12 @@ impl Evaluator<'_> {
     /// Evaluates the iterable, then for each element binds the loop
     /// variables and evaluates the body to a rule. Used by `seq`/`choice`
     /// to splice for-expression results inline.
-    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
+    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Vec<RuleId> {
         let iterable = config.iterable;
         let body = config.body;
         let n_bindings = config.bindings.len();
 
-        let iter_vid = self.eval_expr(iterable)?;
+        let iter_vid = self.eval_expr(iterable);
         // Typecheck ensures iterable is a list
         let n_items = match self.get_val(iter_vid) {
             Value::List(items) => items.len(),
@@ -786,10 +779,10 @@ impl Evaluator<'_> {
                 let (name_span, _) = config.bindings[j];
                 self.bind(self.ast.text(name_span), value_id);
             }
-            results.push(self.lower_to_rule(body)?);
+            results.push(self.lower_to_rule(body));
             self.pop_scope();
         }
-        Ok(results)
+        results
     }
 }
 
