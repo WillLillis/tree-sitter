@@ -297,40 +297,27 @@ fn resolve_children(
     locals: &Locals<'_>,
 ) -> Result<(), ResolveError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
-    #[allow(clippy::redundant_closure_for_method_calls)]
-    if let Some(child_count) = nodes[id.index()].children().map(|c| c.len()) {
-        for i in 0..child_count {
-            let child = nodes[id.index()].children().unwrap()[i];
+    if let Some(range) = nodes[id.index()].child_range() {
+        for i in 0..range.len as usize {
+            let child = ctx.child_slice(range)[i];
             resolve_expr(nodes, ctx, names, child, locals)?;
         }
         return Ok(());
     }
 
     match &nodes[id.index()] {
-        Node::Call { .. } => {
-            let n_args = match &nodes[id.index()] {
-                Node::Call { args, .. } => args.len(),
-                _ => unreachable!(),
-            };
-            for i in 0..n_args {
-                let arg = match &nodes[id.index()] {
-                    Node::Call { args, .. } => args[i],
-                    _ => unreachable!(),
-                };
+        Node::Call { args, .. } => {
+            let range = *args;
+            for i in 0..range.len as usize {
+                let arg = ctx.child_slice(range)[i];
                 resolve_expr(nodes, ctx, names, arg, locals)?;
             }
             Ok(())
         }
-        Node::Object(_) => {
-            let n_fields = match &nodes[id.index()] {
-                Node::Object(fields) => fields.len(),
-                _ => unreachable!(),
-            };
-            for i in 0..n_fields {
-                let value = match &nodes[id.index()] {
-                    Node::Object(fields) => fields[i].1,
-                    _ => unreachable!(),
-                };
+        &Node::Object(range) => {
+            let len = ctx.get_object(range).len();
+            for i in 0..len {
+                let value = ctx.get_object(range)[i].1;
                 resolve_expr(nodes, ctx, names, value, locals)?;
             }
             Ok(())

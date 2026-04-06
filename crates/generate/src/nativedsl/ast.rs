@@ -91,6 +91,10 @@ pub struct AstContext<'src> {
     pub grammar_config: Option<GrammarConfig>,
     pub fn_configs: Vec<FnConfig>,
     pub for_configs: Vec<ForConfig>,
+    /// Flat storage for object field (key, value) pairs, indexed by `ChildRange`.
+    pub object_fields: Vec<(Span, NodeId)>,
+    /// Shared storage for variadic node children (Seq, Choice, List, etc.).
+    pub children: Vec<NodeId>,
     source: &'src str,
 }
 
@@ -105,6 +109,19 @@ impl AstContext<'_> {
     #[must_use]
     pub fn get_for(&self, idx: u32) -> &ForConfig {
         &self.for_configs[idx as usize]
+    }
+
+    /// Look up object fields by range (stored in `Node::Object`).
+    #[must_use]
+    pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
+        &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
+    }
+
+    /// Resolve a `ChildRange` to a slice of child NodeIds.
+    #[inline]
+    #[must_use]
+    pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
+        &self.children[range.start as usize..range.start as usize + range.len as usize]
     }
 
     /// Returns the full source text.
@@ -141,6 +158,8 @@ impl<'src> Ast<'src> {
                 grammar_config: None,
                 fn_configs: Vec::new(),
                 for_configs: Vec::new(),
+                object_fields: Vec::new(),
+                children: Vec::with_capacity(estimated_nodes),
                 source,
             },
         }
@@ -201,6 +220,19 @@ impl<'src> Ast<'src> {
         self.context.get_for(idx)
     }
 
+    /// Store object fields and return a `ChildRange` for `Node::Object`.
+    pub fn push_object(&mut self, fields: Vec<(Span, NodeId)>) -> ChildRange {
+        let start = self.context.object_fields.len() as u32;
+        let len = fields.len() as u16;
+        self.context.object_fields.extend(fields);
+        ChildRange::new(start, len)
+    }
+
+    #[must_use]
+    pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
+        self.context.get_object(range)
+    }
+
     #[must_use]
     pub const fn source(&self) -> &str {
         self.context.source
@@ -210,6 +242,22 @@ impl<'src> Ast<'src> {
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         self.context.text(span)
+    }
+
+    /// Push a list of child NodeIds into the shared children vector,
+    /// returning a `ChildRange` referencing them.
+    pub fn push_children(&mut self, items: Vec<NodeId>) -> ChildRange {
+        let start = self.context.children.len() as u32;
+        let len = items.len() as u16;
+        self.context.children.extend(items);
+        ChildRange::new(start, len)
+    }
+
+    /// Resolve a `ChildRange` to a slice of child NodeIds.
+    #[inline]
+    #[must_use]
+    pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
+        self.context.child_slice(range)
     }
 
     /// Get the raw content of a string literal (between quotes, not unescaped).
@@ -247,6 +295,23 @@ impl<'src> Ast<'src> {
 /// and `Choice`.
 pub type NodeList = Vec<NodeId>;
 
+/// A compact reference to a range of children in `Ast::children`.
+///
+/// Replaces inline `Vec<NodeId>` in Node variants to keep the enum small.
+/// 6 bytes instead of 24.
+#[derive(Clone, Copy, Debug)]
+pub struct ChildRange {
+    pub start: u32,
+    pub len: u16,
+}
+
+impl ChildRange {
+    #[must_use]
+    pub const fn new(start: u32, len: u16) -> Self {
+        Self { start, len }
+    }
+}
+
 /// Every AST construct lives in this enum.
 ///
 /// The enum is kept at 32 bytes by storing large payloads (function configs,
@@ -281,7 +346,7 @@ pub enum Node {
     RawStringLit {
         hash_count: u8,
     },
-    IntLit(i64),
+    IntLit(i32),
     /// Unresolved identifier - replaced by name resolution pass.
     Ident(Span),
     /// Resolved: reference to a grammar rule.
@@ -292,8 +357,8 @@ pub enum Node {
         obj: NodeId,
         field: Span,
     },
-    Seq(NodeList),
-    Choice(NodeList),
+    Seq(ChildRange),
+    Choice(ChildRange),
     Repeat(NodeId),
     Repeat1(NodeId),
     Optional(NodeId),
@@ -330,7 +395,7 @@ pub enum Node {
         context: Span,
         content: NodeId,
     },
-    Concat(NodeList),
+    Concat(ChildRange),
     DynRegex {
         pattern: NodeId,
         flags: Option<NodeId>,
@@ -339,11 +404,12 @@ pub enum Node {
     For(u32),
     Call {
         name: Span,
-        args: NodeList,
+        args: ChildRange,
     },
-    List(NodeList),
-    Tuple(NodeList),
-    Object(Vec<(Span, NodeId)>),
+    List(ChildRange),
+    Tuple(ChildRange),
+    /// Range into `AstContext::object_fields`.
+    Object(ChildRange),
     Neg(NodeId),
 
     // ---- Types ----
@@ -351,20 +417,21 @@ pub enum Node {
     TypeStr,
     TypeInt,
     TypeList(NodeId),
-    TypeTuple(NodeList),
+    TypeTuple(ChildRange),
 
     // Sentinel (occupies index 0)
     Unreachable,
 }
 
 impl Node {
-    /// Returns the child node list for variadic nodes (`Seq`, `Choice`,
+    /// Returns the child range for variadic nodes (`Seq`, `Choice`,
     /// `List`, `Tuple`, `Concat`), or `None` for other variants.
+    /// Use `Ast::child_slice()` to resolve the range to a `&[NodeId]`.
     #[must_use]
-    pub fn children(&self) -> Option<&[NodeId]> {
+    pub fn child_range(&self) -> Option<ChildRange> {
         match self {
-            Self::Seq(c) | Self::Choice(c) | Self::List(c) | Self::Tuple(c) | Self::Concat(c) => {
-                Some(c)
+            Self::Seq(r) | Self::Choice(r) | Self::List(r) | Self::Tuple(r) | Self::Concat(r) => {
+                Some(*r)
             }
             _ => None,
         }

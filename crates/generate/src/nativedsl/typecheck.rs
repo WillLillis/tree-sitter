@@ -146,8 +146,9 @@ fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId) -> Result<Ty, TypeError> {
         Node::TypeStr => Ok(Ty::Str),
         Node::TypeRule => Ok(Ty::Rule),
         Node::TypeList(inner) => Ok(Ty::List(Box::new(ast_type_to_ty(ast, *inner)?))),
-        Node::TypeTuple(elems) => {
-            let tys = elems
+        Node::TypeTuple(range) => {
+            let tys = ast
+                .child_slice(*range)
                 .iter()
                 .map(|&id| ast_type_to_ty(ast, id))
                 .collect::<Result<_, _>>()?;
@@ -403,7 +404,8 @@ fn type_of<'src>(
             }
             Ok(Ty::Int)
         }
-        Node::Object(fields) => {
+        Node::Object(range) => {
+            let fields = ast.get_object(*range);
             let tys = fields
                 .iter()
                 .map(|(key_span, val_id)| {
@@ -413,7 +415,8 @@ fn type_of<'src>(
                 .collect::<Result<Vec<_>, TypeError>>()?;
             Ok(Ty::Object(tys))
         }
-        Node::List(items) => {
+        Node::List(range) => {
+            let items = ast.child_slice(*range);
             if items.is_empty() {
                 return Ok(Ty::List(Box::new(Ty::Rule)));
             }
@@ -429,15 +432,16 @@ fn type_of<'src>(
             }
             Ok(Ty::List(Box::new(first)))
         }
-        Node::Tuple(items) => {
-            let tys = items
+        Node::Tuple(range) => {
+            let tys = ast
+                .child_slice(*range)
                 .iter()
                 .map(|&id| type_of(ast, id, env))
                 .collect::<Result<_, _>>()?;
             Ok(Ty::Tuple(tys))
         }
-        Node::Concat(parts) => {
-            for &part in parts {
+        Node::Concat(range) => {
+            for &part in ast.child_slice(*range) {
                 expect_str(ast, part, env)?;
             }
             Ok(Ty::Str)
@@ -449,8 +453,8 @@ fn type_of<'src>(
             }
             Ok(Ty::Rule)
         }
-        Node::Seq(members) | Node::Choice(members) => {
-            for &member in members {
+        Node::Seq(range) | Node::Choice(range) => {
+            for &member in ast.child_slice(*range) {
                 if matches!(ast.node(member), Node::For(_)) {
                     check_for_expr(ast, member, env)?;
                 } else {
@@ -511,7 +515,7 @@ fn type_of<'src>(
                     span,
                 })?
                 .clone();
-            check_call_args(ast, fn_name, args, &sig, span, env)?;
+            check_call_args(ast, fn_name, ast.child_slice(*args), &sig, span, env)?;
             Ok(sig.return_ty)
         }
         _ => Err(TypeError {
@@ -560,24 +564,7 @@ fn check_for_expr<'src>(
     };
 
     env.push_scope();
-    if let [(name_span, ty_id)] = &bindings[..] {
-        let declared = ast_type_to_ty(ast, *ty_id)?;
-        if !is_compatible(&elem_ty, &declared) {
-            env.pop_scope();
-            return Err(mismatch(declared, elem_ty, span));
-        }
-        env.insert_var(ast.text(*name_span), declared);
-    } else {
-        let Ty::Tuple(elem_tys) = &elem_ty else {
-            env.pop_scope();
-            return Err(TypeError {
-                kind: TypeErrorKind::ForBindingsNotTuple {
-                    bindings: bindings.len(),
-                    got: elem_ty,
-                },
-                span,
-            });
-        };
+    if let Ty::Tuple(elem_tys) = &elem_ty {
         if bindings.len() != elem_tys.len() {
             env.pop_scope();
             return Err(TypeError {
@@ -596,6 +583,22 @@ fn check_for_expr<'src>(
             }
             env.insert_var(ast.text(*name_span), declared);
         }
+    } else if let [(name_span, ty_id)] = &bindings[..] {
+        let declared = ast_type_to_ty(ast, *ty_id)?;
+        if !is_compatible(&elem_ty, &declared) {
+            env.pop_scope();
+            return Err(mismatch(declared, elem_ty, span));
+        }
+        env.insert_var(ast.text(*name_span), declared);
+    } else {
+        env.pop_scope();
+        return Err(TypeError {
+            kind: TypeErrorKind::ForBindingsNotTuple {
+                bindings: bindings.len(),
+                got: elem_ty,
+            },
+            span,
+        });
     }
 
     let body_ty = type_of(ast, body, env)?;
