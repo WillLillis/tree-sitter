@@ -21,6 +21,7 @@ mod bitvec;
 mod build_tables;
 mod dedup;
 mod grammars;
+#[cfg(feature = "nativedsl")]
 pub mod nativedsl;
 mod nfa;
 mod node_types;
@@ -127,14 +128,15 @@ pub type LoadGrammarFileResult<T> = Result<T, LoadGrammarError>;
 #[cfg(feature = "load")]
 #[derive(Debug, Error, Serialize)]
 pub enum LoadGrammarError {
-    #[error("Path to a grammar file with `.js`, `.json`, or `.grammar` extension is required")]
+    #[error("Path to a grammar file with `.js`, `.json`, or `.tsg` extension is required")]
     InvalidPath,
     #[error("Failed to load grammar.js -- {0}")]
     LoadJSGrammarFile(#[from] JSError),
     #[error("Failed to load grammar.json -- {0}")]
     IO(IoError),
-    #[error("Failed to load native DSL grammar -- {0}")]
-    NativeDsl(#[from] nativedsl::DslError),
+    #[cfg(feature = "nativedsl")]
+    #[error(transparent)]
+    NativeDsl(nativedsl::NativeDslError),
     #[error("Unknown grammar file extension: {0:?}")]
     FileExtension(PathBuf),
 }
@@ -252,12 +254,12 @@ where
             fs::create_dir_all(&path_buf)
                 .map_err(|e| GenerateError::IO(IoError::new(&e, Some(path_buf.as_path()))))?;
             repo_path = path_buf;
-            repo_path.join("grammar.js")
+            find_grammar_file(&repo_path)
         } else {
             path_buf
         }
     } else {
-        repo_path.join("grammar.js")
+        find_grammar_file(&repo_path)
     };
 
     // Read the grammar file.
@@ -441,6 +443,27 @@ fn read_grammar_version(repo_path: &Path) -> Result<Option<Version>, ParseVersio
     }
 }
 
+/// Find the grammar file in a directory. Falls back to `grammar.js` if none
+/// are found (so that the existing error message about a missing file is
+/// preserved).
+#[cfg(feature = "load")]
+fn find_grammar_file(dir: &Path) -> PathBuf {
+    #[cfg(feature = "nativedsl")]
+    {
+        let tsg = dir.join("grammar.tsg");
+        if tsg.exists() {
+            return tsg;
+        }
+    }
+    for ext in ["js", "json"] {
+        let path = dir.join(format!("grammar.{ext}"));
+        if path.exists() {
+            return path;
+        }
+    }
+    dir.join("grammar.js")
+}
+
 #[cfg(feature = "load")]
 pub fn load_grammar_file(
     grammar_path: &Path,
@@ -453,10 +476,17 @@ pub fn load_grammar_file(
         Some("js") => Ok(load_js_grammar_file(grammar_path, js_runtime)?),
         Some("json") => Ok(fs::read_to_string(grammar_path)
             .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?),
-        Some("grammar") => {
-            let source = fs::read_to_string(grammar_path)
+        #[cfg(feature = "nativedsl")]
+        Some("tsg") => {
+            let source_text = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
-            Ok(nativedsl::parse_native_dsl_to_json(&source)?)
+            nativedsl::parse_native_dsl_to_json(&source_text).map_err(|error| {
+                LoadGrammarError::NativeDsl(nativedsl::NativeDslError {
+                    error,
+                    source_text,
+                    path: grammar_path.to_owned(),
+                })
+            })
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
     }

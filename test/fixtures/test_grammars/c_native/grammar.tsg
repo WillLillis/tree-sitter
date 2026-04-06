@@ -117,26 +117,26 @@ rule preproc_include {
         preprocessor("include"),
         field(path, choice(string_literal, system_lib_string, identifier,
             alias(preproc_call_expression, call_expression))),
-        token.immediate(regex(r"\r?\n")),
+        token_immediate(regex(r"\r?\n")),
     )
 }
 
 rule preproc_def {
     seq(preprocessor("define"), field(name, identifier),
-        field(value, optional(preproc_arg)), token.immediate(regex(r"\r?\n")))
+        field(value, optional(preproc_arg)), token_immediate(regex(r"\r?\n")))
 }
 
 rule preproc_function_def {
     seq(preprocessor("define"), field(name, identifier),
         field(parameters, preproc_params),
-        field(value, optional(preproc_arg)), token.immediate(regex(r"\r?\n")))
+        field(value, optional(preproc_arg)), token_immediate(regex(r"\r?\n")))
 }
 
-rule preproc_params { seq(token.immediate("("), comma_sep(choice(identifier, "...")), ")") }
+rule preproc_params { seq(token_immediate("("), comma_sep(choice(identifier, "...")), ")") }
 
 rule preproc_call {
     seq(field(directive, preproc_directive),
-        field(argument, optional(preproc_arg)), token.immediate(regex(r"\r?\n")))
+        field(argument, optional(preproc_arg)), token_immediate(regex(r"\r?\n")))
 }
 
 // Base variants (no suffix)
@@ -730,7 +730,7 @@ rule number_literal {
 
 rule char_literal {
     seq(choice("L'", "u'", "U'", "u8'", "'"),
-        repeat1(choice(escape_sequence, alias(token.immediate(regex(r"[^\n']")), character))),
+        repeat1(choice(escape_sequence, alias(token_immediate(regex(r"[^\n']")), character))),
         "'")
 }
 
@@ -742,7 +742,7 @@ rule concatenated_string {
 
 rule string_literal {
     seq(choice("L\"", "u\"", "U\"", "u8\"", "\""),
-        repeat(choice(alias(token.immediate(prec(1, regex(r#"[^\\"\n]+"#))), string_content), escape_sequence)),
+        repeat(choice(alias(token_immediate(prec(1, regex(r#"[^\\"\n]+"#))), string_content), escape_sequence)),
         "\"")
 }
 

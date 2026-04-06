@@ -80,13 +80,17 @@ impl<'src> Parser<'src> {
     }
 
     fn expect(&mut self, kind: &TokenKind) -> Result<Span, ParseError> {
-        self.eat(kind)
-            .ok_or_else(|| self.error(ParseErrorKind::ExpectedToken(format!("{kind:?}"))))
+        self.eat(kind).ok_or_else(|| {
+            self.error(ParseErrorKind::ExpectedToken {
+                expected: kind.clone(),
+                got: self.tokens[self.pos].kind.clone(),
+            })
+        })
     }
 
-    /// Eat an identifier token, returning its span.
-    fn eat_ident(&mut self) -> Option<Span> {
-        if matches!(self.tokens[self.pos].kind, TokenKind::Ident) {
+    /// Eat a token matching `kind` exactly, returning its span.
+    fn eat_kind(&mut self, kind: &TokenKind) -> Option<Span> {
+        if self.tokens[self.pos].kind == *kind {
             let span = self.span();
             self.pos += 1;
             Some(span)
@@ -96,35 +100,13 @@ impl<'src> Parser<'src> {
     }
 
     fn expect_ident(&mut self) -> Result<Span, ParseError> {
-        self.eat_ident()
+        self.eat_kind(&TokenKind::Ident)
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedIdent))
     }
 
-    /// Eat a string literal, returning its span.
-    fn eat_string(&mut self) -> Option<Span> {
-        if matches!(self.tokens[self.pos].kind, TokenKind::StringLit) {
-            let span = self.span();
-            self.pos += 1;
-            Some(span)
-        } else {
-            None
-        }
-    }
-
     fn expect_string(&mut self) -> Result<Span, ParseError> {
-        self.eat_string()
+        self.eat_kind(&TokenKind::StringLit)
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedString))
-    }
-
-    fn expect_ident_value(&mut self, expected: &str) -> Result<Span, ParseError> {
-        if matches!(self.tokens[self.pos].kind, TokenKind::Ident) {
-            let span = self.span();
-            if self.ast.text(span) == expected {
-                self.pos += 1;
-                return Ok(span);
-            }
-        }
-        Err(self.error(ParseErrorKind::ExpectedToken(format!("'{expected}'"))))
     }
 
     /// Accept an identifier or keyword as a name (for field names that clash with keywords).
@@ -145,6 +127,7 @@ impl<'src> Parser<'src> {
             | TokenKind::KwBlank
             | TokenKind::KwPrec
             | TokenKind::KwReserved
+            | TokenKind::KwTokenImmediate
             | TokenKind::KwConcat
             | TokenKind::KwRegex
             | TokenKind::KwLet
@@ -249,10 +232,10 @@ impl<'src> Parser<'src> {
         let items = self.comma_sep(&TokenKind::RBracket, |this| {
             this.expect(&TokenKind::LBracket)?;
             let group = this.comma_sep(&TokenKind::RBracket, |this| {
-                if let Some(span) = this.eat_string() {
+                if let Some(span) = this.eat_kind(&TokenKind::StringLit) {
                     let inner = Span::new(span.start + 1, span.end - 1);
                     Ok(PrecEntry::Name(this.ast.text(inner).to_string()))
-                } else if let Some(span) = this.eat_ident() {
+                } else if let Some(span) = this.eat_kind(&TokenKind::Ident) {
                     Ok(PrecEntry::Symbol(span))
                 } else {
                     Err(this.error(ParseErrorKind::ExpectedStringOrIdent))
@@ -336,7 +319,7 @@ impl<'src> Parser<'src> {
     fn parse_type(&mut self) -> Result<NodeId, ParseError> {
         let start = self.span();
 
-        if let Some(id_span) = self.eat_ident() {
+        if let Some(id_span) = self.eat_kind(&TokenKind::Ident) {
             let id = self.ast.text(id_span).to_string();
             return match id.as_str() {
                 "rule" => Ok(self.ast.push(Node::TypeRule, id_span)),
@@ -377,9 +360,9 @@ impl<'src> Parser<'src> {
         match &self.tokens[self.pos].kind {
             TokenKind::KwSeq => self.parse_variadic_combinator(start, "seq"),
             TokenKind::KwChoice => self.parse_variadic_combinator(start, "choice"),
-            TokenKind::KwRepeat => self.parse_unary_combinator(start, "repeat"),
-            TokenKind::KwRepeat1 => self.parse_unary_combinator(start, "repeat1"),
-            TokenKind::KwOptional => self.parse_unary_combinator(start, "optional"),
+            TokenKind::KwRepeat => self.parse_unary_wrapper(start, Node::Repeat),
+            TokenKind::KwRepeat1 => self.parse_unary_wrapper(start, Node::Repeat1),
+            TokenKind::KwOptional => self.parse_unary_wrapper(start, Node::Optional),
             TokenKind::KwBlank => {
                 self.pos += 1;
                 self.expect(&TokenKind::LParen)?;
@@ -388,7 +371,8 @@ impl<'src> Parser<'src> {
             }
             TokenKind::KwField => self.parse_field_combinator(start),
             TokenKind::KwAlias => self.parse_alias_combinator(start),
-            TokenKind::KwToken => self.parse_token_combinator(start),
+            TokenKind::KwToken => self.parse_unary_wrapper(start, Node::Token),
+            TokenKind::KwTokenImmediate => self.parse_unary_wrapper(start, Node::TokenImmediate),
             TokenKind::KwPrec => self.parse_prec_combinator(start),
             TokenKind::KwReserved => self.parse_reserved_combinator(start),
             TokenKind::KwConcat => self.parse_concat(start),
@@ -396,7 +380,7 @@ impl<'src> Parser<'src> {
             TokenKind::KwFor => self.parse_for_expr(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             TokenKind::StringLit => {
-                let span = self.eat_string().unwrap();
+                let span = self.eat_kind(&TokenKind::StringLit).unwrap();
                 Ok(self.ast.push(Node::StringLit, span))
             }
             TokenKind::IntLit(_) => {
@@ -440,18 +424,16 @@ impl<'src> Parser<'src> {
         Ok(self.ast.push(node, start.merge(end)))
     }
 
-    fn parse_unary_combinator(&mut self, start: Span, name: &str) -> Result<NodeId, ParseError> {
+    fn parse_unary_wrapper(
+        &mut self,
+        start: Span,
+        make_node: fn(NodeId) -> Node,
+    ) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(&TokenKind::LParen)?;
         let inner = self.parse_expr()?;
         let end = self.expect(&TokenKind::RParen)?;
-        let node = match name {
-            "repeat" => Node::Repeat(inner),
-            "repeat1" => Node::Repeat1(inner),
-            "optional" => Node::Optional(inner),
-            _ => unreachable!(),
-        };
-        Ok(self.ast.push(node, start.merge(end)))
+        Ok(self.ast.push(make_node(inner), start.merge(end)))
     }
 
     fn parse_field_combinator(&mut self, start: Span) -> Result<NodeId, ParseError> {
@@ -476,22 +458,6 @@ impl<'src> Parser<'src> {
         Ok(self
             .ast
             .push(Node::Alias { content, target }, start.merge(end)))
-    }
-
-    fn parse_token_combinator(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
-        if self.eat(&TokenKind::Dot).is_some() {
-            self.expect_ident_value("immediate")?;
-            self.expect(&TokenKind::LParen)?;
-            let inner = self.parse_expr()?;
-            let end = self.expect(&TokenKind::RParen)?;
-            Ok(self.ast.push(Node::TokenImmediate(inner), start.merge(end)))
-        } else {
-            self.expect(&TokenKind::LParen)?;
-            let inner = self.parse_expr()?;
-            let end = self.expect(&TokenKind::RParen)?;
-            Ok(self.ast.push(Node::Token(inner), start.merge(end)))
-        }
     }
 
     fn parse_concat(&mut self, start: Span) -> Result<NodeId, ParseError> {
@@ -692,7 +658,7 @@ pub struct ParseError {
 /// The specific kind of parse error.
 #[derive(Debug, Serialize)]
 pub enum ParseErrorKind {
-    ExpectedToken(String),
+    ExpectedToken { expected: TokenKind, got: TokenKind },
     ExpectedIdent,
     ExpectedString,
     ExpectedName,
@@ -710,7 +676,9 @@ pub enum ParseErrorKind {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            ParseErrorKind::ExpectedToken(token) => write!(f, "expected {token}"),
+            ParseErrorKind::ExpectedToken { expected, got } => {
+                write!(f, "expected {expected}, got {got}")
+            }
             ParseErrorKind::ExpectedIdent => write!(f, "expected identifier"),
             ParseErrorKind::ExpectedString => write!(f, "expected string literal"),
             ParseErrorKind::ExpectedName => write!(f, "expected name"),

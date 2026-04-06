@@ -160,6 +160,13 @@ fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId) -> Result<Ty, TypeError> {
     }
 }
 
+const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
+    TypeError {
+        kind: TypeErrorKind::TypeMismatch { expected, got },
+        span,
+    }
+}
+
 /// Run type checking on the entire AST.
 ///
 /// First pre-scans all top-level items to register rule names as `Ty::Rule`
@@ -218,15 +225,7 @@ fn check_item<'src>(
             if let Some(ty_id) = ty {
                 let declared = ast_type_to_ty(ast, *ty_id)?;
                 if !is_compatible(&inferred, &declared) {
-                    let name_str = ast.text(*name);
-                    return Err(TypeError {
-                        kind: TypeErrorKind::TypeMismatch {
-                            expected: declared,
-                            got: inferred,
-                            context: format!("let '{name_str}'"),
-                        },
-                        span: ast.span(*value),
-                    });
+                    return Err(mismatch(declared, inferred, ast.span(*value)));
                 }
             }
             env.insert_var(ast.text(*name), inferred);
@@ -267,30 +266,12 @@ fn check_item<'src>(
             env.pop_scope();
 
             if !is_compatible(&body_ty, &return_ty) {
-                let fn_name = ast.text(fn_name_span);
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: return_ty,
-                        got: body_ty,
-                        context: format!("fn '{fn_name}'"),
-                    },
-                    span: ast.span(body),
-                });
+                return Err(mismatch(return_ty, body_ty, ast.span(body)));
             }
             Ok(())
         }
         Node::Rule { body, .. } => {
-            let ty = type_of(ast, *body, env)?;
-            if !is_rule_like(&ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: ty,
-                        context: "rule body".to_string(),
-                    },
-                    span: ast.span(*body),
-                });
-            }
+            expect_rule(ast, *body, env)?;
             Ok(())
         }
         _ => Err(TypeError {
@@ -322,18 +303,50 @@ fn check_call_args<'src>(
             span: call_span,
         });
     }
-    for (&arg_id, (param_name, param_ty)) in args.iter().zip(sig.params.iter()) {
+    for (&arg_id, (_param_name, param_ty)) in args.iter().zip(sig.params.iter()) {
         let arg_ty = type_of(ast, arg_id, env)?;
         if !is_compatible(&arg_ty, param_ty) {
-            return Err(TypeError {
-                kind: TypeErrorKind::TypeMismatch {
-                    expected: param_ty.clone(),
-                    got: arg_ty,
-                    context: format!("fn '{fn_name}': argument '{param_name}'"),
-                },
-                span: ast.span(arg_id),
-            });
+            return Err(mismatch(param_ty.clone(), arg_ty, ast.span(arg_id)));
         }
+    }
+    Ok(())
+}
+
+/// Type-check a node and assert it produces a rule-like type.
+fn expect_rule<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    let ty = type_of(ast, id, env)?;
+    if !is_rule_like(&ty) {
+        return Err(mismatch(Ty::Rule, ty, ast.span(id)));
+    }
+    Ok(())
+}
+
+/// Type-check a node and assert it produces a string type.
+fn expect_str<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    let ty = type_of(ast, id, env)?;
+    if ty != Ty::Str {
+        return Err(mismatch(Ty::Str, ty, ast.span(id)));
+    }
+    Ok(())
+}
+
+/// Type-check a node and assert it produces a precedence-like type (int or string).
+fn expect_prec<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    let ty = type_of(ast, id, env)?;
+    if !is_prec_like(&ty) {
+        return Err(mismatch(Ty::Int, ty, ast.span(id)));
     }
     Ok(())
 }
@@ -386,14 +399,7 @@ fn type_of<'src>(
         Node::Neg(inner) => {
             let ty = type_of(ast, *inner, env)?;
             if ty != Ty::Int {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Int,
-                        got: ty,
-                        context: "unary minus".to_string(),
-                    },
-                    span,
-                });
+                return Err(mismatch(Ty::Int, ty, span));
             }
             Ok(Ty::Int)
         }
@@ -432,44 +438,14 @@ fn type_of<'src>(
         }
         Node::Concat(parts) => {
             for &part in parts {
-                let ty = type_of(ast, part, env)?;
-                if ty != Ty::Str {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::TypeMismatch {
-                            expected: Ty::Str,
-                            got: ty,
-                            context: "concat() argument".to_string(),
-                        },
-                        span: ast.span(part),
-                    });
-                }
+                expect_str(ast, part, env)?;
             }
             Ok(Ty::Str)
         }
         Node::DynRegex { pattern, flags } => {
-            let ty = type_of(ast, *pattern, env)?;
-            if ty != Ty::Str {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Str,
-                        got: ty,
-                        context: "regex() pattern".to_string(),
-                    },
-                    span,
-                });
-            }
+            expect_str(ast, *pattern, env)?;
             if let Some(flags_id) = flags {
-                let flags_ty = type_of(ast, *flags_id, env)?;
-                if flags_ty != Ty::Str {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::TypeMismatch {
-                            expected: Ty::Str,
-                            got: flags_ty,
-                            context: "regex() flags".to_string(),
-                        },
-                        span,
-                    });
-                }
+                expect_str(ast, *flags_id, env)?;
             }
             Ok(Ty::Rule)
         }
@@ -478,155 +454,47 @@ fn type_of<'src>(
                 if matches!(ast.node(member), Node::For(_)) {
                     check_for_expr(ast, member, env)?;
                 } else {
-                    let ty = type_of(ast, member, env)?;
-                    if !is_rule_like(&ty) {
-                        return Err(TypeError {
-                            kind: TypeErrorKind::TypeMismatch {
-                                expected: Ty::Rule,
-                                got: ty,
-                                context: "seq/choice member".to_string(),
-                            },
-                            span: ast.span(member),
-                        });
-                    }
+                    expect_rule(ast, member, env)?;
                 }
             }
             Ok(Ty::Rule)
         }
-        Node::Repeat(inner) | Node::Repeat1(inner) | Node::Optional(inner) => {
-            let ty = type_of(ast, *inner, env)?;
-            if !is_rule_like(&ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: ty,
-                        context: "repeat/optional argument".to_string(),
-                    },
-                    span: ast.span(*inner),
-                });
-            }
+        Node::Repeat(inner)
+        | Node::Repeat1(inner)
+        | Node::Optional(inner)
+        | Node::Token(inner)
+        | Node::TokenImmediate(inner) => {
+            expect_rule(ast, *inner, env)?;
             Ok(Ty::Rule)
         }
-        Node::Field { content, .. } => {
-            let ty = type_of(ast, *content, env)?;
-            if !is_rule_like(&ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: ty,
-                        context: "field() content".to_string(),
-                    },
-                    span: ast.span(*content),
-                });
-            }
+        Node::Field { content, .. } | Node::Reserved { content, .. } => {
+            expect_rule(ast, *content, env)?;
             Ok(Ty::Rule)
         }
         Node::Alias { content, target } => {
-            let ty = type_of(ast, *content, env)?;
-            if !is_rule_like(&ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: ty,
-                        context: "alias() content".to_string(),
-                    },
-                    span: ast.span(*content),
-                });
-            }
+            expect_rule(ast, *content, env)?;
             let target_ty = type_of(ast, *target, env)?;
             if !matches!(ast.node(*target), Node::RuleRef(_) | Node::VarRef(_))
                 && target_ty != Ty::Str
                 && target_ty != Ty::Rule
             {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: target_ty,
-                        context: "alias target".to_string(),
-                    },
-                    span: ast.span(*target),
-                });
-            }
-            Ok(Ty::Rule)
-        }
-        Node::Token(inner) | Node::TokenImmediate(inner) => {
-            let ty = type_of(ast, *inner, env)?;
-            if !is_rule_like(&ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: ty,
-                        context: "token() argument".to_string(),
-                    },
-                    span: ast.span(*inner),
-                });
+                return Err(mismatch(Ty::Rule, target_ty, ast.span(*target)));
             }
             Ok(Ty::Rule)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content } => {
-            let value_ty = type_of(ast, *value, env)?;
-            if !is_prec_like(&value_ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Int,
-                        got: value_ty,
-                        context: "precedence value".to_string(),
-                    },
-                    span: ast.span(*value),
-                });
-            }
-            let content_ty = type_of(ast, *content, env)?;
-            if !is_rule_like(&content_ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: content_ty,
-                        context: "prec() content".to_string(),
-                    },
-                    span: ast.span(*content),
-                });
-            }
+            expect_prec(ast, *value, env)?;
+            expect_rule(ast, *content, env)?;
             Ok(Ty::Rule)
         }
         Node::PrecDynamic { value, content } => {
             let value_ty = type_of(ast, *value, env)?;
             if value_ty != Ty::Int {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Int,
-                        got: value_ty,
-                        context: "prec.dynamic() value".to_string(),
-                    },
-                    span: ast.span(*value),
-                });
+                return Err(mismatch(Ty::Int, value_ty, ast.span(*value)));
             }
-            let content_ty = type_of(ast, *content, env)?;
-            if !is_rule_like(&content_ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: content_ty,
-                        context: "prec.dynamic() content".to_string(),
-                    },
-                    span: ast.span(*content),
-                });
-            }
-            Ok(Ty::Rule)
-        }
-        Node::Reserved { content, .. } => {
-            let ty = type_of(ast, *content, env)?;
-            if !is_rule_like(&ty) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: Ty::Rule,
-                        got: ty,
-                        context: "reserved() content".to_string(),
-                    },
-                    span: ast.span(*content),
-                });
-            }
+            expect_rule(ast, *content, env)?;
             Ok(Ty::Rule)
         }
         Node::For(_) => {
@@ -695,16 +563,8 @@ fn check_for_expr<'src>(
     if let [(name_span, ty_id)] = &bindings[..] {
         let declared = ast_type_to_ty(ast, *ty_id)?;
         if !is_compatible(&elem_ty, &declared) {
-            let binding_name = ast.text(*name_span);
             env.pop_scope();
-            return Err(TypeError {
-                kind: TypeErrorKind::TypeMismatch {
-                    expected: declared,
-                    got: elem_ty,
-                    context: format!("for binding '{binding_name}'"),
-                },
-                span,
-            });
+            return Err(mismatch(declared, elem_ty, span));
         }
         env.insert_var(ast.text(*name_span), declared);
     } else {
@@ -731,16 +591,8 @@ fn check_for_expr<'src>(
         for ((name_span, ty_id), actual_ty) in bindings.iter().zip(elem_tys.iter()) {
             let declared = ast_type_to_ty(ast, *ty_id)?;
             if !is_compatible(actual_ty, &declared) {
-                let binding_name = ast.text(*name_span);
                 env.pop_scope();
-                return Err(TypeError {
-                    kind: TypeErrorKind::TypeMismatch {
-                        expected: declared,
-                        got: actual_ty.clone(),
-                        context: format!("for binding '{binding_name}'"),
-                    },
-                    span,
-                });
+                return Err(mismatch(declared, actual_ty.clone(), span));
             }
             env.insert_var(ast.text(*name_span), declared);
         }
@@ -749,14 +601,7 @@ fn check_for_expr<'src>(
     let body_ty = type_of(ast, body, env)?;
     env.pop_scope();
     if !is_rule_like(&body_ty) {
-        return Err(TypeError {
-            kind: TypeErrorKind::TypeMismatch {
-                expected: Ty::Rule,
-                got: body_ty,
-                context: "for-expression body".to_string(),
-            },
-            span: ast.span(body),
-        });
+        return Err(mismatch(Ty::Rule, body_ty, ast.span(body)));
     }
     Ok(())
 }
@@ -774,7 +619,6 @@ pub enum TypeErrorKind {
     TypeMismatch {
         expected: Ty,
         got: Ty,
-        context: String,
     },
     UndefinedFunction(String),
     ArgCountMismatch {
@@ -809,12 +653,8 @@ pub enum TypeErrorKind {
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            TypeErrorKind::TypeMismatch {
-                expected,
-                got,
-                context,
-            } => {
-                write!(f, "{context}: expected {expected}, got {got}")
+            TypeErrorKind::TypeMismatch { expected, got } => {
+                write!(f, "expected {expected}, got {got}")
             }
             TypeErrorKind::UndefinedFunction(name) => write!(f, "undefined function '{name}'"),
             TypeErrorKind::ArgCountMismatch {

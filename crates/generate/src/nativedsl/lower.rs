@@ -326,7 +326,6 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
     let mut rule_entries: Vec<(String, RuleId)> = Vec::new();
 
     for &item_id in &ast.root_items {
-        let span = ast.span(item_id);
         match ast.node(item_id) {
             Node::Grammar => {}
             Node::Let { name, value, .. } => {
@@ -342,12 +341,7 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
                 let rule_id = eval.lower_to_rule(*body)?;
                 rule_entries.push((rule_name, rule_id));
             }
-            _ => {
-                return Err(LowerError {
-                    kind: LowerErrorKind::UnexpectedTopLevel,
-                    span,
-                });
-            }
+            _ => unreachable!(),
         }
     }
 
@@ -469,13 +463,11 @@ impl Evaluator<'_> {
             Node::Neg(inner) => {
                 let inner = *inner;
                 let vid = self.eval_expr(inner)?;
-                match self.get_val(vid) {
-                    Value::Int(n) => Ok(self.alloc_val(Value::Int(-n))),
-                    _ => Err(LowerError {
-                        kind: LowerErrorKind::NegRequiresInt,
-                        span,
-                    }),
-                }
+                // Typecheck ensures this is an int
+                let Value::Int(n) = self.get_val(vid) else {
+                    unreachable!();
+                };
+                Ok(self.alloc_val(Value::Int(-n)))
             }
             Node::Ident(_) => {
                 unreachable!("resolve pass should have replaced all Ident nodes")
@@ -493,16 +485,11 @@ impl Evaluator<'_> {
                 let (obj, field) = (*obj, *field);
                 let obj_id = self.eval_expr(obj)?;
                 let field_name = ast.text(field);
-                match self.get_val(obj_id) {
-                    Value::Object(map) => map.get(field_name).copied().ok_or_else(|| LowerError {
-                        kind: LowerErrorKind::FieldNotFound(field_name.to_string()),
-                        span,
-                    }),
-                    _ => Err(LowerError {
-                        kind: LowerErrorKind::FieldAccessOnNonObject,
-                        span,
-                    }),
-                }
+                // Typecheck ensures obj is an object with the right fields
+                let Value::Object(map) = self.get_val(obj_id) else {
+                    unreachable!();
+                };
+                Ok(*map.get(field_name).unwrap())
             }
             Node::Object(fields) => {
                 let len = fields.len();
@@ -561,7 +548,7 @@ impl Evaluator<'_> {
                 for arg_id in args.iter().take(len) {
                     arg_vals.push(self.eval_expr(*arg_id)?);
                 }
-                self.eval_fn_call_with_vals(ast.text(name), &arg_vals, span)
+                self.eval_fn_call_with_vals(ast.text(name), &arg_vals)
             }
             _ => {
                 let rule_id = self.eval_combinator(id)?;
@@ -577,39 +564,34 @@ impl Evaluator<'_> {
     /// to a `RuleId` (strings become `ARule::String`).
     fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let vid = self.eval_expr(id)?;
-        self.value_to_rule(vid, self.ast.span(id))
+        Ok(self.value_to_rule(vid))
     }
 
     /// Convert an evaluated value to an arena rule ID.
     ///
     /// `Value::Rule` passes through directly, `Value::Str` becomes
     /// `ARule::String`. Other value types are not valid rule expressions.
-    fn value_to_rule(&mut self, id: ValueId, span: Span) -> Result<RuleId, LowerError> {
+    fn value_to_rule(&mut self, id: ValueId) -> RuleId {
         match self.get_val(id) {
-            Value::Rule(rid) => return Ok(*rid),
+            Value::Rule(rid) => *rid,
             Value::Str(s) => {
                 let s = *s;
-                return Ok(self.alloc_rule(ARule::String(s)));
+                self.alloc_rule(ARule::String(s))
             }
-            _ => {}
+            // Typecheck ensures only rule-like values reach here
+            _ => unreachable!(),
         }
-        Err(LowerError {
-            kind: LowerErrorKind::ExpectedRuleExpression,
-            span,
-        })
     }
 
     /// Convert an evaluated value to an arena precedence.
     ///
     /// Integers become `APrec::Integer`, strings become `APrec::Name`.
-    fn value_to_prec(&self, id: ValueId, span: Span) -> Result<APrec, LowerError> {
+    fn value_to_prec(&self, id: ValueId) -> APrec {
         match self.get_val(id) {
-            Value::Int(n) => Ok(APrec::Integer(*n as i32)),
-            Value::Str(s) => Ok(APrec::Name(*s)),
-            _ => Err(LowerError {
-                kind: LowerErrorKind::ExpectedPrecedenceValue,
-                span,
-            }),
+            Value::Int(n) => APrec::Integer(*n as i32),
+            Value::Str(s) => APrec::Name(*s),
+            // Typecheck ensures only prec-like values reach here
+            _ => unreachable!(),
         }
     }
 
@@ -620,7 +602,6 @@ impl Evaluator<'_> {
     /// `seq`/`choice`, inline `for` expressions are expanded in-place.
     fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
-        let span = ast.span(id);
         match ast.node(id) {
             Node::Seq(members) | Node::Choice(members) => {
                 let is_seq = matches!(ast.node(id), Node::Seq(_));
@@ -633,7 +614,7 @@ impl Evaluator<'_> {
                             _ => unreachable!(),
                         };
                         let config = ast.get_for(for_idx);
-                        child_ids.extend(self.eval_for_to_rules(config, ast.span(*member))?);
+                        child_ids.extend(self.eval_for_to_rules(config)?);
                     } else {
                         child_ids.push(self.lower_to_rule(*member)?);
                     }
@@ -714,26 +695,20 @@ impl Evaluator<'_> {
                 let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
             }
-            Node::Prec { value, content } => {
+            Node::Prec { value, content }
+            | Node::PrecLeft { value, content }
+            | Node::PrecRight { value, content } => {
                 let (value, content) = (*value, *content);
                 let vid = self.eval_expr(value)?;
-                let prec = self.value_to_prec(vid, ast.span(value))?;
+                let prec = self.value_to_prec(vid);
                 let inner = self.lower_to_rule(content)?;
-                Ok(self.alloc_rule(ARule::Prec(prec, inner)))
-            }
-            Node::PrecLeft { value, content } => {
-                let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value)?;
-                let prec = self.value_to_prec(vid, ast.span(value))?;
-                let inner = self.lower_to_rule(content)?;
-                Ok(self.alloc_rule(ARule::PrecLeft(prec, inner)))
-            }
-            Node::PrecRight { value, content } => {
-                let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value)?;
-                let prec = self.value_to_prec(vid, ast.span(value))?;
-                let inner = self.lower_to_rule(content)?;
-                Ok(self.alloc_rule(ARule::PrecRight(prec, inner)))
+                let make_rule: fn(APrec, RuleId) -> ARule = match ast.node(id) {
+                    Node::Prec { .. } => ARule::Prec,
+                    Node::PrecLeft { .. } => ARule::PrecLeft,
+                    Node::PrecRight { .. } => ARule::PrecRight,
+                    _ => unreachable!(),
+                };
+                Ok(self.alloc_rule(make_rule(prec, inner)))
             }
             Node::PrecDynamic { value, content } => {
                 let (value, content) = (*value, *content);
@@ -751,10 +726,7 @@ impl Evaluator<'_> {
                 let sid = self.strings.intern_span(context);
                 Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
-            _ => Err(LowerError {
-                kind: LowerErrorKind::CannotUseAsGrammarRule,
-                span,
-            }),
+            _ => unreachable!(),
         }
     }
 
@@ -766,12 +738,9 @@ impl Evaluator<'_> {
         &mut self,
         name: &str,
         arg_vals: &[ValueId],
-        span: Span,
     ) -> Result<ValueId, LowerError> {
-        let &fn_id = self.fns.get(name).ok_or_else(|| LowerError {
-            kind: LowerErrorKind::UndefinedFunction(name.to_string()),
-            span,
-        })?;
+        // Resolve pass ensures all called functions are registered
+        let &fn_id = self.fns.get(name).unwrap();
 
         let config = self.get_fn_config(fn_id);
         let param_names: Vec<Span> = config.params.iter().map(|param| param.name).collect();
@@ -792,25 +761,17 @@ impl Evaluator<'_> {
     /// Evaluates the iterable, then for each element binds the loop
     /// variables and evaluates the body to a rule. Used by `seq`/`choice`
     /// to splice for-expression results inline.
-    fn eval_for_to_rules(
-        &mut self,
-        config: &ForConfig,
-        span: Span,
-    ) -> Result<Vec<RuleId>, LowerError> {
+    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
         let iterable = config.iterable;
         let body = config.body;
         let bindings: Vec<_> = config.bindings.clone();
 
         let iter_vid = self.eval_expr(iterable)?;
-        let item_ids = match self.get_val(iter_vid) {
-            Value::List(items) => items.clone(),
-            _ => {
-                return Err(LowerError {
-                    kind: LowerErrorKind::ForRequiresList,
-                    span,
-                });
-            }
+        // Typecheck ensures iterable is a list
+        let Value::List(item_ids) = self.get_val(iter_vid) else {
+            unreachable!();
         };
+        let item_ids = item_ids.clone();
 
         let mut results = Vec::new();
         for item_id in item_ids {
@@ -818,14 +779,10 @@ impl Evaluator<'_> {
             if let [(name_span, _)] = &bindings[..] {
                 self.bind(self.ast.text(*name_span), item_id);
             } else {
-                let tuple_ids = if let Value::Tuple(ids) = self.get_val(item_id) {
-                    ids.clone()
-                } else {
-                    self.pop_scope();
-                    return Err(LowerError {
-                        kind: LowerErrorKind::ForBindingMismatch,
-                        span,
-                    });
+                // Typecheck ensures elements are tuples when multi-binding
+                let tuple_ids = match self.get_val(item_id) {
+                    Value::Tuple(ids) => ids.clone(),
+                    _ => unreachable!(),
                 };
                 for ((name_span, _), val_id) in bindings.iter().zip(tuple_ids.iter()) {
                     self.bind(self.ast.text(*name_span), *val_id);
@@ -1036,16 +993,6 @@ pub struct LowerError {
 pub enum LowerErrorKind {
     MissingGrammarBlock,
     MissingLanguageField,
-    UnexpectedTopLevel,
-    ExpectedRuleExpression,
-    ExpectedPrecedenceValue,
-    UndefinedFunction(String),
-    NegRequiresInt,
-    FieldAccessOnNonObject,
-    FieldNotFound(String),
-    ForRequiresList,
-    ForBindingMismatch,
-    CannotUseAsGrammarRule,
 }
 
 impl std::fmt::Display for LowerError {
@@ -1054,20 +1001,6 @@ impl std::fmt::Display for LowerError {
             LowerErrorKind::MissingGrammarBlock => write!(f, "missing grammar block"),
             LowerErrorKind::MissingLanguageField => {
                 write!(f, "grammar block missing 'language' field")
-            }
-            LowerErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
-            LowerErrorKind::ExpectedRuleExpression => write!(f, "expected rule expression"),
-            LowerErrorKind::ExpectedPrecedenceValue => write!(f, "expected precedence value"),
-            LowerErrorKind::UndefinedFunction(name) => write!(f, "undefined function '{name}'"),
-            LowerErrorKind::NegRequiresInt => write!(f, "unary minus requires integer"),
-            LowerErrorKind::FieldAccessOnNonObject => write!(f, "field access on non-object"),
-            LowerErrorKind::FieldNotFound(name) => write!(f, "no field '{name}' on object"),
-            LowerErrorKind::ForRequiresList => write!(f, "for-expression requires a list"),
-            LowerErrorKind::ForBindingMismatch => {
-                write!(f, "for-expression binding/value mismatch")
-            }
-            LowerErrorKind::CannotUseAsGrammarRule => {
-                write!(f, "expression cannot be used as a grammar rule")
             }
         }
     }
