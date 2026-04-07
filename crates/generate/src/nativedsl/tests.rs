@@ -1,0 +1,1155 @@
+use std::path::Path;
+
+use crate::grammars::{InputGrammar, VariableType};
+use crate::nativedsl::{ast, parse_native_dsl, parse_native_dsl_to_json};
+use crate::rules::{Precedence, Rule};
+
+fn dsl(input: &str) -> InputGrammar {
+    parse_native_dsl(input, Path::new(".")).unwrap()
+}
+
+fn dsl_err(input: &str) -> String {
+    parse_native_dsl(input, Path::new("."))
+        .unwrap_err()
+        .to_string()
+}
+
+fn test_grammars_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/test_grammars")
+}
+
+fn native_grammar_dir(name: &str) -> std::path::PathBuf {
+    test_grammars_dir().join(name)
+}
+
+fn read_native_grammar(name: &str) -> String {
+    let path = native_grammar_dir(name).join("grammar.tsg");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+fn rule_names(g: &InputGrammar) -> Vec<&str> {
+    g.variables.iter().map(|v| v.name.as_str()).collect()
+}
+
+fn find_rule<'a>(g: &'a InputGrammar, name: &str) -> &'a Rule {
+    &g.variables
+        .iter()
+        .find(|v| v.name == name)
+        .unwrap_or_else(|| panic!("rule '{name}' not found"))
+        .rule
+}
+
+fn dsl_inherit(input: &str) -> InputGrammar {
+    parse_native_dsl(input, &test_grammars_dir()).unwrap()
+}
+
+fn dsl_inherit_err(input: &str) -> String {
+    parse_native_dsl(input, &test_grammars_dir())
+        .unwrap_err()
+        .to_string()
+}
+
+// ===== Node size =====
+
+#[test]
+fn node_enum_is_16_bytes() {
+    // 4 nodes per 64-byte cache line
+    assert_eq!(std::mem::size_of::<ast::Node>(), 16);
+}
+
+// ===== Minimal grammar =====
+
+#[test]
+fn minimal_grammar() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { repeat("hello") }
+    "#);
+    assert_eq!(g.name, "test");
+    assert_eq!(g.variables.len(), 1);
+    assert_eq!(g.variables[0].name, "program");
+    assert_eq!(g.variables[0].kind, VariableType::Named);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::repeat(Rule::String("hello".into())),
+            Rule::Blank
+        ])
+    );
+}
+
+// ===== Combinators =====
+
+#[test]
+fn seq_and_choice() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { seq(choice("a", "b"), "c") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::seq(vec![
+            Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())]),
+            Rule::String("c".into()),
+        ])
+    );
+}
+
+#[test]
+fn repeat1() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { repeat1("x") }
+    "#);
+    assert_eq!(g.variables[0].rule, Rule::repeat(Rule::String("x".into())));
+}
+
+#[test]
+fn optional_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { optional("x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![Rule::String("x".into()), Rule::Blank])
+    );
+}
+
+#[test]
+fn blank_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { blank() }
+    "#);
+    assert_eq!(g.variables[0].rule, Rule::Blank);
+}
+
+#[test]
+fn token_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { token(seq("a", "b")) }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::token(Rule::seq(vec![
+            Rule::String("a".into()),
+            Rule::String("b".into()),
+        ]))
+    );
+}
+
+#[test]
+fn token_immediate_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { token_immediate("x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::immediate_token(Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn field_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { field(name, "x") }
+        rule name { "n" }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::field("name".to_string(), Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn alias_with_string() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { alias(identifier, "id") }
+        rule identifier { regexp("[a-z]+") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::alias(
+            Rule::NamedSymbol("identifier".into()),
+            "id".to_string(),
+            false
+        )
+    );
+}
+
+#[test]
+fn regexp_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { regexp("[a-z]+") }
+    "#);
+    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == "[a-z]+"));
+}
+
+#[test]
+fn concat_combinator() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { regexp(concat("[", "a-z", "]+")) }
+    "#);
+    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == "[a-z]+"));
+}
+
+// ===== Prec variants =====
+
+#[test]
+fn prec_default() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { prec(1, "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn prec_left() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { prec.left(2, "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec_left(Precedence::Integer(2), Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn prec_right() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { prec.right(3, "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec_right(Precedence::Integer(3), Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn prec_dynamic() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { prec.dynamic(4, "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec_dynamic(4, Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn prec_with_string_name() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { prec.left("assign", "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec_left(Precedence::Name("assign".into()), Rule::String("x".into()))
+    );
+}
+
+// ===== Let bindings =====
+
+#[test]
+fn let_binding_int() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let P: int = 5
+        rule program { prec(P, "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec(Precedence::Integer(5), Rule::String("x".into()))
+    );
+}
+
+#[test]
+fn let_binding_object_field_access() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let PREC: int = { ADD: 1, MUL: 2 }
+        rule add { prec.left(PREC.ADD, seq(expr, "+", expr)) }
+        rule mul { prec.left(PREC.MUL, seq(expr, "*", expr)) }
+        rule expr { choice(add, mul) }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec_left(
+            Precedence::Integer(1),
+            Rule::seq(vec![
+                Rule::NamedSymbol("expr".into()),
+                Rule::String("+".into()),
+                Rule::NamedSymbol("expr".into()),
+            ])
+        )
+    );
+}
+
+#[test]
+fn let_binding_negative_int() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let P: int = -1
+        rule program { prec(P, "x") }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec(Precedence::Integer(-1), Rule::String("x".into()))
+    );
+}
+
+// ===== Functions =====
+
+#[test]
+fn function_expansion() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        fn comma_sep(item: rule) -> rule {
+            seq(item, repeat(seq(",", item)))
+        }
+        rule program { comma_sep(identifier) }
+        rule identifier { regexp("[a-z]+") }
+    "#);
+    assert_eq!(g.variables.len(), 2);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::seq(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::choice(vec![
+                Rule::repeat(Rule::seq(vec![
+                    Rule::String(",".into()),
+                    Rule::NamedSymbol("identifier".into()),
+                ])),
+                Rule::Blank,
+            ]),
+        ])
+    );
+}
+
+#[test]
+fn function_multiple_calls() {
+    let g = dsl(r##"
+        grammar { language: "test" }
+        fn make_if(content: rule) -> rule { seq("#if", content, "#endif") }
+        rule preproc_if { make_if(_statement) }
+        rule preproc_block_if { make_if(_block_item) }
+        rule _statement { "stmt" }
+        rule _block_item { "item" }
+    "##);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::seq(vec![
+            Rule::String("#if".into()),
+            Rule::NamedSymbol("_statement".into()),
+            Rule::String("#endif".into()),
+        ])
+    );
+    assert_eq!(
+        g.variables[1].rule,
+        Rule::seq(vec![
+            Rule::String("#if".into()),
+            Rule::NamedSymbol("_block_item".into()),
+            Rule::String("#endif".into()),
+        ])
+    );
+}
+
+// ===== For expressions =====
+
+#[test]
+fn for_tuple_destructure() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule binary {
+            choice(
+                for (op: str, p: int) in [("+", 1), ("*", 2)] {
+                    prec.left(p, seq(expr, op, expr))
+                }
+            )
+        }
+        rule expr { "x" }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::prec_left(
+                Precedence::Integer(1),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("+".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+            Rule::prec_left(
+                Precedence::Integer(2),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("*".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+        ])
+    );
+}
+
+#[test]
+fn for_single_binding() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule keywords {
+            choice(for (kw: str) in ["if", "else", "while"] { kw })
+        }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::String("if".into()),
+            Rule::String("else".into()),
+            Rule::String("while".into()),
+        ])
+    );
+}
+
+#[test]
+fn for_single_element_tuple_destructure() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule keywords {
+            choice(for (kw: str) in [("if"), ("else"), ("while")] { kw })
+        }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::String("if".into()),
+            Rule::String("else".into()),
+            Rule::String("while".into()),
+        ])
+    );
+}
+
+// ===== Grammar config =====
+
+#[test]
+fn grammar_config_all_fields() {
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            extras: [regexp(r"\s"), comment],
+            externals: [heredoc],
+            supertypes: [_expression],
+            inline: [_statement],
+            conflicts: [[primary, arrow]],
+            word: identifier,
+        }
+        rule program { _expression }
+        rule _expression { "x" }
+        rule comment { regexp(r"\/\/.*") }
+        rule identifier { regexp("[a-z]+") }
+    "#);
+    assert_eq!(g.extra_symbols.len(), 2);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(g.supertype_symbols, vec!["_expression"]);
+    assert_eq!(g.variables_to_inline, vec!["_statement"]);
+    assert_eq!(
+        g.expected_conflicts,
+        vec![vec!["primary".to_string(), "arrow".to_string()]]
+    );
+    assert_eq!(g.word_token, Some("identifier".into()));
+}
+
+// ===== Raw strings =====
+
+#[test]
+fn raw_string_literal() {
+    let g = dsl(r##"
+        grammar { language: "test" }
+        rule program { regexp(r#""[^"]*""#) }
+    "##);
+    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == r#""[^"]*""#));
+}
+
+// ===== String escapes =====
+
+#[test]
+fn string_with_escapes() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { "\n\t\\" }
+    "#);
+    assert_eq!(g.variables[0].rule, Rule::String("\n\t\\".into()));
+}
+
+// ===== JSON roundtrip =====
+
+#[test]
+fn json_roundtrip() {
+    #[expect(clippy::needless_raw_string_hashes, reason = "false positive")]
+    let input = r##"
+        grammar { language: "test", extras: [regexp(r"\s")] }
+        rule program { repeat(pair) }
+        rule pair { seq(field(key, string), ":", field(value, string)) }
+        rule string { regexp(r#""[^"]*""#) }
+    "##;
+    let grammar = dsl(input);
+    let json_str = parse_native_dsl_to_json(input, Path::new(".")).unwrap();
+    let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
+    assert_eq!(grammar.name, reparsed.name);
+    assert_eq!(grammar.variables.len(), reparsed.variables.len());
+    for (orig, re) in grammar.variables.iter().zip(reparsed.variables.iter()) {
+        assert_eq!(orig.name, re.name);
+    }
+}
+
+// ===== Error cases =====
+
+#[test]
+fn error_type_mismatch_fn_args() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        fn needs_int(x: int) -> rule { prec(x, "a") }
+        rule program { needs_int("not_an_int") }
+    "#,
+    );
+    assert!(msg.contains("expected int"), "error was: {msg}");
+}
+
+#[test]
+fn error_for_binding_count_mismatch() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        rule bad { choice(for (a: str, b: int) in [("x")] { a }) }
+    "#,
+    );
+    assert!(msg.contains("bindings"), "error was: {msg}");
+}
+
+#[test]
+fn error_unknown_identifier() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        rule program { nonexistent }
+    "#,
+    );
+    assert!(
+        msg.contains("unknown") && msg.contains("nonexistent"),
+        "error was: {msg}"
+    );
+}
+
+#[test]
+fn error_duplicate_rule() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        rule program { "a" }
+        rule program { "b" }
+    "#,
+    );
+    assert!(
+        msg.contains("duplicate") && msg.contains("program"),
+        "error was: {msg}"
+    );
+}
+
+#[test]
+fn error_unknown_grammar_field() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test", bogus: "x" }
+        rule program { "x" }
+    "#,
+    );
+    assert!(
+        msg.contains("unknown") && msg.contains("bogus"),
+        "error was: {msg}"
+    );
+}
+
+// ===== Prec inside token_immediate =====
+
+#[test]
+fn prec_inside_token_immediate() {
+    let source = read_native_grammar("json_native");
+    let g = parse_native_dsl(&source, &native_grammar_dir("json_native")).unwrap();
+    let string_content = g
+        .variables
+        .iter()
+        .find(|v| v.name == "string_content")
+        .unwrap();
+    if let Rule::Metadata { params, .. } = &string_content.rule {
+        assert_eq!(params.precedence, Precedence::Integer(1));
+        assert!(params.is_token);
+        assert!(params.is_main_token);
+    } else {
+        panic!("expected Metadata, got {:?}", string_content.rule);
+    }
+}
+
+// ===== Full grammar roundtrips =====
+
+#[test]
+fn json_native_grammar_roundtrip() {
+    let dir = native_grammar_dir("json_native");
+    let native_json = parse_native_dsl_to_json(&read_native_grammar("json_native"), &dir).unwrap();
+    let js_json =
+        std::fs::read_to_string(test_grammars_dir().join("../grammars/json/src/grammar.json"))
+            .unwrap();
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_eq!(native, js);
+}
+
+#[test]
+fn c_native_grammar_roundtrip() {
+    let dir = native_grammar_dir("c_native");
+    let native_json = parse_native_dsl_to_json(&read_native_grammar("c_native"), &dir).unwrap();
+    let js_json =
+        std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
+            .unwrap();
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_eq!(native, js);
+}
+
+#[test]
+fn javascript_native_grammar_roundtrip() {
+    let dir = native_grammar_dir("javascript_native");
+    let native_json =
+        parse_native_dsl_to_json(&read_native_grammar("javascript_native"), &dir).unwrap();
+    let js_json = std::fs::read_to_string(
+        test_grammars_dir().join("../grammars/javascript/src/grammar.json"),
+    )
+    .unwrap();
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+
+    assert_eq!(native.name, js.name, "name mismatch");
+
+    let native_rules: rustc_hash::FxHashMap<&str, &Rule> = native
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.rule))
+        .collect();
+    let js_rules: rustc_hash::FxHashMap<&str, &Rule> = js
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.rule))
+        .collect();
+
+    for (name, js_rule) in &js_rules {
+        let native_rule = native_rules
+            .get(name)
+            .unwrap_or_else(|| panic!("missing rule '{name}' in native grammar"));
+        assert_eq!(native_rule, js_rule, "rule mismatch for '{name}'");
+    }
+    for name in native_rules.keys() {
+        assert!(
+            js_rules.contains_key(name),
+            "extra rule '{name}' in native grammar"
+        );
+    }
+    assert_eq!(native.extra_symbols, js.extra_symbols, "extras mismatch");
+    assert_eq!(
+        native.expected_conflicts, js.expected_conflicts,
+        "conflicts mismatch"
+    );
+    assert_eq!(
+        native.external_tokens, js.external_tokens,
+        "externals mismatch"
+    );
+    assert_eq!(
+        native.variables_to_inline, js.variables_to_inline,
+        "inline mismatch"
+    );
+    assert_eq!(
+        native.supertype_symbols, js.supertype_symbols,
+        "supertypes mismatch"
+    );
+    assert_eq!(native.word_token, js.word_token, "word mismatch");
+    assert_eq!(
+        native.precedence_orderings, js.precedence_orderings,
+        "precedences mismatch"
+    );
+}
+
+// ===== C++ grammar roundtrip =====
+
+#[test]
+fn cpp_native_grammar_roundtrip() {
+    let dir = native_grammar_dir("cpp_native");
+    let native_json = parse_native_dsl_to_json(&read_native_grammar("cpp_native"), &dir).unwrap();
+    let js_json =
+        std::fs::read_to_string(test_grammars_dir().join("../grammars/cpp/src/grammar.json"))
+            .unwrap();
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+
+    assert_eq!(native.name, js.name, "name mismatch");
+
+    let native_rules: rustc_hash::FxHashMap<&str, &Rule> = native
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.rule))
+        .collect();
+    let js_rules: rustc_hash::FxHashMap<&str, &Rule> = js
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.rule))
+        .collect();
+
+    // Collect all mismatches before asserting so we see the full picture
+    let mut mismatches = Vec::new();
+    for (name, js_rule) in &js_rules {
+        match native_rules.get(name) {
+            None => mismatches.push(format!("MISSING: {name}")),
+            Some(native_rule) if native_rule != js_rule => {
+                mismatches.push(format!("MISMATCH: {name}"));
+            }
+            _ => {}
+        }
+    }
+    for name in native_rules.keys() {
+        if !js_rules.contains_key(name) {
+            mismatches.push(format!("EXTRA: {name}"));
+        }
+    }
+    if native.extra_symbols != js.extra_symbols {
+        mismatches.push("CONFIG: extras".into());
+    }
+    if native.expected_conflicts != js.expected_conflicts {
+        mismatches.push("CONFIG: conflicts".into());
+    }
+    if native.external_tokens != js.external_tokens {
+        mismatches.push("CONFIG: externals".into());
+    }
+    if native.variables_to_inline != js.variables_to_inline {
+        mismatches.push("CONFIG: inline".into());
+    }
+    if native.supertype_symbols != js.supertype_symbols {
+        mismatches.push("CONFIG: supertypes".into());
+    }
+    if native.word_token != js.word_token {
+        mismatches.push("CONFIG: word".into());
+    }
+    if native.precedence_orderings != js.precedence_orderings {
+        mismatches.push("CONFIG: precedences".into());
+    }
+
+    if !mismatches.is_empty() {
+        mismatches.sort();
+        panic!("{} issues:\n{}", mismatches.len(), mismatches.join("\n"));
+    }
+}
+
+// ===== Inheritance =====
+
+#[test]
+fn inherit_all_rules() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+    "#,
+    );
+    assert_eq!(g.name, "derived");
+    assert_eq!(
+        rule_names(&g),
+        vec![
+            "program",
+            "statement",
+            "expression",
+            "identifier",
+            "_inline_rule"
+        ]
+    );
+}
+
+#[test]
+fn inherit_config() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+    "#,
+    );
+    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+    assert_eq!(g.variables_to_inline, vec!["_inline_rule"]);
+    assert_eq!(g.extra_symbols.len(), 1);
+}
+
+#[test]
+fn override_rule_replaces_body() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule expression { choice(identifier, "42") }
+    "#,
+    );
+    assert_eq!(
+        *find_rule(&g, "expression"),
+        Rule::choice(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::String("42".into()),
+        ])
+    );
+    assert_eq!(
+        *find_rule(&g, "_inline_rule"),
+        Rule::String("inline".into())
+    );
+}
+
+#[test]
+fn override_preserves_rule_order() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule statement { "overridden" }
+    "#,
+    );
+    assert_eq!(g.variables[1].name, "statement");
+    assert_eq!(g.variables[1].rule, Rule::String("overridden".into()));
+}
+
+#[test]
+fn new_rules_appended() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        rule new_rule { "hello" }
+    "#,
+    );
+    assert_eq!(g.variables.last().unwrap().name, "new_rule");
+    assert_eq!(
+        g.variables.last().unwrap().rule,
+        Rule::String("hello".into())
+    );
+    assert_eq!(g.variables.len(), 6);
+}
+
+#[test]
+fn override_and_new_combined() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule expression { choice(identifier, number) }
+        rule number { regexp("[0-9]+") }
+    "#,
+    );
+    assert_eq!(g.variables.len(), 6);
+    assert_eq!(
+        *find_rule(&g, "expression"),
+        Rule::choice(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::NamedSymbol("number".into()),
+        ])
+    );
+}
+
+#[test]
+fn config_override_replaces() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            extras: [regexp(r"\s"), regexp(r"//.*")],
+        }
+    "#,
+    );
+    assert_eq!(g.extra_symbols.len(), 2);
+}
+
+#[test]
+fn config_word_inherited() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+    "#,
+    );
+    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+}
+
+#[test]
+fn config_word_overridden() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, word: expression }
+    "#,
+    );
+    assert_eq!(g.word_token.as_deref(), Some("expression"));
+}
+
+#[test]
+fn field_access_produces_named_symbol() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule expression { choice(base.expression, "extended") }
+    "#,
+    );
+    assert_eq!(
+        *find_rule(&g, "expression"),
+        Rule::choice(vec![
+            Rule::NamedSymbol("expression".into()),
+            Rule::String("extended".into()),
+        ])
+    );
+}
+
+#[test]
+fn config_access_extras() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        let base_extras = base::extras
+    "#,
+    );
+    assert_eq!(g.name, "derived");
+}
+
+#[test]
+fn inherit_from_json() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("../grammars/json/src/grammar.json")
+        grammar { language: "json_extended", inherits: base }
+        rule new_type { "null" }
+    "#,
+    );
+    assert_eq!(g.name, "json_extended");
+    assert!(g.variables.iter().any(|v| v.name == "document"));
+    assert!(g.variables.iter().any(|v| v.name == "new_type"));
+}
+
+#[test]
+fn append_concatenates_lists() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let a: list<str> = ["x", "y"]
+        let b: list<str> = ["z"]
+        let c: list<str> = append(a, b)
+        rule program { choice(for (s: str) in c { s }) }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::String("x".into()),
+            Rule::String("y".into()),
+            Rule::String("z".into()),
+        ])
+    );
+}
+
+// ===== Inheritance errors =====
+
+#[test]
+fn error_override_without_inherit() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        override rule foo { "bar" }
+    "#,
+    );
+    assert!(
+        msg.contains("override") && msg.contains("inherits"),
+        "expected override-without-inherit error, got: {msg}"
+    );
+}
+
+#[test]
+fn error_override_rule_not_found() {
+    let msg = dsl_inherit_err(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule nonexistent { "oops" }
+    "#,
+    );
+    assert!(
+        msg.contains("nonexistent") && msg.contains("not found"),
+        "expected rule-not-found error, got: {msg}"
+    );
+}
+
+#[test]
+fn error_inherit_bad_path() {
+    let msg = dsl_inherit_err(
+        r#"
+        let base = inherit("nonexistent/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+    "#,
+    );
+    assert!(
+        msg.contains("failed to resolve") || msg.contains("nonexistent"),
+        "expected path error, got: {msg}"
+    );
+}
+
+#[test]
+fn error_inherit_bad_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad_file = dir.path().join("grammar.txt");
+    std::fs::write(&bad_file, "not a grammar").unwrap();
+
+    let input = format!(
+        r#"
+        let base = inherit("{}")
+        grammar {{ language: "derived", inherits: base }}
+    "#,
+        bad_file.display()
+    );
+    let msg = parse_native_dsl(&input, Path::new("."))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        msg.contains("unsupported file extension"),
+        "expected extension error, got: {msg}"
+    );
+}
+
+#[test]
+fn error_inherit_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let a_path = dir.path().join("a.tsg");
+    let b_path = dir.path().join("b.tsg");
+
+    std::fs::write(
+        &a_path,
+        format!(
+            r#"
+        let base = inherit("{}")
+        grammar {{ language: "a", inherits: base }}
+    "#,
+            b_path.display()
+        ),
+    )
+    .unwrap();
+
+    std::fs::write(
+        &b_path,
+        format!(
+            r#"
+        let base = inherit("{}")
+        grammar {{ language: "b", inherits: base }}
+    "#,
+            a_path.display()
+        ),
+    )
+    .unwrap();
+
+    let source = std::fs::read_to_string(&a_path).unwrap();
+    let msg = parse_native_dsl(&source, dir.path())
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("cycle"), "expected cycle error, got: {msg}");
+}
+
+#[test]
+fn error_append_mismatched_types() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let a: list<str> = ["x"]
+        let b: list<int> = [1]
+        let c = append(a, b)
+        rule program { "x" }
+    "#,
+    );
+    assert!(
+        msg.contains("list<str>") && msg.contains("list<int>"),
+        "expected type mismatch, got: {msg}"
+    );
+}
+
+#[test]
+fn error_append_non_list() {
+    let msg = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let a: str = "x"
+        let b: list<str> = ["y"]
+        let c = append(a, b)
+        rule program { "x" }
+    "#,
+    );
+    assert!(msg.contains("list"), "expected list type error, got: {msg}");
+}
+
+// ===== Benchmarks =====
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_native_dsl_c() {
+    let dir = native_grammar_dir("c_native");
+    let source = read_native_grammar("c_native");
+    for _ in 0..10 {
+        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+    }
+    let n = 1000;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+    }
+    eprintln!("Native DSL C: {:?}/iter", start.elapsed() / n);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_native_dsl_javascript() {
+    let dir = native_grammar_dir("javascript_native");
+    let source = read_native_grammar("javascript_native");
+    for _ in 0..10 {
+        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+    }
+    let n = 1000;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+    }
+    eprintln!("Native DSL JavaScript: {:?}/iter", start.elapsed() / n);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_json_parse_c() {
+    let js_json =
+        std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
+            .unwrap();
+    for _ in 0..10 {
+        std::hint::black_box(crate::parse_grammar::parse_grammar(&js_json).unwrap());
+    }
+    let n = 1000;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(crate::parse_grammar::parse_grammar(&js_json).unwrap());
+    }
+    eprintln!("JSON parse_grammar C: {:?}/iter", start.elapsed() / n);
+}

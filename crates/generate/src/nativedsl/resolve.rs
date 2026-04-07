@@ -89,8 +89,15 @@ impl Locals<'_> {
 /// # Errors
 ///
 /// Returns [`ResolveError`] for duplicate declarations or unknown identifiers.
-pub fn resolve(ast: &mut Ast<'_>) -> Result<(), ResolveError> {
-    let names = collect_names(ast)?;
+pub fn resolve(ast: &mut Ast<'_>, base_rule_names: &[String]) -> Result<(), ResolveError> {
+    let mut names = collect_names(ast)?;
+    // Register inherited rule names so they resolve to RuleRef
+    for name in base_rule_names {
+        // Don't error on duplicates - derived rules intentionally shadow base rules
+        if names.get(name).is_none() {
+            names.decls.insert(name.clone(), Decl::Rule);
+        }
+    }
     let n_items = ast.root_items.len();
     for i in 0..n_items {
         let item_id = ast.root_items[i];

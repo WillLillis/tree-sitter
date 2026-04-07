@@ -17,6 +17,8 @@ mod lexer;
 pub mod lower;
 mod parser;
 mod resolve;
+#[cfg(test)]
+mod tests;
 mod typecheck;
 
 use std::path::{Path, PathBuf};
@@ -41,11 +43,110 @@ use typecheck::TypeError;
 /// Returns [`DslError`] if any pipeline stage fails. The error carries the
 /// source [`Span`] of the offending construct.
 pub fn parse_native_dsl(input: &str, grammar_dir: &Path) -> Result<InputGrammar, DslError> {
+    parse_native_dsl_inner(input, grammar_dir, &[])
+}
+
+fn parse_native_dsl_inner(
+    input: &str,
+    grammar_dir: &Path,
+    ancestor_paths: &[PathBuf],
+) -> Result<InputGrammar, DslError> {
     let tokens = lexer::Lexer::new(input).tokenize()?;
-    let mut ast = parser::Parser::new(tokens, input).parse()?;
-    resolve::resolve(&mut ast)?;
+    let ast = parser::Parser::new(tokens, input).parse()?;
+
+    // Load base grammar before resolve so we can register its rule names
+    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?;
+    let base_rule_names: Vec<String> = base
+        .as_ref()
+        .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
+        .unwrap_or_default();
+
+    let mut ast = ast;
+    resolve::resolve(&mut ast, &base_rule_names)?;
     typecheck::check(&ast)?;
-    Ok(lower::lower_with_path(&ast, grammar_dir, &[])?)
+    Ok(lower::lower_with_base(&ast, base)?)
+}
+
+/// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
+fn load_base_grammar(
+    ast: &ast::Ast<'_>,
+    grammar_dir: &Path,
+    ancestor_paths: &[PathBuf],
+) -> Result<Option<InputGrammar>, DslError> {
+    use lower::{LowerError, LowerErrorKind};
+
+    for &item_id in &ast.root_items {
+        if let ast::Node::Let { value, .. } = ast.node(item_id) {
+            if let ast::Node::Inherit { path } = ast.node(*value) {
+                let path_str = ast.string_lit_content(*path);
+                let span = ast.span(*path);
+                let full_path = grammar_dir.join(path_str);
+                let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
+                    kind: LowerErrorKind::InheritLoadError(format!(
+                        "failed to resolve '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                })?;
+
+                // Cycle detection
+                if ancestor_paths.iter().any(|p| p == &canonical) {
+                    let mut chain = String::new();
+                    for p in ancestor_paths {
+                        chain.push_str(&p.display().to_string());
+                        chain.push_str(" -> ");
+                    }
+                    chain.push_str(&canonical.display().to_string());
+                    return Err(LowerError {
+                        kind: LowerErrorKind::InheritCycle(chain),
+                        span,
+                    }
+                    .into());
+                }
+
+                let content = std::fs::read_to_string(&full_path).map_err(|e| LowerError {
+                    kind: LowerErrorKind::InheritLoadError(format!(
+                        "failed to read '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                })?;
+
+                let mut child_ancestors = ancestor_paths.to_vec();
+                child_ancestors.push(canonical.clone());
+                let child_dir = canonical
+                    .parent()
+                    .expect("canonical path always has a parent");
+
+                let inherit_err = |msg: String| -> DslError {
+                    LowerError {
+                        kind: LowerErrorKind::InheritLoadError(format!(
+                            "in '{}': {msg}",
+                            full_path.display()
+                        )),
+                        span,
+                    }
+                    .into()
+                };
+
+                let ext = full_path.extension().and_then(|e| e.to_str());
+                let grammar = match ext {
+                    Some("tsg") => parse_native_dsl_inner(&content, child_dir, &child_ancestors)
+                        .map_err(|e| inherit_err(e.to_string()))?,
+                    Some("json") => crate::parse_grammar::parse_grammar(&content)
+                        .map_err(|e| inherit_err(e.to_string()))?,
+                    _ => {
+                        return Err(inherit_err(format!(
+                            "unsupported file extension, expected .tsg or .json"
+                        )));
+                    }
+                };
+
+                return Ok(Some(grammar));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Parse a native DSL source file and serialize to `grammar.json` format.
@@ -200,558 +301,4 @@ fn digit_count(n: usize) -> usize {
         return 1;
     }
     ((n as f64).log10().floor() as usize) + 1
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::grammars::VariableType;
-    use crate::rules::Rule;
-
-    #[test]
-    fn test_minimal_grammar() {
-        // Largest payload: NodeId(4) + Option<NodeId>(4) + NodeId(4) = 12, plus 4-byte tag = 16
-        // 4 nodes per 64-byte cache line
-        assert_eq!(std::mem::size_of::<ast::Node>(), 16);
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            rule program {
-                repeat("hello")
-            }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(grammar.name, "test");
-        assert_eq!(grammar.variables.len(), 1);
-        assert_eq!(grammar.variables[0].name, "program");
-        assert_eq!(grammar.variables[0].kind, VariableType::Named);
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::choice(vec![
-                Rule::repeat(Rule::String("hello".into())),
-                Rule::Blank,
-            ])
-        );
-    }
-
-    #[test]
-    fn test_function_expansion() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            fn comma_sep(item: rule) -> rule {
-                seq(item, repeat(seq(",", item)))
-            }
-
-            rule program {
-                comma_sep(identifier)
-            }
-
-            rule identifier {
-                regexp("[a-z]+")
-            }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(grammar.variables.len(), 2);
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::seq(vec![
-                Rule::NamedSymbol("identifier".into()),
-                Rule::choice(vec![
-                    Rule::repeat(Rule::seq(vec![
-                        Rule::String(",".into()),
-                        Rule::NamedSymbol("identifier".into()),
-                    ])),
-                    Rule::Blank,
-                ]),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_let_and_prec() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            let PREC: int = 5
-
-            rule expr {
-                prec.left(PREC, seq(expr, "+", expr))
-            }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::prec_left(
-                crate::rules::Precedence::Integer(5),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            )
-        );
-    }
-
-    #[test]
-    fn test_object_field_access() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            let PREC: int = { ADD: 1, MUL: 2 }
-
-            rule add {
-                prec.left(PREC.ADD, seq(expr, "+", expr))
-            }
-
-            rule mul {
-                prec.left(PREC.MUL, seq(expr, "*", expr))
-            }
-
-            rule expr {
-                choice(add, mul)
-            }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(grammar.variables.len(), 3);
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::prec_left(
-                crate::rules::Precedence::Integer(1),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            )
-        );
-    }
-
-    #[test]
-    fn test_grammar_config() {
-        let input = r#"
-            grammar {
-                language: "test",
-                extras: [regexp(r"\s"), comment],
-                externals: [heredoc],
-                supertypes: [_expression],
-                inline: [_statement],
-                conflicts: [[primary, arrow]],
-                word: identifier,
-            }
-
-            rule program { _expression }
-            rule _expression { "x" }
-            rule comment { regexp(r"\/\/.*") }
-            rule identifier { regexp("[a-z]+") }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(grammar.extra_symbols.len(), 2);
-        assert_eq!(grammar.external_tokens.len(), 1);
-        assert_eq!(grammar.supertype_symbols, vec!["_expression"]);
-        assert_eq!(grammar.variables_to_inline, vec!["_statement"]);
-        assert_eq!(
-            grammar.expected_conflicts,
-            vec![vec!["primary".to_string(), "arrow".to_string()]]
-        );
-        assert_eq!(grammar.word_token, Some("identifier".into()));
-    }
-
-    #[test]
-    fn test_for_expression() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            rule binary {
-                choice(
-                    for (op: str, p: int) in [
-                        ("+", 1),
-                        ("*", 2),
-                    ] {
-                        prec.left(p, seq(expr, op, expr))
-                    }
-                )
-            }
-
-            rule expr { "x" }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::choice(vec![
-                Rule::prec_left(
-                    crate::rules::Precedence::Integer(1),
-                    Rule::seq(vec![
-                        Rule::NamedSymbol("expr".into()),
-                        Rule::String("+".into()),
-                        Rule::NamedSymbol("expr".into()),
-                    ])
-                ),
-                Rule::prec_left(
-                    crate::rules::Precedence::Integer(2),
-                    Rule::seq(vec![
-                        Rule::NamedSymbol("expr".into()),
-                        Rule::String("*".into()),
-                        Rule::NamedSymbol("expr".into()),
-                    ])
-                ),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_for_single_binding() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            rule keywords {
-                choice(
-                    for (kw: str) in ["if", "else", "while"] {
-                        kw
-                    }
-                )
-            }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::choice(vec![
-                Rule::String("if".into()),
-                Rule::String("else".into()),
-                Rule::String("while".into()),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_for_single_element_tuple_destructure() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            rule keywords {
-                choice(
-                    for (kw: str) in [("if"), ("else"), ("while")] {
-                        kw
-                    }
-                )
-            }
-        "#;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::choice(vec![
-                Rule::String("if".into()),
-                Rule::String("else".into()),
-                Rule::String("while".into()),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_for_binding_count_mismatch() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            rule bad {
-                choice(
-                    for (a: str, b: int) in [("x")] {
-                        a
-                    }
-                )
-            }
-        "#;
-        let err = parse_native_dsl(input, Path::new(".")).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("bindings"),
-            "error should mention binding count mismatch: {msg}",
-        );
-    }
-
-    #[test]
-    fn test_json_roundtrip() {
-        #[expect(clippy::needless_raw_string_hashes, reason = "false positive")]
-        let input = r##"
-            grammar {
-                language: "test",
-                extras: [regexp(r"\s")],
-            }
-
-            rule program { repeat(pair) }
-            rule pair { seq(field(key, string), ":", field(value, string)) }
-            rule string { regexp(r#""[^"]*""#) }
-        "##;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        let json_str = parse_native_dsl_to_json(input, Path::new(".")).unwrap();
-        let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
-        assert_eq!(grammar.name, reparsed.name);
-        assert_eq!(grammar.variables.len(), reparsed.variables.len());
-        for (orig, re) in grammar.variables.iter().zip(reparsed.variables.iter()) {
-            assert_eq!(orig.name, re.name);
-        }
-    }
-
-    #[test]
-    fn test_expression_fn_helper() {
-        let input = r##"
-            grammar {
-                language: "test",
-            }
-
-            fn make_if(content: rule) -> rule {
-                seq("#if", content, "#endif")
-            }
-
-            rule preproc_if { make_if(_statement) }
-            rule preproc_in_block_if { make_if(_block_item) }
-
-            rule _statement { "stmt" }
-            rule _block_item { "item" }
-        "##;
-        let grammar = parse_native_dsl(input, Path::new(".")).unwrap();
-        let names: Vec<&str> = grammar.variables.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "preproc_if",
-                "preproc_in_block_if",
-                "_statement",
-                "_block_item"
-            ]
-        );
-        assert_eq!(
-            grammar.variables[0].rule,
-            Rule::seq(vec![
-                Rule::String("#if".into()),
-                Rule::NamedSymbol("_statement".into()),
-                Rule::String("#endif".into()),
-            ])
-        );
-        assert_eq!(
-            grammar.variables[1].rule,
-            Rule::seq(vec![
-                Rule::String("#if".into()),
-                Rule::NamedSymbol("_block_item".into()),
-                Rule::String("#endif".into()),
-            ])
-        );
-    }
-
-    #[test]
-    fn test_type_check_fn_args() {
-        let input = r#"
-            grammar {
-                language: "test",
-            }
-
-            fn needs_int(x: int) -> rule {
-                prec(x, "a")
-            }
-
-            rule program {
-                needs_int("not_an_int")
-            }
-        "#;
-        let err = parse_native_dsl(input, Path::new(".")).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("expected int"), "error was: {msg}",);
-    }
-
-    #[test]
-    fn test_prec_inside_token_immediate() {
-        let source = read_native_grammar("json_native");
-        let grammar_dir = native_grammar_dir("json_native");
-        let g = parse_native_dsl(&source, &grammar_dir).unwrap();
-        let string_content = g
-            .variables
-            .iter()
-            .find(|v| v.name == "string_content")
-            .unwrap();
-        eprintln!("string_content rule: {:?}", string_content.rule);
-        if let Rule::Metadata { params, .. } = &string_content.rule {
-            assert_eq!(
-                params.precedence,
-                crate::rules::Precedence::Integer(1),
-                "precedence lost in token.immediate(prec(1, ...))"
-            );
-            assert!(params.is_token);
-            assert!(params.is_main_token);
-        } else {
-            panic!("expected Metadata, got {:?}", string_content.rule);
-        }
-    }
-
-    fn test_grammars_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/test_grammars")
-    }
-
-    fn native_grammar_dir(name: &str) -> std::path::PathBuf {
-        test_grammars_dir().join(name)
-    }
-
-    fn read_native_grammar(name: &str) -> String {
-        let path = native_grammar_dir(name).join("grammar.tsg");
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
-    }
-
-    #[test]
-    fn test_json_native_grammar() {
-        let grammar_dir = native_grammar_dir("json_native");
-        let native_source = read_native_grammar("json_native");
-        let native_json = parse_native_dsl_to_json(&native_source, &grammar_dir).unwrap();
-
-        let js_path = test_grammars_dir().join("../grammars/json/src/grammar.json");
-        let js_json = std::fs::read_to_string(&js_path).unwrap();
-
-        let native_grammar = crate::parse_grammar::parse_grammar(&native_json).unwrap();
-        let js_grammar = crate::parse_grammar::parse_grammar(&js_json).unwrap();
-        assert_eq!(native_grammar, js_grammar);
-    }
-
-    #[test]
-    fn test_c_native_grammar() {
-        let grammar_dir = native_grammar_dir("c_native");
-        let native_source = read_native_grammar("c_native");
-        let native_json = parse_native_dsl_to_json(&native_source, &grammar_dir).unwrap();
-        let js_path = test_grammars_dir().join("../grammars/c/src/grammar.json");
-        let js_json = std::fs::read_to_string(&js_path).unwrap();
-
-        let native_grammar = crate::parse_grammar::parse_grammar(&native_json).unwrap();
-        let js_grammar = crate::parse_grammar::parse_grammar(&js_json).unwrap();
-        assert_eq!(native_grammar, js_grammar);
-    }
-
-    #[test]
-    fn test_javascript_native_grammar() {
-        let grammar_dir = native_grammar_dir("javascript_native");
-        let native_source = read_native_grammar("javascript_native");
-        let native_json = parse_native_dsl_to_json(&native_source, &grammar_dir).unwrap();
-        let js_path = test_grammars_dir().join("../grammars/javascript/src/grammar.json");
-        let js_json = std::fs::read_to_string(&js_path).unwrap();
-
-        let native_grammar = crate::parse_grammar::parse_grammar(&native_json).unwrap();
-        let js_grammar = crate::parse_grammar::parse_grammar(&js_json).unwrap();
-
-        assert_eq!(native_grammar.name, js_grammar.name, "name mismatch");
-
-        let native_rules: rustc_hash::FxHashMap<&str, &crate::rules::Rule> = native_grammar
-            .variables
-            .iter()
-            .map(|v| (v.name.as_str(), &v.rule))
-            .collect();
-        let js_rules: rustc_hash::FxHashMap<&str, &crate::rules::Rule> = js_grammar
-            .variables
-            .iter()
-            .map(|v| (v.name.as_str(), &v.rule))
-            .collect();
-
-        for (name, js_rule) in &js_rules {
-            let native_rule = native_rules
-                .get(name)
-                .unwrap_or_else(|| panic!("missing rule '{name}' in native grammar"));
-            assert_eq!(native_rule, js_rule, "rule mismatch for '{name}'");
-        }
-        for name in native_rules.keys() {
-            assert!(
-                js_rules.contains_key(name),
-                "extra rule '{name}' in native grammar"
-            );
-        }
-        assert_eq!(native_rules.len(), js_rules.len(), "rule count mismatch");
-
-        assert_eq!(
-            native_grammar.extra_symbols, js_grammar.extra_symbols,
-            "extras mismatch"
-        );
-        assert_eq!(
-            native_grammar.expected_conflicts, js_grammar.expected_conflicts,
-            "conflicts mismatch"
-        );
-        assert_eq!(
-            native_grammar.external_tokens, js_grammar.external_tokens,
-            "externals mismatch"
-        );
-        assert_eq!(
-            native_grammar.variables_to_inline, js_grammar.variables_to_inline,
-            "inline mismatch"
-        );
-        assert_eq!(
-            native_grammar.supertype_symbols, js_grammar.supertype_symbols,
-            "supertypes mismatch"
-        );
-        assert_eq!(
-            native_grammar.word_token, js_grammar.word_token,
-            "word mismatch"
-        );
-        assert_eq!(
-            native_grammar.precedence_orderings, js_grammar.precedence_orderings,
-            "precedences mismatch"
-        );
-    }
-
-    #[test]
-    #[ignore = "benchmark"] // run with --ignored for benchmarking
-    fn bench_native_dsl_c() {
-        let grammar_dir = native_grammar_dir("c_native");
-        let source = read_native_grammar("c_native");
-        for _ in 0..10 {
-            std::hint::black_box(parse_native_dsl(&source, &grammar_dir).unwrap());
-        }
-        let n = 1000;
-        let start = std::time::Instant::now();
-        for _ in 0..n {
-            std::hint::black_box(parse_native_dsl(&source, &grammar_dir).unwrap());
-        }
-        eprintln!("Native DSL C: {:?}/iter", start.elapsed() / n);
-    }
-
-    #[test]
-    #[ignore = "benchmark"]
-    fn bench_native_dsl_javascript() {
-        let grammar_dir = native_grammar_dir("javascript_native");
-        let source = read_native_grammar("javascript_native");
-        for _ in 0..10 {
-            std::hint::black_box(parse_native_dsl(&source, &grammar_dir).unwrap());
-        }
-        let n = 1000;
-        let start = std::time::Instant::now();
-        for _ in 0..n {
-            std::hint::black_box(parse_native_dsl(&source, &grammar_dir).unwrap());
-        }
-        eprintln!("Native DSL JavaScript: {:?}/iter", start.elapsed() / n);
-    }
-
-    #[test]
-    #[ignore = "benchmark"]
-    fn bench_json_parse_c() {
-        let js_json =
-            std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
-                .unwrap();
-        for _ in 0..10 {
-            std::hint::black_box(crate::parse_grammar::parse_grammar(&js_json).unwrap());
-        }
-        let n = 1000;
-        let start = std::time::Instant::now();
-        for _ in 0..n {
-            std::hint::black_box(crate::parse_grammar::parse_grammar(&js_json).unwrap());
-        }
-        eprintln!("JSON parse_grammar C: {:?}/iter", start.elapsed() / n);
-    }
 }
