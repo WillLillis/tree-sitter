@@ -42,7 +42,7 @@ pub struct InputGrammar {
     pub reserved_words: Vec<ReservedWordContext<Rule>>,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReservedWordContext<T> {
     pub name: String,
     pub reserved_words: Vec<T>,

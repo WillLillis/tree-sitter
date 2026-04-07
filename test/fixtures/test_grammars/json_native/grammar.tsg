@@ -2,7 +2,7 @@
 
 grammar {
     language: "json",
-    extras: [regex(r"\s"), comment],
+    extras: [regexp(r"\s"), comment],
     supertypes: [_value],
 }
 
@@ -61,13 +61,13 @@ rule _string_content {
 }
 
 rule string_content {
-    token_immediate(prec(1, regex(r#"[^\\"\n]+"#)))
+    token_immediate(prec(1, regexp(r#"[^\\"\n]+"#)))
 }
 
 rule escape_sequence {
     token_immediate(seq(
         "\\",
-        regex(r#"(\"|\\|\/|b|f|n|r|t|u)"#),
+        regexp(r#"(\"|\\|\/|b|f|n|r|t|u)"#),
     ))
 }
 
@@ -78,14 +78,14 @@ rule number {
     // exponentPart = seq(choice('e', 'E'), signedInteger)
     token(choice(
         seq(
-            seq(optional("-"), choice("0", seq(regex(r"[1-9]"), optional(regex(r"\d+"))))),
+            seq(optional("-"), choice("0", seq(regexp(r"[1-9]"), optional(regexp(r"\d+"))))),
             ".",
-            optional(regex(r"\d+")),
-            optional(seq(choice("e", "E"), seq(optional("-"), regex(r"\d+")))),
+            optional(regexp(r"\d+")),
+            optional(seq(choice("e", "E"), seq(optional("-"), regexp(r"\d+")))),
         ),
         seq(
-            seq(optional("-"), choice("0", seq(regex(r"[1-9]"), optional(regex(r"\d+"))))),
-            optional(seq(choice("e", "E"), seq(optional("-"), regex(r"\d+")))),
+            seq(optional("-"), choice("0", seq(regexp(r"[1-9]"), optional(regexp(r"\d+"))))),
+            optional(seq(choice("e", "E"), seq(optional("-"), regexp(r"\d+")))),
         ),
     ))
 }
@@ -96,10 +96,10 @@ rule null { "null" }
 
 rule comment {
     token(choice(
-        seq("//", regex(r".*")),
+        seq("//", regexp(r".*")),
         seq(
             "/*",
-            regex(r#"[^*]*\*+([^/*][^*]*\*+)*"#),
+            regexp(r#"[^*]*\*+([^/*][^*]*\*+)*"#),
             "/",
         ),
     ))

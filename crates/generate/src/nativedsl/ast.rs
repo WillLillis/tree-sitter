@@ -29,6 +29,30 @@ impl NodeId {
     }
 }
 
+/// Typed index into `AstContext::fn_configs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FnId(u32);
+
+impl FnId {
+    #[inline]
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Typed index into `AstContext::for_configs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ForId(u32);
+
+impl ForId {
+    #[inline]
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Byte offset range `[start, end)` in the source text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Span {
@@ -62,8 +86,9 @@ impl Span {
     /// Resolve this span to a `&str` slice of the source.
     ///
     /// # Safety (internal)
-    /// Span boundaries are always produced by the lexer at valid UTF-8
-    /// positions (ASCII token boundaries), so unchecked indexing is safe.
+    /// Span boundaries are produced by the lexer at ASCII byte positions
+    /// (all token delimiters are ASCII), which are always valid UTF-8
+    /// boundaries.
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
@@ -106,16 +131,16 @@ impl AstContext<'_> {
         self.spans[id.index()]
     }
 
-    /// Look up a function config by its index (stored in `Node::Fn(idx)`).
+    /// Look up a function config by its index (stored in `Node::Fn(id)`).
     #[must_use]
-    pub fn get_fn(&self, idx: u32) -> &FnConfig {
-        &self.fn_configs[idx as usize]
+    pub fn get_fn(&self, id: FnId) -> &FnConfig {
+        &self.fn_configs[id.index()]
     }
 
-    /// Look up a for-loop config by its index (stored in `Node::For(idx)`).
+    /// Look up a for-loop config by its index (stored in `Node::For(id)`).
     #[must_use]
-    pub fn get_for(&self, idx: u32) -> &ForConfig {
-        &self.for_configs[idx as usize]
+    pub fn get_for(&self, id: ForId) -> &ForConfig {
+        &self.for_configs[id.index()]
     }
 
     /// Look up object fields by range (stored in `Node::Object`).
@@ -210,28 +235,28 @@ impl<'src> Ast<'src> {
         self.context.spans[id.index()]
     }
 
-    /// Store a function config and return its index for `Node::Fn(idx)`.
-    pub fn push_fn(&mut self, config: FnConfig) -> u32 {
-        let idx = self.context.fn_configs.len() as u32;
+    /// Store a function config and return its [`FnId`] for `Node::Fn`.
+    pub fn push_fn(&mut self, config: FnConfig) -> FnId {
+        let id = FnId(self.context.fn_configs.len() as u32);
         self.context.fn_configs.push(config);
-        idx
+        id
     }
 
     #[must_use]
-    pub fn get_fn(&self, idx: u32) -> &FnConfig {
-        self.context.get_fn(idx)
+    pub fn get_fn(&self, id: FnId) -> &FnConfig {
+        self.context.get_fn(id)
     }
 
-    /// Store a for-loop config and return its index for `Node::For(idx)`.
-    pub fn push_for(&mut self, config: ForConfig) -> u32 {
-        let idx = self.context.for_configs.len() as u32;
+    /// Store a for-loop config and return its [`ForId`] for `Node::For`.
+    pub fn push_for(&mut self, config: ForConfig) -> ForId {
+        let id = ForId(self.context.for_configs.len() as u32);
         self.context.for_configs.push(config);
-        idx
+        id
     }
 
     #[must_use]
-    pub fn get_for(&self, idx: u32) -> &ForConfig {
-        self.context.get_for(idx)
+    pub fn get_for(&self, id: ForId) -> &ForConfig {
+        self.context.get_for(id)
     }
 
     /// Store object fields and return a `ChildRange` for `Node::Object`.
@@ -267,10 +292,10 @@ impl<'src> Ast<'src> {
 
     /// Push a list of child NodeIds into the shared children vector,
     /// returning a `ChildRange` referencing them.
-    pub fn push_children(&mut self, items: Vec<NodeId>) -> ChildRange {
+    pub fn push_children(&mut self, items: &[NodeId]) -> ChildRange {
         let start = self.context.children.len() as u32;
         let len = items.len() as u16;
-        self.context.children.extend(items);
+        self.context.children.extend_from_slice(items);
         ChildRange::new(start, len)
     }
 
@@ -335,9 +360,10 @@ impl ChildRange {
 
 /// Every AST construct lives in this enum.
 ///
-/// The enum is kept at 32 bytes by storing large payloads (function configs,
-/// for-loop configs, grammar config) out-of-line in [`AstContext`] and
-/// referencing them by index.
+/// The enum is kept at 16 bytes (4 nodes per 64-byte cache line) by storing
+/// large payloads out-of-line in [`AstContext`] - function/for configs by
+/// index, variadic children via [`ChildRange`], and identifier spans via the
+/// parallel spans vector.
 ///
 /// After the resolve pass, all `Ident` nodes are replaced with either
 /// `RuleRef` or `VarRef`.
@@ -350,13 +376,17 @@ pub enum Node {
         name: NodeId,
         body: NodeId,
     },
+    /// Override rule definition - replaces a rule from the base grammar.
+    OverrideRule {
+        name: NodeId,
+        body: NodeId,
+    },
     Let {
         name: NodeId,
         ty: Option<NodeId>,
         value: NodeId,
     },
-    /// Index into `Ast::fn_configs`.
-    Fn(u32),
+    Fn(FnId),
 
     // ---- Expressions ----
     /// String literal. Node span covers `"..."` including quotes.
@@ -375,6 +405,11 @@ pub enum Node {
     /// Resolved: reference to a variable (let binding, fn param, for binding).
     VarRef,
     FieldAccess {
+        obj: NodeId,
+        field: NodeId,
+    },
+    /// `c::extras`, `c::inline` - access a config field on a base grammar.
+    ConfigAccess {
         obj: NodeId,
         field: NodeId,
     },
@@ -419,8 +454,17 @@ pub enum Node {
         pattern: NodeId,
         flags: Option<NodeId>,
     },
-    /// Index into `Ast::for_configs`.
-    For(u32),
+    /// `inherit("path/to/grammar")` - loads a base grammar for inheritance.
+    /// The `path` NodeId points to the string literal containing the path.
+    Inherit {
+        path: NodeId,
+    },
+    /// `append(list1, list2)` - concatenates two lists.
+    Append {
+        left: NodeId,
+        right: NodeId,
+    },
+    For(ForId),
     Call {
         name: NodeId,
         args: ChildRange,
@@ -466,6 +510,8 @@ impl Node {
 pub struct GrammarConfig {
     /// Language name - processed string (from string literal).
     pub language: Option<String>,
+    /// Base grammar to inherit from (the `inherits:` field).
+    pub inherits: Option<NodeId>,
     pub extras: NodeList,
     pub externals: NodeList,
     /// Conflict groups - identifiers stored as spans.
