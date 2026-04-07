@@ -25,7 +25,6 @@
 //! existing parser generator pipeline.
 
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -540,109 +539,15 @@ impl<'src> Evaluator<'src> {
 ///
 /// Returns [`LowerError`] if the grammar block is missing, a required field
 /// is absent, or an expression cannot be used as a grammar rule.
-pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
-    lower_with_path(ast, Path::new("."), &[])
-}
-
-/// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
-fn find_and_load_base_grammar(
+/// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
+///
+/// The `base_grammar` is the pre-loaded inherited grammar (if any), which
+/// was loaded earlier in the pipeline so that resolve could register its
+/// rule names.
+pub fn lower_with_base(
     ast: &Ast<'_>,
-    grammar_dir: &Path,
-    ancestor_paths: &[PathBuf],
-) -> Result<Option<InputGrammar>, LowerError> {
-    for &item_id in &ast.root_items {
-        if let Node::Let { value, .. } = ast.node(item_id) {
-            if let Node::Inherit { path } = ast.node(*value) {
-                let path_str = ast.string_lit_content(*path);
-                let span = ast.span(*path);
-                let full_path = grammar_dir.join(path_str);
-                let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
-                    kind: LowerErrorKind::InheritLoadError(format!(
-                        "failed to resolve '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                })?;
-
-                // Cycle detection
-                if ancestor_paths.iter().any(|p| p == &canonical) {
-                    let mut chain = String::new();
-                    for p in ancestor_paths {
-                        chain.push_str(&p.display().to_string());
-                        chain.push_str(" -> ");
-                    }
-                    chain.push_str(&canonical.display().to_string());
-                    return Err(LowerError {
-                        kind: LowerErrorKind::InheritCycle(chain),
-                        span,
-                    });
-                }
-
-                let content = std::fs::read_to_string(&full_path).map_err(|e| LowerError {
-                    kind: LowerErrorKind::InheritLoadError(format!(
-                        "failed to read '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                })?;
-
-                let mut child_ancestors = ancestor_paths.to_vec();
-                child_ancestors.push(canonical.clone());
-                let child_dir = canonical
-                    .parent()
-                    .expect("canonical path always has a parent");
-
-                let inherit_err = |e: std::fmt::Arguments<'_>| LowerError {
-                    kind: LowerErrorKind::InheritLoadError(format!(
-                        "in '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                };
-
-                let ext = full_path.extension().and_then(|e| e.to_str());
-                let grammar = match ext {
-                    Some("tsg") => {
-                        let tokens = super::lexer::Lexer::new(&content)
-                            .tokenize()
-                            .map_err(|e| inherit_err(format_args!("{e}")))?;
-                        let mut child_ast = super::parser::Parser::new(tokens, &content)
-                            .parse()
-                            .map_err(|e| inherit_err(format_args!("{e}")))?;
-                        super::resolve::resolve(&mut child_ast)
-                            .map_err(|e| inherit_err(format_args!("{e}")))?;
-                        super::typecheck::check(&child_ast)
-                            .map_err(|e| inherit_err(format_args!("{e}")))?;
-                        lower_with_path(&child_ast, child_dir, &child_ancestors)?
-                    }
-                    Some("json") => crate::parse_grammar::parse_grammar(&content)
-                        .map_err(|e| inherit_err(format_args!("{e}")))?,
-                    _ => {
-                        return Err(LowerError {
-                            kind: LowerErrorKind::InheritLoadError(format!(
-                                "unsupported file extension for '{}', expected .tsg or .json",
-                                full_path.display()
-                            )),
-                            span,
-                        });
-                    }
-                };
-
-                return Ok(Some(grammar));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// Lower with an explicit grammar directory (needed for `inherit()` path resolution)
-/// and a set of ancestor paths for cycle detection.
-pub fn lower_with_path(
-    ast: &Ast<'_>,
-    grammar_dir: &Path,
-    ancestor_paths: &[PathBuf],
+    base_grammar: Option<InputGrammar>,
 ) -> Result<InputGrammar, LowerError> {
-    let base_grammar = find_and_load_base_grammar(ast, grammar_dir, ancestor_paths)?;
     let mut eval = Evaluator::new(ast, base_grammar);
     let mut rule_entries: Vec<(String, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(String, RuleId, Span)> = Vec::new();
