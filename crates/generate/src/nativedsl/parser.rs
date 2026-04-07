@@ -82,8 +82,8 @@ impl<'src> Parser<'src> {
     fn expect(&mut self, kind: &TokenKind) -> Result<Span, ParseError> {
         self.eat(kind).ok_or_else(|| {
             self.error(ParseErrorKind::ExpectedToken {
-                expected: kind.clone(),
-                got: self.tokens[self.pos].kind.clone(),
+                expected: *kind,
+                got: self.tokens[self.pos].kind,
             })
         })
     }
@@ -137,12 +137,15 @@ impl<'src> Parser<'src> {
             | TokenKind::KwReserved
             | TokenKind::KwTokenImmediate
             | TokenKind::KwConcat
-            | TokenKind::KwRegex
+            | TokenKind::KwRegexp
             | TokenKind::KwLet
             | TokenKind::KwFn
             | TokenKind::KwFor
             | TokenKind::KwIn
-            | TokenKind::KwGrammar => {
+            | TokenKind::KwGrammar
+            | TokenKind::KwInherit
+            | TokenKind::KwOverride
+            | TokenKind::KwAppend => {
                 self.pos += 1;
                 Ok(span)
             }
@@ -161,6 +164,7 @@ impl<'src> Parser<'src> {
         match &self.tokens[self.pos].kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
             TokenKind::KwRule => self.parse_rule_def(),
+            TokenKind::KwOverride => self.parse_override_rule_def(),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwFn => self.parse_fn_def(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
@@ -177,16 +181,16 @@ impl<'src> Parser<'src> {
                 self.ast.context.grammar_config = Some(config);
                 return Ok(self.ast.push(Node::Grammar, start.merge(end)));
             }
-            let key_span = self.expect_ident()?;
-            let key = self.ast.text(key_span).to_string();
+            let key_span = self.expect_name()?;
             self.expect(&TokenKind::Colon)?;
-            match key.as_str() {
+            match self.ast.text(key_span) {
                 "language" => {
                     let span = self.expect_string()?;
                     // Strip quotes - language name is simple ASCII, no escapes
                     let inner = Span::new(span.start + 1, span.end - 1);
                     config.language = Some(self.ast.text(inner).to_string());
                 }
+                "inherits" => config.inherits = Some(self.parse_expr()?),
                 "extras" => config.extras = self.parse_expr_array()?,
                 "externals" => config.externals = self.parse_expr_array()?,
                 "supertypes" => config.supertypes = self.parse_ident_span_array()?,
@@ -197,7 +201,9 @@ impl<'src> Parser<'src> {
                 "reserved" => config.reserved = self.parse_reserved()?,
                 _ => {
                     return Err(ParseError {
-                        kind: ParseErrorKind::UnknownGrammarField(key),
+                        kind: ParseErrorKind::UnknownGrammarField(
+                            self.ast.text(key_span).to_string(),
+                        ),
                         span: key_span,
                     });
                 }
@@ -277,6 +283,18 @@ impl<'src> Parser<'src> {
         Ok(self.ast.push(Node::Rule { name, body }, start.merge(end)))
     }
 
+    fn parse_override_rule_def(&mut self) -> Result<NodeId, ParseError> {
+        let start = self.expect(&TokenKind::KwOverride)?;
+        self.expect(&TokenKind::KwRule)?;
+        let name = self.expect_ident_node()?;
+        self.expect(&TokenKind::LBrace)?;
+        let body = self.parse_expr()?;
+        let end = self.expect(&TokenKind::RBrace)?;
+        Ok(self
+            .ast
+            .push(Node::OverrideRule { name, body }, start.merge(end)))
+    }
+
     fn parse_let_def(&mut self) -> Result<NodeId, ParseError> {
         let start = self.expect(&TokenKind::KwLet)?;
         let name = self.expect_ident_node()?;
@@ -328,8 +346,7 @@ impl<'src> Parser<'src> {
         let start = self.span();
 
         if let Some(id_span) = self.eat_kind(&TokenKind::Ident) {
-            let id = self.ast.text(id_span).to_string();
-            return match id.as_str() {
+            return match self.ast.text(id_span) {
                 "rule" => Ok(self.ast.push(Node::TypeRule, id_span)),
                 "str" => Ok(self.ast.push(Node::TypeStr, id_span)),
                 "int" => Ok(self.ast.push(Node::TypeInt, id_span)),
@@ -340,7 +357,7 @@ impl<'src> Parser<'src> {
                     Ok(self.ast.push(Node::TypeList(inner), start.merge(end)))
                 }
                 _ => Err(ParseError {
-                    kind: ParseErrorKind::UnknownType(id),
+                    kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
                     span: id_span,
                 }),
             };
@@ -349,7 +366,7 @@ impl<'src> Parser<'src> {
         if self.eat(&TokenKind::LParen).is_some() {
             let elems = self.comma_sep(&TokenKind::RParen, Self::parse_type)?;
             let end = self.expect(&TokenKind::RParen)?;
-            let range = self.ast.push_children(elems);
+            let range = self.ast.push_children(&elems);
             return Ok(self.ast.push(Node::TypeTuple(range), start.merge(end)));
         }
 
@@ -385,7 +402,9 @@ impl<'src> Parser<'src> {
             TokenKind::KwPrec => self.parse_prec_combinator(start),
             TokenKind::KwReserved => self.parse_reserved_combinator(start),
             TokenKind::KwConcat => self.parse_concat(start),
-            TokenKind::KwRegex => self.parse_dyn_regex(start),
+            TokenKind::KwRegexp => self.parse_dyn_regex(start),
+            TokenKind::KwInherit => self.parse_inherit_expr(start),
+            TokenKind::KwAppend => self.parse_append_expr(start),
             TokenKind::KwFor => self.parse_for_expr(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             TokenKind::StringLit => {
@@ -425,7 +444,7 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LParen)?;
         let args = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RParen)?;
-        let range = self.ast.push_children(args);
+        let range = self.ast.push_children(&args);
         let node = match name {
             "seq" => Node::Seq(range),
             "choice" => Node::Choice(range),
@@ -476,7 +495,7 @@ impl<'src> Parser<'src> {
         self.expect(&TokenKind::LParen)?;
         let args = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RParen)?;
-        let range = self.ast.push_children(args);
+        let range = self.ast.push_children(&args);
         Ok(self.ast.push(Node::Concat(range), start.merge(end)))
     }
 
@@ -545,6 +564,27 @@ impl<'src> Parser<'src> {
             .push(Node::Reserved { context, content }, start.merge(end)))
     }
 
+    fn parse_inherit_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
+        self.pos += 1;
+        self.expect(&TokenKind::LParen)?;
+        let path_span = self.expect_string()?;
+        let path = self.ast.push(Node::StringLit, path_span);
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok(self.ast.push(Node::Inherit { path }, start.merge(end)))
+    }
+
+    fn parse_append_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
+        self.pos += 1;
+        self.expect(&TokenKind::LParen)?;
+        let left = self.parse_expr()?;
+        self.expect(&TokenKind::Comma)?;
+        let right = self.parse_expr()?;
+        let end = self.expect(&TokenKind::RParen)?;
+        Ok(self
+            .ast
+            .push(Node::Append { left, right }, start.merge(end)))
+    }
+
     fn parse_for_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(&TokenKind::LParen)?;
@@ -579,6 +619,12 @@ impl<'src> Parser<'src> {
                 let field_span = self.ast.span(field);
                 let span = start.merge(field_span);
                 id = self.ast.push(Node::FieldAccess { obj: id, field }, span);
+            } else if self.at(&TokenKind::ColonColon) {
+                self.pos += 1;
+                let field = self.expect_ident_node()?;
+                let field_span = self.ast.span(field);
+                let span = start.merge(field_span);
+                id = self.ast.push(Node::ConfigAccess { obj: id, field }, span);
             } else if self.at(&TokenKind::LParen) {
                 if !matches!(self.ast.node(id), Node::Ident) {
                     return Err(self.error(ParseErrorKind::OnlySimpleNamesCallable));
@@ -586,7 +632,7 @@ impl<'src> Parser<'src> {
                 self.pos += 1;
                 let args = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
                 let end = self.expect(&TokenKind::RParen)?;
-                let args = self.ast.push_children(args);
+                let args = self.ast.push_children(&args);
                 id = self.ast.push(
                     Node::Call {
                         name: name_id,
@@ -606,7 +652,7 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         let items = self.comma_sep(&TokenKind::RBracket, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RBracket)?;
-        let range = self.ast.push_children(items);
+        let range = self.ast.push_children(&items);
         Ok(self.ast.push(Node::List(range), start.merge(end)))
     }
 
@@ -614,7 +660,7 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         let items = self.comma_sep(&TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(&TokenKind::RParen)?;
-        let range = self.ast.push_children(items);
+        let range = self.ast.push_children(&items);
         Ok(self.ast.push(Node::Tuple(range), start.merge(end)))
     }
 
