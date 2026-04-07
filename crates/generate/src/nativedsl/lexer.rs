@@ -15,7 +15,7 @@ use thiserror::Error;
 use super::ast::Span;
 
 /// The kind of a lexer token.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum TokenKind {
     // Identifiers and literals
     Ident,
@@ -50,7 +50,10 @@ pub enum TokenKind {
     KwReserved,
     KwTokenImmediate,
     KwConcat,
-    KwRegex,
+    KwRegexp,
+    KwInherit,
+    KwOverride,
+    KwAppend,
 
     // Punctuation
     LBrace,
@@ -61,6 +64,7 @@ pub enum TokenKind {
     RBracket,
     Comma,
     Colon,
+    ColonColon,
     Dot,
     Arrow, // ->
     Minus,
@@ -97,7 +101,10 @@ impl std::fmt::Display for TokenKind {
             Self::KwReserved => "'reserved'",
             Self::KwTokenImmediate => "'token_immediate'",
             Self::KwConcat => "'concat'",
-            Self::KwRegex => "'regex'",
+            Self::KwRegexp => "'regexp'",
+            Self::KwInherit => "'inherit'",
+            Self::KwOverride => "'override'",
+            Self::KwAppend => "'append'",
             Self::LBrace => "'{'",
             Self::RBrace => "'}'",
             Self::LParen => "'('",
@@ -106,6 +113,7 @@ impl std::fmt::Display for TokenKind {
             Self::RBracket => "']'",
             Self::Comma => "','",
             Self::Colon => "':'",
+            Self::ColonColon => "'::'",
             Self::Dot => "'.'",
             Self::Arrow => "'->'",
             Self::Minus => "'-'",
@@ -207,7 +215,14 @@ impl<'src> Lexer<'src> {
             b'[' => TokenKind::LBracket,
             b']' => TokenKind::RBracket,
             b',' => TokenKind::Comma,
-            b':' => TokenKind::Colon,
+            b':' => {
+                if self.peek() == Some(b':') {
+                    self.advance();
+                    TokenKind::ColonColon
+                } else {
+                    TokenKind::Colon
+                }
+            }
             b'.' => TokenKind::Dot,
             b'=' => TokenKind::Eq,
             b'<' => TokenKind::Lt,
@@ -379,7 +394,10 @@ impl<'src> Lexer<'src> {
             "reserved" => TokenKind::KwReserved,
             "token_immediate" => TokenKind::KwTokenImmediate,
             "concat" => TokenKind::KwConcat,
-            "regex" => TokenKind::KwRegex,
+            "regexp" => TokenKind::KwRegexp,
+            "inherit" => TokenKind::KwInherit,
+            "override" => TokenKind::KwOverride,
+            "append" => TokenKind::KwAppend,
             _ => TokenKind::Ident,
         })
     }
@@ -423,7 +441,12 @@ impl std::fmt::Display for LexError {
                 write!(f, "expected '\"' after 'r' and '#' delimiters")
             }
             LexErrorKind::IntegerOverflow => {
-                write!(f, "integer literal too large (must fit in i32)")
+                write!(
+                    f,
+                    "integer literal out of range [{}, {}]",
+                    i32::MIN,
+                    i32::MAX,
+                )
             }
         }
     }

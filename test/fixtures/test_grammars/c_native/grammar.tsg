@@ -21,7 +21,7 @@ grammar {
         [type_specifier, _top_level_expression_statement],
         [type_qualifier, extension_expression],
     ],
-    extras: [regex(r"\s|\\\r?\n"), comment],
+    extras: [regexp(r"\s|\\\r?\n"), comment],
     inline: [
         _type_identifier, _field_identifier, _statement_identifier,
         _non_case_statement, _assignment_left_expression, _expression_not_binary,
@@ -53,7 +53,7 @@ fn comma_sep1(item: rule) -> rule { seq(item, repeat(seq(",", item))) }
 fn comma_sep(item: rule) -> rule { optional(comma_sep1(item)) }
 
 fn preprocessor(command: str) -> rule {
-    alias(regex(concat("#[ \t]*", command)), concat("#", command))
+    alias(regexp(concat("#[ \t]*", command)), concat("#", command))
 }
 
 // ---------------------------------------------------------------------------
@@ -117,26 +117,26 @@ rule preproc_include {
         preprocessor("include"),
         field(path, choice(string_literal, system_lib_string, identifier,
             alias(preproc_call_expression, call_expression))),
-        token_immediate(regex(r"\r?\n")),
+        token_immediate(regexp(r"\r?\n")),
     )
 }
 
 rule preproc_def {
     seq(preprocessor("define"), field(name, identifier),
-        field(value, optional(preproc_arg)), token_immediate(regex(r"\r?\n")))
+        field(value, optional(preproc_arg)), token_immediate(regexp(r"\r?\n")))
 }
 
 rule preproc_function_def {
     seq(preprocessor("define"), field(name, identifier),
         field(parameters, preproc_params),
-        field(value, optional(preproc_arg)), token_immediate(regex(r"\r?\n")))
+        field(value, optional(preproc_arg)), token_immediate(regexp(r"\r?\n")))
 }
 
 rule preproc_params { seq(token_immediate("("), comma_sep(choice(identifier, "...")), ")") }
 
 rule preproc_call {
     seq(field(directive, preproc_directive),
-        field(argument, optional(preproc_arg)), token_immediate(regex(r"\r?\n")))
+        field(argument, optional(preproc_arg)), token_immediate(regexp(r"\r?\n")))
 }
 
 // Base variants (no suffix)
@@ -167,8 +167,8 @@ rule preproc_else_in_enumerator_list_no_comma { preproc_else_body(enumerator, -1
 rule preproc_elif_in_enumerator_list_no_comma { preproc_elif_body(enumerator, -1, alias(preproc_else_in_enumerator_list_no_comma, preproc_else), alias(preproc_elif_in_enumerator_list_no_comma, preproc_elif), alias(preproc_elifdef_in_enumerator_list_no_comma, preproc_elifdef)) }
 rule preproc_elifdef_in_enumerator_list_no_comma { preproc_elifdef_body(enumerator, -1, alias(preproc_else_in_enumerator_list_no_comma, preproc_else), alias(preproc_elif_in_enumerator_list_no_comma, preproc_elif), alias(preproc_elifdef_in_enumerator_list_no_comma, preproc_elifdef)) }
 
-rule preproc_arg { token(prec(-1, regex(r"\S([^/\n]|\/[^*]|\\\r?\n)*"))) }
-rule preproc_directive { regex(r"#[ \t]*[a-zA-Z0-9]\w*") }
+rule preproc_arg { token(prec(-1, regexp(r"\S([^/\n]|\/[^*]|\\\r?\n)*"))) }
+rule preproc_directive { regexp(r"#[ \t]*[a-zA-Z0-9]\w*") }
 
 rule _preproc_expression {
     choice(
@@ -704,33 +704,33 @@ rule field_designator { seq(".", _field_identifier) }
 // hexDigits = seq(repeat1(/[0-9a-fA-F]/), repeat(seq("'", repeat1(/[0-9a-fA-F]/))))
 rule number_literal {
     token(seq(
-        optional(regex(r"[-\+]")),
-        optional(choice(regex("0[xX]"), regex("0[bB]"))),
+        optional(regexp(r"[-\+]")),
+        optional(choice(regexp("0[xX]"), regexp("0[bB]"))),
         choice(
             seq(
                 choice(
-                    seq(repeat1(regex("[0-9]")), repeat(seq("'", repeat1(regex("[0-9]"))))),
-                    seq(regex("0[bB]"), seq(repeat1(regex("[0-9]")), repeat(seq("'", repeat1(regex("[0-9]")))))),
-                    seq(regex("0[xX]"), seq(repeat1(regex("[0-9a-fA-F]")), repeat(seq("'", repeat1(regex("[0-9a-fA-F]")))))),
+                    seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]"))))),
+                    seq(regexp("0[bB]"), seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]")))))),
+                    seq(regexp("0[xX]"), seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]")))))),
                 ),
-                optional(seq(".", optional(seq(repeat1(regex("[0-9a-fA-F]")), repeat(seq("'", repeat1(regex("[0-9a-fA-F]")))))))),
+                optional(seq(".", optional(seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]")))))))),
             ),
-            seq(".", seq(repeat1(regex("[0-9]")), repeat(seq("'", repeat1(regex("[0-9]")))))),
+            seq(".", seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]")))))),
         ),
         optional(seq(
-            regex("[eEpP]"),
+            regexp("[eEpP]"),
             optional(seq(
-                optional(regex(r"[-\+]")),
-                seq(repeat1(regex("[0-9a-fA-F]")), repeat(seq("'", repeat1(regex("[0-9a-fA-F]"))))),
+                optional(regexp(r"[-\+]")),
+                seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]"))))),
             )),
         )),
-        regex("[uUlLwWfFbBdD]*"),
+        regexp("[uUlLwWfFbBdD]*"),
     ))
 }
 
 rule char_literal {
     seq(choice("L'", "u'", "U'", "u8'", "'"),
-        repeat1(choice(escape_sequence, alias(token_immediate(regex(r"[^\n']")), character))),
+        repeat1(choice(escape_sequence, alias(token_immediate(regexp(r"[^\n']")), character))),
         "'")
 }
 
@@ -742,21 +742,21 @@ rule concatenated_string {
 
 rule string_literal {
     seq(choice("L\"", "u\"", "U\"", "u8\"", "\""),
-        repeat(choice(alias(token_immediate(prec(1, regex(r#"[^\\"\n]+"#))), string_content), escape_sequence)),
+        repeat(choice(alias(token_immediate(prec(1, regexp(r#"[^\\"\n]+"#))), string_content), escape_sequence)),
         "\"")
 }
 
 rule escape_sequence {
-    token(prec(1, seq("\\", choice(regex("[^xuU]"), regex(r"\d{2,3}"), regex("x[0-9a-fA-F]{1,4}"), regex("u[0-9a-fA-F]{4}"), regex("U[0-9a-fA-F]{8}")))))
+    token(prec(1, seq("\\", choice(regexp("[^xuU]"), regexp(r"\d{2,3}"), regexp("x[0-9a-fA-F]{1,4}"), regexp("u[0-9a-fA-F]{4}"), regexp("U[0-9a-fA-F]{8}")))))
 }
 
-rule system_lib_string { token(seq("<", repeat(choice(regex(r"[^>\n]"), "\\>")), ">")) }
+rule system_lib_string { token(seq("<", repeat(choice(regexp(r"[^>\n]"), "\\>")), ">")) }
 
 rule true { token(choice("TRUE", "true")) }
 rule false { token(choice("FALSE", "false")) }
 rule null { choice("NULL", "nullptr") }
 
-rule identifier { regex(r"(\p{XID_Start}|\$|_|\\u[0-9A-Fa-f]{4}|\\U[0-9A-Fa-f]{8})(\p{XID_Continue}|\$|\\u[0-9A-Fa-f]{4}|\\U[0-9A-Fa-f]{8})*") }
+rule identifier { regexp(r"(\p{XID_Start}|\$|_|\\u[0-9A-Fa-f]{4}|\\U[0-9A-Fa-f]{8})(\p{XID_Continue}|\$|\\u[0-9A-Fa-f]{4}|\\U[0-9A-Fa-f]{8})*") }
 
 rule _type_identifier { alias(identifier, type_identifier) }
 rule _field_identifier { alias(identifier, field_identifier) }
@@ -770,6 +770,6 @@ rule macro_type_specifier {
 
 rule comment {
     token(choice(
-        seq("//", regex(r"(\\+(.|\r?\n)|[^\\\n])*")),
-        seq("/*", regex(r"[^*]*\*+([^/*][^*]*\*+)*"), "/")))
+        seq("//", regexp(r"(\\+(.|\r?\n)|[^\\\n])*")),
+        seq("/*", regexp(r"[^*]*\*+([^/*][^*]*\*+)*"), "/")))
 }

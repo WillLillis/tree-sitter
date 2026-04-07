@@ -25,6 +25,7 @@
 //! existing parser generator pipeline.
 
 use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -146,6 +147,9 @@ enum Value<'src> {
     Object(FxHashMap<&'src str, ValueId>),
     List(Vec<ValueId>),
     Tuple(Vec<ValueId>),
+    /// Marker for a loaded base grammar from `inherit("path")`.
+    /// The actual grammar data lives in `Evaluator::base_grammar`.
+    Grammar,
 }
 
 /// The evaluator: walks the AST and builds values and rules in arenas.
@@ -167,10 +171,12 @@ struct Evaluator<'src> {
     rule_children: Vec<RuleId>,
     // Unified string pool
     strings: StringPool<'src>,
+    /// Pre-loaded base grammar from `inherit()`, if any.
+    base_grammar: Option<InputGrammar>,
 }
 
 impl<'src> Evaluator<'src> {
-    fn new(ast: &'src Ast<'src>) -> Self {
+    fn new(ast: &'src Ast<'src>, base_grammar: Option<InputGrammar>) -> Self {
         Self {
             ast,
             values: Vec::new(),
@@ -179,6 +185,7 @@ impl<'src> Evaluator<'src> {
             rules: Vec::new(),
             rule_children: Vec::new(),
             strings: StringPool::new(ast.source()),
+            base_grammar,
         }
     }
 
@@ -309,6 +316,218 @@ impl<'src> Evaluator<'src> {
             APrec::Name(sid) => Precedence::Name(self.strings.to_string(sid)),
         }
     }
+
+    /// Import a config field from a base grammar as a DSL value.
+    ///
+    /// `c::extras` -> list of rules, `c::inline` -> list of rule names, etc.
+    fn import_config_field(&mut self, field: &str) -> ValueId {
+        let grammar = self.base_grammar.as_ref().unwrap();
+        match field {
+            "extras" => Self::import_rules_as_list(
+                &grammar.extra_symbols,
+                &mut self.values,
+                &mut self.rules,
+                &mut self.rule_children,
+                &mut self.strings,
+            ),
+            "externals" => Self::import_rules_as_list(
+                &grammar.external_tokens,
+                &mut self.values,
+                &mut self.rules,
+                &mut self.rule_children,
+                &mut self.strings,
+            ),
+            "inline" => Self::import_names_as_list(
+                &grammar.variables_to_inline,
+                &mut self.values,
+                &mut self.rules,
+                &mut self.strings,
+            ),
+            "supertypes" => Self::import_names_as_list(
+                &grammar.supertype_symbols,
+                &mut self.values,
+                &mut self.rules,
+                &mut self.strings,
+            ),
+            "conflicts" => {
+                let groups = &grammar.expected_conflicts;
+                let vals: Vec<ValueId> = groups
+                    .iter()
+                    .map(|group| {
+                        Self::import_names_as_list(
+                            group,
+                            &mut self.values,
+                            &mut self.rules,
+                            &mut self.strings,
+                        )
+                    })
+                    .collect();
+                Self::alloc_val_s(&mut self.values, Value::List(vals))
+            }
+            "word" => match &grammar.word_token {
+                Some(name) => {
+                    let sid = self.strings.intern_owned(name.clone());
+                    let rid = Self::alloc_rule_s(&mut self.rules, ARule::NamedSymbol(sid));
+                    Self::alloc_val_s(&mut self.values, Value::Rule(rid))
+                }
+                None => {
+                    let rid = Self::alloc_rule_s(&mut self.rules, ARule::Blank);
+                    Self::alloc_val_s(&mut self.values, Value::Rule(rid))
+                }
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn alloc_val_s<'a>(values: &mut Vec<Value<'a>>, val: Value<'a>) -> ValueId {
+        let id = ValueId(values.len() as u32);
+        values.push(val);
+        id
+    }
+
+    fn alloc_rule_s(rules: &mut Vec<ARule>, rule: ARule) -> RuleId {
+        let id = RuleId(rules.len() as u32);
+        rules.push(rule);
+        id
+    }
+
+    fn import_rules_as_list(
+        rules_data: &[Rule],
+        values: &mut Vec<Value<'_>>,
+        rules: &mut Vec<ARule>,
+        rule_children: &mut Vec<RuleId>,
+        strings: &mut StringPool<'_>,
+    ) -> ValueId {
+        let vals: Vec<ValueId> = rules_data
+            .iter()
+            .map(|r| {
+                let rid = Self::import_rule(r, rules, rule_children, strings);
+                Self::alloc_val_s(values, Value::Rule(rid))
+            })
+            .collect();
+        Self::alloc_val_s(values, Value::List(vals))
+    }
+
+    fn import_names_as_list(
+        names: &[String],
+        values: &mut Vec<Value<'_>>,
+        rules: &mut Vec<ARule>,
+        strings: &mut StringPool<'_>,
+    ) -> ValueId {
+        let vals: Vec<ValueId> = names
+            .iter()
+            .map(|name| {
+                let sid = strings.intern_owned(name.clone());
+                let rid = Self::alloc_rule_s(rules, ARule::NamedSymbol(sid));
+                Self::alloc_val_s(values, Value::Rule(rid))
+            })
+            .collect();
+        Self::alloc_val_s(values, Value::List(vals))
+    }
+
+    fn import_rule(
+        rule: &Rule,
+        rules: &mut Vec<ARule>,
+        rule_children: &mut Vec<RuleId>,
+        strings: &mut StringPool<'_>,
+    ) -> RuleId {
+        match rule {
+            Rule::Blank => Self::alloc_rule_s(rules, ARule::Blank),
+            Rule::String(s) => {
+                let sid = strings.intern_owned(s.clone());
+                Self::alloc_rule_s(rules, ARule::String(sid))
+            }
+            Rule::Pattern(p, f) => {
+                let pid = strings.intern_owned(p.clone());
+                let fid = if f.is_empty() {
+                    None
+                } else {
+                    Some(strings.intern_owned(f.clone()))
+                };
+                Self::alloc_rule_s(rules, ARule::Pattern(pid, fid))
+            }
+            Rule::NamedSymbol(name) => {
+                let sid = strings.intern_owned(name.clone());
+                Self::alloc_rule_s(rules, ARule::NamedSymbol(sid))
+            }
+            Rule::Choice(members) => {
+                let start = rule_children.len() as u32;
+                for m in members {
+                    let mid = Self::import_rule(m, rules, rule_children, strings);
+                    rule_children.push(mid);
+                }
+                let len = (rule_children.len() as u32 - start) as u16;
+                Self::alloc_rule_s(rules, ARule::Choice(start, len))
+            }
+            Rule::Seq(members) => {
+                let start = rule_children.len() as u32;
+                for m in members {
+                    let mid = Self::import_rule(m, rules, rule_children, strings);
+                    rule_children.push(mid);
+                }
+                let len = (rule_children.len() as u32 - start) as u16;
+                Self::alloc_rule_s(rules, ARule::Seq(start, len))
+            }
+            Rule::Repeat(inner) => {
+                let inner = Self::import_rule(inner, rules, rule_children, strings);
+                Self::alloc_rule_s(rules, ARule::Repeat(inner))
+            }
+            Rule::Metadata {
+                params,
+                rule: inner,
+            } => {
+                let mut rid = Self::import_rule(inner, rules, rule_children, strings);
+                if params.dynamic_precedence != 0 {
+                    rid = Self::alloc_rule_s(
+                        rules,
+                        ARule::PrecDynamic(params.dynamic_precedence, rid),
+                    );
+                }
+                match &params.precedence {
+                    Precedence::None => {}
+                    prec => {
+                        let aprec = match prec {
+                            Precedence::Integer(n) => APrec::Integer(*n),
+                            Precedence::Name(s) => APrec::Name(strings.intern_owned(s.clone())),
+                            Precedence::None => unreachable!(),
+                        };
+                        rid = match params.associativity {
+                            Some(crate::rules::Associativity::Left) => {
+                                Self::alloc_rule_s(rules, ARule::PrecLeft(aprec, rid))
+                            }
+                            Some(crate::rules::Associativity::Right) => {
+                                Self::alloc_rule_s(rules, ARule::PrecRight(aprec, rid))
+                            }
+                            None => Self::alloc_rule_s(rules, ARule::Prec(aprec, rid)),
+                        };
+                    }
+                }
+                if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
+                    let sid = strings.intern_owned(value.clone());
+                    rid = Self::alloc_rule_s(rules, ARule::Alias(sid, *is_named, rid));
+                }
+                if let Some(ref field_name) = params.field_name {
+                    let sid = strings.intern_owned(field_name.clone());
+                    rid = Self::alloc_rule_s(rules, ARule::Field(sid, rid));
+                }
+                if params.is_token && params.is_main_token {
+                    rid = Self::alloc_rule_s(rules, ARule::ImmediateToken(rid));
+                } else if params.is_token {
+                    rid = Self::alloc_rule_s(rules, ARule::Token(rid));
+                }
+                rid
+            }
+            Rule::Reserved {
+                rule: inner,
+                context_name,
+            } => {
+                let inner = Self::import_rule(inner, rules, rule_children, strings);
+                let sid = strings.intern_owned(context_name.clone());
+                Self::alloc_rule_s(rules, ARule::Reserved(sid, inner))
+            }
+            Rule::Symbol(_) => unreachable!(),
+        }
+    }
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
@@ -322,8 +541,111 @@ impl<'src> Evaluator<'src> {
 /// Returns [`LowerError`] if the grammar block is missing, a required field
 /// is absent, or an expression cannot be used as a grammar rule.
 pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
-    let mut eval = Evaluator::new(ast);
-    let mut rule_entries: Vec<(String, RuleId)> = Vec::new();
+    lower_with_path(ast, Path::new("."), &[])
+}
+
+/// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
+fn find_and_load_base_grammar(
+    ast: &Ast<'_>,
+    grammar_dir: &Path,
+    ancestor_paths: &[PathBuf],
+) -> Result<Option<InputGrammar>, LowerError> {
+    for &item_id in &ast.root_items {
+        if let Node::Let { value, .. } = ast.node(item_id) {
+            if let Node::Inherit { path } = ast.node(*value) {
+                let path_str = ast.string_lit_content(*path);
+                let span = ast.span(*path);
+                let full_path = grammar_dir.join(path_str);
+                let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
+                    kind: LowerErrorKind::InheritLoadError(format!(
+                        "failed to resolve '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                })?;
+
+                // Cycle detection
+                if ancestor_paths.iter().any(|p| p == &canonical) {
+                    let mut chain = String::new();
+                    for p in ancestor_paths {
+                        chain.push_str(&p.display().to_string());
+                        chain.push_str(" -> ");
+                    }
+                    chain.push_str(&canonical.display().to_string());
+                    return Err(LowerError {
+                        kind: LowerErrorKind::InheritCycle(chain),
+                        span,
+                    });
+                }
+
+                let content = std::fs::read_to_string(&full_path).map_err(|e| LowerError {
+                    kind: LowerErrorKind::InheritLoadError(format!(
+                        "failed to read '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                })?;
+
+                let mut child_ancestors = ancestor_paths.to_vec();
+                child_ancestors.push(canonical.clone());
+                let child_dir = canonical
+                    .parent()
+                    .expect("canonical path always has a parent");
+
+                let inherit_err = |e: std::fmt::Arguments<'_>| LowerError {
+                    kind: LowerErrorKind::InheritLoadError(format!(
+                        "in '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                };
+
+                let ext = full_path.extension().and_then(|e| e.to_str());
+                let grammar = match ext {
+                    Some("tsg") => {
+                        let tokens = super::lexer::Lexer::new(&content)
+                            .tokenize()
+                            .map_err(|e| inherit_err(format_args!("{e}")))?;
+                        let mut child_ast = super::parser::Parser::new(tokens, &content)
+                            .parse()
+                            .map_err(|e| inherit_err(format_args!("{e}")))?;
+                        super::resolve::resolve(&mut child_ast)
+                            .map_err(|e| inherit_err(format_args!("{e}")))?;
+                        super::typecheck::check(&child_ast)
+                            .map_err(|e| inherit_err(format_args!("{e}")))?;
+                        lower_with_path(&child_ast, child_dir, &child_ancestors)?
+                    }
+                    Some("json") => crate::parse_grammar::parse_grammar(&content)
+                        .map_err(|e| inherit_err(format_args!("{e}")))?,
+                    _ => {
+                        return Err(LowerError {
+                            kind: LowerErrorKind::InheritLoadError(format!(
+                                "unsupported file extension for '{}', expected .tsg or .json",
+                                full_path.display()
+                            )),
+                            span,
+                        });
+                    }
+                };
+
+                return Ok(Some(grammar));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Lower with an explicit grammar directory (needed for `inherit()` path resolution)
+/// and a set of ancestor paths for cycle detection.
+pub fn lower_with_path(
+    ast: &Ast<'_>,
+    grammar_dir: &Path,
+    ancestor_paths: &[PathBuf],
+) -> Result<InputGrammar, LowerError> {
+    let base_grammar = find_and_load_base_grammar(ast, grammar_dir, ancestor_paths)?;
+    let mut eval = Evaluator::new(ast, base_grammar);
+    let mut rule_entries: Vec<(String, RuleId)> = Vec::with_capacity(ast.root_items.len());
+    let mut override_entries: Vec<(String, RuleId, Span)> = Vec::new();
 
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
@@ -340,6 +662,11 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
                 let rule_name = ast.node_text(*name).to_string();
                 let rule_id = eval.lower_to_rule(*body);
                 rule_entries.push((rule_name, rule_id));
+            }
+            Node::OverrideRule { name, body } => {
+                let rule_name = ast.node_text(*name).to_string();
+                let rule_id = eval.lower_to_rule(*body);
+                override_entries.push((rule_name, rule_id, ast.span(*name)));
             }
             _ => unreachable!(),
         }
@@ -381,25 +708,92 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
         });
     }
 
-    let variables = rule_entries
-        .into_iter()
-        .map(|(name, rid)| Variable {
-            name,
-            kind: VariableType::Named,
-            rule: eval.build_rule(rid),
-        })
-        .collect();
+    // Look up the base grammar if `inherits:` is set
+    // Take base grammar out of eval to avoid borrow conflicts
+    let base_grammar = eval.base_grammar.take();
+    let base = base_grammar.as_ref();
 
-    Ok(InputGrammar {
-        name: language.clone(),
-        variables,
-        extra_symbols,
-        expected_conflicts: config
+    // Build variables: merge base + overrides + new rules
+    let variables = if let Some(base) = base {
+        if !override_entries.is_empty() && base.variables.is_empty() {
+            return Err(LowerError {
+                kind: LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.clone()),
+                span: override_entries[0].2,
+            });
+        }
+        let mut vars: Vec<Variable> = base.variables.clone();
+        for (name, rid, span) in &override_entries {
+            if let Some(var) = vars.iter_mut().find(|v| v.name == *name) {
+                var.rule = eval.build_rule(*rid);
+            } else {
+                return Err(LowerError {
+                    kind: LowerErrorKind::OverrideRuleNotFound(name.clone()),
+                    span: *span,
+                });
+            }
+        }
+        for (name, rid) in &rule_entries {
+            vars.push(Variable {
+                name: name.clone(),
+                kind: VariableType::Named,
+                rule: eval.build_rule(*rid),
+            });
+        }
+        vars
+    } else {
+        if !override_entries.is_empty() {
+            return Err(LowerError {
+                kind: LowerErrorKind::OverrideWithoutInherit,
+                span: override_entries[0].2,
+            });
+        }
+        rule_entries
+            .into_iter()
+            .map(|(name, rid)| Variable {
+                name,
+                kind: VariableType::Named,
+                rule: eval.build_rule(rid),
+            })
+            .collect()
+    };
+
+    // Build config - use derived values if non-empty, else inherit from base
+    let extra_symbols = if config.extras.is_empty() {
+        base.map_or_else(Vec::new, |b| b.extra_symbols.clone())
+    } else {
+        let mut syms = Vec::with_capacity(config.extras.len());
+        for &id in &config.extras {
+            let rid = eval.lower_to_rule(id);
+            syms.push(eval.build_rule(rid));
+        }
+        syms
+    };
+
+    let external_tokens = if config.externals.is_empty() {
+        base.map_or_else(Vec::new, |b| b.external_tokens.clone())
+    } else {
+        let mut toks = Vec::with_capacity(config.externals.len());
+        for &id in &config.externals {
+            let rid = eval.lower_to_rule(id);
+            toks.push(eval.build_rule(rid));
+        }
+        toks
+    };
+
+    let expected_conflicts = if config.conflicts.is_empty() {
+        base.map_or_else(Vec::new, |b| b.expected_conflicts.clone())
+    } else {
+        config
             .conflicts
             .iter()
             .map(|g| g.iter().map(|s| ast.text(*s).to_string()).collect())
-            .collect(),
-        precedence_orderings: config
+            .collect()
+    };
+
+    let precedence_orderings = if config.precedences.is_empty() {
+        base.map_or_else(Vec::new, |b| b.precedence_orderings.clone())
+    } else {
+        config
             .precedences
             .iter()
             .map(|g| {
@@ -410,19 +804,62 @@ pub fn lower(ast: &Ast<'_>) -> Result<InputGrammar, LowerError> {
                     })
                     .collect()
             })
-            .collect(),
-        external_tokens,
-        variables_to_inline: config
+            .collect()
+    };
+
+    let variables_to_inline = if config.inline.is_empty() {
+        base.map_or_else(Vec::new, |b| b.variables_to_inline.clone())
+    } else {
+        config
             .inline
             .iter()
             .map(|s| ast.text(*s).to_string())
-            .collect(),
-        supertype_symbols: config
+            .collect()
+    };
+
+    let supertype_symbols = if config.supertypes.is_empty() {
+        base.map_or_else(Vec::new, |b| b.supertype_symbols.clone())
+    } else {
+        config
             .supertypes
             .iter()
             .map(|s| ast.text(*s).to_string())
-            .collect(),
-        word_token: config.word.map(|s| ast.text(s).to_string()),
+            .collect()
+    };
+
+    let word_token = config
+        .word
+        .map(|s| ast.text(s).to_string())
+        .or_else(|| base.and_then(|b| b.word_token.clone()));
+
+    let reserved_words = if config.reserved.is_empty() {
+        base.map_or_else(Vec::new, |b| b.reserved_words.clone())
+    } else {
+        let mut result = Vec::with_capacity(config.reserved.len());
+        for rws in &config.reserved {
+            let mut words = Vec::with_capacity(rws.words.len());
+            for &id in &rws.words {
+                let rid = eval.lower_to_rule(id);
+                words.push(eval.build_rule(rid));
+            }
+            result.push(ReservedWordContext {
+                name: ast.text(rws.name).to_string(),
+                reserved_words: words,
+            });
+        }
+        result
+    };
+
+    Ok(InputGrammar {
+        name: language.clone(),
+        variables,
+        extra_symbols,
+        expected_conflicts,
+        precedence_orderings,
+        external_tokens,
+        variables_to_inline,
+        supertype_symbols,
+        word_token,
         reserved_words,
     })
 }
@@ -441,7 +878,7 @@ impl Evaluator<'_> {
             Node::StringLit => {
                 let content_span = Span::new(span.start + 1, span.end - 1);
                 let raw = ast.text(content_span);
-                if raw.contains('\\') {
+                if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
                     let sid = self.strings.intern_owned(unescape_string(raw));
                     self.alloc_val(Value::Str(sid))
                 } else {
@@ -478,19 +915,47 @@ impl Evaluator<'_> {
                 let name = ast.text(span);
                 self.lookup(name).expect("resolve pass validated this")
             }
-            Node::FieldAccess { obj, field } => {
-                let (obj, field) = (*obj, *field);
-                let obj_id = self.eval_expr(obj);
-                let field_name = ast.node_text(field);
-                // Typecheck ensures obj is an object with the right fields
-                let Value::Object(map) = self.get_val(obj_id) else {
+            Node::Inherit { .. } => self.alloc_val(Value::Grammar),
+            Node::Append { left, right } => {
+                let (left, right) = (*left, *right);
+                let left_val = self.eval_expr(left);
+                let right_val = self.eval_expr(right);
+                let Value::List(left_items) = self.get_val(left_val) else {
                     unreachable!();
                 };
-                *map.get(field_name).unwrap()
+                let Value::List(right_items) = self.get_val(right_val) else {
+                    unreachable!();
+                };
+                let mut combined = left_items.clone();
+                combined.extend_from_slice(right_items);
+                self.alloc_val(Value::List(combined))
+            }
+            Node::FieldAccess { obj, field } => {
+                let (obj, field) = (*obj, *field);
+                let obj_val = self.eval_expr(obj);
+                let field_name = ast.node_text(field);
+                match self.get_val(obj_val) {
+                    Value::Object(map) => *map.get(field_name).unwrap(),
+                    // c.rule_name -> NamedSymbol reference to the base rule
+                    Value::Grammar => {
+                        let sid = self.strings.intern_span(ast.span(field));
+                        let rid = self.alloc_rule(ARule::NamedSymbol(sid));
+                        self.alloc_val(Value::Rule(rid))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Node::ConfigAccess { obj, field } => {
+                let (obj, field) = (*obj, *field);
+                let obj_val = self.eval_expr(obj);
+                let field_name = ast.node_text(field);
+                debug_assert!(matches!(self.get_val(obj_val), Value::Grammar));
+                self.import_config_field(field_name)
             }
             Node::Object(range) => {
                 let fields = ast.get_object(*range);
-                let mut map = FxHashMap::default();
+                let mut map =
+                    FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
                 for i in 0..fields.len() {
                     let (key_span, value_id) = ast.get_object(*range)[i];
                     let val = self.eval_expr(value_id);
@@ -552,14 +1017,59 @@ impl Evaluator<'_> {
         }
     }
 
-    /// Evaluate an expression and convert the result to an arena rule.
-    ///
-    /// This is the main entry point for lowering a rule body or combinator
-    /// argument. Evaluates the expression, then converts the resulting value
-    /// to a `RuleId` (strings become `ARule::String`).
+    /// Convert an AST node directly to an arena rule, short-circuiting the
+    /// value arena for common cases (RuleRef, StringLit, combinators).
     fn lower_to_rule(&mut self, id: NodeId) -> RuleId {
-        let vid = self.eval_expr(id);
-        self.value_to_rule(vid)
+        let ast = self.ast;
+        match ast.node(id) {
+            // Fast paths: skip the value arena entirely
+            Node::RuleRef => {
+                let sid = self.strings.intern_span(ast.span(id));
+                self.alloc_rule(ARule::NamedSymbol(sid))
+            }
+            Node::StringLit => {
+                let span = ast.span(id);
+                let content_span = Span::new(span.start + 1, span.end - 1);
+                let raw = ast.text(content_span);
+                if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
+                    let sid = self.strings.intern_owned(unescape_string(raw));
+                    self.alloc_rule(ARule::String(sid))
+                } else {
+                    let sid = self.strings.intern_span(content_span);
+                    self.alloc_rule(ARule::String(sid))
+                }
+            }
+            Node::RawStringLit { hash_count } => {
+                let hash_count = *hash_count;
+                let span = ast.span(id);
+                let prefix_len = 2 + u32::from(hash_count);
+                let suffix_len = 1 + u32::from(hash_count);
+                let content_span = Span::new(span.start + prefix_len, span.end - suffix_len);
+                let sid = self.strings.intern_span(content_span);
+                self.alloc_rule(ARule::String(sid))
+            }
+            // Combinators go directly to rules
+            Node::Seq(_)
+            | Node::Choice(_)
+            | Node::Repeat(_)
+            | Node::Repeat1(_)
+            | Node::Optional(_)
+            | Node::Blank
+            | Node::Field { .. }
+            | Node::Alias { .. }
+            | Node::Token(_)
+            | Node::TokenImmediate(_)
+            | Node::Prec { .. }
+            | Node::PrecLeft { .. }
+            | Node::PrecRight { .. }
+            | Node::PrecDynamic { .. }
+            | Node::Reserved { .. } => self.eval_combinator(id),
+            // Everything else goes through eval_expr
+            _ => {
+                let vid = self.eval_expr(id);
+                self.value_to_rule(vid)
+            }
+        }
     }
 
     /// Convert an evaluated value to an arena rule ID.
@@ -601,7 +1111,7 @@ impl Evaluator<'_> {
             Node::Seq(range) | Node::Choice(range) => {
                 let is_seq = matches!(ast.node(id), Node::Seq(_));
                 let members = ast.child_slice(*range);
-                let mut child_ids = Vec::new();
+                let mut child_ids = Vec::with_capacity(members.len());
                 for &member in members {
                     if matches!(ast.node(member), Node::For(_)) {
                         let for_idx = match ast.node(member) {
@@ -734,12 +1244,13 @@ impl Evaluator<'_> {
         let &fn_id = self.fns.get(name).unwrap();
 
         let config = self.get_fn_config(fn_id);
-        let param_names: Vec<NodeId> = config.params.iter().map(|param| param.name).collect();
+        let n_params = config.params.len();
         let body = config.body;
 
         self.push_scope();
-        for (name_id, val_id) in param_names.iter().zip(arg_vals.iter()) {
-            self.bind(self.ast.node_text(*name_id), *val_id);
+        for i in 0..n_params {
+            let param_name = self.get_fn_config(fn_id).params[i].name;
+            self.bind(self.ast.node_text(param_name), arg_vals[i]);
         }
 
         let result = self.eval_expr(body);
@@ -984,6 +1495,10 @@ pub struct LowerError {
 pub enum LowerErrorKind {
     MissingGrammarBlock,
     MissingLanguageField,
+    OverrideRuleNotFound(String),
+    OverrideWithoutInherit,
+    InheritLoadError(String),
+    InheritCycle(String),
 }
 
 impl std::fmt::Display for LowerError {
@@ -992,6 +1507,18 @@ impl std::fmt::Display for LowerError {
             LowerErrorKind::MissingGrammarBlock => write!(f, "missing grammar block"),
             LowerErrorKind::MissingLanguageField => {
                 write!(f, "grammar block missing 'language' field")
+            }
+            LowerErrorKind::OverrideRuleNotFound(name) => {
+                write!(f, "override rule '{name}' not found in base grammar")
+            }
+            LowerErrorKind::OverrideWithoutInherit => {
+                write!(f, "'override rule' requires a grammar with 'inherits'")
+            }
+            LowerErrorKind::InheritLoadError(msg) => {
+                write!(f, "failed to load inherited grammar: {msg}")
+            }
+            LowerErrorKind::InheritCycle(chain) => {
+                write!(f, "inheritance cycle detected: {chain}")
             }
         }
     }
