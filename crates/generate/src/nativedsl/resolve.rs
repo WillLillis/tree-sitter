@@ -143,11 +143,12 @@ impl Names {
 fn collect_names(ast: &Ast<'_>) -> Result<Names, ResolveError> {
     let mut names = Names::new();
 
+    // Register rules, lets, and fns first
     for i in 0..ast.root_items.len() {
         let item_id = ast.root_items[i];
         let span = ast.span(item_id);
         match ast.node(item_id) {
-            Node::Rule { name, .. } => {
+            Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
                 names.insert(ast.node_text(*name), Decl::Rule, span)?;
             }
             Node::Let { name, .. } => {
@@ -157,21 +158,20 @@ fn collect_names(ast: &Ast<'_>) -> Result<Names, ResolveError> {
                 let config = ast.get_fn(*fn_idx);
                 names.insert(ast.node_text(config.name), Decl::Fn, span)?;
             }
-            Node::Grammar => {
-                if let Some(config) = &ast.context.grammar_config {
-                    for j in 0..config.externals.len() {
-                        let ext_id = config.externals[j];
-                        if let Node::Ident = ast.node(ext_id) {
-                            names.insert(
-                                ast.text(ast.span(ext_id)),
-                                Decl::Rule,
-                                ast.span(ext_id),
-                            )?;
-                        }
-                    }
+            _ => {}
+        }
+    }
+
+    // Register externals that aren't already declared as rules
+    if let Some(config) = &ast.context.grammar_config {
+        for j in 0..config.externals.len() {
+            let ext_id = config.externals[j];
+            if let Node::Ident = ast.node(ext_id) {
+                let name = ast.text(ast.span(ext_id));
+                if names.get(name).is_none() {
+                    names.insert(name, Decl::Rule, ast.span(ext_id))?;
                 }
             }
-            _ => {}
         }
     }
 
@@ -189,6 +189,9 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
             // SAFETY: Earlier pass has already verified this is `Some`
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
             let nodes = &mut ast.nodes;
+            if let Some(inherits) = grammar_config.inherits {
+                resolve_expr(nodes, ctx, names, inherits, &Locals::EMPTY)?;
+            }
             for &id in &grammar_config.extras {
                 resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
             }
@@ -202,7 +205,7 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
             }
             Ok(())
         }
-        Node::Rule { body, .. } => {
+        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
             let body = *body;
             resolve_expr(&mut ast.nodes, &ast.context, names, body, &Locals::EMPTY)
         }
@@ -301,27 +304,25 @@ fn resolve_children(
 ) -> Result<(), ResolveError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = nodes[id.index()].child_range() {
-        for i in 0..range.len as usize {
-            let child = ctx.child_slice(range)[i];
-            resolve_expr(nodes, ctx, names, child, locals)?;
+        let children = ctx.child_slice(range);
+        for i in 0..children.len() {
+            resolve_expr(nodes, ctx, names, children[i], locals)?;
         }
         return Ok(());
     }
 
     match &nodes[id.index()] {
         Node::Call { args, .. } => {
-            let range = *args;
-            for i in 0..range.len as usize {
-                let arg = ctx.child_slice(range)[i];
-                resolve_expr(nodes, ctx, names, arg, locals)?;
+            let args = ctx.child_slice(*args);
+            for i in 0..args.len() {
+                resolve_expr(nodes, ctx, names, args[i], locals)?;
             }
             Ok(())
         }
         &Node::Object(range) => {
-            let len = ctx.get_object(range).len();
-            for i in 0..len {
-                let value = ctx.get_object(range)[i].1;
-                resolve_expr(nodes, ctx, names, value, locals)?;
+            let fields = ctx.get_object(range);
+            for i in 0..fields.len() {
+                resolve_expr(nodes, ctx, names, fields[i].1, locals)?;
             }
             Ok(())
         }
@@ -337,6 +338,11 @@ fn resolve_children(
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
             let content = *content;
             resolve_expr(nodes, ctx, names, content, locals)
+        }
+        Node::Append { left, right } => {
+            let (left, right) = (*left, *right);
+            resolve_expr(nodes, ctx, names, left, locals)?;
+            resolve_expr(nodes, ctx, names, right, locals)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
@@ -354,7 +360,7 @@ fn resolve_children(
             }
             Ok(())
         }
-        Node::FieldAccess { obj, .. } => {
+        Node::FieldAccess { obj, .. } | Node::ConfigAccess { obj, .. } => {
             let obj = *obj;
             resolve_expr(nodes, ctx, names, obj, locals)
         }
