@@ -30,6 +30,8 @@ pub enum Ty {
     Int,
     Str,
     Rule,
+    /// A loaded base grammar from `inherit("path")`.
+    Grammar,
     List(Box<Self>),
     Tuple(Vec<Self>),
     Object(Vec<(String, Self)>),
@@ -41,6 +43,7 @@ impl std::fmt::Display for Ty {
             Self::Int => write!(f, "int"),
             Self::Str => write!(f, "str"),
             Self::Rule => write!(f, "rule"),
+            Self::Grammar => write!(f, "grammar"),
             Self::List(inner) => write!(f, "list<{inner}>"),
             Self::Tuple(elems) => {
                 write!(f, "(")?;
@@ -139,6 +142,27 @@ impl<'src> TypeEnv<'src> {
     }
 }
 
+/// Convert function parameters to typed (name, type) pairs.
+///
+/// # Errors
+///
+/// Returns [`TypeError`] if a parameter's type annotation cannot be resolved.
+fn parse_fn_params(
+    ast: &Ast<'_>,
+    config: &super::ast::FnConfig,
+) -> Result<Vec<(String, Ty)>, TypeError> {
+    config
+        .params
+        .iter()
+        .map(|param| {
+            Ok((
+                ast.node_text(param.name).to_string(),
+                ast_type_to_ty(ast, param.ty)?,
+            ))
+        })
+        .collect()
+}
+
 /// Convert an AST type node (`TypeRule`, `TypeStr`, etc.) to a [`Ty`].
 fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId) -> Result<Ty, TypeError> {
     match ast.node(ty_id) {
@@ -183,21 +207,12 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
     // Pre-scan: register all rule names and fn signatures.
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
-            Node::Rule { name, .. } => {
+            Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
                 env.insert_var(ast.node_text(*name), Ty::Rule);
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                let params: Vec<(String, Ty)> = config
-                    .params
-                    .iter()
-                    .map(|param| {
-                        Ok((
-                            ast.node_text(param.name).to_string(),
-                            ast_type_to_ty(ast, param.ty)?,
-                        ))
-                    })
-                    .collect::<Result<_, TypeError>>()?;
+                let params = parse_fn_params(ast, config)?;
                 let return_ty = ast_type_to_ty(ast, config.return_ty)?;
                 env.fns
                     .insert(ast.node_text(config.name), FnSig { params, return_ty });
@@ -234,17 +249,7 @@ fn check_item<'src>(
         }
         Node::Fn(fn_idx) => {
             let config = ast.get_fn(*fn_idx);
-            let params: Vec<(String, Ty)> = config
-                .params
-                .iter()
-                .map(|param| {
-                    Ok((
-                        ast.node_text(param.name).to_string(),
-                        ast_type_to_ty(ast, param.ty)?,
-                    ))
-                })
-                .collect::<Result<_, TypeError>>()?;
-
+            let params = parse_fn_params(ast, config)?;
             let return_ty = ast_type_to_ty(ast, config.return_ty)?;
             let body = config.body;
             let fn_name_span = config.name;
@@ -271,7 +276,7 @@ fn check_item<'src>(
             }
             Ok(())
         }
-        Node::Rule { body, .. } => {
+        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
             expect_rule(ast, *body, env)?;
             Ok(())
         }
@@ -366,6 +371,21 @@ fn type_of<'src>(
         Node::IntLit(_) => Ok(Ty::Int),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
         Node::RuleRef | Node::Blank => Ok(Ty::Rule),
+        Node::Inherit { .. } => Ok(Ty::Grammar),
+        Node::Append { left, right } => {
+            let left_ty = type_of(ast, *left, env)?;
+            let right_ty = type_of(ast, *right, env)?;
+            match (&left_ty, &right_ty) {
+                (Ty::List(l), Ty::List(r)) if l == r => Ok(left_ty),
+                (Ty::List(_), Ty::List(_)) => Err(mismatch(left_ty, right_ty, ast.span(*right))),
+                (Ty::List(_), _) => Err(mismatch(left_ty, right_ty, ast.span(*right))),
+                _ => Err(mismatch(
+                    Ty::List(Box::new(Ty::Rule)),
+                    left_ty,
+                    ast.span(*left),
+                )),
+            }
+        }
         Node::Ident => {
             unreachable!("resolve pass should have replaced all Ident nodes")
         }
@@ -392,9 +412,32 @@ fn type_of<'src>(
                         },
                         span,
                     }),
+                // c.rule_name -> rule reference from the base grammar
+                Ty::Grammar => Ok(Ty::Rule),
                 _ => Err(TypeError {
                     kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty.clone()),
                     span: ast.span(*obj),
+                }),
+            }
+        }
+        Node::ConfigAccess { obj, field } => {
+            let obj_ty = type_of(ast, *obj, env)?;
+            if obj_ty != Ty::Grammar {
+                return Err(TypeError {
+                    kind: TypeErrorKind::ConfigAccessOnNonGrammar(obj_ty),
+                    span: ast.span(*obj),
+                });
+            }
+            let field_name = ast.node_text(*field);
+            match field_name {
+                "extras" | "externals" => Ok(Ty::List(Box::new(Ty::Rule))),
+                "inline" | "supertypes" => Ok(Ty::List(Box::new(Ty::Rule))),
+                "conflicts" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
+                "precedences" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
+                "word" => Ok(Ty::Rule),
+                _ => Err(TypeError {
+                    kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
+                    span: ast.span(*field),
                 }),
             }
         }
@@ -547,11 +590,7 @@ fn check_for_expr<'src>(
     let config = ast.get_for(*for_idx);
     let iterable = config.iterable;
     let body = config.body;
-    let bindings: Vec<_> = config
-        .bindings
-        .iter()
-        .map(|(span, ty)| (*span, *ty))
-        .collect();
+    let bindings = &config.bindings;
 
     let iter_ty = type_of(ast, iterable, env)?;
     let elem_ty = match &iter_ty {
@@ -584,7 +623,7 @@ fn check_for_expr<'src>(
             }
             env.insert_var(ast.text(*name_span), declared);
         }
-    } else if let [(name_span, ty_id)] = &bindings[..] {
+    } else if let [(name_span, ty_id)] = bindings.as_slice() {
         let declared = ast_type_to_ty(ast, *ty_id)?;
         if !is_compatible(&elem_ty, &declared) {
             env.pop_scope();
@@ -649,9 +688,10 @@ pub enum TypeErrorKind {
         got: Ty,
     },
     UnresolvedVariable(String),
+    ConfigAccessOnNonGrammar(Ty),
+    UnknownConfigField(String),
     UnexpectedTopLevel,
     CannotInferType,
-    MissingFnReturnType(String),
 }
 
 impl std::fmt::Display for TypeError {
@@ -699,11 +739,14 @@ impl std::fmt::Display for TypeError {
                 )
             }
             TypeErrorKind::UnresolvedVariable(name) => write!(f, "unresolved variable '{name}'"),
+            TypeErrorKind::ConfigAccessOnNonGrammar(ty) => {
+                write!(f, "'::' config access requires a grammar value, got {ty}")
+            }
+            TypeErrorKind::UnknownConfigField(name) => {
+                write!(f, "unknown grammar config field '{name}'")
+            }
             TypeErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
             TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
-            TypeErrorKind::MissingFnReturnType(name) => {
-                write!(f, "fn '{name}' has no return type annotation")
-            }
         }
     }
 }
