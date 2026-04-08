@@ -23,10 +23,9 @@ mod typecheck;
 
 use std::path::{Path, PathBuf};
 
-use crate::{
-    grammars::InputGrammar,
-    nativedsl::ast::{FileSpan, SourceFile, SourceMap},
-};
+use crate::grammars::InputGrammar;
+
+use ast::{SourceFile, SourceMap, Span};
 
 pub use lexer::{LexError, LexErrorKind};
 pub use lower::{LowerError, LowerErrorKind};
@@ -62,7 +61,7 @@ fn parse_native_dsl_inner(
     let grammar_dir = grammar_path.parent().unwrap_or(Path::new("."));
 
     let tokens = lexer::Lexer::new(input, file).tokenize()?;
-    let ast = parser::Parser::new(tokens, input, file).parse()?;
+    let ast = parser::Parser::new(tokens, input, file, grammar_path.to_path_buf()).parse()?;
 
     // Load base grammar before resolve so we can register its rule names
     let base = load_base_grammar(&ast, grammar_dir, ancestor_paths, file)?;
@@ -82,7 +81,7 @@ fn parse_native_dsl_inner(
     });
 
     let mut ast = ast;
-    resolve::resolve(&mut ast, &base_rule_names, inherit_span, file)?;
+    resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
     typecheck::check(&ast, file)?;
     Ok(lower::lower_with_base(&ast, base, file)?)
 }
@@ -100,7 +99,7 @@ fn load_base_grammar(
         if let ast::Node::Let { value, .. } = ast.node(item_id) {
             if let ast::Node::Inherit { path } = ast.node(*value) {
                 let path_str = ast.string_lit_content(*path);
-                let span = ast::FileSpan::new(file, ast.span(*path));
+                let span = ast.span(*path);
                 let full_path = grammar_dir.join(path_str);
                 let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
                     kind: LowerErrorKind::InheritLoadError(format!(
@@ -210,9 +209,9 @@ pub enum DslError {
 use ast::Note;
 
 impl DslError {
-    /// Returns the file span where the error occurred.
+    /// Returns the source span where the error occurred.
     #[must_use]
-    pub const fn span(&self) -> FileSpan {
+    pub const fn span(&self) -> Span {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
@@ -264,8 +263,8 @@ struct SpanContext<'a> {
     underline_len: usize,
 }
 
-fn span_context<'a>(span: FileSpan, source_text: &'a str) -> SpanContext<'a> {
-    let offset = span.span.start as usize;
+fn span_context<'a>(span: Span, source_text: &'a str) -> SpanContext<'a> {
+    let offset = span.start as usize;
     let bytes = source_text.as_bytes();
 
     let mut line_start = 0;
@@ -283,7 +282,7 @@ fn span_context<'a>(span: FileSpan, source_text: &'a str) -> SpanContext<'a> {
     let col = offset - line_start + 1;
     let line_text = &source_text[line_start..line_end];
     let span_start_in_line = col.saturating_sub(1);
-    let span_len = (span.span.end - span.span.start) as usize;
+    let span_len = (span.end - span.start) as usize;
     let underline_len = span_len
         .max(1)
         .min(line_text.len().saturating_sub(span_start_in_line));
