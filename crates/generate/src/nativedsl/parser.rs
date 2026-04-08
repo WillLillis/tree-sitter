@@ -646,7 +646,7 @@ impl<'src> Parser<'src> {
                 id = self.ast.push(Node::RuleInline { obj: id, rule }, span);
             } else if self.at(TokenKind::LParen) {
                 if !matches!(self.ast.node(id), Node::Ident) {
-                    return Err(self.error(ParseErrorKind::OnlySimpleNamesCallable));
+                    return Err(self.error(ParseErrorKind::ExpectedFunctionName));
                 }
                 self.pos += 1;
                 let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
@@ -765,7 +765,7 @@ pub enum ParseErrorKind {
     UnknownType(String),
     UnknownGrammarField(String),
     MissingReturnType,
-    OnlySimpleNamesCallable,
+    ExpectedFunctionName,
     ExpectedStringOrIdent,
     DuplicateGrammarBlock,
     TooManyChildren,
@@ -792,8 +792,8 @@ impl std::fmt::Display for ParseError {
             ParseErrorKind::MissingReturnType => {
                 write!(f, "function must have a return type annotation (-> type)")
             }
-            ParseErrorKind::OnlySimpleNamesCallable => {
-                write!(f, "only simple names can be called")
+            ParseErrorKind::ExpectedFunctionName => {
+                write!(f, "only identifiers can be used as function names")
             }
             ParseErrorKind::ExpectedStringOrIdent => {
                 write!(f, "expected string or identifier")
