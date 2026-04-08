@@ -480,8 +480,7 @@ pub fn load_grammar_file(
         Some("tsg") => {
             let source_text = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
-            let grammar_dir = grammar_path.parent().unwrap();
-            nativedsl::parse_native_dsl_to_json(&source_text, grammar_dir).map_err(|error| {
+            nativedsl::parse_native_dsl_to_json(&source_text, grammar_path).map_err(|error| {
                 LoadGrammarError::NativeDsl(nativedsl::NativeDslError {
                     error,
                     source_text,

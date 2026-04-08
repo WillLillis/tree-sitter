@@ -23,7 +23,10 @@ mod typecheck;
 
 use std::path::{Path, PathBuf};
 
-use crate::grammars::InputGrammar;
+use crate::{
+    grammars::InputGrammar,
+    nativedsl::ast::{FileSpan, SourceFile, SourceMap},
+};
 
 pub use lexer::{LexError, LexErrorKind};
 pub use lower::{LowerError, LowerErrorKind};
@@ -31,7 +34,6 @@ pub use parser::{ParseError, ParseErrorKind};
 pub use resolve::{ResolveError, ResolveErrorKind};
 pub use typecheck::{Ty, TypeError, TypeErrorKind};
 
-use ast::Span;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -43,20 +45,27 @@ use thiserror::Error;
 ///
 /// Returns [`DslError`] if any pipeline stage fails. The error carries the
 /// source [`Span`] of the offending construct.
-pub fn parse_native_dsl(input: &str, grammar_dir: &Path) -> Result<InputGrammar, DslError> {
-    parse_native_dsl_inner(input, grammar_dir, &[])
+pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> Result<InputGrammar, DslError> {
+    parse_native_dsl_inner(input, grammar_path, &[])
 }
 
 fn parse_native_dsl_inner(
     input: &str,
-    grammar_dir: &Path,
+    grammar_path: &Path,
     ancestor_paths: &[PathBuf],
 ) -> Result<InputGrammar, DslError> {
-    let tokens = lexer::Lexer::new(input).tokenize()?;
-    let ast = parser::Parser::new(tokens, input).parse()?;
+    let mut source_map = SourceMap::new(SourceFile::new(
+        grammar_path.to_path_buf(),
+        input.to_string(),
+    ));
+    let file = ast::FileId::new(0);
+    let grammar_dir = grammar_path.parent().unwrap_or(Path::new("."));
+
+    let tokens = lexer::Lexer::new(input, file).tokenize()?;
+    let ast = parser::Parser::new(tokens, input, file).parse()?;
 
     // Load base grammar before resolve so we can register its rule names
-    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?;
+    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths, file)?;
     let base_rule_names: Vec<String> = base
         .as_ref()
         .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
@@ -73,9 +82,9 @@ fn parse_native_dsl_inner(
     });
 
     let mut ast = ast;
-    resolve::resolve(&mut ast, &base_rule_names, inherit_span)?;
-    typecheck::check(&ast)?;
-    Ok(lower::lower_with_base(&ast, base)?)
+    resolve::resolve(&mut ast, &base_rule_names, inherit_span, file)?;
+    typecheck::check(&ast, file)?;
+    Ok(lower::lower_with_base(&ast, base, file)?)
 }
 
 /// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
@@ -83,6 +92,7 @@ fn load_base_grammar(
     ast: &ast::Ast<'_>,
     grammar_dir: &Path,
     ancestor_paths: &[PathBuf],
+    file: ast::FileId,
 ) -> Result<Option<InputGrammar>, DslError> {
     use lower::{LowerError, LowerErrorKind};
 
@@ -90,7 +100,7 @@ fn load_base_grammar(
         if let ast::Node::Let { value, .. } = ast.node(item_id) {
             if let ast::Node::Inherit { path } = ast.node(*value) {
                 let path_str = ast.string_lit_content(*path);
-                let span = ast.span(*path);
+                let span = ast::FileSpan::new(file, ast.span(*path));
                 let full_path = grammar_dir.join(path_str);
                 let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
                     kind: LowerErrorKind::InheritLoadError(format!(
@@ -125,9 +135,6 @@ fn load_base_grammar(
 
                 let mut child_ancestors = ancestor_paths.to_vec();
                 child_ancestors.push(canonical.clone());
-                let child_dir = canonical
-                    .parent()
-                    .expect("canonical path always has a parent");
 
                 let inherit_err = |msg: String| -> DslError {
                     LowerError {
@@ -142,7 +149,7 @@ fn load_base_grammar(
 
                 let ext = full_path.extension().and_then(|e| e.to_str());
                 let grammar = match ext {
-                    Some("tsg") => parse_native_dsl_inner(&content, child_dir, &child_ancestors)
+                    Some("tsg") => parse_native_dsl_inner(&content, &canonical, &child_ancestors)
                         .map_err(|e| inherit_err(e.to_string()))?,
                     Some("json") => crate::parse_grammar::parse_grammar(&content)
                         .map_err(|e| inherit_err(e.to_string()))?,
@@ -174,8 +181,8 @@ fn load_base_grammar(
 ///
 /// Panics if JSON serialization of the grammar fails (should not happen with
 /// valid grammar data).
-pub fn parse_native_dsl_to_json(input: &str, grammar_dir: &Path) -> Result<String, DslError> {
-    let grammar = parse_native_dsl(input, grammar_dir)?;
+pub fn parse_native_dsl_to_json(input: &str, grammar_path: &Path) -> Result<String, DslError> {
+    let grammar = parse_native_dsl(input, grammar_path)?;
     Ok(
         serde_json::to_string_pretty(&lower::grammar_to_json(&grammar))
             .expect("grammar JSON serialization should not fail"),
@@ -203,9 +210,9 @@ pub enum DslError {
 use ast::Note;
 
 impl DslError {
-    /// Returns the source span where the error occurred.
+    /// Returns the file span where the error occurred.
     #[must_use]
-    pub const fn span(&self) -> Span {
+    pub const fn span(&self) -> FileSpan {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
@@ -257,8 +264,8 @@ struct SpanContext<'a> {
     underline_len: usize,
 }
 
-fn span_context<'a>(span: Span, source_text: &'a str) -> SpanContext<'a> {
-    let offset = span.start as usize;
+fn span_context<'a>(span: FileSpan, source_text: &'a str) -> SpanContext<'a> {
+    let offset = span.span.start as usize;
     let bytes = source_text.as_bytes();
 
     let mut line_start = 0;
@@ -276,7 +283,7 @@ fn span_context<'a>(span: Span, source_text: &'a str) -> SpanContext<'a> {
     let col = offset - line_start + 1;
     let line_text = &source_text[line_start..line_end];
     let span_start_in_line = col.saturating_sub(1);
-    let span_len = (span.end - span.start) as usize;
+    let span_len = (span.span.end - span.span.start) as usize;
     let underline_len = span_len
         .max(1)
         .min(line_text.len().saturating_sub(span_start_in_line));

@@ -9,27 +9,27 @@ use super::{
 };
 
 fn dsl(input: &str) -> InputGrammar {
-    parse_native_dsl(input, Path::new(".")).unwrap()
+    parse_native_dsl(input, Path::new("./grammar.tsg")).unwrap()
 }
 
 fn dsl_err(input: &str) -> DslError {
-    parse_native_dsl(input, Path::new(".")).unwrap_err()
+    parse_native_dsl(input, Path::new("./grammar.tsg")).unwrap_err()
 }
 
 fn dsl_inherit_err(input: &str) -> DslError {
-    parse_native_dsl(input, &test_grammars_dir()).unwrap_err()
+    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap_err()
 }
 
 fn test_grammars_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/test_grammars")
 }
 
-fn native_grammar_dir(name: &str) -> std::path::PathBuf {
-    test_grammars_dir().join(name)
+fn native_grammar_path(name: &str) -> std::path::PathBuf {
+    test_grammars_dir().join(name).join("grammar.tsg")
 }
 
 fn read_native_grammar(name: &str) -> String {
-    let path = native_grammar_dir(name).join("grammar.tsg");
+    let path = native_grammar_path(name);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
@@ -47,7 +47,7 @@ fn find_rule<'a>(g: &'a InputGrammar, name: &str) -> &'a Rule {
 }
 
 fn dsl_inherit(input: &str) -> InputGrammar {
-    parse_native_dsl(input, &test_grammars_dir()).unwrap()
+    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap()
 }
 
 // ===== Node size =====
@@ -771,7 +771,7 @@ fn error_unknown_grammar_field() {
 #[test]
 fn prec_inside_token_immediate() {
     let source = read_native_grammar("json_native");
-    let g = parse_native_dsl(&source, &native_grammar_dir("json_native")).unwrap();
+    let g = parse_native_dsl(&source, &native_grammar_path("json_native")).unwrap();
     let string_content = g
         .variables
         .iter()
@@ -790,7 +790,7 @@ fn prec_inside_token_immediate() {
 
 #[test]
 fn json_native_grammar_roundtrip() {
-    let dir = native_grammar_dir("json_native");
+    let dir = native_grammar_path("json_native");
     let native_json = parse_native_dsl_to_json(&read_native_grammar("json_native"), &dir).unwrap();
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/json/src/grammar.json"))
@@ -802,7 +802,7 @@ fn json_native_grammar_roundtrip() {
 
 #[test]
 fn c_native_grammar_roundtrip() {
-    let dir = native_grammar_dir("c_native");
+    let dir = native_grammar_path("c_native");
     let native_json = parse_native_dsl_to_json(&read_native_grammar("c_native"), &dir).unwrap();
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
@@ -814,7 +814,7 @@ fn c_native_grammar_roundtrip() {
 
 #[test]
 fn javascript_native_grammar_roundtrip() {
-    let dir = native_grammar_dir("javascript_native");
+    let dir = native_grammar_path("javascript_native");
     let native_json =
         parse_native_dsl_to_json(&read_native_grammar("javascript_native"), &dir).unwrap();
     let js_json = std::fs::read_to_string(
@@ -877,7 +877,7 @@ fn javascript_native_grammar_roundtrip() {
 
 #[test]
 fn cpp_native_grammar_roundtrip() {
-    let dir = native_grammar_dir("cpp_native");
+    let dir = native_grammar_path("cpp_native");
     let native_json = parse_native_dsl_to_json(&read_native_grammar("cpp_native"), &dir).unwrap();
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/cpp/src/grammar.json"))
@@ -1634,7 +1634,7 @@ fn multiple_inherit_bindings_only_first_used() {
 #[test]
 #[ignore = "benchmark"]
 fn bench_native_dsl_c() {
-    let dir = native_grammar_dir("c_native");
+    let dir = native_grammar_path("c_native");
     let source = read_native_grammar("c_native");
     for _ in 0..10 {
         std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
@@ -1650,7 +1650,7 @@ fn bench_native_dsl_c() {
 #[test]
 #[ignore = "benchmark"]
 fn bench_native_dsl_javascript() {
-    let dir = native_grammar_dir("javascript_native");
+    let dir = native_grammar_path("javascript_native");
     let source = read_native_grammar("javascript_native");
     for _ in 0..10 {
         std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
