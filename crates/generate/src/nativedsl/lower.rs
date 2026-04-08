@@ -587,17 +587,11 @@ pub fn lower_with_base(
         .as_ref()
         .ok_or_else(|| LowerError {
             kind: LowerErrorKind::MissingGrammarBlock,
-            span: FileSpan {
-                span: Span::new(0, 0),
-                file,
-            },
+            span: Span::new(0, 0),
         })?;
     let language = config.language.as_ref().ok_or_else(|| LowerError {
         kind: LowerErrorKind::MissingLanguageField,
-        span: FileSpan {
-            span: Span::new(0, 0),
-            file,
-        },
+        span: Span::new(0, 0),
     })?;
 
     let mut extra_symbols = Vec::with_capacity(config.extras.len());
@@ -633,10 +627,7 @@ pub fn lower_with_base(
         if !override_entries.is_empty() && base.variables.is_empty() {
             return Err(LowerError {
                 kind: LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.clone()),
-                span: FileSpan {
-                    file,
-                    span: override_entries[0].2,
-                },
+                span: override_entries[0].2,
             });
         }
         let mut vars: Vec<Variable> = base.variables.clone();
@@ -646,7 +637,7 @@ pub fn lower_with_base(
             } else {
                 return Err(LowerError {
                     kind: LowerErrorKind::OverrideRuleNotFound(name.clone()),
-                    span: FileSpan { span: *span, file },
+                    span: *span,
                 });
             }
         }
@@ -662,10 +653,7 @@ pub fn lower_with_base(
         if !override_entries.is_empty() {
             return Err(LowerError {
                 kind: LowerErrorKind::OverrideWithoutInherit,
-                span: FileSpan {
-                    span: override_entries[0].2,
-                    file,
-                },
+                span: override_entries[0].2,
             });
         }
         rule_entries
@@ -882,10 +870,7 @@ impl Evaluator<'_> {
                     }
                     None => Err(LowerError {
                         kind: LowerErrorKind::InheritRuleNotFound(rule_name.to_string()),
-                        span: FileSpan {
-                            file,
-                            span: ast.span(rule),
-                        },
+                        span: ast.span(rule),
                     }),
                 };
                 self.base_grammar = Some(grammar);
@@ -1435,7 +1420,7 @@ fn unescape_string(raw: &str) -> String {
 #[derive(Debug, Serialize, Error)]
 pub struct LowerError {
     pub kind: LowerErrorKind,
-    pub span: FileSpan,
+    pub span: Span,
 }
 
 /// The specific kind of lowering error.
