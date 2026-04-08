@@ -18,8 +18,8 @@ use thiserror::Error;
 
 use super::{
     ast::{
-        Ast, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Param, PrecEntry,
-        ReservedWordSet, Span,
+        Ast, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note, NoteMessage, Param,
+        PrecEntry, ReservedWordSet, Span,
     },
     lexer::{Token, TokenKind},
 };
@@ -157,6 +157,7 @@ impl<'src> Parser<'src> {
         ParseError {
             kind,
             span: self.span(),
+            note: None,
         }
     }
 
@@ -173,6 +174,23 @@ impl<'src> Parser<'src> {
 
     fn parse_grammar_block(&mut self) -> Result<NodeId, ParseError> {
         let start = self.expect(&TokenKind::KwGrammar)?;
+        if self.ast.context.grammar_config.is_some() {
+            let first_span = self
+                .ast
+                .root_items
+                .iter()
+                .find(|&&id| matches!(self.ast.node(id), Node::Grammar))
+                .map(|&id| self.ast.span(id))
+                .unwrap();
+            return Err(ParseError {
+                kind: ParseErrorKind::DuplicateGrammarBlock,
+                span: start,
+                note: Some(Note {
+                    message: NoteMessage::FirstDefinedHere,
+                    span: first_span,
+                }),
+            });
+        }
         self.expect(&TokenKind::LBrace)?;
         let mut config = GrammarConfig::default();
 
@@ -205,6 +223,7 @@ impl<'src> Parser<'src> {
                             self.ast.text(key_span).to_string(),
                         ),
                         span: key_span,
+                        note: None,
                     });
                 }
             }
@@ -359,6 +378,7 @@ impl<'src> Parser<'src> {
                 _ => Err(ParseError {
                     kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
                     span: id_span,
+                    note: None,
                 }),
             };
         }
@@ -527,6 +547,7 @@ impl<'src> Parser<'src> {
                     return Err(ParseError {
                         kind: ParseErrorKind::ExpectedPrecVariant(id.to_string()),
                         span: id_span,
+                        note: None,
                     });
                 }
             }
@@ -717,6 +738,7 @@ enum PrecVariant {
 pub struct ParseError {
     pub kind: ParseErrorKind,
     pub span: Span,
+    pub note: Option<Note>,
 }
 
 /// The specific kind of parse error.
@@ -735,6 +757,7 @@ pub enum ParseErrorKind {
     ExpectedPrecVariant(String),
     OnlySimpleNamesCallable,
     ExpectedStringOrIdent,
+    DuplicateGrammarBlock,
 }
 
 impl std::fmt::Display for ParseError {
@@ -766,6 +789,9 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorKind::ExpectedStringOrIdent => {
                 write!(f, "expected string or identifier")
+            }
+            ParseErrorKind::DuplicateGrammarBlock => {
+                write!(f, "only one grammar block is allowed")
             }
         }
     }
