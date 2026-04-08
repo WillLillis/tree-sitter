@@ -1258,8 +1258,8 @@ rule program { bogus_ref }
 
     let parent_path = dir.path().join("parent.tsg");
     let parent_src = r#"let base = inherit("base.tsg")
-grammar {{ language: "derived", inherits: base }}
-rule extra {{ "hello" }}
+grammar { language: "derived", inherits: base }
+rule extra { "hello" }
 "#
     .to_string();
     let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
