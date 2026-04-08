@@ -387,7 +387,7 @@ fn type_of<'src>(
             }
         }
         Node::Ident => {
-            unreachable!("resolve pass should have replaced all Ident nodes")
+            unreachable!()
         }
         Node::VarRef => {
             let var_span = ast.span(id);

@@ -387,7 +387,10 @@ impl<'src> Parser<'src> {
         if self.eat(TokenKind::LParen).is_some() {
             let elems = self.comma_sep(TokenKind::RParen, Self::parse_type)?;
             let end = self.expect(TokenKind::RParen)?;
-            let range = self.ast.push_children(&elems);
+            let range = self
+                .ast
+                .push_children(&elems)
+                .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
             return Ok(self.ast.push(Node::TypeTuple(range), start.merge(end)));
         }
 
@@ -468,7 +471,10 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LParen)?;
         let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
-        let range = self.ast.push_children(&args);
+        let range = self
+            .ast
+            .push_children(&args)
+            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         let node = match name {
             "seq" => Node::Seq(range),
             "choice" => Node::Choice(range),
@@ -519,7 +525,10 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LParen)?;
         let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
-        let range = self.ast.push_children(&args);
+        let range = self
+            .ast
+            .push_children(&args)
+            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::Concat(range), start.merge(end)))
     }
 
@@ -642,7 +651,10 @@ impl<'src> Parser<'src> {
                 self.pos += 1;
                 let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
                 let end = self.expect(TokenKind::RParen)?;
-                let args = self.ast.push_children(&args);
+                let args = self
+                    .ast
+                    .push_children(&args)
+                    .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
                 id = self.ast.push(
                     Node::Call {
                         name: name_id,
@@ -662,7 +674,10 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         let items = self.comma_sep(TokenKind::RBracket, Self::parse_expr)?;
         let end = self.expect(TokenKind::RBracket)?;
-        let range = self.ast.push_children(&items);
+        let range = self
+            .ast
+            .push_children(&items)
+            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::List(range), start.merge(end)))
     }
 
@@ -670,7 +685,10 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         let items = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
-        let range = self.ast.push_children(&items);
+        let range = self
+            .ast
+            .push_children(&items)
+            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::Tuple(range), start.merge(end)))
     }
 
@@ -683,7 +701,10 @@ impl<'src> Parser<'src> {
             Ok((key, value))
         })?;
         let end = self.expect(TokenKind::RBrace)?;
-        let range = self.ast.push_object(fields);
+        let range = self
+            .ast
+            .push_object(fields)
+            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::Object(range), start.merge(end)))
     }
 
@@ -747,6 +768,7 @@ pub enum ParseErrorKind {
     OnlySimpleNamesCallable,
     ExpectedStringOrIdent,
     DuplicateGrammarBlock,
+    TooManyChildren,
 }
 
 impl std::fmt::Display for ParseError {
@@ -778,6 +800,9 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorKind::DuplicateGrammarBlock => {
                 write!(f, "only one grammar block is allowed")
+            }
+            ParseErrorKind::TooManyChildren => {
+                write!(f, "too many elements (maximum {})", u16::MAX)
             }
         }
     }
