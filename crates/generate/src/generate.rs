@@ -134,9 +134,10 @@ pub enum LoadGrammarError {
     LoadJSGrammarFile(#[from] JSError),
     #[error("Failed to load grammar.json -- {0}")]
     IO(IoError),
+    // TODO: Find a better solution  to this being so large
     #[cfg(feature = "nativedsl")]
     #[error(transparent)]
-    NativeDsl(nativedsl::NativeDslError),
+    NativeDsl(Box<nativedsl::NativeDslError>),
     #[error("Unknown grammar file extension: {0:?}")]
     FileExtension(PathBuf),
 }
@@ -481,11 +482,11 @@ pub fn load_grammar_file(
             let source_text = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
             nativedsl::parse_native_dsl_to_json(&source_text, grammar_path).map_err(|error| {
-                LoadGrammarError::NativeDsl(nativedsl::NativeDslError {
+                LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
                     error,
                     source_text,
                     path: grammar_path.to_owned(),
-                })
+                }))
             })
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,

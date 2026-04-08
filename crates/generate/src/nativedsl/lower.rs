@@ -409,17 +409,16 @@ impl<'src> Evaluator<'src> {
                     .collect();
                 Self::alloc_val_s(&mut self.values, Value::List(vals))
             }
-            "word" => match &grammar.word_token {
-                Some(name) => {
+            "word" => {
+                if let Some(name) = &grammar.word_token {
                     let sid = self.strings.intern_owned(name.clone());
                     let rid = Self::alloc_rule_s(&mut self.rules, ARule::NamedSymbol(sid));
                     Self::alloc_val_s(&mut self.values, Value::Rule(rid))
-                }
-                None => {
+                } else {
                     let rid = Self::alloc_rule_s(&mut self.rules, ARule::Blank);
                     Self::alloc_val_s(&mut self.values, Value::Rule(rid))
                 }
-            },
+            }
             _ => unreachable!(),
         }
     }
@@ -594,9 +593,9 @@ impl<'src> Evaluator<'src> {
 /// rule names.
 pub fn lower_with_base(
     ast: &Ast<'_>,
-    base_grammar: Option<InputGrammar>,
+    base_grammar: Option<&InputGrammar>,
 ) -> Result<InputGrammar, LowerError> {
-    let mut eval = Evaluator::new(ast, base_grammar.as_ref());
+    let mut eval = Evaluator::new(ast, base_grammar);
     let mut rule_entries: Vec<(String, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(String, RuleId, Span)> = Vec::new();
 
@@ -638,10 +637,8 @@ pub fn lower_with_base(
         span: Span::new(0, 0),
     })?;
 
-    let base = base_grammar.as_ref();
-
     // Build variables: merge base + overrides + new rules
-    let variables = if let Some(base) = base {
+    let variables = if let Some(base) = base_grammar {
         if !override_entries.is_empty() && base.variables.is_empty() {
             return Err(LowerError {
                 kind: LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.clone()),
@@ -686,31 +683,31 @@ pub fn lower_with_base(
 
     let extra_symbols = match config.extras {
         Some(id) => eval.eval_rule_list(id)?,
-        None => base.map_or_else(Vec::new, |b| b.extra_symbols.clone()),
+        None => base_grammar.map_or_else(Vec::new, |b| b.extra_symbols.clone()),
     };
 
     let external_tokens = match config.externals {
         Some(id) => eval.eval_rule_list(id)?,
-        None => base.map_or_else(Vec::new, |b| b.external_tokens.clone()),
+        None => base_grammar.map_or_else(Vec::new, |b| b.external_tokens.clone()),
     };
 
     let variables_to_inline = match config.inline {
         Some(id) => eval.eval_name_list(id)?,
-        None => base.map_or_else(Vec::new, |b| b.variables_to_inline.clone()),
+        None => base_grammar.map_or_else(Vec::new, |b| b.variables_to_inline.clone()),
     };
 
     let supertype_symbols = match config.supertypes {
         Some(id) => eval.eval_name_list(id)?,
-        None => base.map_or_else(Vec::new, |b| b.supertype_symbols.clone()),
+        None => base_grammar.map_or_else(Vec::new, |b| b.supertype_symbols.clone()),
     };
 
     let word_token = match config.word {
         Some(id) => Some(eval.eval_rule_name(id)?),
-        None => base.and_then(|b| b.word_token.clone()),
+        None => base_grammar.and_then(|b| b.word_token.clone()),
     };
 
     let expected_conflicts = if config.conflicts.is_empty() {
-        base.map_or_else(Vec::new, |b| b.expected_conflicts.clone())
+        base_grammar.map_or_else(Vec::new, |b| b.expected_conflicts.clone())
     } else {
         config
             .conflicts
@@ -720,7 +717,7 @@ pub fn lower_with_base(
     };
 
     let precedence_orderings = if config.precedences.is_empty() {
-        base.map_or_else(Vec::new, |b| b.precedence_orderings.clone())
+        base_grammar.map_or_else(Vec::new, |b| b.precedence_orderings.clone())
     } else {
         config
             .precedences
@@ -737,7 +734,7 @@ pub fn lower_with_base(
     };
 
     let reserved_words = if config.reserved.is_empty() {
-        base.map_or_else(Vec::new, |b| b.reserved_words.clone())
+        base_grammar.map_or_else(Vec::new, |b| b.reserved_words.clone())
     } else {
         let mut result = Vec::with_capacity(config.reserved.len());
         for rws in &config.reserved {
@@ -934,7 +931,7 @@ impl Evaluator<'_> {
     }
 
     /// Convert an AST node directly to an arena rule, short-circuiting the
-    /// value arena for common cases (RuleRef, StringLit, combinators).
+    /// value arena for common cases (`RuleRef`, `StringLit`, combinators).
     fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
         match ast.node(id) {
@@ -1168,9 +1165,9 @@ impl Evaluator<'_> {
         let body = config.body;
 
         self.push_scope();
-        for i in 0..n_params {
+        for (i, arg_val) in arg_vals.iter().enumerate().take(n_params) {
             let param_name = self.get_fn_config(fn_id).params[i].name;
-            self.bind(self.ast.node_text(param_name), arg_vals[i]);
+            self.bind(self.ast.node_text(param_name), *arg_val);
         }
 
         let result = self.eval_expr(body);
@@ -1411,7 +1408,7 @@ pub struct LowerError {
 }
 
 /// The specific kind of lowering error.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum LowerErrorKind {
     MissingGrammarBlock,
     MissingLanguageField,
