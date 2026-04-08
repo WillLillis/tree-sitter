@@ -25,14 +25,15 @@ use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
 
+pub use lexer::{LexError, LexErrorKind};
+pub use lower::{LowerError, LowerErrorKind};
+pub use parser::{ParseError, ParseErrorKind};
+pub use resolve::{ResolveError, ResolveErrorKind};
+pub use typecheck::{Ty, TypeError, TypeErrorKind};
+
 use ast::Span;
-use lexer::LexError;
-use lower::LowerError;
-use parser::ParseError;
-use resolve::ResolveError;
 use serde::Serialize;
 use thiserror::Error;
-use typecheck::TypeError;
 
 /// Parse a native DSL source file into an [`InputGrammar`].
 ///

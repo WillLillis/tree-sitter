@@ -101,6 +101,12 @@ pub fn resolve(ast: &mut Ast<'_>, base_rule_names: &[String]) -> Result<(), Reso
     let n_items = ast.root_items.len();
     for i in 0..n_items {
         let item_id = ast.root_items[i];
+        // Register let bindings in order so forward references are caught
+        if let Node::Let { name, .. } = ast.node(item_id) {
+            let name_text = ast.node_text(*name);
+            let span = ast.span(item_id);
+            names.insert(name_text, Decl::Var, span)?;
+        }
         resolve_item(ast, &names, item_id)?;
     }
     Ok(())
@@ -150,16 +156,14 @@ impl Names {
 fn collect_names(ast: &Ast<'_>) -> Result<Names, ResolveError> {
     let mut names = Names::new();
 
-    // Register rules, lets, and fns first
+    // Register rules and fns upfront (forward references allowed).
+    // Let bindings are registered during pass 2 in item order (no forward references).
     for i in 0..ast.root_items.len() {
         let item_id = ast.root_items[i];
         let span = ast.span(item_id);
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
                 names.insert(ast.node_text(*name), Decl::Rule, span)?;
-            }
-            Node::Let { name, .. } => {
-                names.insert(ast.node_text(*name), Decl::Var, span)?;
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
@@ -367,7 +371,7 @@ fn resolve_children(
             }
             Ok(())
         }
-        Node::FieldAccess { obj, .. } | Node::ConfigAccess { obj, .. } => {
+        Node::FieldAccess { obj, .. } | Node::RuleInline { obj, .. } => {
             let obj = *obj;
             resolve_expr(nodes, ctx, names, obj, locals)
         }
@@ -383,7 +387,7 @@ pub struct ResolveError {
 }
 
 /// The specific kind of resolve error.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum ResolveErrorKind {
     DuplicateDeclaration(String),
     UnknownIdentifier(String),
