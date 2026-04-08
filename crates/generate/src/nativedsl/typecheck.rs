@@ -1,19 +1,7 @@
 //! Structural type checker for the native grammar DSL.
 //!
-//! Runs after name resolution and before lowering. Validates that:
-//!
-//! - Rule bodies produce rule-typed expressions
-//! - Function arguments match parameter types
-//! - Function bodies match declared return types
-//! - `let` binding values match declared types
-//! - `for` loop iterables are lists with element types matching bindings
-//! - Combinator arguments have the correct types (`seq`/`choice` need rules,
-//!   `concat` needs strings, `prec` needs int/string values, etc.)
-//!
-//! The type system is simple and structural. `str` is a subtype of `rule`
-//! (string literals can appear anywhere a rule expression is expected).
-//! `Object({field: int, ...})` is compatible with `int` if all fields are
-//! `int`.
+//! Runs after name resolution and before lowering. `Str` is a subtype of
+//! `Rule` (string literals can appear where rules are expected).
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -21,16 +9,11 @@ use thiserror::Error;
 
 use super::ast::{Ast, Node, NodeId, Span};
 
-/// The type of a DSL expression.
-///
-/// The type system is intentionally simple: five base types plus structural
-/// containers. `Str` is a subtype of `Rule` (see [`is_compatible`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Ty {
     Int,
     Str,
     Rule,
-    /// A loaded base grammar from `inherit("path")`.
     Grammar,
     List(Box<Self>),
     Tuple(Vec<Self>),
@@ -47,21 +30,21 @@ impl std::fmt::Display for Ty {
             Self::List(inner) => write!(f, "list<{inner}>"),
             Self::Tuple(elems) => {
                 write!(f, "(")?;
-                for (i, elem) in elems.iter().enumerate() {
+                for (i, e) in elems.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{elem}")?;
+                    write!(f, "{e}")?;
                 }
                 write!(f, ")")
             }
             Self::Object(fields) => {
                 write!(f, "{{")?;
-                for (i, (key, val)) in fields.iter().enumerate() {
+                for (i, (k, v)) in fields.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{key}: {val}")?;
+                    write!(f, "{k}: {v}")?;
                 }
                 write!(f, "}}")
             }
@@ -69,44 +52,25 @@ impl std::fmt::Display for Ty {
     }
 }
 
-/// Check whether `actual` is assignable to `expected`.
-///
-/// This is the subtyping relation: `Str` is compatible with `Rule`, and an
-/// `Object` with all-int fields is compatible with `Int`.
 fn is_compatible(actual: &Ty, expected: &Ty) -> bool {
-    if actual == expected {
-        return true;
-    }
-    match (actual, expected) {
-        (Ty::Str, Ty::Rule) => true,
-        (Ty::Object(fields), Ty::Int) => fields.iter().all(|(_, ty)| ty == &Ty::Int),
-        _ => false,
-    }
+    actual == expected
+        || matches!((actual, expected), (Ty::Str, Ty::Rule))
+        || matches!((actual, expected), (Ty::Object(fields), Ty::Int) if fields.iter().all(|(_, ty)| ty == &Ty::Int))
 }
 
-/// Returns `true` for types that can appear where a grammar rule is expected.
 const fn is_rule_like(ty: &Ty) -> bool {
     matches!(ty, Ty::Rule | Ty::Str)
 }
-
-/// Returns `true` for types that can appear as precedence values.
 const fn is_prec_like(ty: &Ty) -> bool {
     matches!(ty, Ty::Int | Ty::Str)
 }
 
-/// A function's type signature: parameter names/types and return type.
 #[derive(Clone, Debug)]
 struct FnSig {
     params: Vec<(String, Ty)>,
     return_ty: Ty,
 }
 
-/// The type environment: a scope stack for variables and a map of function
-/// signatures.
-///
-/// Variable scopes form a stack - `push_scope`/`pop_scope` manage nesting
-/// for function bodies and for-loop bodies. Lookups walk the stack from top
-/// to bottom, implementing lexical scoping.
 struct TypeEnv<'src> {
     var_scopes: Vec<FxHashMap<&'src str, Ty>>,
     fns: FxHashMap<&'src str, FnSig>,
@@ -119,34 +83,20 @@ impl<'src> TypeEnv<'src> {
             fns: FxHashMap::default(),
         }
     }
-
     fn insert_var(&mut self, name: &'src str, ty: Ty) {
         self.var_scopes.last_mut().unwrap().insert(name, ty);
     }
-
     fn get_var(&self, name: &str) -> Option<&Ty> {
-        for scope in self.var_scopes.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty);
-            }
-        }
-        None
+        self.var_scopes.iter().rev().find_map(|s| s.get(name))
     }
-
     fn push_scope(&mut self) {
         self.var_scopes.push(FxHashMap::default());
     }
-
     fn pop_scope(&mut self) {
         self.var_scopes.pop();
     }
 }
 
-/// Convert function parameters to typed (name, type) pairs.
-///
-/// # Errors
-///
-/// Returns [`TypeError`] if a parameter's type annotation cannot be resolved.
 fn parse_fn_params(
     ast: &Ast<'_>,
     config: &super::ast::FnConfig,
@@ -154,30 +104,27 @@ fn parse_fn_params(
     config
         .params
         .iter()
-        .map(|param| {
+        .map(|p| {
             Ok((
-                ast.node_text(param.name).to_string(),
-                ast_type_to_ty(ast, param.ty)?,
+                ast.node_text(p.name).to_string(),
+                ast_type_to_ty(ast, p.ty)?,
             ))
         })
         .collect()
 }
 
-/// Convert an AST type node (`TypeRule`, `TypeStr`, etc.) to a [`Ty`].
 fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId) -> Result<Ty, TypeError> {
     match ast.node(ty_id) {
         Node::TypeInt => Ok(Ty::Int),
         Node::TypeStr => Ok(Ty::Str),
         Node::TypeRule => Ok(Ty::Rule),
         Node::TypeList(inner) => Ok(Ty::List(Box::new(ast_type_to_ty(ast, *inner)?))),
-        Node::TypeTuple(range) => {
-            let tys = ast
-                .child_slice(*range)
+        Node::TypeTuple(range) => Ok(Ty::Tuple(
+            ast.child_slice(*range)
                 .iter()
                 .map(|&id| ast_type_to_ty(ast, id))
-                .collect::<Result<_, _>>()?;
-            Ok(Ty::Tuple(tys))
-        }
+                .collect::<Result<_, _>>()?,
+        )),
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
             span: ast.span(ty_id),
@@ -192,19 +139,22 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     }
 }
 
-/// Run type checking on the entire AST.
-///
-/// First pre-scans all top-level items to register rule names as `Ty::Rule`
-/// and function signatures. Then checks each item body.
-///
-/// # Errors
-///
-/// Returns [`TypeError`] on type mismatches, undefined functions, wrong
-/// argument counts, etc.
+fn expect_ty<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    check: fn(&Ty) -> bool,
+    expected: Ty,
+) -> Result<(), TypeError> {
+    let ty = type_of(ast, id, env)?;
+    if !check(&ty) {
+        return Err(mismatch(expected, ty, ast.span(id)));
+    }
+    Ok(())
+}
+
 pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
     let mut env = TypeEnv::new();
-
-    // Pre-scan: register all rule names and fn signatures.
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
@@ -220,20 +170,17 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
             _ => {}
         }
     }
-
     for &item_id in &ast.root_items {
         check_item(ast, item_id, &mut env)?;
     }
     Ok(())
 }
 
-/// Type-check a single top-level item (rule, let, fn).
 fn check_item<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
 ) -> Result<(), TypeError> {
-    let span = ast.span(id);
     match ast.node(id) {
         Node::Grammar => Ok(()),
         Node::Let { name, ty, value } => {
@@ -251,46 +198,34 @@ fn check_item<'src>(
             let config = ast.get_fn(*fn_idx);
             let params = parse_fn_params(ast, config)?;
             let return_ty = ast_type_to_ty(ast, config.return_ty)?;
-            let body = config.body;
-            let fn_name_span = config.name;
-
             env.fns.insert(
-                ast.node_text(fn_name_span),
+                ast.node_text(config.name),
                 FnSig {
                     params,
                     return_ty: return_ty.clone(),
                 },
             );
-
             env.push_scope();
             for param in &config.params {
-                let ty = ast_type_to_ty(ast, param.ty)?;
-                env.insert_var(ast.node_text(param.name), ty);
+                env.insert_var(ast.node_text(param.name), ast_type_to_ty(ast, param.ty)?);
             }
-
-            let body_ty = type_of(ast, body, env)?;
+            let body_ty = type_of(ast, config.body, env)?;
             env.pop_scope();
-
             if !is_compatible(&body_ty, &return_ty) {
-                return Err(mismatch(return_ty, body_ty, ast.span(body)));
+                return Err(mismatch(return_ty, body_ty, ast.span(config.body)));
             }
             Ok(())
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
-            expect_rule(ast, *body, env)?;
-            Ok(())
+            expect_ty(ast, *body, env, is_rule_like, Ty::Rule)
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::UnexpectedTopLevel,
-            span,
+            span: ast.span(id),
         }),
     }
 }
 
-/// Validate function call arguments against the function's signature.
-///
-/// Checks argument count and that each argument type is compatible with the
-/// corresponding parameter type.
 fn check_call_args<'src>(
     ast: &'src Ast<'src>,
     fn_name: &str,
@@ -309,7 +244,7 @@ fn check_call_args<'src>(
             span: call_span,
         });
     }
-    for (&arg_id, (_param_name, param_ty)) in args.iter().zip(sig.params.iter()) {
+    for (&arg_id, (_, param_ty)) in args.iter().zip(sig.params.iter()) {
         let arg_ty = type_of(ast, arg_id, env)?;
         if !is_compatible(&arg_ty, param_ty) {
             return Err(mismatch(param_ty.clone(), arg_ty, ast.span(arg_id)));
@@ -318,49 +253,6 @@ fn check_call_args<'src>(
     Ok(())
 }
 
-/// Type-check a node and assert it produces a rule-like type.
-fn expect_rule<'src>(
-    ast: &'src Ast<'src>,
-    id: NodeId,
-    env: &mut TypeEnv<'src>,
-) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
-    if !is_rule_like(&ty) {
-        return Err(mismatch(Ty::Rule, ty, ast.span(id)));
-    }
-    Ok(())
-}
-
-/// Type-check a node and assert it produces a string type.
-fn expect_str<'src>(
-    ast: &'src Ast<'src>,
-    id: NodeId,
-    env: &mut TypeEnv<'src>,
-) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
-    if ty != Ty::Str {
-        return Err(mismatch(Ty::Str, ty, ast.span(id)));
-    }
-    Ok(())
-}
-
-/// Type-check a node and assert it produces a precedence-like type (int or string).
-fn expect_prec<'src>(
-    ast: &'src Ast<'src>,
-    id: NodeId,
-    env: &mut TypeEnv<'src>,
-) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
-    if !is_prec_like(&ty) {
-        return Err(mismatch(Ty::Int, ty, ast.span(id)));
-    }
-    Ok(())
-}
-
-/// Infer the type of an expression node.
-///
-/// Recursively types sub-expressions and validates that combinator arguments
-/// have the correct types. Returns the resulting [`Ty`].
 fn type_of<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
@@ -373,28 +265,22 @@ fn type_of<'src>(
         Node::RuleRef | Node::Blank => Ok(Ty::Rule),
         Node::Inherit { .. } => Ok(Ty::Grammar),
         Node::Append { left, right } => {
-            let left_ty = type_of(ast, *left, env)?;
-            let right_ty = type_of(ast, *right, env)?;
-            match (&left_ty, &right_ty) {
-                (Ty::List(l), Ty::List(r)) if l == r => Ok(left_ty),
-                (Ty::List(_), Ty::List(_) | _) => {
-                    Err(mismatch(left_ty, right_ty, ast.span(*right)))
-                }
+            let (lt, rt) = (type_of(ast, *left, env)?, type_of(ast, *right, env)?);
+            match (&lt, &rt) {
+                (Ty::List(l), Ty::List(r)) if l == r => Ok(lt),
+                (Ty::List(_), _) => Err(mismatch(lt, rt, ast.span(*right))),
                 _ => Err(TypeError {
-                    kind: TypeErrorKind::AppendRequiresList(left_ty),
+                    kind: TypeErrorKind::AppendRequiresList(lt),
                     span: ast.span(*left),
                 }),
             }
         }
-        Node::Ident => {
-            unreachable!()
-        }
+        Node::Ident => unreachable!(),
         Node::VarRef => {
-            let var_span = ast.span(id);
-            let name = ast.text(var_span);
+            let name = ast.text(span);
             env.get_var(name).cloned().ok_or_else(|| TypeError {
                 kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
-                span: var_span,
+                span,
             })
         }
         Node::FieldAccess { obj, field } => {
@@ -412,7 +298,6 @@ fn type_of<'src>(
                         },
                         span,
                     }),
-                // c.extras, c.inline, etc. - config field access on a grammar
                 Ty::Grammar => match field_name {
                     "extras" | "externals" | "inline" | "supertypes" => {
                         Ok(Ty::List(Box::new(Ty::Rule)))
@@ -432,7 +317,6 @@ fn type_of<'src>(
                 }),
             }
         }
-        // c::rule_name - inline the body of a rule from the base grammar
         Node::RuleInline { obj, .. } => {
             let obj_ty = type_of(ast, *obj, env)?;
             if obj_ty != Ty::Grammar {
@@ -451,13 +335,10 @@ fn type_of<'src>(
             Ok(Ty::Int)
         }
         Node::Object(range) => {
-            let fields = ast.get_object(*range);
-            let tys = fields
+            let tys = ast
+                .get_object(*range)
                 .iter()
-                .map(|(key_span, val_id)| {
-                    let ty = type_of(ast, *val_id, env)?;
-                    Ok((ast.text(*key_span).to_string(), ty))
-                })
+                .map(|(ks, vid)| Ok((ast.text(*ks).to_string(), type_of(ast, *vid, env)?)))
                 .collect::<Result<Vec<_>, TypeError>>()?;
             Ok(Ty::Object(tys))
         }
@@ -478,24 +359,22 @@ fn type_of<'src>(
             }
             Ok(Ty::List(Box::new(first)))
         }
-        Node::Tuple(range) => {
-            let tys = ast
-                .child_slice(*range)
+        Node::Tuple(range) => Ok(Ty::Tuple(
+            ast.child_slice(*range)
                 .iter()
                 .map(|&id| type_of(ast, id, env))
-                .collect::<Result<_, _>>()?;
-            Ok(Ty::Tuple(tys))
-        }
+                .collect::<Result<_, _>>()?,
+        )),
         Node::Concat(range) => {
             for &part in ast.child_slice(*range) {
-                expect_str(ast, part, env)?;
+                expect_ty(ast, part, env, |t| *t == Ty::Str, Ty::Str)?;
             }
             Ok(Ty::Str)
         }
         Node::DynRegex { pattern, flags } => {
-            expect_str(ast, *pattern, env)?;
-            if let Some(flags_id) = flags {
-                expect_str(ast, *flags_id, env)?;
+            expect_ty(ast, *pattern, env, |t| *t == Ty::Str, Ty::Str)?;
+            if let Some(fid) = flags {
+                expect_ty(ast, *fid, env, |t| *t == Ty::Str, Ty::Str)?;
             }
             Ok(Ty::Rule)
         }
@@ -504,7 +383,7 @@ fn type_of<'src>(
                 if matches!(ast.node(member), Node::For(_)) {
                     check_for_expr(ast, member, env)?;
                 } else {
-                    expect_rule(ast, member, env)?;
+                    expect_ty(ast, member, env, is_rule_like, Ty::Rule)?;
                 }
             }
             Ok(Ty::Rule)
@@ -514,19 +393,18 @@ fn type_of<'src>(
         | Node::Optional(inner)
         | Node::Token(inner)
         | Node::TokenImmediate(inner) => {
-            expect_rule(ast, *inner, env)?;
+            expect_ty(ast, *inner, env, is_rule_like, Ty::Rule)?;
             Ok(Ty::Rule)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
-            expect_rule(ast, *content, env)?;
+            expect_ty(ast, *content, env, is_rule_like, Ty::Rule)?;
             Ok(Ty::Rule)
         }
         Node::Alias { content, target } => {
-            expect_rule(ast, *content, env)?;
+            expect_ty(ast, *content, env, is_rule_like, Ty::Rule)?;
             let target_ty = type_of(ast, *target, env)?;
             if !matches!(ast.node(*target), Node::RuleRef | Node::VarRef)
-                && target_ty != Ty::Str
-                && target_ty != Ty::Rule
+                && !is_rule_like(&target_ty)
             {
                 return Err(mismatch(Ty::Rule, target_ty, ast.span(*target)));
             }
@@ -535,16 +413,16 @@ fn type_of<'src>(
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content } => {
-            expect_prec(ast, *value, env)?;
-            expect_rule(ast, *content, env)?;
+            expect_ty(ast, *value, env, is_prec_like, Ty::Int)?;
+            expect_ty(ast, *content, env, is_rule_like, Ty::Rule)?;
             Ok(Ty::Rule)
         }
         Node::PrecDynamic { value, content } => {
-            let value_ty = type_of(ast, *value, env)?;
-            if value_ty != Ty::Int {
-                return Err(mismatch(Ty::Int, value_ty, ast.span(*value)));
+            let vt = type_of(ast, *value, env)?;
+            if vt != Ty::Int {
+                return Err(mismatch(Ty::Int, vt, ast.span(*value)));
             }
-            expect_rule(ast, *content, env)?;
+            expect_ty(ast, *content, env, is_rule_like, Ty::Rule)?;
             Ok(Ty::Rule)
         }
         Node::For(_) => {
@@ -571,11 +449,6 @@ fn type_of<'src>(
     }
 }
 
-/// Type-check a `for` expression.
-///
-/// Validates that the iterable is a list, that bindings match element types
-/// (with tuple destructuring for multi-binding), and that the body produces
-/// a rule.
 fn check_for_expr<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
@@ -588,36 +461,31 @@ fn check_for_expr<'src>(
             span,
         });
     };
-
     let config = ast.get_for(*for_idx);
-    let iterable = config.iterable;
-    let body = config.body;
-    let bindings = &config.bindings;
-
-    let iter_ty = type_of(ast, iterable, env)?;
+    let iter_ty = type_of(ast, config.iterable, env)?;
     let elem_ty = match &iter_ty {
         Ty::List(inner) => inner.as_ref().clone(),
         _ => {
             return Err(TypeError {
                 kind: TypeErrorKind::ForRequiresList(iter_ty.clone()),
-                span: ast.span(iterable),
+                span: ast.span(config.iterable),
             });
         }
     };
 
     env.push_scope();
     if let Ty::Tuple(elem_tys) = &elem_ty {
-        if bindings.len() != elem_tys.len() {
+        if config.bindings.len() != elem_tys.len() {
             env.pop_scope();
             return Err(TypeError {
                 kind: TypeErrorKind::ForBindingCountMismatch {
-                    bindings: bindings.len(),
+                    bindings: config.bindings.len(),
                     tuple_elements: elem_tys.len(),
                 },
                 span,
             });
         }
-        for ((name_span, ty_id), actual_ty) in bindings.iter().zip(elem_tys.iter()) {
+        for ((name_span, ty_id), actual_ty) in config.bindings.iter().zip(elem_tys.iter()) {
             let declared = ast_type_to_ty(ast, *ty_id)?;
             if !is_compatible(actual_ty, &declared) {
                 env.pop_scope();
@@ -625,7 +493,7 @@ fn check_for_expr<'src>(
             }
             env.insert_var(ast.text(*name_span), declared);
         }
-    } else if let [(name_span, ty_id)] = bindings.as_slice() {
+    } else if let [(name_span, ty_id)] = config.bindings.as_slice() {
         let declared = ast_type_to_ty(ast, *ty_id)?;
         if !is_compatible(&elem_ty, &declared) {
             env.pop_scope();
@@ -636,29 +504,27 @@ fn check_for_expr<'src>(
         env.pop_scope();
         return Err(TypeError {
             kind: TypeErrorKind::ForBindingsNotTuple {
-                bindings: bindings.len(),
+                bindings: config.bindings.len(),
                 got: elem_ty,
             },
             span,
         });
     }
 
-    let body_ty = type_of(ast, body, env)?;
+    let body_ty = type_of(ast, config.body, env)?;
     env.pop_scope();
     if !is_rule_like(&body_ty) {
-        return Err(mismatch(Ty::Rule, body_ty, ast.span(body)));
+        return Err(mismatch(Ty::Rule, body_ty, ast.span(config.body)));
     }
     Ok(())
 }
 
-/// An error encountered during type checking.
 #[derive(Debug, Serialize, Error)]
 pub struct TypeError {
     pub kind: TypeErrorKind,
     pub span: Span,
 }
 
-/// The specific kind of type error.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum TypeErrorKind {
     TypeMismatch {
@@ -703,17 +569,15 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::TypeMismatch { expected, got } => {
                 write!(f, "expected {expected}, got {got}")
             }
-            TypeErrorKind::UndefinedFunction(name) => write!(f, "undefined function '{name}'"),
+            TypeErrorKind::UndefinedFunction(n) => write!(f, "undefined function '{n}'"),
             TypeErrorKind::ArgCountMismatch {
                 fn_name,
                 expected,
                 got,
-            } => {
-                write!(
-                    f,
-                    "fn '{fn_name}': expected {expected} arguments, got {got}"
-                )
-            }
+            } => write!(
+                f,
+                "fn '{fn_name}': expected {expected} arguments, got {got}"
+            ),
             TypeErrorKind::FieldNotFound { field, on_type } => {
                 write!(f, "no field '{field}' on {on_type}")
             }
@@ -729,28 +593,22 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::ForBindingCountMismatch {
                 bindings,
                 tuple_elements,
-            } => {
-                write!(
-                    f,
-                    "for has {bindings} bindings but tuples have {tuple_elements} elements"
-                )
-            }
-            TypeErrorKind::ForBindingsNotTuple { bindings, got } => {
-                write!(
-                    f,
-                    "for has {bindings} bindings but list elements are {got}, not tuples"
-                )
-            }
-            TypeErrorKind::UnresolvedVariable(name) => write!(f, "unresolved variable '{name}'"),
+            } => write!(
+                f,
+                "for has {bindings} bindings but tuples have {tuple_elements} elements"
+            ),
+            TypeErrorKind::ForBindingsNotTuple { bindings, got } => write!(
+                f,
+                "for has {bindings} bindings but list elements are {got}, not tuples"
+            ),
+            TypeErrorKind::UnresolvedVariable(n) => write!(f, "unresolved variable '{n}'"),
             TypeErrorKind::AppendRequiresList(got) => {
                 write!(f, "append requires list arguments, got {got}")
             }
             TypeErrorKind::ConfigAccessOnNonGrammar(ty) => {
-                write!(f, "'::' config access requires a grammar value, got {ty}")
+                write!(f, "'::' requires a grammar value, got {ty}")
             }
-            TypeErrorKind::UnknownConfigField(name) => {
-                write!(f, "unknown grammar config field '{name}'")
-            }
+            TypeErrorKind::UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
             TypeErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
             TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
         }
