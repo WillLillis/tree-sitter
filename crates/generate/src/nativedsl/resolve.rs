@@ -190,14 +190,30 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
         }
     }
 
-    // Register externals that aren't already declared as rules
+    // Register identifiers from config fields that aren't already declared.
+    // In grammar.js, externals/inline/supertypes/word can reference names
+    // not declared as rules. We mirror that by pre-registering them.
+    // Only works for literal list expressions; arbitrary expressions
+    // (e.g. append(...)) are resolved normally.
     if let Some(config) = &ast.context.grammar_config {
-        for j in 0..config.externals.len() {
-            let ext_id = config.externals[j];
-            if let Node::Ident = ast.node(ext_id) {
-                let name = ast.text(ast.span(ext_id));
+        let config_lists = [config.externals, config.inline, config.supertypes];
+        for list_id in config_lists.into_iter().flatten() {
+            if let Node::List(range) = ast.node(list_id) {
+                for &child in ast.child_slice(*range) {
+                    if let Node::Ident = ast.node(child) {
+                        let name = ast.text(ast.span(child));
+                        if names.get(name).is_none() {
+                            names.insert(name, Decl::Rule, ast.span(child))?;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(word_id) = config.word {
+            if let Node::Ident = ast.node(word_id) {
+                let name = ast.text(ast.span(word_id));
                 if names.get(name).is_none() {
-                    names.insert(name, Decl::Rule, ast.span(ext_id))?;
+                    names.insert(name, Decl::Rule, ast.span(word_id))?;
                 }
             }
         }
@@ -217,13 +233,17 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
             // SAFETY: Earlier pass has already verified this is `Some`
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
             let nodes = &mut ast.nodes;
-            if let Some(inherits) = grammar_config.inherits {
-                resolve_expr(nodes, ctx, names, inherits, &Locals::EMPTY)?;
-            }
-            for &id in &grammar_config.extras {
-                resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
-            }
-            for &id in &grammar_config.externals {
+            for id in [
+                grammar_config.inherits,
+                grammar_config.extras,
+                grammar_config.externals,
+                grammar_config.inline,
+                grammar_config.supertypes,
+                grammar_config.word,
+            ]
+            .into_iter()
+            .flatten()
+            {
                 resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
             }
             for rws in &grammar_config.reserved {
