@@ -12,7 +12,7 @@ use memchr::{memchr, memchr2};
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{FileId, FileSpan, Span};
+use super::ast::Span;
 
 /// The kind of a lexer token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -136,23 +136,14 @@ pub struct Token {
 pub struct Lexer<'src> {
     source: &'src [u8],
     pos: usize,
-    file: FileId,
 }
 
 impl<'src> Lexer<'src> {
     /// Create a new lexer for the given source text.
-    pub const fn new(source: &'src str, file: FileId) -> Self {
+    pub const fn new(source: &'src str) -> Self {
         Self {
             source: source.as_bytes(),
             pos: 0,
-            file,
-        }
-    }
-
-    fn file_span(&self, span: Span) -> FileSpan {
-        FileSpan {
-            file: self.file,
-            span,
         }
     }
 
