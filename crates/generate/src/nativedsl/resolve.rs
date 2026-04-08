@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, AstContext, Node, NodeId, Param, Span};
+use super::ast::{Ast, AstContext, Node, NodeId, Note, NoteMessage, Param, Span};
 
 /// Zero-allocation scope chain for local variable names.
 ///
@@ -89,13 +89,19 @@ impl Locals<'_> {
 /// # Errors
 ///
 /// Returns [`ResolveError`] for duplicate declarations or unknown identifiers.
-pub fn resolve(ast: &mut Ast<'_>, base_rule_names: &[String]) -> Result<(), ResolveError> {
+pub fn resolve(
+    ast: &mut Ast<'_>,
+    base_rule_names: &[String],
+    inherit_span: Option<Span>,
+) -> Result<(), ResolveError> {
     let mut names = collect_names(ast)?;
-    // Register inherited rule names so they resolve to RuleRef
+    // Register inherited rule names so they resolve to RuleRef.
+    // Use the inherit statement's span so "first defined here" points there.
+    let inherit_span = inherit_span.unwrap_or(Span::new(0, 0));
     for name in base_rule_names {
         // Don't error on duplicates - derived rules intentionally shadow base rules
         if names.get(name).is_none() {
-            names.decls.insert(name.clone(), Decl::Rule);
+            names.decls.insert(name.clone(), (Decl::Rule, inherit_span));
         }
     }
     let n_items = ast.root_items.len();
@@ -121,9 +127,9 @@ enum Decl {
     Fn,
 }
 
-/// Map of top-level declaration names to their kinds.
+/// Map of top-level declaration names to their kinds and definition spans.
 struct Names {
-    decls: FxHashMap<String, Decl>,
+    decls: FxHashMap<String, (Decl, Span)>,
 }
 
 impl Names {
@@ -134,18 +140,22 @@ impl Names {
     }
 
     fn insert(&mut self, name: &str, kind: Decl, span: Span) -> Result<(), ResolveError> {
-        if self.decls.contains_key(name) {
+        if let Some((_, first_span)) = self.decls.get(name) {
             return Err(ResolveError {
                 kind: ResolveErrorKind::DuplicateDeclaration(name.to_string()),
                 span,
+                note: Some(Note {
+                    message: NoteMessage::FirstDefinedHere,
+                    span: *first_span,
+                }),
             });
         }
-        self.decls.insert(name.to_string(), kind);
+        self.decls.insert(name.to_string(), (kind, span));
         Ok(())
     }
 
     fn get(&self, name: &str) -> Option<Decl> {
-        self.decls.get(name).copied()
+        self.decls.get(name).map(|(d, _)| *d)
     }
 }
 
@@ -266,6 +276,7 @@ fn resolve_expr(
             return Err(ResolveError {
                 kind: ResolveErrorKind::UnknownIdentifier(name.to_string()),
                 span,
+                note: None,
             });
         }
         return Ok(());
@@ -384,6 +395,7 @@ fn resolve_children(
 pub struct ResolveError {
     pub kind: ResolveErrorKind,
     pub span: Span,
+    pub note: Option<Note>,
 }
 
 /// The specific kind of resolve error.
