@@ -473,7 +473,8 @@ pub fn load_grammar_file(
     if grammar_path.is_dir() {
         Err(LoadGrammarError::InvalidPath)?;
     }
-    match grammar_path.extension().and_then(|e| e.to_str()) {
+    let start = std::time::Instant::now();
+    let g = match grammar_path.extension().and_then(|e| e.to_str()) {
         Some("js") => Ok(load_js_grammar_file(grammar_path, js_runtime)?),
         Some("json") => Ok(fs::read_to_string(grammar_path)
             .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?),
@@ -490,7 +491,10 @@ pub fn load_grammar_file(
             })
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
-    }
+    };
+    println!("grammar time: {:?} ({:?})", start.elapsed(), grammar_path.extension());
+
+    g
 }
 
 #[cfg(feature = "load")]
