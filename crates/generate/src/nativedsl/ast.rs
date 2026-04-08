@@ -8,9 +8,19 @@
 //! bindings) is stored in [`AstContext`], separate from the node arena, so
 //! that later passes can mutate nodes while borrowing context immutably.
 
-use std::{num::NonZeroU32, path::PathBuf};
+use std::{fmt, num::NonZeroU32, path::PathBuf};
 
 use serde::Serialize;
+
+/// Error returned when the AST exceeds capacity limits.
+#[derive(Debug)]
+pub struct CapacityError;
+
+impl fmt::Display for CapacityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "too many elements (maximum {})", u16::MAX)
+    }
+}
 
 /// Typed index into the AST node arena.
 ///
@@ -288,11 +298,14 @@ impl<'src> Ast<'src> {
     }
 
     /// Store object fields and return a `ChildRange` for `Node::Object`.
-    pub fn push_object(&mut self, fields: Vec<(Span, NodeId)>) -> ChildRange {
+    pub fn push_object(
+        &mut self,
+        fields: Vec<(Span, NodeId)>,
+    ) -> Result<ChildRange, CapacityError> {
         let start = self.context.object_fields.len() as u32;
-        let len = fields.len() as u16;
+        let len = u16::try_from(fields.len()).map_err(|_| CapacityError)?;
         self.context.object_fields.extend(fields);
-        ChildRange::new(start, len)
+        Ok(ChildRange::new(start, len))
     }
 
     #[must_use]
@@ -320,11 +333,11 @@ impl<'src> Ast<'src> {
 
     /// Push a list of child `NodeId`s into the shared children vector,
     /// returning a `ChildRange` referencing them.
-    pub fn push_children(&mut self, items: &[NodeId]) -> ChildRange {
+    pub fn push_children(&mut self, items: &[NodeId]) -> Result<ChildRange, CapacityError> {
         let start = self.context.children.len() as u32;
-        let len = items.len() as u16;
+        let len = u16::try_from(items.len()).map_err(|_| CapacityError)?;
         self.context.children.extend_from_slice(items);
-        ChildRange::new(start, len)
+        Ok(ChildRange::new(start, len))
     }
 
     /// Resolve a `ChildRange` to a slice of child `NodeId`s.

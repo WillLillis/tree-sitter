@@ -33,7 +33,7 @@ use thiserror::Error;
 use crate::grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType};
 use crate::rules::{Precedence, Rule};
 
-use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecEntry, Span};
+use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, PrecEntry, Span};
 
 /// A handle to an interned string in the [`StringPool`].
 ///
@@ -86,7 +86,7 @@ impl<'src> StringPool<'src> {
         match &self.entries[id.0.get() as usize] {
             StrEntry::Source(span) => span.resolve(self.source),
             StrEntry::Owned(s) => s,
-            StrEntry::Unreachable => unreachable!("poison string entry"),
+            StrEntry::Unreachable => unreachable!(),
         }
     }
 
@@ -244,7 +244,7 @@ impl<'src> Evaluator<'src> {
     fn get_str_val(&self, id: ValueId) -> Str {
         match self.get_val(id) {
             Value::Str(s) => *s,
-            _ => unreachable!("type checker ensures string value"),
+            _ => unreachable!(),
         }
     }
 
@@ -320,14 +320,14 @@ impl<'src> Evaluator<'src> {
     fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
         let vid = self.eval_expr(id)?;
         let Value::List(items) = self.get_val(vid) else {
-            unreachable!("type checker ensures config list fields are lists")
+            unreachable!()
         };
         items
             .iter()
             .map(|&item_vid| match self.get_val(item_vid) {
                 Value::Rule(rid) => Ok(self.build_rule(*rid)),
                 Value::Str(sid) => Ok(Rule::String(self.strings.to_string(*sid))),
-                _ => unreachable!("config list elements should be rules or strings"),
+                _ => unreachable!(),
             })
             .collect()
     }
@@ -336,18 +336,17 @@ impl<'src> Evaluator<'src> {
     fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
         let vid = self.eval_expr(id)?;
         let Value::List(items) = self.get_val(vid) else {
-            unreachable!("type checker ensures config list fields are lists")
+            unreachable!()
         };
-        let items = items.clone();
         items
             .iter()
             .map(|&item_vid| {
                 let Value::Rule(rid) = *self.get_val(item_vid) else {
-                    unreachable!("type checker ensures list elements are rules")
+                    unreachable!()
                 };
                 match &self.rules[rid.0 as usize] {
                     ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-                    _ => unreachable!("inline/supertypes should be named symbols"),
+                    _ => unreachable!(),
                 }
             })
             .collect()
@@ -358,13 +357,13 @@ impl<'src> Evaluator<'src> {
         let rid = self.lower_to_rule(id)?;
         match &self.rules[rid.0 as usize] {
             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-            _ => unreachable!("word should be a named symbol"),
+            _ => unreachable!(),
         }
     }
 
-    /// Import a config field from a base grammar as a DSL value.
+    /// Import a config field from the base grammar as a DSL value.
     ///
-    /// `c::extras` -> list of rules, `c::inline` -> list of rule names, etc.
+    /// `c.extras` -> list of rules, `c.inline` -> list of rule names, etc.
     fn import_config_field(&mut self, field: &str) -> ValueId {
         let grammar = self.base_grammar.as_ref().unwrap();
         match field {
@@ -582,15 +581,14 @@ impl<'src> Evaluator<'src> {
 /// grammar configuration, rule definitions, and metadata into the output
 /// format consumed by the tree-sitter parser generator.
 ///
+/// The `base_grammar` is the pre-loaded inherited grammar (if any), which
+/// was loaded earlier in the pipeline so that resolve could register its
+/// rule names.
+///
 /// # Errors
 ///
 /// Returns [`LowerError`] if the grammar block is missing, a required field
 /// is absent, or an expression cannot be used as a grammar rule.
-/// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
-///
-/// The `base_grammar` is the pre-loaded inherited grammar (if any), which
-/// was loaded earlier in the pipeline so that resolve could register its
-/// rule names.
 pub fn lower_with_base(
     ast: &Ast<'_>,
     base_grammar: Option<&InputGrammar>,
@@ -628,32 +626,29 @@ pub fn lower_with_base(
         .context
         .grammar_config
         .as_ref()
-        .ok_or_else(|| LowerError {
-            kind: LowerErrorKind::MissingGrammarBlock,
-            span: Span::new(0, 0),
-        })?;
-    let language = config.language.as_ref().ok_or_else(|| LowerError {
-        kind: LowerErrorKind::MissingLanguageField,
-        span: Span::new(0, 0),
-    })?;
+        .ok_or_else(|| LowerError::new(LowerErrorKind::MissingGrammarBlock, Span::new(0, 0)))?;
+    let language = config
+        .language
+        .as_ref()
+        .ok_or_else(|| LowerError::new(LowerErrorKind::MissingLanguageField, Span::new(0, 0)))?;
 
     // Build variables: merge base + overrides + new rules
     let variables = if let Some(base) = base_grammar {
         if !override_entries.is_empty() && base.variables.is_empty() {
-            return Err(LowerError {
-                kind: LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.clone()),
-                span: override_entries[0].2,
-            });
+            return Err(LowerError::new(
+                LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.clone()),
+                override_entries[0].2,
+            ));
         }
         let mut vars: Vec<Variable> = base.variables.clone();
         for (name, rid, span) in &override_entries {
             if let Some(var) = vars.iter_mut().find(|v| v.name == *name) {
                 var.rule = eval.build_rule(*rid);
             } else {
-                return Err(LowerError {
-                    kind: LowerErrorKind::OverrideRuleNotFound(name.clone()),
-                    span: *span,
-                });
+                return Err(LowerError::new(
+                    LowerErrorKind::OverrideRuleNotFound(name.clone()),
+                    *span,
+                ));
             }
         }
         for (name, rid) in &rule_entries {
@@ -666,10 +661,10 @@ pub fn lower_with_base(
         vars
     } else {
         if !override_entries.is_empty() {
-            return Err(LowerError {
-                kind: LowerErrorKind::OverrideWithoutInherit,
-                span: override_entries[0].2,
-            });
+            return Err(LowerError::new(
+                LowerErrorKind::OverrideWithoutInherit,
+                override_entries[0].2,
+            ));
         }
         rule_entries
             .into_iter()
@@ -803,9 +798,7 @@ impl Evaluator<'_> {
                 };
                 Ok(self.alloc_val(Value::Int(-*n)))
             }
-            Node::Ident => {
-                unreachable!("resolve pass should have replaced all Ident nodes")
-            }
+            Node::Ident => unreachable!(),
             Node::RuleRef => {
                 let sid = self.strings.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
@@ -835,7 +828,9 @@ impl Evaluator<'_> {
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = ast.node_text(field);
                 match self.get_val(obj_val) {
-                    // TODO: This  likely needs to be a  runtime error as well
+                    // Typecheck validates all field accesses: Object fields are
+                    // checked against the known field list, Grammar fields against
+                    // the known config names. No unknown field reaches lowering.
                     Value::Object(map) => Ok(*map.get(field_name).unwrap()),
                     // c.extras, c.inline, etc. - config field access
                     Value::Grammar => Ok(self.import_config_field(field_name)),
@@ -845,8 +840,7 @@ impl Evaluator<'_> {
             // c::rule_name - inline the body of a rule from the base grammar
             Node::RuleInline { obj, rule } => {
                 let (obj, rule) = (*obj, *rule);
-                let obj_val = self.eval_expr(obj)?;
-                debug_assert!(matches!(self.get_val(obj_val), Value::Grammar));
+                self.eval_expr(obj)?;
                 let rule_name = ast.node_text(rule);
                 let grammar = self.base_grammar.unwrap();
                 match grammar.variables.iter().find(|v| v.name == rule_name) {
@@ -859,18 +853,17 @@ impl Evaluator<'_> {
                         );
                         Ok(Self::alloc_val_s(&mut self.values, Value::Rule(rid)))
                     }
-                    None => Err(LowerError {
-                        kind: LowerErrorKind::InheritRuleNotFound(rule_name.to_string()),
-                        span: ast.span(rule),
-                    }),
+                    None => Err(LowerError::new(
+                        LowerErrorKind::InheritRuleNotFound(rule_name.to_string()),
+                        ast.span(rule),
+                    )),
                 }
             }
             Node::Object(range) => {
                 let fields = ast.get_object(*range);
                 let mut map =
                     FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
-                for i in 0..fields.len() {
-                    let (key_span, value_id) = ast.get_object(*range)[i];
+                for &(key_span, value_id) in fields {
                     let val = self.eval_expr(value_id)?;
                     map.insert(ast.text(key_span), val);
                 }
@@ -1391,7 +1384,7 @@ fn unescape_string(raw: &str) -> String {
                 Some(b't') => result.push('\t'),
                 Some(b'r') => result.push('\r'),
                 Some(b'0') => result.push('\0'),
-                _ => unreachable!("lexer validated escape sequences"),
+                _ => unreachable!(),
             }
         } else {
             result.push(b as char);
@@ -1405,6 +1398,19 @@ fn unescape_string(raw: &str) -> String {
 pub struct LowerError {
     pub kind: LowerErrorKind,
     pub span: Span,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<Note>,
+}
+
+impl LowerError {
+    #[must_use]
+    pub const fn new(kind: LowerErrorKind, span: Span) -> Self {
+        Self {
+            kind,
+            span,
+            note: None,
+        }
+    }
 }
 
 /// The specific kind of lowering error.

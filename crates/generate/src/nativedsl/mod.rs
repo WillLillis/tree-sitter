@@ -53,6 +53,14 @@ fn parse_native_dsl_inner(
     grammar_path: &Path,
     ancestor_paths: &[PathBuf],
 ) -> Result<InputGrammar, DslError> {
+    if input.len() >= u32::MAX as usize {
+        return Err(LexError {
+            kind: LexErrorKind::InputTooLarge,
+            span: Span::new(0, 0),
+        }
+        .into());
+    }
+
     let grammar_dir = grammar_path.parent().unwrap();
 
     let tokens = lexer::Lexer::new(input).tokenize()?;
@@ -96,31 +104,31 @@ fn load_base_grammar(
             let path_str = ast.string_lit_content(*path);
             let span = ast.span(*path);
             let full_path = grammar_dir.join(path_str);
-            let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
-                kind: LowerErrorKind::InheritLoadError(format!(
-                    "failed to resolve '{}': {e}",
-                    full_path.display()
-                )),
-                span,
+            let canonical = dunce::canonicalize(&full_path).map_err(|e| {
+                LowerError::new(
+                    LowerErrorKind::InheritLoadError(format!(
+                        "failed to resolve '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                )
             })?;
 
             // Cycle detection
             if ancestor_paths.iter().any(|p| p == &canonical) {
                 let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
                 chain.push(canonical);
-                return Err(LowerError {
-                    kind: LowerErrorKind::InheritCycle(chain),
-                    span,
-                }
-                .into());
+                return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span).into());
             }
 
-            let content = std::fs::read_to_string(&full_path).map_err(|e| LowerError {
-                kind: LowerErrorKind::InheritLoadError(format!(
-                    "failed to read '{}': {e}",
-                    full_path.display()
-                )),
-                span,
+            let content = std::fs::read_to_string(&full_path).map_err(|e| {
+                LowerError::new(
+                    LowerErrorKind::InheritLoadError(format!(
+                        "failed to read '{}': {e}",
+                        full_path.display()
+                    )),
+                    span,
+                )
             })?;
 
             let mut child_ancestors = ancestor_paths.to_vec();
@@ -135,22 +143,22 @@ fn load_base_grammar(
                         path: canonical.clone(),
                         inherit_span: span,
                     })?,
-                Some("json") => {
-                    crate::parse_grammar::parse_grammar(&content).map_err(|e| LowerError {
-                        kind: LowerErrorKind::InheritLoadError(format!(
+                Some("json") => crate::parse_grammar::parse_grammar(&content).map_err(|e| {
+                    LowerError::new(
+                        LowerErrorKind::InheritLoadError(format!(
                             "in '{}': {e}",
                             full_path.display()
                         )),
                         span,
-                    })?
-                }
+                    )
+                })?,
                 _ => {
-                    return Err(LowerError {
-                        kind: LowerErrorKind::InheritLoadError(
+                    return Err(LowerError::new(
+                        LowerErrorKind::InheritLoadError(
                             "unsupported file extension, expected .tsg or .json".to_string(),
                         ),
                         span,
-                    }
+                    )
                     .into());
                 }
             };
@@ -242,6 +250,7 @@ impl DslError {
         match self {
             Self::Parse(e) => e.note.as_ref(),
             Self::Resolve(e) => e.note.as_ref(),
+            Self::Lower(e) => e.note.as_ref(),
             Self::Inherited(e) => e.inner.note(),
             _ => None,
         }
