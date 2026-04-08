@@ -218,13 +218,13 @@ impl<'src> Parser<'src> {
                     config.language = Some(self.ast.text(inner).to_string());
                 }
                 "inherits" => config.inherits = Some(self.parse_expr()?),
-                "extras" => config.extras = self.parse_expr_array()?,
-                "externals" => config.externals = self.parse_expr_array()?,
-                "supertypes" => config.supertypes = self.parse_ident_span_array()?,
-                "inline" => config.inline = self.parse_ident_span_array()?,
+                "extras" => config.extras = Some(self.parse_expr()?),
+                "externals" => config.externals = Some(self.parse_expr()?),
+                "supertypes" => config.supertypes = Some(self.parse_expr()?),
+                "inline" => config.inline = Some(self.parse_expr()?),
                 "conflicts" => config.conflicts = self.parse_conflicts()?,
                 "precedences" => config.precedences = self.parse_precedences()?,
-                "word" => config.word = Some(self.expect_ident()?),
+                "word" => config.word = Some(self.parse_expr()?),
                 "reserved" => config.reserved = self.parse_reserved()?,
                 _ => {
                     return Err(ParseError {
@@ -245,14 +245,6 @@ impl<'src> Parser<'src> {
     fn parse_expr_array(&mut self) -> Result<NodeList, ParseError> {
         self.expect(&TokenKind::LBracket)?;
         let items = self.comma_sep(&TokenKind::RBracket, Self::parse_expr)?;
-        self.expect(&TokenKind::RBracket)?;
-        Ok(items)
-    }
-
-    /// `[ident, ident, ...]` - returns spans of the identifiers
-    fn parse_ident_span_array(&mut self) -> Result<Vec<Span>, ParseError> {
-        self.expect(&TokenKind::LBracket)?;
-        let items = self.comma_sep(&TokenKind::RBracket, Self::expect_ident)?;
         self.expect(&TokenKind::RBracket)?;
         Ok(items)
     }
