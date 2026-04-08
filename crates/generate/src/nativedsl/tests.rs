@@ -1770,6 +1770,22 @@ fn bench_native_dsl_javascript() {
 
 #[test]
 #[ignore = "benchmark"]
+fn bench_native_dsl_cpp() {
+    let dir = native_grammar_path("cpp_native");
+    let source = read_native_grammar("cpp_native");
+    for _ in 0..10 {
+        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+    }
+    let n = 1000;
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+    }
+    eprintln!("Native DSL C++: {:?}/iter", start.elapsed() / n);
+}
+
+#[test]
+#[ignore = "benchmark"]
 fn bench_json_parse_c() {
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
