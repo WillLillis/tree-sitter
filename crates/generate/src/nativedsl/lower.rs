@@ -134,44 +134,54 @@ impl<'src> Evaluator<'src> {
         self.values.push(val);
         id
     }
+
     fn get_val(&self, id: ValueId) -> &Value<'src> {
         &self.values[id.0 as usize]
     }
+
     fn push_scope(&mut self) {
         self.scopes.push(FxHashMap::default());
     }
+
     fn pop_scope(&mut self) {
         self.scopes.pop();
     }
+
     fn bind(&mut self, name: &'src str, val: ValueId) {
         self.scopes.last_mut().unwrap().insert(name, val);
     }
+
     fn lookup(&self, name: &str) -> Option<ValueId> {
         self.scopes
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).copied())
     }
+
     fn alloc_rule(&mut self, rule: ARule) -> RuleId {
         let id = RuleId(self.rules.len() as u32);
         self.rules.push(rule);
         id
     }
-    fn children_start(&self) -> u32 {
+
+    const fn children_start(&self) -> u32 {
         self.rule_children.len() as u32
     }
+
     fn children_range(&self, start: u32, span: Span) -> Result<(u32, u16), LowerError> {
         let count = self.rule_children.len() as u32 - start;
         u16::try_from(count)
             .map(|len| (start, len))
             .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
     }
+
     fn get_fn_config(&self, fn_id: NodeId) -> &'src FnConfig {
         match self.ast.node(fn_id) {
             Node::Fn(fn_idx) => self.ast.get_fn(*fn_idx),
             _ => unreachable!(),
         }
     }
+
     fn get_str_val(&self, id: ValueId) -> Str {
         match self.get_val(id) {
             Value::Str(s) => *s,
@@ -282,17 +292,16 @@ impl<'src> Evaluator<'src> {
                     .collect();
                 self.alloc_val(Value::List(vals))
             }
-            "word" => match &grammar.word_token {
-                Some(name) => {
+            "word" => {
+                if let Some(name) = &grammar.word_token {
                     let sid = self.strings.intern_owned(name.clone());
                     let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                     self.alloc_val(Value::Rule(rid))
-                }
-                None => {
+                } else {
                     let rid = self.alloc_rule(ARule::Blank);
                     self.alloc_val(Value::Rule(rid))
                 }
-            },
+            }
             _ => unreachable!(),
         }
     }

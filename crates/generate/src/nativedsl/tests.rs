@@ -1775,7 +1775,7 @@ fn error_unterminated_escape() {
 
 #[test]
 fn error_unterminated_raw_string() {
-    let err = dsl_err(r##"grammar { language: r#"test } rule program { "x" }"##);
+    let err = dsl_err(r#"grammar { language: r#"test } rule program { "x" }"#);
     let DslError::Lex(e) = err else {
         panic!("expected Lex error, got {err:?}")
     };
