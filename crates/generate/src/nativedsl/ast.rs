@@ -8,7 +8,7 @@
 //! bindings) is stored in [`AstContext`], separate from the node arena, so
 //! that later passes can mutate nodes while borrowing context immutably.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, path::PathBuf};
 
 use serde::Serialize;
 
@@ -53,11 +53,91 @@ impl ForId {
     }
 }
 
+/// Index into a [`SourceMap`] file table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct FileId(u32);
+
+impl FileId {
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A source span tagged with the file it belongs to.
+///
+/// Used in error types and notes to reference locations that may be in
+/// different files (e.g., an inherited grammar).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct FileSpan {
+    pub file: FileId,
+    pub span: Span,
+}
+
+impl FileSpan {
+    #[must_use]
+    pub const fn new(file: FileId, span: Span) -> Self {
+        Self { file, span }
+    }
+}
+
+/// Owns the source text and paths for all files in a compilation.
+///
+/// Files are registered during the pipeline and referenced by [`FileId`].
+/// The main grammar file is always `FileId(0)`.
+#[derive(Debug, Default)]
+pub struct SourceMap {
+    files: Vec<SourceFile>,
+}
+
+impl SourceMap {
+    pub fn new(source: SourceFile) -> Self {
+        Self {
+            files: vec![source],
+        }
+    }
+    /// Register a file and return its [`FileId`].
+    pub fn add(&mut self, path: std::path::PathBuf, source: String) -> FileId {
+        let id = FileId(self.files.len() as u32);
+        self.files.push(SourceFile { path, source });
+        id
+    }
+
+    /// Get the source text for a file.
+    #[must_use]
+    pub fn source(&self, id: FileId) -> &str {
+        &self.files[id.index()].source
+    }
+
+    /// Get the file path for a file.
+    #[must_use]
+    pub fn path(&self, id: FileId) -> &std::path::Path {
+        &self.files[id.index()].path
+    }
+}
+
+#[derive(Debug)]
+pub struct SourceFile {
+    path: std::path::PathBuf,
+    source: String,
+}
+
+impl SourceFile {
+    pub fn new(path: PathBuf, source: String) -> Self {
+        Self { path, source }
+    }
+}
+
 /// A secondary annotation on an error, pointing to a related source location.
 #[derive(Clone, Debug, Serialize)]
 pub struct Note {
     pub message: NoteMessage,
-    pub span: Span,
+    pub span: FileSpan,
 }
 
 /// The kind of secondary note attached to an error.

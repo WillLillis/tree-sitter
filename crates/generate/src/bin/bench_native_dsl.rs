@@ -7,9 +7,7 @@ fn main() {
         eprintln!("usage: bench-native-dsl <grammar.tsg>");
         std::process::exit(1);
     });
-    let grammar_dir = Path::new(&path)
-        .parent()
-        .expect("grammar path must have a parent directory");
+    let grammar_path = Path::new(&path);
     let source = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!("failed to read {path}: {e}");
         std::process::exit(1);
@@ -22,12 +20,16 @@ fn main() {
 
     // Warmup
     for _ in 0..10 {
-        black_box(tree_sitter_generate::nativedsl::parse_native_dsl(&source, grammar_dir).unwrap());
+        black_box(
+            tree_sitter_generate::nativedsl::parse_native_dsl(&source, grammar_path).unwrap(),
+        );
     }
 
     let start = Instant::now();
     for _ in 0..n {
-        black_box(tree_sitter_generate::nativedsl::parse_native_dsl(&source, grammar_dir).unwrap());
+        black_box(
+            tree_sitter_generate::nativedsl::parse_native_dsl(&source, grammar_path).unwrap(),
+        );
     }
     let elapsed = start.elapsed();
     eprintln!("{n} iterations in {elapsed:?} ({:?}/iter)", elapsed / n);

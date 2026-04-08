@@ -19,7 +19,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, Node, NodeId, Span};
+use super::ast::{Ast, FileId, FileSpan, Node, NodeId, Span};
 
 /// The type of a DSL expression.
 ///
@@ -150,6 +150,7 @@ impl<'src> TypeEnv<'src> {
 fn parse_fn_params(
     ast: &Ast<'_>,
     config: &super::ast::FnConfig,
+    file: FileId,
 ) -> Result<Vec<(String, Ty)>, TypeError> {
     config
         .params
@@ -157,38 +158,41 @@ fn parse_fn_params(
         .map(|param| {
             Ok((
                 ast.node_text(param.name).to_string(),
-                ast_type_to_ty(ast, param.ty)?,
+                ast_type_to_ty(ast, param.ty, file)?,
             ))
         })
         .collect()
 }
 
 /// Convert an AST type node (`TypeRule`, `TypeStr`, etc.) to a [`Ty`].
-fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId) -> Result<Ty, TypeError> {
+fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId, file: FileId) -> Result<Ty, TypeError> {
     match ast.node(ty_id) {
         Node::TypeInt => Ok(Ty::Int),
         Node::TypeStr => Ok(Ty::Str),
         Node::TypeRule => Ok(Ty::Rule),
-        Node::TypeList(inner) => Ok(Ty::List(Box::new(ast_type_to_ty(ast, *inner)?))),
+        Node::TypeList(inner) => Ok(Ty::List(Box::new(ast_type_to_ty(ast, *inner, file)?))),
         Node::TypeTuple(range) => {
             let tys = ast
                 .child_slice(*range)
                 .iter()
-                .map(|&id| ast_type_to_ty(ast, id))
+                .map(|&id| ast_type_to_ty(ast, id, file))
                 .collect::<Result<_, _>>()?;
             Ok(Ty::Tuple(tys))
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: ast.span(ty_id),
+            span: FileSpan {
+                file,
+                span: ast.span(ty_id),
+            },
         }),
     }
 }
 
-const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
+fn mismatch(expected: Ty, got: Ty, span: Span, file: FileId) -> TypeError {
     TypeError {
         kind: TypeErrorKind::TypeMismatch { expected, got },
-        span,
+        span: FileSpan::new(file, span),
     }
 }
 
@@ -201,7 +205,7 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 ///
 /// Returns [`TypeError`] on type mismatches, undefined functions, wrong
 /// argument counts, etc.
-pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
+pub fn check<'src>(ast: &'src Ast<'src>, file: FileId) -> Result<(), TypeError> {
     let mut env = TypeEnv::new();
 
     // Pre-scan: register all rule names and fn signatures.
@@ -212,8 +216,8 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                let params = parse_fn_params(ast, config)?;
-                let return_ty = ast_type_to_ty(ast, config.return_ty)?;
+                let params = parse_fn_params(ast, config, file)?;
+                let return_ty = ast_type_to_ty(ast, config.return_ty, file)?;
                 env.fns
                     .insert(ast.node_text(config.name), FnSig { params, return_ty });
             }
@@ -222,7 +226,7 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
     }
 
     for &item_id in &ast.root_items {
-        check_item(ast, item_id, &mut env)?;
+        check_item(ast, item_id, &mut env, file)?;
     }
     Ok(())
 }
@@ -232,16 +236,17 @@ fn check_item<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<(), TypeError> {
     let span = ast.span(id);
     match ast.node(id) {
         Node::Grammar => Ok(()),
         Node::Let { name, ty, value } => {
-            let inferred = type_of(ast, *value, env)?;
+            let inferred = type_of(ast, *value, env, file)?;
             if let Some(ty_id) = ty {
-                let declared = ast_type_to_ty(ast, *ty_id)?;
+                let declared = ast_type_to_ty(ast, *ty_id, file)?;
                 if !is_compatible(&inferred, &declared) {
-                    return Err(mismatch(declared, inferred, ast.span(*value)));
+                    return Err(mismatch(declared, inferred, ast.span(*value), file));
                 }
             }
             env.insert_var(ast.node_text(*name), inferred);
@@ -249,8 +254,8 @@ fn check_item<'src>(
         }
         Node::Fn(fn_idx) => {
             let config = ast.get_fn(*fn_idx);
-            let params = parse_fn_params(ast, config)?;
-            let return_ty = ast_type_to_ty(ast, config.return_ty)?;
+            let params = parse_fn_params(ast, config, file)?;
+            let return_ty = ast_type_to_ty(ast, config.return_ty, file)?;
             let body = config.body;
             let fn_name_span = config.name;
 
@@ -264,25 +269,25 @@ fn check_item<'src>(
 
             env.push_scope();
             for param in &config.params {
-                let ty = ast_type_to_ty(ast, param.ty)?;
+                let ty = ast_type_to_ty(ast, param.ty, file)?;
                 env.insert_var(ast.node_text(param.name), ty);
             }
 
-            let body_ty = type_of(ast, body, env)?;
+            let body_ty = type_of(ast, body, env, file)?;
             env.pop_scope();
 
             if !is_compatible(&body_ty, &return_ty) {
-                return Err(mismatch(return_ty, body_ty, ast.span(body)));
+                return Err(mismatch(return_ty, body_ty, ast.span(body), file));
             }
             Ok(())
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
-            expect_rule(ast, *body, env)?;
+            expect_rule(ast, *body, env, file)?;
             Ok(())
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::UnexpectedTopLevel,
-            span,
+            span: FileSpan { file, span },
         }),
     }
 }
@@ -298,6 +303,7 @@ fn check_call_args<'src>(
     sig: &FnSig,
     call_span: Span,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<(), TypeError> {
     if args.len() != sig.params.len() {
         return Err(TypeError {
@@ -306,13 +312,16 @@ fn check_call_args<'src>(
                 expected: sig.params.len(),
                 got: args.len(),
             },
-            span: call_span,
+            span: FileSpan {
+                file,
+                span: call_span,
+            },
         });
     }
     for (&arg_id, (_param_name, param_ty)) in args.iter().zip(sig.params.iter()) {
-        let arg_ty = type_of(ast, arg_id, env)?;
+        let arg_ty = type_of(ast, arg_id, env, file)?;
         if !is_compatible(&arg_ty, param_ty) {
-            return Err(mismatch(param_ty.clone(), arg_ty, ast.span(arg_id)));
+            return Err(mismatch(param_ty.clone(), arg_ty, ast.span(arg_id), file));
         }
     }
     Ok(())
@@ -323,10 +332,11 @@ fn expect_rule<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
+    let ty = type_of(ast, id, env, file)?;
     if !is_rule_like(&ty) {
-        return Err(mismatch(Ty::Rule, ty, ast.span(id)));
+        return Err(mismatch(Ty::Rule, ty, ast.span(id), file));
     }
     Ok(())
 }
@@ -336,10 +346,11 @@ fn expect_str<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
+    let ty = type_of(ast, id, env, file)?;
     if ty != Ty::Str {
-        return Err(mismatch(Ty::Str, ty, ast.span(id)));
+        return Err(mismatch(Ty::Str, ty, ast.span(id), file));
     }
     Ok(())
 }
@@ -349,10 +360,11 @@ fn expect_prec<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
+    let ty = type_of(ast, id, env, file)?;
     if !is_prec_like(&ty) {
-        return Err(mismatch(Ty::Int, ty, ast.span(id)));
+        return Err(mismatch(Ty::Int, ty, ast.span(id), file));
     }
     Ok(())
 }
@@ -365,6 +377,7 @@ fn type_of<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<Ty, TypeError> {
     let span = ast.span(id);
     match ast.node(id) {
@@ -373,16 +386,19 @@ fn type_of<'src>(
         Node::RuleRef | Node::Blank => Ok(Ty::Rule),
         Node::Inherit { .. } => Ok(Ty::Grammar),
         Node::Append { left, right } => {
-            let left_ty = type_of(ast, *left, env)?;
-            let right_ty = type_of(ast, *right, env)?;
+            let left_ty = type_of(ast, *left, env, file)?;
+            let right_ty = type_of(ast, *right, env, file)?;
             match (&left_ty, &right_ty) {
                 (Ty::List(l), Ty::List(r)) if l == r => Ok(left_ty),
-                (Ty::List(_), Ty::List(_)) => Err(mismatch(left_ty, right_ty, ast.span(*right))),
-                (Ty::List(_), _) => Err(mismatch(left_ty, right_ty, ast.span(*right))),
+                (Ty::List(_), Ty::List(_)) => {
+                    Err(mismatch(left_ty, right_ty, ast.span(*right), file))
+                }
+                (Ty::List(_), _) => Err(mismatch(left_ty, right_ty, ast.span(*right), file)),
                 _ => Err(mismatch(
                     Ty::List(Box::new(Ty::Rule)),
                     left_ty,
                     ast.span(*left),
+                    file,
                 )),
             }
         }
@@ -394,11 +410,14 @@ fn type_of<'src>(
             let name = ast.text(var_span);
             env.get_var(name).cloned().ok_or_else(|| TypeError {
                 kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
-                span: var_span,
+                span: FileSpan {
+                    file,
+                    span: var_span,
+                },
             })
         }
         Node::FieldAccess { obj, field } => {
-            let obj_ty = type_of(ast, *obj, env)?;
+            let obj_ty = type_of(ast, *obj, env, file)?;
             let field_name = ast.node_text(*field);
             match &obj_ty {
                 Ty::Object(fields) => fields
@@ -410,7 +429,7 @@ fn type_of<'src>(
                             field: field_name.to_string(),
                             on_type: obj_ty.clone(),
                         },
-                        span,
+                        span: FileSpan { file, span },
                     }),
                 // c.extras, c.inline, etc. - config field access on a grammar
                 Ty::Grammar => match field_name {
@@ -421,30 +440,39 @@ fn type_of<'src>(
                     "word" => Ok(Ty::Rule),
                     _ => Err(TypeError {
                         kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                        span: ast.span(*field),
+                        span: FileSpan {
+                            file,
+                            span: ast.span(*field),
+                        },
                     }),
                 },
                 _ => Err(TypeError {
                     kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty.clone()),
-                    span: ast.span(*obj),
+                    span: FileSpan {
+                        file,
+                        span: ast.span(*obj),
+                    },
                 }),
             }
         }
         // c::rule_name - inline the body of a rule from the base grammar
         Node::RuleInline { obj, .. } => {
-            let obj_ty = type_of(ast, *obj, env)?;
+            let obj_ty = type_of(ast, *obj, env, file)?;
             if obj_ty != Ty::Grammar {
                 return Err(TypeError {
                     kind: TypeErrorKind::ConfigAccessOnNonGrammar(obj_ty),
-                    span: ast.span(*obj),
+                    span: FileSpan {
+                        file,
+                        span: ast.span(*obj),
+                    },
                 });
             }
             Ok(Ty::Rule)
         }
         Node::Neg(inner) => {
-            let ty = type_of(ast, *inner, env)?;
+            let ty = type_of(ast, *inner, env, file)?;
             if ty != Ty::Int {
-                return Err(mismatch(Ty::Int, ty, span));
+                return Err(mismatch(Ty::Int, ty, span, file));
             }
             Ok(Ty::Int)
         }
@@ -453,7 +481,7 @@ fn type_of<'src>(
             let tys = fields
                 .iter()
                 .map(|(key_span, val_id)| {
-                    let ty = type_of(ast, *val_id, env)?;
+                    let ty = type_of(ast, *val_id, env, file)?;
                     Ok((ast.text(*key_span).to_string(), ty))
                 })
                 .collect::<Result<Vec<_>, TypeError>>()?;
@@ -464,13 +492,16 @@ fn type_of<'src>(
             if items.is_empty() {
                 return Ok(Ty::List(Box::new(Ty::Rule)));
             }
-            let first = type_of(ast, items[0], env)?;
+            let first = type_of(ast, items[0], env, file)?;
             for &item_id in &items[1..] {
-                let ty = type_of(ast, item_id, env)?;
+                let ty = type_of(ast, item_id, env, file)?;
                 if ty != first {
                     return Err(TypeError {
                         kind: TypeErrorKind::ListElementTypeMismatch { first, got: ty },
-                        span: ast.span(item_id),
+                        span: FileSpan {
+                            file,
+                            span: ast.span(item_id),
+                        },
                     });
                 }
             }
@@ -480,29 +511,29 @@ fn type_of<'src>(
             let tys = ast
                 .child_slice(*range)
                 .iter()
-                .map(|&id| type_of(ast, id, env))
+                .map(|&id| type_of(ast, id, env, file))
                 .collect::<Result<_, _>>()?;
             Ok(Ty::Tuple(tys))
         }
         Node::Concat(range) => {
             for &part in ast.child_slice(*range) {
-                expect_str(ast, part, env)?;
+                expect_str(ast, part, env, file)?;
             }
             Ok(Ty::Str)
         }
         Node::DynRegex { pattern, flags } => {
-            expect_str(ast, *pattern, env)?;
+            expect_str(ast, *pattern, env, file)?;
             if let Some(flags_id) = flags {
-                expect_str(ast, *flags_id, env)?;
+                expect_str(ast, *flags_id, env, file)?;
             }
             Ok(Ty::Rule)
         }
         Node::Seq(range) | Node::Choice(range) => {
             for &member in ast.child_slice(*range) {
                 if matches!(ast.node(member), Node::For(_)) {
-                    check_for_expr(ast, member, env)?;
+                    check_for_expr(ast, member, env, file)?;
                 } else {
-                    expect_rule(ast, member, env)?;
+                    expect_rule(ast, member, env, file)?;
                 }
             }
             Ok(Ty::Rule)
@@ -512,41 +543,41 @@ fn type_of<'src>(
         | Node::Optional(inner)
         | Node::Token(inner)
         | Node::TokenImmediate(inner) => {
-            expect_rule(ast, *inner, env)?;
+            expect_rule(ast, *inner, env, file)?;
             Ok(Ty::Rule)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
-            expect_rule(ast, *content, env)?;
+            expect_rule(ast, *content, env, file)?;
             Ok(Ty::Rule)
         }
         Node::Alias { content, target } => {
-            expect_rule(ast, *content, env)?;
-            let target_ty = type_of(ast, *target, env)?;
+            expect_rule(ast, *content, env, file)?;
+            let target_ty = type_of(ast, *target, env, file)?;
             if !matches!(ast.node(*target), Node::RuleRef | Node::VarRef)
                 && target_ty != Ty::Str
                 && target_ty != Ty::Rule
             {
-                return Err(mismatch(Ty::Rule, target_ty, ast.span(*target)));
+                return Err(mismatch(Ty::Rule, target_ty, ast.span(*target), file));
             }
             Ok(Ty::Rule)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content } => {
-            expect_prec(ast, *value, env)?;
-            expect_rule(ast, *content, env)?;
+            expect_prec(ast, *value, env, file)?;
+            expect_rule(ast, *content, env, file)?;
             Ok(Ty::Rule)
         }
         Node::PrecDynamic { value, content } => {
-            let value_ty = type_of(ast, *value, env)?;
+            let value_ty = type_of(ast, *value, env, file)?;
             if value_ty != Ty::Int {
-                return Err(mismatch(Ty::Int, value_ty, ast.span(*value)));
+                return Err(mismatch(Ty::Int, value_ty, ast.span(*value), file));
             }
-            expect_rule(ast, *content, env)?;
+            expect_rule(ast, *content, env, file)?;
             Ok(Ty::Rule)
         }
         Node::For(_) => {
-            check_for_expr(ast, id, env)?;
+            check_for_expr(ast, id, env, file)?;
             Ok(Ty::Rule)
         }
         Node::Call { name, args } => {
@@ -556,15 +587,15 @@ fn type_of<'src>(
                 .get(fn_name)
                 .ok_or_else(|| TypeError {
                     kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
-                    span,
+                    span: FileSpan { file, span },
                 })?
                 .clone();
-            check_call_args(ast, fn_name, ast.child_slice(*args), &sig, span, env)?;
+            check_call_args(ast, fn_name, ast.child_slice(*args), &sig, span, env, file)?;
             Ok(sig.return_ty)
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span,
+            span: FileSpan { file, span },
         }),
     }
 }
@@ -578,12 +609,13 @@ fn check_for_expr<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
+    file: FileId,
 ) -> Result<(), TypeError> {
     let span = ast.span(id);
     let Node::For(for_idx) = ast.node(id) else {
         return Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span,
+            span: FileSpan { file, span },
         });
     };
 
@@ -592,13 +624,16 @@ fn check_for_expr<'src>(
     let body = config.body;
     let bindings = &config.bindings;
 
-    let iter_ty = type_of(ast, iterable, env)?;
+    let iter_ty = type_of(ast, iterable, env, file)?;
     let elem_ty = match &iter_ty {
         Ty::List(inner) => inner.as_ref().clone(),
         _ => {
             return Err(TypeError {
                 kind: TypeErrorKind::ForRequiresList(iter_ty.clone()),
-                span: ast.span(iterable),
+                span: FileSpan {
+                    file,
+                    span: ast.span(iterable),
+                },
             });
         }
     };
@@ -612,22 +647,22 @@ fn check_for_expr<'src>(
                     bindings: bindings.len(),
                     tuple_elements: elem_tys.len(),
                 },
-                span,
+                span: FileSpan { file, span },
             });
         }
         for ((name_span, ty_id), actual_ty) in bindings.iter().zip(elem_tys.iter()) {
-            let declared = ast_type_to_ty(ast, *ty_id)?;
+            let declared = ast_type_to_ty(ast, *ty_id, file)?;
             if !is_compatible(actual_ty, &declared) {
                 env.pop_scope();
-                return Err(mismatch(declared, actual_ty.clone(), span));
+                return Err(mismatch(declared, actual_ty.clone(), span, file));
             }
             env.insert_var(ast.text(*name_span), declared);
         }
     } else if let [(name_span, ty_id)] = bindings.as_slice() {
-        let declared = ast_type_to_ty(ast, *ty_id)?;
+        let declared = ast_type_to_ty(ast, *ty_id, file)?;
         if !is_compatible(&elem_ty, &declared) {
             env.pop_scope();
-            return Err(mismatch(declared, elem_ty, span));
+            return Err(mismatch(declared, elem_ty, span, file));
         }
         env.insert_var(ast.text(*name_span), declared);
     } else {
@@ -637,14 +672,14 @@ fn check_for_expr<'src>(
                 bindings: bindings.len(),
                 got: elem_ty,
             },
-            span,
+            span: FileSpan { file, span },
         });
     }
 
-    let body_ty = type_of(ast, body, env)?;
+    let body_ty = type_of(ast, body, env, file)?;
     env.pop_scope();
     if !is_rule_like(&body_ty) {
-        return Err(mismatch(Ty::Rule, body_ty, ast.span(body)));
+        return Err(mismatch(Ty::Rule, body_ty, ast.span(body), file));
     }
     Ok(())
 }
@@ -653,7 +688,7 @@ fn check_for_expr<'src>(
 #[derive(Debug, Serialize, Error)]
 pub struct TypeError {
     pub kind: TypeErrorKind,
-    pub span: Span,
+    pub span: FileSpan,
 }
 
 /// The specific kind of type error.
