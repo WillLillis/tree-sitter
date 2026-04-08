@@ -177,7 +177,7 @@ impl AstContext<'_> {
         &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
     }
 
-    /// Resolve a `ChildRange` to a slice of child NodeIds.
+    /// Resolve a `ChildRange` to a slice of child `NodeId`s.
     #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
@@ -318,7 +318,7 @@ impl<'src> Ast<'src> {
         self.context.node_text(id)
     }
 
-    /// Push a list of child NodeIds into the shared children vector,
+    /// Push a list of child `NodeId`s into the shared children vector,
     /// returning a `ChildRange` referencing them.
     pub fn push_children(&mut self, items: &[NodeId]) -> ChildRange {
         let start = self.context.children.len() as u32;
@@ -327,7 +327,7 @@ impl<'src> Ast<'src> {
         ChildRange::new(start, len)
     }
 
-    /// Resolve a `ChildRange` to a slice of child NodeIds.
+    /// Resolve a `ChildRange` to a slice of child `NodeId`s.
     #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
@@ -483,7 +483,7 @@ pub enum Node {
         flags: Option<NodeId>,
     },
     /// `inherit("path/to/grammar")` - loads a base grammar for inheritance.
-    /// The `path` NodeId points to the string literal containing the path.
+    /// The `path` `NodeId` points to the string literal containing the path.
     Inherit {
         path: NodeId,
     },
@@ -519,7 +519,7 @@ impl Node {
     /// `List`, `Tuple`, `Concat`), or `None` for other variants.
     /// Use `Ast::child_slice()` to resolve the range to a `&[NodeId]`.
     #[must_use]
-    pub fn child_range(&self) -> Option<ChildRange> {
+    pub const fn child_range(&self) -> Option<ChildRange> {
         match self {
             Self::Seq(r) | Self::Choice(r) | Self::List(r) | Self::Tuple(r) | Self::Concat(r) => {
                 Some(*r)
