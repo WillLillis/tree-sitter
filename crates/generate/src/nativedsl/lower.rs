@@ -31,7 +31,6 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType};
-use crate::nativedsl::ast::{FileId, FileSpan};
 use crate::rules::{Precedence, Rule};
 
 use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecEntry, Span};
@@ -550,7 +549,6 @@ impl<'src> Evaluator<'src> {
 pub fn lower_with_base(
     ast: &Ast<'_>,
     base_grammar: Option<InputGrammar>,
-    file: FileId,
 ) -> Result<InputGrammar, LowerError> {
     let mut eval = Evaluator::new(ast, base_grammar);
     let mut rule_entries: Vec<(String, RuleId)> = Vec::with_capacity(ast.root_items.len());
@@ -560,7 +558,7 @@ pub fn lower_with_base(
         match ast.node(item_id) {
             Node::Grammar => {}
             Node::Let { name, value, .. } => {
-                let val = eval.eval_expr(*value, file)?;
+                let val = eval.eval_expr(*value)?;
                 eval.bind(ast.node_text(*name), val);
             }
             Node::Fn(fn_idx) => {
@@ -569,12 +567,12 @@ pub fn lower_with_base(
             }
             Node::Rule { name, body } => {
                 let rule_name = ast.node_text(*name).to_string();
-                let rule_id = eval.lower_to_rule(*body, file)?;
+                let rule_id = eval.lower_to_rule(*body)?;
                 rule_entries.push((rule_name, rule_id));
             }
             Node::OverrideRule { name, body } => {
                 let rule_name = ast.node_text(*name).to_string();
-                let rule_id = eval.lower_to_rule(*body, file)?;
+                let rule_id = eval.lower_to_rule(*body)?;
                 override_entries.push((rule_name, rule_id, ast.span(*name)));
             }
             _ => unreachable!(),
@@ -596,19 +594,19 @@ pub fn lower_with_base(
 
     let mut extra_symbols = Vec::with_capacity(config.extras.len());
     for &id in &config.extras {
-        let rid = eval.lower_to_rule(id, file)?;
+        let rid = eval.lower_to_rule(id)?;
         extra_symbols.push(eval.build_rule(rid));
     }
     let mut external_tokens = Vec::with_capacity(config.externals.len());
     for &id in &config.externals {
-        let rid = eval.lower_to_rule(id, file)?;
+        let rid = eval.lower_to_rule(id)?;
         external_tokens.push(eval.build_rule(rid));
     }
     let mut reserved_words = Vec::with_capacity(config.reserved.len());
     for rws in &config.reserved {
         let mut words = Vec::with_capacity(rws.words.len());
         for &id in &rws.words {
-            let rid = eval.lower_to_rule(id, file)?;
+            let rid = eval.lower_to_rule(id)?;
             words.push(eval.build_rule(rid));
         }
         reserved_words.push(ReservedWordContext {
@@ -672,7 +670,7 @@ pub fn lower_with_base(
     } else {
         let mut syms = Vec::with_capacity(config.extras.len());
         for &id in &config.extras {
-            let rid = eval.lower_to_rule(id, file)?;
+            let rid = eval.lower_to_rule(id)?;
             syms.push(eval.build_rule(rid));
         }
         syms
@@ -683,7 +681,7 @@ pub fn lower_with_base(
     } else {
         let mut toks = Vec::with_capacity(config.externals.len());
         for &id in &config.externals {
-            let rid = eval.lower_to_rule(id, file)?;
+            let rid = eval.lower_to_rule(id)?;
             toks.push(eval.build_rule(rid));
         }
         toks
@@ -748,7 +746,7 @@ pub fn lower_with_base(
         for rws in &config.reserved {
             let mut words = Vec::with_capacity(rws.words.len());
             for &id in &rws.words {
-                let rid = eval.lower_to_rule(id, file)?;
+                let rid = eval.lower_to_rule(id)?;
                 words.push(eval.build_rule(rid));
             }
             result.push(ReservedWordContext {
@@ -779,7 +777,7 @@ impl Evaluator<'_> {
     /// Literals become `Value::Int`/`Value::Str`, identifiers are looked up
     /// in the scope chain, combinators are delegated to `eval_combinator`,
     /// and function calls are expanded inline.
-    fn eval_expr(&mut self, id: NodeId, file: FileId) -> Result<ValueId, LowerError> {
+    fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
         let ast = self.ast;
         let span = ast.span(id);
         match ast.node(id) {
@@ -805,7 +803,7 @@ impl Evaluator<'_> {
             }
             Node::Neg(inner) => {
                 let inner = *inner;
-                let vid = self.eval_expr(inner, file)?;
+                let vid = self.eval_expr(inner)?;
                 let Value::Int(n) = self.get_val(vid) else {
                     unreachable!();
                 };
@@ -826,8 +824,8 @@ impl Evaluator<'_> {
             Node::Inherit { .. } => Ok(self.alloc_val(Value::Grammar)),
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
-                let left_val = self.eval_expr(left, file)?;
-                let right_val = self.eval_expr(right, file)?;
+                let left_val = self.eval_expr(left)?;
+                let right_val = self.eval_expr(right)?;
                 let Value::List(left_items) = self.get_val(left_val) else {
                     unreachable!();
                 };
@@ -840,7 +838,7 @@ impl Evaluator<'_> {
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
-                let obj_val = self.eval_expr(obj, file)?;
+                let obj_val = self.eval_expr(obj)?;
                 let field_name = ast.node_text(field);
                 match self.get_val(obj_val) {
                     // TODO: This  likely needs to be a  runtime error as well
@@ -853,7 +851,7 @@ impl Evaluator<'_> {
             // c::rule_name - inline the body of a rule from the base grammar
             Node::RuleInline { obj, rule } => {
                 let (obj, rule) = (*obj, *rule);
-                let obj_val = self.eval_expr(obj, file)?;
+                let obj_val = self.eval_expr(obj)?;
                 debug_assert!(matches!(self.get_val(obj_val), Value::Grammar));
                 let rule_name = ast.node_text(rule);
                 let grammar = self.base_grammar.take().unwrap();
@@ -882,7 +880,7 @@ impl Evaluator<'_> {
                     FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
                 for i in 0..fields.len() {
                     let (key_span, value_id) = ast.get_object(*range)[i];
-                    let val = self.eval_expr(value_id, file)?;
+                    let val = self.eval_expr(value_id)?;
                     map.insert(ast.text(key_span), val);
                 }
                 Ok(self.alloc_val(Value::Object(map)))
@@ -896,7 +894,7 @@ impl Evaluator<'_> {
                 let items = ast.child_slice(*range);
                 let mut vals = Vec::with_capacity(items.len());
                 for &item_id in items {
-                    vals.push(self.eval_expr(item_id, file)?);
+                    vals.push(self.eval_expr(item_id)?);
                 }
                 Ok(self.alloc_val(make(vals)))
             }
@@ -904,7 +902,7 @@ impl Evaluator<'_> {
                 let parts = ast.child_slice(*range);
                 let mut result = String::new();
                 for &part_id in parts {
-                    let vid = self.eval_expr(part_id, file)?;
+                    let vid = self.eval_expr(part_id)?;
                     let s = self.get_str_val(vid);
                     result.push_str(self.strings.resolve(s));
                 }
@@ -913,11 +911,11 @@ impl Evaluator<'_> {
             }
             Node::DynRegex { pattern, flags } => {
                 let (pattern, flags) = (*pattern, *flags);
-                let pattern_val = self.eval_expr(pattern, file)?;
+                let pattern_val = self.eval_expr(pattern)?;
                 let pattern_str = self.get_str_val(pattern_val);
                 let flags_str = match flags {
                     Some(flags_id) => {
-                        let flags_val = self.eval_expr(flags_id, file)?;
+                        let flags_val = self.eval_expr(flags_id)?;
                         Some(self.get_str_val(flags_val))
                     }
                     None => None,
@@ -930,12 +928,12 @@ impl Evaluator<'_> {
                 let arg_ids = ast.child_slice(args);
                 let mut arg_vals = Vec::with_capacity(arg_ids.len());
                 for &arg_id in arg_ids {
-                    arg_vals.push(self.eval_expr(arg_id, file)?);
+                    arg_vals.push(self.eval_expr(arg_id)?);
                 }
-                self.eval_fn_call_with_vals(ast.node_text(name), &arg_vals, file)
+                self.eval_fn_call_with_vals(ast.node_text(name), &arg_vals)
             }
             _ => {
-                let rule_id = self.eval_combinator(id, file)?;
+                let rule_id = self.eval_combinator(id)?;
                 Ok(self.alloc_val(Value::Rule(rule_id)))
             }
         }
@@ -943,7 +941,7 @@ impl Evaluator<'_> {
 
     /// Convert an AST node directly to an arena rule, short-circuiting the
     /// value arena for common cases (RuleRef, StringLit, combinators).
-    fn lower_to_rule(&mut self, id: NodeId, file: FileId) -> Result<RuleId, LowerError> {
+    fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
         match ast.node(id) {
             // Fast paths: skip the value arena entirely
@@ -987,10 +985,10 @@ impl Evaluator<'_> {
             | Node::PrecLeft { .. }
             | Node::PrecRight { .. }
             | Node::PrecDynamic { .. }
-            | Node::Reserved { .. } => self.eval_combinator(id, file),
+            | Node::Reserved { .. } => self.eval_combinator(id),
             // Everything else goes through eval_expr
             _ => {
-                let vid = self.eval_expr(id, file)?;
+                let vid = self.eval_expr(id)?;
                 Ok(self.value_to_rule(vid))
             }
         }
@@ -1029,7 +1027,7 @@ impl Evaluator<'_> {
     /// Handles `seq`, `choice`, `repeat`, `repeat1`, `optional`, `blank`,
     /// `field`, `alias`, `token`, `prec` variants, and `reserved`. For
     /// `seq`/`choice`, inline `for` expressions are expanded in-place.
-    fn eval_combinator(&mut self, id: NodeId, file: FileId) -> Result<RuleId, LowerError> {
+    fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
@@ -1043,9 +1041,9 @@ impl Evaluator<'_> {
                             _ => unreachable!(),
                         };
                         let config = ast.get_for(for_idx);
-                        child_ids.extend(self.eval_for_to_rules(config, file)?);
+                        child_ids.extend(self.eval_for_to_rules(config)?);
                     } else {
-                        child_ids.push(self.lower_to_rule(member, file)?);
+                        child_ids.push(self.lower_to_rule(member)?);
                     }
                 }
                 let start = self.children_start();
@@ -1060,7 +1058,7 @@ impl Evaluator<'_> {
                 }
             }
             Node::Repeat(inner) => {
-                let inner = self.lower_to_rule(*inner, file)?;
+                let inner = self.lower_to_rule(*inner)?;
                 let rep = self.alloc_rule(ARule::Repeat(inner));
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
@@ -1070,11 +1068,11 @@ impl Evaluator<'_> {
                 Ok(self.alloc_rule(ARule::Choice(s, l)))
             }
             Node::Repeat1(inner) => {
-                let inner = self.lower_to_rule(*inner, file)?;
+                let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::Repeat(inner)))
             }
             Node::Optional(inner) => {
-                let inner = self.lower_to_rule(*inner, file)?;
+                let inner = self.lower_to_rule(*inner)?;
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.push_child(inner);
@@ -1085,20 +1083,20 @@ impl Evaluator<'_> {
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             Node::Field { name, content } => {
                 let (name, content) = (*name, *content);
-                let inner = self.lower_to_rule(content, file)?;
+                let inner = self.lower_to_rule(content)?;
                 let sid = self.strings.intern_span(ast.span(name));
                 Ok(self.alloc_rule(ARule::Field(sid, inner)))
             }
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
-                let inner = self.lower_to_rule(content, file)?;
+                let inner = self.lower_to_rule(content)?;
                 match ast.node(target) {
                     Node::RuleRef | Node::VarRef => {
                         let sid = self.strings.intern_span(ast.span(target));
                         Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
                     }
                     _ => {
-                        let vid = self.eval_expr(target, file)?;
+                        let vid = self.eval_expr(target)?;
                         match self.get_val(vid) {
                             Value::Str(str_handle) => {
                                 let str_handle = *str_handle;
@@ -1117,20 +1115,20 @@ impl Evaluator<'_> {
                 }
             }
             Node::Token(inner) => {
-                let inner = self.lower_to_rule(*inner, file)?;
+                let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::Token(inner)))
             }
             Node::TokenImmediate(inner) => {
-                let inner = self.lower_to_rule(*inner, file)?;
+                let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
             }
             Node::Prec { value, content }
             | Node::PrecLeft { value, content }
             | Node::PrecRight { value, content } => {
                 let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value, file)?;
+                let vid = self.eval_expr(value)?;
                 let prec = self.value_to_prec(vid);
-                let inner = self.lower_to_rule(content, file)?;
+                let inner = self.lower_to_rule(content)?;
                 let make_rule: fn(APrec, RuleId) -> ARule = match ast.node(id) {
                     Node::Prec { .. } => ARule::Prec,
                     Node::PrecLeft { .. } => ARule::PrecLeft,
@@ -1141,17 +1139,17 @@ impl Evaluator<'_> {
             }
             Node::PrecDynamic { value, content } => {
                 let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value, file)?;
+                let vid = self.eval_expr(value)?;
                 let prec_value = match self.get_val(vid) {
                     Value::Int(n) => *n,
                     _ => unreachable!(),
                 };
-                let inner = self.lower_to_rule(content, file)?;
+                let inner = self.lower_to_rule(content)?;
                 Ok(self.alloc_rule(ARule::PrecDynamic(prec_value, inner)))
             }
             Node::Reserved { context, content } => {
                 let (context, content) = (*context, *content);
-                let inner = self.lower_to_rule(content, file)?;
+                let inner = self.lower_to_rule(content)?;
                 let sid = self.strings.intern_span(ast.span(context));
                 Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
@@ -1167,7 +1165,6 @@ impl Evaluator<'_> {
         &mut self,
         name: &str,
         arg_vals: &[ValueId],
-        file: FileId,
     ) -> Result<ValueId, LowerError> {
         // Resolve pass ensures all called functions are registered
         let &fn_id = self.fns.get(name).unwrap();
@@ -1182,7 +1179,7 @@ impl Evaluator<'_> {
             self.bind(self.ast.node_text(param_name), arg_vals[i]);
         }
 
-        let result = self.eval_expr(body, file);
+        let result = self.eval_expr(body);
         self.pop_scope();
         result
     }
@@ -1192,16 +1189,12 @@ impl Evaluator<'_> {
     /// Evaluates the iterable, then for each element binds the loop
     /// variables and evaluates the body to a rule. Used by `seq`/`choice`
     /// to splice for-expression results inline.
-    fn eval_for_to_rules(
-        &mut self,
-        config: &ForConfig,
-        file: FileId,
-    ) -> Result<Vec<RuleId>, LowerError> {
+    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
         let iterable = config.iterable;
         let body = config.body;
         let n_bindings = config.bindings.len();
 
-        let iter_vid = self.eval_expr(iterable, file)?;
+        let iter_vid = self.eval_expr(iterable)?;
         // Typecheck ensures iterable is a list
         let n_items = match self.get_val(iter_vid) {
             Value::List(items) => items.len(),
@@ -1223,7 +1216,7 @@ impl Evaluator<'_> {
                 let (name_span, _) = config.bindings[j];
                 self.bind(self.ast.text(name_span), value_id);
             }
-            results.push(self.lower_to_rule(body, file)?);
+            results.push(self.lower_to_rule(body)?);
             self.pop_scope();
         }
         Ok(results)
@@ -1431,7 +1424,7 @@ pub enum LowerErrorKind {
     OverrideRuleNotFound(String),
     OverrideWithoutInherit,
     InheritLoadError(String),
-    InheritCycle(String),
+    InheritCycle(Vec<std::path::PathBuf>),
     InheritRuleNotFound(String),
 }
 
@@ -1452,7 +1445,14 @@ impl std::fmt::Display for LowerError {
                 write!(f, "failed to load inherited grammar: {msg}")
             }
             LowerErrorKind::InheritCycle(chain) => {
-                write!(f, "inheritance cycle detected: {chain}")
+                write!(f, "inheritance cycle detected: ")?;
+                for (i, path) in chain.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " -> ")?;
+                    }
+                    write!(f, "{}", path.display())?;
+                }
+                Ok(())
             }
             LowerErrorKind::InheritRuleNotFound(name) => {
                 write!(

@@ -1187,6 +1187,48 @@ fn error_override_rule_not_found() {
 }
 
 #[test]
+fn error_inherit_child_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let base_path = dir.path().join("base.tsg");
+    std::fs::write(
+        &base_path,
+        r#"grammar { language: "base" }
+rule program { bogus_ref }
+"#,
+    )
+    .unwrap();
+
+    let parent_path = dir.path().join("parent.tsg");
+    let parent_src = format!(
+        r#"let base = inherit("base.tsg")
+grammar {{ language: "derived", inherits: base }}
+rule extra {{ "hello" }}
+"#,
+    );
+    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
+
+    let DslError::Inherited(inherited) = &err else {
+        panic!("expected Inherited error, got {err:?}")
+    };
+    // Inner error is a resolve error from the base grammar
+    let DslError::Resolve(resolve_err) = inherited.inner.as_ref() else {
+        panic!("expected Resolve error, got {:?}", inherited.inner)
+    };
+    assert_eq!(
+        resolve_err.kind,
+        ResolveErrorKind::UnknownIdentifier("bogus_ref".to_string())
+    );
+    // InheritedError carries the base file's context
+    assert_eq!(inherited.path, base_path);
+    assert!(inherited.source_text.contains("bogus_ref"));
+    // inherit_span points to the "base.tsg" string in the parent
+    assert_eq!(
+        &parent_src[inherited.inherit_span.start as usize..inherited.inherit_span.end as usize],
+        r#""base.tsg""#
+    );
+}
+
+#[test]
 fn error_inherit_bad_path() {
     let err = dsl_inherit_err(
         r#"
@@ -1256,11 +1298,24 @@ fn error_inherit_cycle() {
 
     let source = std::fs::read_to_string(&a_path).unwrap();
     let err = parse_native_dsl(&source, dir.path()).unwrap_err();
-    // Cycle is wrapped in InheritLoadError as it propagates through the recursive chain
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
+    // a inherits b, b inherits a -> cycle detected when a is loaded recursively from b
+    let DslError::Inherited(outer) = err else {
+        panic!("expected Inherited error, got {err:?}")
     };
-    assert!(matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("cycle")));
+    let DslError::Inherited(inner) = outer.inner.as_ref() else {
+        panic!("expected nested Inherited error, got {:?}", outer.inner)
+    };
+    let DslError::Lower(e) = inner.inner.as_ref() else {
+        panic!("expected Lower error, got {:?}", inner.inner)
+    };
+    let LowerErrorKind::InheritCycle(chain) = &e.kind else {
+        panic!("expected InheritCycle, got {:?}", e.kind)
+    };
+    let filenames: Vec<_> = chain
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(filenames, ["b.tsg", "a.tsg", "b.tsg"]);
 }
 
 #[test]

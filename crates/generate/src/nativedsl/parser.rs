@@ -20,8 +20,8 @@ use std::path::PathBuf;
 
 use super::{
     ast::{
-        Ast, FileId, FileSpan, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note,
-        NoteMessage, Param, PrecEntry, ReservedWordSet, Span,
+        Ast, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note, NoteMessage, Param,
+        PrecEntry, ReservedWordSet, Span,
     },
     lexer::{Token, TokenKind},
 };
@@ -32,18 +32,16 @@ pub struct Parser<'src> {
     pos: usize,
     grammar_path: PathBuf,
     pub ast: Ast<'src>,
-    file: FileId,
 }
 
 impl<'src> Parser<'src> {
     /// Create a new parser from a token stream and source text.
-    pub fn new(tokens: Vec<Token>, source: &'src str, file: FileId, grammar_path: PathBuf) -> Self {
+    pub fn new(tokens: Vec<Token>, source: &'src str, grammar_path: PathBuf) -> Self {
         Self {
             tokens,
             pos: 0,
             grammar_path,
             ast: Ast::new(source),
-            file,
         }
     }
 
@@ -156,13 +154,6 @@ impl<'src> Parser<'src> {
                 Ok(span)
             }
             _ => Err(self.error(ParseErrorKind::ExpectedName)),
-        }
-    }
-
-    fn file_span(&self, span: Span) -> FileSpan {
-        FileSpan {
-            file: self.file,
-            span,
         }
     }
 
