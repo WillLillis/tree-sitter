@@ -181,10 +181,7 @@ fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId, file: FileId) -> Result<Ty, Type
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: FileSpan {
-                file,
-                span: ast.span(ty_id),
-            },
+            span: ast.span(ty_id),
         }),
     }
 }
@@ -192,7 +189,7 @@ fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId, file: FileId) -> Result<Ty, Type
 fn mismatch(expected: Ty, got: Ty, span: Span, file: FileId) -> TypeError {
     TypeError {
         kind: TypeErrorKind::TypeMismatch { expected, got },
-        span: FileSpan::new(file, span),
+        span: span,
     }
 }
 
@@ -287,7 +284,7 @@ fn check_item<'src>(
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::UnexpectedTopLevel,
-            span: FileSpan { file, span },
+            span: span,
         }),
     }
 }
@@ -312,10 +309,7 @@ fn check_call_args<'src>(
                 expected: sig.params.len(),
                 got: args.len(),
             },
-            span: FileSpan {
-                file,
-                span: call_span,
-            },
+            span: call_span,
         });
     }
     for (&arg_id, (_param_name, param_ty)) in args.iter().zip(sig.params.iter()) {
@@ -410,10 +404,7 @@ fn type_of<'src>(
             let name = ast.text(var_span);
             env.get_var(name).cloned().ok_or_else(|| TypeError {
                 kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
-                span: FileSpan {
-                    file,
-                    span: var_span,
-                },
+                span: var_span,
             })
         }
         Node::FieldAccess { obj, field } => {
@@ -429,7 +420,7 @@ fn type_of<'src>(
                             field: field_name.to_string(),
                             on_type: obj_ty.clone(),
                         },
-                        span: FileSpan { file, span },
+                        span: span,
                     }),
                 // c.extras, c.inline, etc. - config field access on a grammar
                 Ty::Grammar => match field_name {
@@ -440,18 +431,12 @@ fn type_of<'src>(
                     "word" => Ok(Ty::Rule),
                     _ => Err(TypeError {
                         kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                        span: FileSpan {
-                            file,
-                            span: ast.span(*field),
-                        },
+                        span: ast.span(*field),
                     }),
                 },
                 _ => Err(TypeError {
                     kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty.clone()),
-                    span: FileSpan {
-                        file,
-                        span: ast.span(*obj),
-                    },
+                    span: ast.span(*obj),
                 }),
             }
         }
@@ -461,10 +446,7 @@ fn type_of<'src>(
             if obj_ty != Ty::Grammar {
                 return Err(TypeError {
                     kind: TypeErrorKind::ConfigAccessOnNonGrammar(obj_ty),
-                    span: FileSpan {
-                        file,
-                        span: ast.span(*obj),
-                    },
+                    span: ast.span(*obj),
                 });
             }
             Ok(Ty::Rule)
@@ -498,10 +480,7 @@ fn type_of<'src>(
                 if ty != first {
                     return Err(TypeError {
                         kind: TypeErrorKind::ListElementTypeMismatch { first, got: ty },
-                        span: FileSpan {
-                            file,
-                            span: ast.span(item_id),
-                        },
+                        span: ast.span(item_id),
                     });
                 }
             }
@@ -587,7 +566,7 @@ fn type_of<'src>(
                 .get(fn_name)
                 .ok_or_else(|| TypeError {
                     kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
-                    span: FileSpan { file, span },
+                    span: span,
                 })?
                 .clone();
             check_call_args(ast, fn_name, ast.child_slice(*args), &sig, span, env, file)?;
@@ -595,7 +574,7 @@ fn type_of<'src>(
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: FileSpan { file, span },
+            span: span,
         }),
     }
 }
@@ -615,7 +594,7 @@ fn check_for_expr<'src>(
     let Node::For(for_idx) = ast.node(id) else {
         return Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: FileSpan { file, span },
+            span: span,
         });
     };
 
@@ -630,10 +609,7 @@ fn check_for_expr<'src>(
         _ => {
             return Err(TypeError {
                 kind: TypeErrorKind::ForRequiresList(iter_ty.clone()),
-                span: FileSpan {
-                    file,
-                    span: ast.span(iterable),
-                },
+                span: ast.span(iterable),
             });
         }
     };
@@ -647,7 +623,7 @@ fn check_for_expr<'src>(
                     bindings: bindings.len(),
                     tuple_elements: elem_tys.len(),
                 },
-                span: FileSpan { file, span },
+                span: span,
             });
         }
         for ((name_span, ty_id), actual_ty) in bindings.iter().zip(elem_tys.iter()) {
@@ -672,7 +648,7 @@ fn check_for_expr<'src>(
                 bindings: bindings.len(),
                 got: elem_ty,
             },
-            span: FileSpan { file, span },
+            span: span,
         });
     }
 
@@ -688,7 +664,7 @@ fn check_for_expr<'src>(
 #[derive(Debug, Serialize, Error)]
 pub struct TypeError {
     pub kind: TypeErrorKind,
-    pub span: FileSpan,
+    pub span: Span,
 }
 
 /// The specific kind of type error.
