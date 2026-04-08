@@ -117,13 +117,14 @@ struct Evaluator<'src> {
 
 impl<'src> Evaluator<'src> {
     fn new(ast: &'src Ast<'src>, base_grammar: Option<&'src InputGrammar>) -> Self {
+        let cap = ast.nodes.len();
         Self {
             ast,
-            values: Vec::new(),
+            values: Vec::with_capacity(cap),
             scopes: vec![FxHashMap::default()],
             fns: FxHashMap::default(),
-            rules: Vec::new(),
-            rule_children: Vec::new(),
+            rules: Vec::with_capacity(cap),
+            rule_children: Vec::with_capacity(cap),
             strings: StringPool::new(ast.source()),
             base_grammar,
         }
