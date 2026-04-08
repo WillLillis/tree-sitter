@@ -477,6 +477,7 @@ fn grammar_config_all_fields() {
 
 #[test]
 fn raw_string_literal() {
+    #[expect(clippy::needless_raw_string_hashes, reason = "false positive")]
     let g = dsl(r##"
         grammar { language: "test" }
         rule program { regexp(r#""[^"]*""#) }
@@ -1256,12 +1257,11 @@ rule program { bogus_ref }
     .unwrap();
 
     let parent_path = dir.path().join("parent.tsg");
-    let parent_src = format!(
-        r#"let base = inherit("base.tsg")
+    let parent_src = r#"let base = inherit("base.tsg")
 grammar {{ language: "derived", inherits: base }}
 rule extra {{ "hello" }}
-"#,
-    );
+"#
+    .to_string();
     let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
 
     let DslError::Inherited(inherited) = &err else {
@@ -1412,13 +1412,7 @@ fn error_append_non_list() {
     let DslError::Type(e) = err else {
         panic!("expected Type error, got {err:?}")
     };
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::List(Box::new(Ty::Rule)),
-            got: Ty::Str,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::AppendRequiresList(Ty::Str));
 }
 
 // ===== More error cases =====

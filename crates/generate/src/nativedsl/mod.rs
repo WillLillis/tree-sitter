@@ -53,7 +53,7 @@ fn parse_native_dsl_inner(
     grammar_path: &Path,
     ancestor_paths: &[PathBuf],
 ) -> Result<InputGrammar, DslError> {
-    let grammar_dir = grammar_path.parent().unwrap_or(Path::new("."));
+    let grammar_dir = grammar_path.parent().unwrap();
 
     let tokens = lexer::Lexer::new(input).tokenize()?;
     let ast = parser::Parser::new(tokens, input, grammar_path.to_path_buf()).parse()?;
@@ -67,10 +67,10 @@ fn parse_native_dsl_inner(
 
     // Find the inherit statement span for "first defined here" notes
     let inherit_span = ast.root_items.iter().find_map(|&id| {
-        if let ast::Node::Let { value, .. } = ast.node(id) {
-            if matches!(ast.node(*value), ast::Node::Inherit { .. }) {
-                return Some(ast.span(id));
-            }
+        if let ast::Node::Let { value, .. } = ast.node(id)
+            && matches!(ast.node(*value), ast::Node::Inherit { .. })
+        {
+            return Some(ast.span(id));
         }
         None
     });
@@ -78,7 +78,7 @@ fn parse_native_dsl_inner(
     let mut ast = ast;
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
     typecheck::check(&ast)?;
-    Ok(lower::lower_with_base(&ast, base)?)
+    Ok(lower::lower_with_base(&ast, base.as_ref())?)
 }
 
 /// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
@@ -90,72 +90,72 @@ fn load_base_grammar(
     use lower::{LowerError, LowerErrorKind};
 
     for &item_id in &ast.root_items {
-        if let ast::Node::Let { value, .. } = ast.node(item_id) {
-            if let ast::Node::Inherit { path } = ast.node(*value) {
-                let path_str = ast.string_lit_content(*path);
-                let span = ast.span(*path);
-                let full_path = grammar_dir.join(path_str);
-                let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
-                    kind: LowerErrorKind::InheritLoadError(format!(
-                        "failed to resolve '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                })?;
+        if let ast::Node::Let { value, .. } = ast.node(item_id)
+            && let ast::Node::Inherit { path } = ast.node(*value)
+        {
+            let path_str = ast.string_lit_content(*path);
+            let span = ast.span(*path);
+            let full_path = grammar_dir.join(path_str);
+            let canonical = dunce::canonicalize(&full_path).map_err(|e| LowerError {
+                kind: LowerErrorKind::InheritLoadError(format!(
+                    "failed to resolve '{}': {e}",
+                    full_path.display()
+                )),
+                span,
+            })?;
 
-                // Cycle detection
-                if ancestor_paths.iter().any(|p| p == &canonical) {
-                    let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
-                    chain.push(canonical);
-                    return Err(LowerError {
-                        kind: LowerErrorKind::InheritCycle(chain),
-                        span,
-                    }
-                    .into());
+            // Cycle detection
+            if ancestor_paths.iter().any(|p| p == &canonical) {
+                let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
+                chain.push(canonical);
+                return Err(LowerError {
+                    kind: LowerErrorKind::InheritCycle(chain),
+                    span,
                 }
+                .into());
+            }
 
-                let content = std::fs::read_to_string(&full_path).map_err(|e| LowerError {
-                    kind: LowerErrorKind::InheritLoadError(format!(
-                        "failed to read '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                })?;
+            let content = std::fs::read_to_string(&full_path).map_err(|e| LowerError {
+                kind: LowerErrorKind::InheritLoadError(format!(
+                    "failed to read '{}': {e}",
+                    full_path.display()
+                )),
+                span,
+            })?;
 
-                let mut child_ancestors = ancestor_paths.to_vec();
-                child_ancestors.push(canonical.clone());
+            let mut child_ancestors = ancestor_paths.to_vec();
+            child_ancestors.push(canonical.clone());
 
-                let ext = full_path.extension().and_then(|e| e.to_str());
-                let grammar = match ext {
-                    Some("tsg") => parse_native_dsl_inner(&content, &canonical, &child_ancestors)
-                        .map_err(|inner| InheritedError {
+            let ext = full_path.extension().and_then(|e| e.to_str());
+            let grammar = match ext {
+                Some("tsg") => parse_native_dsl_inner(&content, &canonical, &child_ancestors)
+                    .map_err(|inner| InheritedError {
                         inner: Box::new(inner),
                         source_text: content.clone(),
                         path: canonical.clone(),
                         inherit_span: span,
                     })?,
-                    Some("json") => {
-                        crate::parse_grammar::parse_grammar(&content).map_err(|e| LowerError {
-                            kind: LowerErrorKind::InheritLoadError(format!(
-                                "in '{}': {e}",
-                                full_path.display()
-                            )),
-                            span,
-                        })?
+                Some("json") => {
+                    crate::parse_grammar::parse_grammar(&content).map_err(|e| LowerError {
+                        kind: LowerErrorKind::InheritLoadError(format!(
+                            "in '{}': {e}",
+                            full_path.display()
+                        )),
+                        span,
+                    })?
+                }
+                _ => {
+                    return Err(LowerError {
+                        kind: LowerErrorKind::InheritLoadError(
+                            "unsupported file extension, expected .tsg or .json".to_string(),
+                        ),
+                        span,
                     }
-                    _ => {
-                        return Err(LowerError {
-                            kind: LowerErrorKind::InheritLoadError(
-                                "unsupported file extension, expected .tsg or .json".to_string(),
-                            ),
-                            span,
-                        }
-                        .into());
-                    }
-                };
+                    .into());
+                }
+            };
 
-                return Ok(Some(grammar));
-            }
+            return Ok(Some(grammar));
         }
     }
     Ok(None)
@@ -279,7 +279,7 @@ struct SpanContext<'a> {
     underline_len: usize,
 }
 
-fn span_context<'a>(span: Span, source_text: &'a str) -> SpanContext<'a> {
+fn span_context(span: Span, source_text: &str) -> SpanContext<'_> {
     let offset = span.start as usize;
     let bytes = source_text.as_bytes();
 

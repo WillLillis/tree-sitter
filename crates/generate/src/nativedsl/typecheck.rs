@@ -185,10 +185,10 @@ fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId) -> Result<Ty, TypeError> {
     }
 }
 
-fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
+const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     TypeError {
         kind: TypeErrorKind::TypeMismatch { expected, got },
-        span: span,
+        span,
     }
 }
 
@@ -282,7 +282,7 @@ fn check_item<'src>(
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::UnexpectedTopLevel,
-            span: span,
+            span,
         }),
     }
 }
@@ -377,13 +377,13 @@ fn type_of<'src>(
             let right_ty = type_of(ast, *right, env)?;
             match (&left_ty, &right_ty) {
                 (Ty::List(l), Ty::List(r)) if l == r => Ok(left_ty),
-                (Ty::List(_), Ty::List(_)) => Err(mismatch(left_ty, right_ty, ast.span(*right))),
-                (Ty::List(_), _) => Err(mismatch(left_ty, right_ty, ast.span(*right))),
-                _ => Err(mismatch(
-                    Ty::List(Box::new(Ty::Rule)),
-                    left_ty,
-                    ast.span(*left),
-                )),
+                (Ty::List(_), Ty::List(_) | _) => {
+                    Err(mismatch(left_ty, right_ty, ast.span(*right)))
+                }
+                _ => Err(TypeError {
+                    kind: TypeErrorKind::AppendRequiresList(left_ty),
+                    span: ast.span(*left),
+                }),
             }
         }
         Node::Ident => {
@@ -410,14 +410,16 @@ fn type_of<'src>(
                             field: field_name.to_string(),
                             on_type: obj_ty.clone(),
                         },
-                        span: span,
+                        span,
                     }),
                 // c.extras, c.inline, etc. - config field access on a grammar
                 Ty::Grammar => match field_name {
-                    "extras" | "externals" => Ok(Ty::List(Box::new(Ty::Rule))),
-                    "inline" | "supertypes" => Ok(Ty::List(Box::new(Ty::Rule))),
-                    "conflicts" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
-                    "precedences" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
+                    "extras" | "externals" | "inline" | "supertypes" => {
+                        Ok(Ty::List(Box::new(Ty::Rule)))
+                    }
+                    "conflicts" | "precedences" => {
+                        Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule)))))
+                    }
                     "word" => Ok(Ty::Rule),
                     _ => Err(TypeError {
                         kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
@@ -556,7 +558,7 @@ fn type_of<'src>(
                 .get(fn_name)
                 .ok_or_else(|| TypeError {
                     kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
-                    span: span,
+                    span,
                 })?
                 .clone();
             check_call_args(ast, fn_name, ast.child_slice(*args), &sig, span, env)?;
@@ -564,7 +566,7 @@ fn type_of<'src>(
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: span,
+            span,
         }),
     }
 }
@@ -583,7 +585,7 @@ fn check_for_expr<'src>(
     let Node::For(for_idx) = ast.node(id) else {
         return Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: span,
+            span,
         });
     };
 
@@ -612,7 +614,7 @@ fn check_for_expr<'src>(
                     bindings: bindings.len(),
                     tuple_elements: elem_tys.len(),
                 },
-                span: span,
+                span,
             });
         }
         for ((name_span, ty_id), actual_ty) in bindings.iter().zip(elem_tys.iter()) {
@@ -637,7 +639,7 @@ fn check_for_expr<'src>(
                 bindings: bindings.len(),
                 got: elem_ty,
             },
-            span: span,
+            span,
         });
     }
 
@@ -657,7 +659,7 @@ pub struct TypeError {
 }
 
 /// The specific kind of type error.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum TypeErrorKind {
     TypeMismatch {
         expected: Ty,
@@ -688,6 +690,7 @@ pub enum TypeErrorKind {
         got: Ty,
     },
     UnresolvedVariable(String),
+    AppendRequiresList(Ty),
     ConfigAccessOnNonGrammar(Ty),
     UnknownConfigField(String),
     UnexpectedTopLevel,
@@ -739,6 +742,9 @@ impl std::fmt::Display for TypeError {
                 )
             }
             TypeErrorKind::UnresolvedVariable(name) => write!(f, "unresolved variable '{name}'"),
+            TypeErrorKind::AppendRequiresList(got) => {
+                write!(f, "append requires list arguments, got {got}")
+            }
             TypeErrorKind::ConfigAccessOnNonGrammar(ty) => {
                 write!(f, "'::' config access requires a grammar value, got {ty}")
             }
