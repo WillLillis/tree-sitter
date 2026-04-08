@@ -408,10 +408,10 @@ pub enum Node {
         obj: NodeId,
         field: NodeId,
     },
-    /// `c::extras`, `c::inline` - access a config field on a base grammar.
-    ConfigAccess {
+    /// `c::expression` - inline the body of a rule from a base grammar.
+    RuleInline {
         obj: NodeId,
-        field: NodeId,
+        rule: NodeId,
     },
     Seq(ChildRange),
     Choice(ChildRange),

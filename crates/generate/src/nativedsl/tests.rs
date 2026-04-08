@@ -1,17 +1,23 @@
 use std::path::Path;
 
 use crate::grammars::{InputGrammar, VariableType};
-use crate::nativedsl::{ast, parse_native_dsl, parse_native_dsl_to_json};
 use crate::rules::{Precedence, Rule};
+
+use super::{
+    DslError, LowerErrorKind, ParseErrorKind, ResolveErrorKind, Ty, TypeErrorKind, ast,
+    parse_native_dsl, parse_native_dsl_to_json,
+};
 
 fn dsl(input: &str) -> InputGrammar {
     parse_native_dsl(input, Path::new(".")).unwrap()
 }
 
-fn dsl_err(input: &str) -> String {
-    parse_native_dsl(input, Path::new("."))
-        .unwrap_err()
-        .to_string()
+fn dsl_err(input: &str) -> DslError {
+    parse_native_dsl(input, Path::new(".")).unwrap_err()
+}
+
+fn dsl_inherit_err(input: &str) -> DslError {
+    parse_native_dsl(input, &test_grammars_dir()).unwrap_err()
 }
 
 fn test_grammars_dir() -> std::path::PathBuf {
@@ -42,12 +48,6 @@ fn find_rule<'a>(g: &'a InputGrammar, name: &str) -> &'a Rule {
 
 fn dsl_inherit(input: &str) -> InputGrammar {
     parse_native_dsl(input, &test_grammars_dir()).unwrap()
-}
-
-fn dsl_inherit_err(input: &str) -> String {
-    parse_native_dsl(input, &test_grammars_dir())
-        .unwrap_err()
-        .to_string()
 }
 
 // ===== Node size =====
@@ -520,68 +520,107 @@ fn json_roundtrip() {
 
 #[test]
 fn error_type_mismatch_fn_args() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         fn needs_int(x: int) -> rule { prec(x, "a") }
         rule program { needs_int("not_an_int") }
     "#,
     );
-    assert!(msg.contains("expected int"), "error was: {msg}");
+    let DslError::Type(e) = err else {
+        panic!("expected Type error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::Int,
+            got: Ty::Str
+        }
+    );
 }
 
 #[test]
 fn error_for_binding_count_mismatch() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         rule bad { choice(for (a: str, b: int) in [("x")] { a }) }
     "#,
     );
-    assert!(msg.contains("bindings"), "error was: {msg}");
+    let DslError::Type(e) = err else {
+        panic!("expected Type error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::ForBindingCountMismatch {
+            bindings: 2,
+            tuple_elements: 1
+        }
+    );
 }
 
 #[test]
 fn error_unknown_identifier() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         rule program { nonexistent }
     "#,
     );
-    assert!(
-        msg.contains("unknown") && msg.contains("nonexistent"),
-        "error was: {msg}"
+    let DslError::Resolve(e) = err else {
+        panic!("expected Resolve error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::UnknownIdentifier("nonexistent".into())
     );
 }
 
 #[test]
 fn error_duplicate_rule() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         rule program { "a" }
         rule program { "b" }
     "#,
     );
-    assert!(
-        msg.contains("duplicate") && msg.contains("program"),
-        "error was: {msg}"
+    let DslError::Resolve(e) = err else {
+        panic!("expected Resolve error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::DuplicateDeclaration("program".into())
     );
 }
 
 #[test]
+fn error_forward_reference_let() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        rule program { MY_VAR }
+        let MY_VAR: str = "x"
+    "#,
+    );
+    let DslError::Resolve(e) = err else {
+        panic!("expected Resolve error, got {err:?}")
+    };
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("MY_VAR".into()));
+}
+
+#[test]
 fn error_unknown_grammar_field() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test", bogus: "x" }
         rule program { "x" }
     "#,
     );
-    assert!(
-        msg.contains("unknown") && msg.contains("bogus"),
-        "error was: {msg}"
-    );
+    let DslError::Parse(e) = err else {
+        panic!("expected Parse error, got {err:?}")
+    };
+    assert_eq!(e.kind, ParseErrorKind::UnknownGrammarField("bogus".into()));
 }
 
 // ===== Prec inside token_immediate =====
@@ -906,18 +945,20 @@ fn config_word_overridden() {
 }
 
 #[test]
-fn field_access_produces_named_symbol() {
+fn rule_inline_expands_base_rule_body() {
     let g = dsl_inherit(
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-        override rule expression { choice(base.expression, "extended") }
+        override rule expression { choice(base::expression, "extended") }
     "#,
     );
+    // c::rule_name inlines the body of the base rule (which is `identifier`,
+    // i.e. NamedSymbol("identifier"))
     assert_eq!(
         *find_rule(&g, "expression"),
         Rule::choice(vec![
-            Rule::NamedSymbol("expression".into()),
+            Rule::NamedSymbol("identifier".into()),
             Rule::String("extended".into()),
         ])
     );
@@ -929,7 +970,7 @@ fn config_access_extras() {
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-        let base_extras = base::extras
+        let base_extras = base.extras
     "#,
     );
     assert_eq!(g.name, "derived");
@@ -972,44 +1013,49 @@ fn append_concatenates_lists() {
 
 #[test]
 fn error_override_without_inherit() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         override rule foo { "bar" }
     "#,
     );
-    assert!(
-        msg.contains("override") && msg.contains("inherits"),
-        "expected override-without-inherit error, got: {msg}"
-    );
+    let DslError::Lower(e) = err else {
+        panic!("expected Lower error, got {err:?}")
+    };
+    assert_eq!(e.kind, LowerErrorKind::OverrideWithoutInherit);
 }
 
 #[test]
 fn error_override_rule_not_found() {
-    let msg = dsl_inherit_err(
+    let err = dsl_inherit_err(
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule nonexistent { "oops" }
     "#,
     );
-    assert!(
-        msg.contains("nonexistent") && msg.contains("not found"),
-        "expected rule-not-found error, got: {msg}"
+    let DslError::Lower(e) = err else {
+        panic!("expected Lower error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::OverrideRuleNotFound("nonexistent".into())
     );
 }
 
 #[test]
 fn error_inherit_bad_path() {
-    let msg = dsl_inherit_err(
+    let err = dsl_inherit_err(
         r#"
         let base = inherit("nonexistent/grammar.tsg")
         grammar { language: "derived", inherits: base }
     "#,
     );
+    let DslError::Lower(e) = err else {
+        panic!("expected Lower error, got {err:?}")
+    };
     assert!(
-        msg.contains("failed to resolve") || msg.contains("nonexistent"),
-        "expected path error, got: {msg}"
+        matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("nonexistent"))
     );
 }
 
@@ -1026,12 +1072,12 @@ fn error_inherit_bad_extension() {
     "#,
         bad_file.display()
     );
-    let msg = parse_native_dsl(&input, Path::new("."))
-        .unwrap_err()
-        .to_string();
+    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    let DslError::Lower(e) = err else {
+        panic!("expected Lower error, got {err:?}")
+    };
     assert!(
-        msg.contains("unsupported file extension"),
-        "expected extension error, got: {msg}"
+        matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("unsupported file extension"))
     );
 }
 
@@ -1066,15 +1112,17 @@ fn error_inherit_cycle() {
     .unwrap();
 
     let source = std::fs::read_to_string(&a_path).unwrap();
-    let msg = parse_native_dsl(&source, dir.path())
-        .unwrap_err()
-        .to_string();
-    assert!(msg.contains("cycle"), "expected cycle error, got: {msg}");
+    let err = parse_native_dsl(&source, dir.path()).unwrap_err();
+    // Cycle is wrapped in InheritLoadError as it propagates through the recursive chain
+    let DslError::Lower(e) = err else {
+        panic!("expected Lower error, got {err:?}")
+    };
+    assert!(matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("cycle")));
 }
 
 #[test]
 fn error_append_mismatched_types() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         let a: list<str> = ["x"]
@@ -1083,15 +1131,21 @@ fn error_append_mismatched_types() {
         rule program { "x" }
     "#,
     );
-    assert!(
-        msg.contains("list<str>") && msg.contains("list<int>"),
-        "expected type mismatch, got: {msg}"
+    let DslError::Type(e) = err else {
+        panic!("expected Type error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::List(Box::new(Ty::Str)),
+            got: Ty::List(Box::new(Ty::Int)),
+        }
     );
 }
 
 #[test]
 fn error_append_non_list() {
-    let msg = dsl_err(
+    let err = dsl_err(
         r#"
         grammar { language: "test" }
         let a: str = "x"
@@ -1100,7 +1154,16 @@ fn error_append_non_list() {
         rule program { "x" }
     "#,
     );
-    assert!(msg.contains("list"), "expected list type error, got: {msg}");
+    let DslError::Type(e) = err else {
+        panic!("expected Type error, got {err:?}")
+    };
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::List(Box::new(Ty::Rule)),
+            got: Ty::Str,
+        }
+    );
 }
 
 // ===== Benchmarks =====
