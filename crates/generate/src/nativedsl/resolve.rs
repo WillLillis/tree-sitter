@@ -210,11 +210,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
 ///
 /// Splits the borrow on `ast` into `&mut ast.nodes` and `&ast.context` so
 /// that nodes can be mutated while reading source text and configs.
-fn resolve_item(
-    ast: &mut Ast<'_>,
-    names: &Names,
-    item_id: NodeId,
-) -> Result<(), ResolveError> {
+fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(), ResolveError> {
     match ast.node(item_id) {
         Node::Grammar => {
             let ctx = &ast.context;
@@ -239,23 +235,11 @@ fn resolve_item(
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
             let body = *body;
-            resolve_expr(
-                &mut ast.nodes,
-                &ast.context,
-                names,
-                body,
-                &Locals::EMPTY,
-            )
+            resolve_expr(&mut ast.nodes, &ast.context, names, body, &Locals::EMPTY)
         }
         Node::Let { value, .. } => {
             let value = *value;
-            resolve_expr(
-                &mut ast.nodes,
-                &ast.context,
-                names,
-                value,
-                &Locals::EMPTY,
-            )
+            resolve_expr(&mut ast.nodes, &ast.context, names, value, &Locals::EMPTY)
         }
         Node::Fn(fn_idx) => {
             let fn_config = ast.context.get_fn(*fn_idx);

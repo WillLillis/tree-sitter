@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
 
-use ast::{SourceFile, SourceMap, Span};
+use ast::Span;
 
 pub use lexer::{LexError, LexErrorKind};
 pub use lower::{LowerError, LowerErrorKind};
@@ -53,18 +53,13 @@ fn parse_native_dsl_inner(
     grammar_path: &Path,
     ancestor_paths: &[PathBuf],
 ) -> Result<InputGrammar, DslError> {
-    let mut source_map = SourceMap::new(SourceFile::new(
-        grammar_path.to_path_buf(),
-        input.to_string(),
-    ));
-    let file = ast::FileId::new(0);
     let grammar_dir = grammar_path.parent().unwrap_or(Path::new("."));
 
-    let tokens = lexer::Lexer::new(input, file).tokenize()?;
-    let ast = parser::Parser::new(tokens, input, file, grammar_path.to_path_buf()).parse()?;
+    let tokens = lexer::Lexer::new(input).tokenize()?;
+    let ast = parser::Parser::new(tokens, input, grammar_path.to_path_buf()).parse()?;
 
     // Load base grammar before resolve so we can register its rule names
-    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths, file)?;
+    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?;
     let base_rule_names: Vec<String> = base
         .as_ref()
         .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
@@ -82,8 +77,8 @@ fn parse_native_dsl_inner(
 
     let mut ast = ast;
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
-    typecheck::check(&ast, file)?;
-    Ok(lower::lower_with_base(&ast, base, file)?)
+    typecheck::check(&ast)?;
+    Ok(lower::lower_with_base(&ast, base)?)
 }
 
 /// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
@@ -91,7 +86,6 @@ fn load_base_grammar(
     ast: &ast::Ast<'_>,
     grammar_dir: &Path,
     ancestor_paths: &[PathBuf],
-    file: ast::FileId,
 ) -> Result<Option<InputGrammar>, DslError> {
     use lower::{LowerError, LowerErrorKind};
 
@@ -111,12 +105,8 @@ fn load_base_grammar(
 
                 // Cycle detection
                 if ancestor_paths.iter().any(|p| p == &canonical) {
-                    let mut chain = String::new();
-                    for p in ancestor_paths {
-                        chain.push_str(&p.display().to_string());
-                        chain.push_str(" -> ");
-                    }
-                    chain.push_str(&canonical.display().to_string());
+                    let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
+                    chain.push(canonical);
                     return Err(LowerError {
                         kind: LowerErrorKind::InheritCycle(chain),
                         span,
@@ -135,27 +125,32 @@ fn load_base_grammar(
                 let mut child_ancestors = ancestor_paths.to_vec();
                 child_ancestors.push(canonical.clone());
 
-                let inherit_err = |msg: String| -> DslError {
-                    LowerError {
-                        kind: LowerErrorKind::InheritLoadError(format!(
-                            "in '{}': {msg}",
-                            full_path.display()
-                        )),
-                        span,
-                    }
-                    .into()
-                };
-
                 let ext = full_path.extension().and_then(|e| e.to_str());
                 let grammar = match ext {
                     Some("tsg") => parse_native_dsl_inner(&content, &canonical, &child_ancestors)
-                        .map_err(|e| inherit_err(e.to_string()))?,
-                    Some("json") => crate::parse_grammar::parse_grammar(&content)
-                        .map_err(|e| inherit_err(e.to_string()))?,
+                        .map_err(|inner| InheritedError {
+                        inner: Box::new(inner),
+                        source_text: content.clone(),
+                        path: canonical.clone(),
+                        inherit_span: span,
+                    })?,
+                    Some("json") => {
+                        crate::parse_grammar::parse_grammar(&content).map_err(|e| LowerError {
+                            kind: LowerErrorKind::InheritLoadError(format!(
+                                "in '{}': {e}",
+                                full_path.display()
+                            )),
+                            span,
+                        })?
+                    }
                     _ => {
-                        return Err(inherit_err(format!(
-                            "unsupported file extension, expected .tsg or .json"
-                        )));
+                        return Err(LowerError {
+                            kind: LowerErrorKind::InheritLoadError(
+                                "unsupported file extension, expected .tsg or .json".to_string(),
+                            ),
+                            span,
+                        }
+                        .into());
                     }
                 };
 
@@ -204,6 +199,25 @@ pub enum DslError {
     Type(#[from] TypeError),
     #[error(transparent)]
     Lower(#[from] LowerError),
+    #[error(transparent)]
+    Inherited(#[from] InheritedError),
+}
+
+/// An error from an inherited grammar, carrying the inherited file's context
+/// so that diagnostics can render with the correct file path and source.
+#[derive(Debug, Serialize, Error)]
+#[error("{inner}")]
+pub struct InheritedError {
+    /// The actual error from the inherited grammar.
+    pub inner: Box<DslError>,
+    /// Source text of the inherited file.
+    #[serde(skip)]
+    pub source_text: String,
+    /// Path to the inherited file.
+    #[serde(skip)]
+    pub path: PathBuf,
+    /// Span of the `inherit("...")` call in the parent file.
+    pub inherit_span: Span,
 }
 
 use ast::Note;
@@ -218,6 +232,7 @@ impl DslError {
             Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
+            Self::Inherited(e) => e.inherit_span,
         }
     }
 
@@ -227,6 +242,7 @@ impl DslError {
         match self {
             Self::Parse(e) => e.note.as_ref(),
             Self::Resolve(e) => e.note.as_ref(),
+            Self::Inherited(e) => e.inner.note(),
             _ => None,
         }
     }
@@ -308,6 +324,20 @@ fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String
 
     use anstyle::AnsiColor;
 
+    // Inherited errors: render the inner error with the inherited file's context,
+    // then append a "inherited from here" note pointing to the parent.
+    if let DslError::Inherited(e) = error {
+        let mut out = render_diagnostic(&e.inner, &e.source_text, &e.path);
+        render_note_snippet(
+            &mut out,
+            e.inherit_span,
+            source_text,
+            path,
+            &ast::NoteMessage::InheritedFromHere,
+        );
+        return out;
+    }
+
     let ctx = span_context(error.span(), source_text);
     let path_display = path.display();
     let gutter_width = digit_count(ctx.line_num);
@@ -349,42 +379,57 @@ fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String
     )
     .unwrap();
 
-    // Render note if present
+    // Render note if present (uses note's own source/path for cross-file notes)
     if let Some(note) = error.note() {
-        let nctx = span_context(note.span, source_text);
-        let note_gutter = digit_count(nctx.line_num);
-        let note_pipe = paint(AnsiColor::Cyan, "|");
-        let note_underline = paint(AnsiColor::Cyan, &"-".repeat(nctx.underline_len));
-
-        writeln!(out).unwrap();
-        writeln!(
-            out,
-            " {} {path_display}:{line_num}:{col}",
-            paint(AnsiColor::Cyan, "-->"),
-            line_num = nctx.line_num,
-            col = nctx.col,
-        )
-        .unwrap();
-        writeln!(out, " {:>note_gutter$} {note_pipe}", "").unwrap();
-        writeln!(
-            out,
-            " {} {note_pipe} {}",
-            paint(AnsiColor::Cyan, &nctx.line_num.to_string()),
-            nctx.line_text,
-        )
-        .unwrap();
-        write!(
-            out,
-            " {:>note_gutter$} {note_pipe} {:>width$}{note_underline} {}",
-            "",
-            "",
-            paint(AnsiColor::Cyan, &format!("note: {}", note.message)),
-            width = nctx.span_start_in_line,
-        )
-        .unwrap();
+        render_note_snippet(&mut out, note.span, &note.source, &note.path, &note.message);
     }
 
     out
+}
+
+fn render_note_snippet(
+    out: &mut String,
+    span: Span,
+    source_text: &str,
+    path: &Path,
+    message: &ast::NoteMessage,
+) {
+    use std::fmt::Write;
+
+    use anstyle::AnsiColor;
+
+    let nctx = span_context(span, source_text);
+    let note_gutter = digit_count(nctx.line_num);
+    let note_pipe = paint(AnsiColor::Cyan, "|");
+    let note_underline = paint(AnsiColor::Cyan, &"-".repeat(nctx.underline_len));
+    let note_path = path.display();
+
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        " {} {note_path}:{line_num}:{col}",
+        paint(AnsiColor::Cyan, "-->"),
+        line_num = nctx.line_num,
+        col = nctx.col,
+    )
+    .unwrap();
+    writeln!(out, " {:>note_gutter$} {note_pipe}", "").unwrap();
+    writeln!(
+        out,
+        " {} {note_pipe} {}",
+        paint(AnsiColor::Cyan, &nctx.line_num.to_string()),
+        nctx.line_text,
+    )
+    .unwrap();
+    write!(
+        out,
+        " {:>note_gutter$} {note_pipe} {:>width$}{note_underline} {}",
+        "",
+        "",
+        paint(AnsiColor::Cyan, &format!("note: {message}")),
+        width = nctx.span_start_in_line,
+    )
+    .unwrap();
 }
 
 fn digit_count(n: usize) -> usize {
