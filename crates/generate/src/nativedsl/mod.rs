@@ -62,8 +62,18 @@ fn parse_native_dsl_inner(
         .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
         .unwrap_or_default();
 
+    // Find the inherit statement span for "first defined here" notes
+    let inherit_span = ast.root_items.iter().find_map(|&id| {
+        if let ast::Node::Let { value, .. } = ast.node(id) {
+            if matches!(ast.node(*value), ast::Node::Inherit { .. }) {
+                return Some(ast.span(id));
+            }
+        }
+        None
+    });
+
     let mut ast = ast;
-    resolve::resolve(&mut ast, &base_rule_names)?;
+    resolve::resolve(&mut ast, &base_rule_names, inherit_span)?;
     typecheck::check(&ast)?;
     Ok(lower::lower_with_base(&ast, base)?)
 }
@@ -190,6 +200,8 @@ pub enum DslError {
     Lower(#[from] LowerError),
 }
 
+use ast::Note;
+
 impl DslError {
     /// Returns the source span where the error occurred.
     #[must_use]
@@ -200,6 +212,16 @@ impl DslError {
             Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
+        }
+    }
+
+    /// Returns an optional secondary note with a related source location.
+    #[must_use]
+    pub fn note(&self) -> Option<&Note> {
+        match self {
+            Self::Parse(e) => e.note.as_ref(),
+            Self::Resolve(e) => e.note.as_ref(),
+            _ => None,
         }
     }
 }
@@ -225,16 +247,20 @@ fn paint(color: anstyle::AnsiColor, text: &str) -> String {
     format!("{style}{text}{style:#}")
 }
 
-fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String {
-    use std::fmt::Write;
+struct SpanContext<'a> {
+    line_num: usize,
+    col: usize,
+    line_text: &'a str,
+    prev_line_text: Option<&'a str>,
+    prev_line_num: usize,
+    span_start_in_line: usize,
+    underline_len: usize,
+}
 
-    use anstyle::AnsiColor;
-
-    let span = error.span();
+fn span_context<'a>(span: Span, source_text: &'a str) -> SpanContext<'a> {
     let offset = span.start as usize;
     let bytes = source_text.as_bytes();
 
-    // Find line boundaries and line number
     let mut line_start = 0;
     let mut prev_line_start = None;
     let mut line_num = 1;
@@ -248,7 +274,6 @@ fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String
     let line_end =
         memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |pos| line_start + pos);
     let col = offset - line_start + 1;
-
     let line_text = &source_text[line_start..line_end];
     let span_start_in_line = col.saturating_sub(1);
     let span_len = (span.end - span.start) as usize;
@@ -256,44 +281,103 @@ fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String
         .max(1)
         .min(line_text.len().saturating_sub(span_start_in_line));
 
-    let path = path.display();
-    let gutter_width = digit_count(line_num);
+    let prev_line_text = prev_line_start.map(|ps| {
+        let pe = memchr::memchr(b'\n', &bytes[ps..]).map_or(bytes.len(), |pos| ps + pos);
+        &source_text[ps..pe]
+    });
+
+    SpanContext {
+        line_num,
+        col,
+        line_text,
+        prev_line_text,
+        prev_line_num: line_num.saturating_sub(1),
+        span_start_in_line,
+        underline_len,
+    }
+}
+
+fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String {
+    use std::fmt::Write;
+
+    use anstyle::AnsiColor;
+
+    let ctx = span_context(error.span(), source_text);
+    let path_display = path.display();
+    let gutter_width = digit_count(ctx.line_num);
     let pipe = paint(AnsiColor::Cyan, "|");
-    let underline = paint(AnsiColor::Red, &"^".repeat(underline_len));
+    let underline = paint(AnsiColor::Red, &"^".repeat(ctx.underline_len));
 
     let mut out = String::new();
     writeln!(out, "{}: {error}", paint(AnsiColor::Red, "error")).unwrap();
     writeln!(
         out,
-        " {} {path}:{line_num}:{col}",
-        paint(AnsiColor::Cyan, "-->")
+        " {} {path_display}:{line_num}:{col}",
+        paint(AnsiColor::Cyan, "-->"),
+        line_num = ctx.line_num,
+        col = ctx.col,
     )
     .unwrap();
     writeln!(out, " {:>gutter_width$} {pipe}", "").unwrap();
-    if let Some(prev_start) = prev_line_start {
-        let prev_end =
-            memchr::memchr(b'\n', &bytes[prev_start..]).map_or(bytes.len(), |pos| prev_start + pos);
-        let prev_num = line_num - 1;
+    if let Some(prev_text) = ctx.prev_line_text {
         writeln!(
             out,
-            " {} {pipe} {}",
-            paint(AnsiColor::Cyan, &prev_num.to_string()),
-            &source_text[prev_start..prev_end],
+            " {} {pipe} {prev_text}",
+            paint(AnsiColor::Cyan, &ctx.prev_line_num.to_string()),
         )
         .unwrap();
     }
     writeln!(
         out,
-        " {} {pipe} {line_text}",
-        paint(AnsiColor::Cyan, &line_num.to_string()),
+        " {} {pipe} {}",
+        paint(AnsiColor::Cyan, &ctx.line_num.to_string()),
+        ctx.line_text,
     )
     .unwrap();
     write!(
         out,
-        " {:>gutter_width$} {pipe} {:>span_start_in_line$}{underline}",
-        "", "",
+        " {:>gutter_width$} {pipe} {:>width$}{underline}",
+        "",
+        "",
+        width = ctx.span_start_in_line,
     )
     .unwrap();
+
+    // Render note if present
+    if let Some(note) = error.note() {
+        let nctx = span_context(note.span, source_text);
+        let note_gutter = digit_count(nctx.line_num);
+        let note_pipe = paint(AnsiColor::Cyan, "|");
+        let note_underline = paint(AnsiColor::Cyan, &"-".repeat(nctx.underline_len));
+
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            " {} {path_display}:{line_num}:{col}",
+            paint(AnsiColor::Cyan, "-->"),
+            line_num = nctx.line_num,
+            col = nctx.col,
+        )
+        .unwrap();
+        writeln!(out, " {:>note_gutter$} {note_pipe}", "").unwrap();
+        writeln!(
+            out,
+            " {} {note_pipe} {}",
+            paint(AnsiColor::Cyan, &nctx.line_num.to_string()),
+            nctx.line_text,
+        )
+        .unwrap();
+        write!(
+            out,
+            " {:>note_gutter$} {note_pipe} {:>width$}{note_underline} {}",
+            "",
+            "",
+            paint(AnsiColor::Cyan, &format!("note: {}", note.message)),
+            width = nctx.span_start_in_line,
+        )
+        .unwrap();
+    }
+
     out
 }
 
