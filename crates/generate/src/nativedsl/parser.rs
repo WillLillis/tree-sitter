@@ -18,8 +18,8 @@ use thiserror::Error;
 
 use super::{
     ast::{
-        Ast, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note, NoteMessage, Param,
-        PrecEntry, ReservedWordSet, Span,
+        Ast, FileId, FileSpan, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note,
+        NoteMessage, Param, PrecEntry, ReservedWordSet, Span,
     },
     lexer::{Token, TokenKind},
 };
@@ -29,15 +29,17 @@ pub struct Parser<'src> {
     tokens: Vec<Token>,
     pos: usize,
     pub ast: Ast<'src>,
+    file: FileId,
 }
 
 impl<'src> Parser<'src> {
     /// Create a new parser from a token stream and source text.
-    pub fn new(tokens: Vec<Token>, source: &'src str) -> Self {
+    pub fn new(tokens: Vec<Token>, source: &'src str, file: FileId) -> Self {
         Self {
             tokens,
             pos: 0,
             ast: Ast::new(source),
+            file,
         }
     }
 
@@ -153,10 +155,17 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn file_span(&self, span: Span) -> FileSpan {
+        FileSpan {
+            file: self.file,
+            span,
+        }
+    }
+
     fn error(&self, kind: ParseErrorKind) -> ParseError {
         ParseError {
             kind,
-            span: self.span(),
+            span: self.file_span(self.span()),
             note: None,
         }
     }
@@ -184,10 +193,10 @@ impl<'src> Parser<'src> {
                 .unwrap();
             return Err(ParseError {
                 kind: ParseErrorKind::DuplicateGrammarBlock,
-                span: start,
+                span: self.file_span(start),
                 note: Some(Note {
                     message: NoteMessage::FirstDefinedHere,
-                    span: first_span,
+                    span: self.file_span(first_span),
                 }),
             });
         }
@@ -222,7 +231,7 @@ impl<'src> Parser<'src> {
                         kind: ParseErrorKind::UnknownGrammarField(
                             self.ast.text(key_span).to_string(),
                         ),
-                        span: key_span,
+                        span: self.file_span(key_span),
                         note: None,
                     });
                 }
@@ -377,7 +386,7 @@ impl<'src> Parser<'src> {
                 }
                 _ => Err(ParseError {
                     kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
-                    span: id_span,
+                    span: self.file_span(id_span),
                     note: None,
                 }),
             };
@@ -546,7 +555,7 @@ impl<'src> Parser<'src> {
                 _ => {
                     return Err(ParseError {
                         kind: ParseErrorKind::ExpectedPrecVariant(id.to_string()),
-                        span: id_span,
+                        span: self.file_span(id_span),
                         note: None,
                     });
                 }
@@ -737,7 +746,7 @@ enum PrecVariant {
 #[derive(Debug, Serialize, Error)]
 pub struct ParseError {
     pub kind: ParseErrorKind,
-    pub span: Span,
+    pub span: FileSpan,
     pub note: Option<Note>,
 }
 
