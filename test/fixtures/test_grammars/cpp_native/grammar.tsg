@@ -12,6 +12,30 @@ let PREC = {
 fn comma_sep1(item: rule) -> rule { seq(item, repeat(seq(",", item))) }
 fn comma_sep(item: rule) -> rule { optional(comma_sep1(item)) }
 
+// Digits with optional ' separators: e.g. digits("[0-9]") = /[0-9]('?[0-9]+)*/
+fn digits(pat: rule) -> rule { seq(repeat1(pat), repeat(seq("'", repeat1(pat)))) }
+
+let BIN_DIGIT = regexp("[01]")
+let DEC_DIGIT = regexp("[0-9]")
+let HEX_DIGIT = regexp("[0-9a-fA-F]")
+let OCT_DIGIT = regexp("[0-7]")
+let SIGN = regexp(r"[-\+]")
+
+let ASSIGNMENT_OPERATORS: list<str> = [
+    "=", "*=", "/=", "%=", "+=", "-=",
+    "<<=", ">>=", "&=", "^=", "|=",
+    "and_eq", "or_eq", "xor_eq",
+]
+
+let FOLD_OPERATORS: list<str> = [
+    "+", "-", "*", "/", "%", "^", "&", "|",
+    "=", "<", ">", "<<", ">>",
+    "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
+    ">>=", "<<=", "==", "!=", "<=", ">=",
+    "&&", "||", ",", ".*", "->*",
+    "or", "and", "bitor", "xor", "bitand", "not_eq",
+]
+
 grammar {
     language: "cpp",
     inherits: c,
@@ -115,16 +139,10 @@ override rule _block_item {
 }
 
 override rule type_qualifier {
-    choice("const", "constexpr", "volatile", "restrict", "__restrict__",
-           "__extension__", "_Atomic", "_Noreturn", "noreturn", "_Nonnull",
-           alignas_qualifier,
-           "mutable", "constinit", "consteval")
+    choice(c::type_qualifier, "mutable", "constinit", "consteval")
 }
 
-override rule type_descriptor {
-    prec.right(0, seq(repeat(type_qualifier), field(type, type_specifier),
-                   repeat(type_qualifier), field(declarator, optional(_abstract_declarator))))
-}
+override rule type_descriptor { prec.right(0, c::type_descriptor) }
 
 // attribute: prepend optional `using namespace:` before C's attribute body
 override rule attribute {
@@ -134,10 +152,7 @@ override rule attribute {
 }
 
 override rule attribute_declaration {
-    choice(
-        seq("[[", comma_sep1(attribute), "]]"),
-        seq("[[", comma_sep1(annotation), "]]"),
-    )
+    choice(c::attribute_declaration, seq("[[", comma_sep1(annotation), "]]"))
 }
 
 // function_definition: body can also be try_statement
@@ -149,9 +164,7 @@ override rule function_definition {
 }
 
 override rule _declaration_modifiers {
-    choice(storage_class_specifier, type_qualifier, attribute_specifier,
-           attribute_declaration, ms_declspec_modifier,
-           "virtual")
+    choice(c::_declaration_modifiers, "virtual")
 }
 
 // storage_class_specifier: remove "auto", add "thread_local"
@@ -162,18 +175,16 @@ override rule storage_class_specifier {
 
 override rule init_declarator {
     choice(
-        seq(field(declarator, _declarator), "=", field(value, choice(initializer_list, expression))),
+        c::init_declarator,
         seq(field(declarator, _declarator), field(value, choice(argument_list, initializer_list))),
     )
 }
 
-override rule compound_statement { prec(-1, seq("{", repeat(_block_item), "}")) }
+override rule compound_statement { prec(-1, c::compound_statement) }
 
 override rule _field_declaration_list_item {
     choice(
-        field_declaration, preproc_def, preproc_function_def, preproc_call,
-        alias(preproc_if_in_field_declaration_list, preproc_if),
-        alias(preproc_ifdef_in_field_declaration_list, preproc_ifdef),
+        c::_field_declaration_list_item,
         template_declaration,
         alias(inline_method_definition, function_definition),
         alias(constructor_or_destructor_definition, function_definition),
@@ -189,90 +200,47 @@ override rule _field_declaration_list_item {
 }
 
 override rule _declarator {
-    choice(attributed_declarator, pointer_declarator, function_declarator,
-           array_declarator, parenthesized_declarator, identifier,
+    choice(c::_declarator,
            reference_declarator, qualified_identifier, template_function,
            operator_name, destructor_name, structured_binding_declarator)
 }
 
 override rule _field_declarator {
-    choice(
-        alias(attributed_field_declarator, attributed_declarator),
-        alias(pointer_field_declarator, pointer_declarator),
-        alias(function_field_declarator, function_declarator),
-        alias(array_field_declarator, array_declarator),
-        alias(parenthesized_field_declarator, parenthesized_declarator),
-        _field_identifier,
-        alias(reference_field_declarator, reference_declarator),
-        template_method, operator_name,
-    )
+    choice(c::_field_declarator,
+           alias(reference_field_declarator, reference_declarator),
+           template_method, operator_name)
 }
 
 override rule _type_declarator {
-    choice(
-        alias(attributed_type_declarator, attributed_declarator),
-        alias(pointer_type_declarator, pointer_declarator),
-        alias(function_type_declarator, function_declarator),
-        alias(array_type_declarator, array_declarator),
-        alias(parenthesized_type_declarator, parenthesized_declarator),
-        _type_identifier,
-        alias(choice("signed", "unsigned", "long", "short"), primitive_type),
-        primitive_type,
-        alias(reference_type_declarator, reference_declarator),
-    )
+    choice(c::_type_declarator, alias(reference_type_declarator, reference_declarator))
 }
 
 override rule _abstract_declarator {
-    choice(abstract_pointer_declarator, abstract_function_declarator,
-           abstract_array_declarator, abstract_parenthesized_declarator,
-           abstract_reference_declarator)
+    choice(c::_abstract_declarator, abstract_reference_declarator)
 }
 
 override rule _top_level_statement {
-    choice(case_statement, attributed_statement, labeled_statement, compound_statement,
-           alias(_top_level_expression_statement, expression_statement),
-           if_statement, switch_statement, do_statement, while_statement,
-           for_statement, return_statement, break_statement,
-           continue_statement, goto_statement,
+    choice(c::_top_level_statement,
            co_return_statement, co_yield_statement, for_range_loop,
            expansion_statement, try_statement, throw_statement)
 }
 
 override rule _non_case_statement {
-    choice(attributed_statement, labeled_statement, compound_statement,
-           expression_statement, if_statement, switch_statement,
-           do_statement, while_statement, for_statement,
-           return_statement, break_statement, continue_statement,
-           goto_statement, seh_try_statement, seh_leave_statement,
+    choice(c::_non_case_statement,
            co_return_statement, co_yield_statement, for_range_loop,
            expansion_statement, try_statement, throw_statement)
 }
 
 override rule _for_statement_body {
-    prec.dynamic(1, seq(
-        choice(field(initializer, declaration),
-               seq(field(initializer, optional(choice(expression, comma_expression))), ";")),
-        field(condition, optional(choice(expression, comma_expression))), ";",
-        field(update, optional(choice(expression, comma_expression))),
-    ))
+    prec.dynamic(1, c::_for_statement_body)
 }
 
 override rule return_statement {
-    seq(choice(
-        seq("return", optional(choice(expression, comma_expression)), ";"),
-        seq("return", initializer_list, ";"),
-    ))
+    seq(choice(c::return_statement, seq("return", initializer_list, ";")))
 }
 
 override rule _expression_not_binary {
-    choice(conditional_expression, assignment_expression,
-           unary_expression, update_expression, cast_expression,
-           pointer_expression, sizeof_expression, alignof_expression,
-           offsetof_expression, generic_expression,
-           subscript_expression, call_expression, field_expression,
-           compound_literal_expression, identifier, number_literal,
-           _string, true, false, null, char_literal,
-           parenthesized_expression, gnu_asm_expression, extension_expression,
+    choice(c::_expression_not_binary,
            co_await_expression, requires_expression, requires_clause,
            template_function, qualified_identifier,
            new_expression, delete_expression, lambda_expression,
@@ -282,7 +250,7 @@ override rule _expression_not_binary {
 
 override rule call_expression {
     prec.dynamic(1, choice(
-        prec(PREC.CALL, seq(field(function, expression), field(arguments, argument_list))),
+        c::call_expression,
         seq(field(function, choice(
             primitive_type,
             seq(optional("typename"), splice_type_specifier),
@@ -292,32 +260,22 @@ override rule call_expression {
 
 override rule sizeof_expression {
     prec.right(PREC.SIZEOF, choice(
-        // The C base: prec(SIZEOF, sizeof ...) - must keep inner prec to match
-        prec(PREC.SIZEOF, seq("sizeof", choice(
-            field(value, expression),
-            seq("(", field(type, type_descriptor), ")")))),
+        c::sizeof_expression,
         seq("sizeof", "...", "(", field(value, identifier), ")"),
     ))
 }
 
 override rule unary_expression {
     choice(
-        prec.left(PREC.UNARY, seq(field(operator, choice("!", "~", "-", "+")), field(argument, expression))),
+        c::unary_expression,
         prec.left(PREC.UNARY, seq(field(operator, choice("not", "compl")), field(argument, expression))),
     )
 }
 
 override rule binary_expression {
     choice(
+        c::binary_expression,
         for (op: str, p: int) in [
-            ("+", PREC.ADD), ("-", PREC.ADD),
-            ("*", PREC.MULTIPLY), ("/", PREC.MULTIPLY), ("%", PREC.MULTIPLY),
-            ("||", PREC.LOGICAL_OR), ("&&", PREC.LOGICAL_AND),
-            ("|", PREC.INCLUSIVE_OR), ("^", PREC.EXCLUSIVE_OR), ("&", PREC.BITWISE_AND),
-            ("==", PREC.EQUAL), ("!=", PREC.EQUAL),
-            (">", PREC.RELATIONAL), (">=", PREC.RELATIONAL),
-            ("<=", PREC.RELATIONAL), ("<", PREC.RELATIONAL),
-            ("<<", PREC.SHIFT), (">>", PREC.SHIFT),
             ("<=>", PREC.THREE_WAY),
             ("or", PREC.LOGICAL_OR), ("and", PREC.LOGICAL_AND),
             ("bitor", PREC.INCLUSIVE_OR), ("xor", PREC.EXCLUSIVE_OR),
@@ -330,7 +288,7 @@ override rule binary_expression {
 
 override rule compound_literal_expression {
     choice(
-        seq("(", field(type, type_descriptor), ")", field(value, initializer_list)),
+        c::compound_literal_expression,
         seq(field(type, choice(
             _class_name, primitive_type,
             seq(optional("typename"), splice_type_specifier),
@@ -339,19 +297,16 @@ override rule compound_literal_expression {
 }
 
 override rule _assignment_left_expression {
-    choice(identifier, call_expression, field_expression,
-           pointer_expression, subscript_expression, parenthesized_expression,
-           qualified_identifier, user_defined_literal)
+    choice(c::_assignment_left_expression, qualified_identifier, user_defined_literal)
 }
 
 override rule parenthesized_expression {
     choice(
-        seq("(", choice(expression, comma_expression, compound_statement), ")"),
+        c::parenthesized_expression,
         seq("(", alias(_assignment_expression_lhs, assignment_expression), ")"),
     )
 }
 
-// C++ completely replaces declaration
 override rule declaration {
     seq(_declaration_specifiers,
         comma_sep1(field(declarator, choice(
@@ -361,7 +316,6 @@ override rule declaration {
         ";")
 }
 
-// C++ replaces type_specifier entirely
 override rule type_specifier {
     choice(
         struct_specifier, union_specifier, enum_specifier,
@@ -375,7 +329,6 @@ override rule type_specifier {
     )
 }
 
-// C++ replaces field_declaration
 override rule field_declaration {
     seq(_declaration_specifiers,
         comma_sep(seq(
@@ -389,7 +342,6 @@ override rule field_declaration {
         optional(attribute_specifier), ";")
 }
 
-// C++ replaces switch/while/if_statement for condition_clause
 override rule switch_statement {
     seq("switch", field(condition, condition_clause), field(body, compound_statement))
 }
@@ -405,12 +357,10 @@ override rule if_statement {
         optional(field(alternative, else_clause))))
 }
 
-// C++ replaces subscript_expression
 override rule subscript_expression {
     prec(PREC.SUBSCRIPT, seq(field(argument, expression), field(indices, subscript_argument_list)))
 }
 
-// C++ replaces field_expression
 override rule field_expression {
     seq(
         prec(PREC.FIELD, seq(
@@ -427,59 +377,39 @@ override rule field_expression {
     )
 }
 
-// C++ replaces argument_list
 override rule argument_list {
     seq("(", comma_sep(choice(expression, initializer_list, compound_statement)), ")")
 }
 
 // C++ number_literal uses digit separators (') and additional suffixes.
-// Built with combinators inside token() to match the JS grammar's structure.
 override rule number_literal {
     token(seq(
-        optional(regexp(r"[-\+]")),
+        optional(SIGN),
         choice(
             // Integer literals
             seq(choice(
-                seq(choice("0b", "0B"),
-                    seq(repeat1(regexp("[01]")), repeat(seq("'", repeat1(regexp("[01]")))))),
-                seq(regexp("[1-9]"), repeat(regexp("[0-9]")),
-                    repeat(seq("'", repeat1(regexp("[0-9]"))))),
-                seq(choice("0x", "0X"),
-                    seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]")))))),
-                seq("0", repeat(regexp("[0-7]")),
-                    repeat(seq("'", repeat1(regexp("[0-7]"))))),
+                seq(choice("0b", "0B"), digits(BIN_DIGIT)),
+                seq(regexp("[1-9]"), repeat(DEC_DIGIT), repeat(seq("'", repeat1(DEC_DIGIT)))),
+                seq(choice("0x", "0X"), digits(HEX_DIGIT)),
+                seq("0", repeat(OCT_DIGIT), repeat(seq("'", repeat1(OCT_DIGIT)))),
             ), optional(regexp(r"(ll|LL)[uU]?|[uU](ll|LL)?|[uU][lL]?|[uU][zZ]?|[lL][uU]?|[zZ][uU]?"))),
             // Float literals
             seq(choice(
-                seq(seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]"))))),
-                    seq(regexp("[eE]"), optional(regexp(r"[-\+]")),
-                        seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]"))))))),
-                seq(seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]"))))),
-                    ".",
-                    optional(seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]")))))),
-                    optional(seq(regexp("[eE]"), optional(regexp(r"[-\+]")),
-                                 seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]")))))))),
-                seq(".",
-                    seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]"))))),
-                    optional(seq(regexp("[eE]"), optional(regexp(r"[-\+]")),
-                                 seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]")))))))),
+                seq(digits(DEC_DIGIT), seq(regexp("[eE]"), optional(SIGN), digits(DEC_DIGIT))),
+                seq(digits(DEC_DIGIT), ".", optional(digits(DEC_DIGIT)),
+                    optional(seq(regexp("[eE]"), optional(SIGN), digits(DEC_DIGIT)))),
+                seq(".", digits(DEC_DIGIT),
+                    optional(seq(regexp("[eE]"), optional(SIGN), digits(DEC_DIGIT)))),
                 seq(choice("0x", "0X"),
-                    choice(
-                        seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]"))))),
-                        seq(seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]"))))),
-                            ".",
-                            optional(seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]"))))))),
-                        seq(".",
-                            seq(repeat1(regexp("[0-9a-fA-F]")), repeat(seq("'", repeat1(regexp("[0-9a-fA-F]")))))),
-                    ),
-                    seq(regexp("[pP]"), optional(regexp(r"[-\+]")),
-                        seq(repeat1(regexp("[0-9]")), repeat(seq("'", repeat1(regexp("[0-9]"))))))),
+                    choice(digits(HEX_DIGIT),
+                           seq(digits(HEX_DIGIT), ".", optional(digits(HEX_DIGIT))),
+                           seq(".", digits(HEX_DIGIT))),
+                    seq(regexp("[pP]"), optional(SIGN), digits(DEC_DIGIT))),
             ), optional(regexp(r"([fF](16|32|64|128)?)|[lL]|(bf16|BF16)"))),
         ),
     ))
 }
 
-// C++ replaces parameter_list
 override rule parameter_list {
     seq("(", comma_sep(choice(
         parameter_declaration,
@@ -490,22 +420,13 @@ override rule parameter_list {
     )), ")")
 }
 
-// C++ replaces assignment_expression
 override rule assignment_expression {
     prec.right(PREC.ASSIGNMENT, seq(
         field(left, _assignment_left_expression),
-        field(operator, choice(
-            "=", "*=", "/=", "%=", "+=", "-=",
-            "<<=", ">>=", "&=", "^=", "|=",
-            "and_eq", "or_eq", "xor_eq",
-        )),
+        field(operator, choice(for (op: str) in ASSIGNMENT_OPERATORS { op })),
         field(right, choice(expression, initializer_list)),
     ))
 }
-
-// ---------------------------------------------------------------------------
-// New rules (not in C)
-// ---------------------------------------------------------------------------
 
 rule annotation { seq("=", expression) }
 
@@ -1054,30 +975,10 @@ rule lambda_capture_initializer {
 
 rule _lambda_capture { choice(seq(optional("*"), this), _lambda_capture_identifier, lambda_capture_initializer) }
 
-rule _fold_operator {
-    choice(
-        for (op: str) in [
-            "+", "-", "*", "/", "%", "^", "&", "|",
-            "=", "<", ">", "<<", ">>",
-            "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
-            ">>=", "<<=", "==", "!=", "<=", ">=",
-            "&&", "||", ",", ".*", "->*",
-            "or", "and", "bitor", "xor", "bitand", "not_eq",
-        ] { op }
-    )
-}
+rule _fold_operator { choice(for (op: str) in FOLD_OPERATORS { op }) }
 
 rule _binary_fold_operator {
-    choice(
-        for (op: str) in [
-            "+", "-", "*", "/", "%", "^", "&", "|",
-            "=", "<", ">", "<<", ">>",
-            "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
-            ">>=", "<<=", "==", "!=", "<=", ">=",
-            "&&", "||", ",", ".*", "->*",
-            "or", "and", "bitor", "xor", "bitand", "not_eq",
-        ] { seq(field(operator, op), "...", op) }
-    )
+    choice(for (op: str) in FOLD_OPERATORS { seq(field(operator, op), "...", op) })
 }
 
 rule _unary_left_fold { seq(field(left, "..."), field(operator, _fold_operator), field(right, expression)) }
@@ -1146,11 +1047,7 @@ rule qualified_operator_cast_identifier {
 
 rule _assignment_expression_lhs {
     seq(field(left, expression),
-        field(operator, choice(
-            "=", "*=", "/=", "%=", "+=", "-=",
-            "<<=", ">>=", "&=", "^=", "|=",
-            "and_eq", "or_eq", "xor_eq",
-        )),
+        field(operator, choice(for (op: str) in ASSIGNMENT_OPERATORS { op })),
         field(right, choice(expression, initializer_list)))
 }
 
