@@ -8,20 +8,25 @@ use super::{
     ast, parse_native_dsl, parse_native_dsl_to_json,
 };
 
-fn dsl(input: &str) -> InputGrammar {
-    parse_native_dsl(input, Path::new("./grammar.tsg")).unwrap()
-}
-
-fn dsl_err(input: &str) -> DslError {
-    parse_native_dsl(input, Path::new("./grammar.tsg")).unwrap_err()
-}
-
-fn dsl_inherit_err(input: &str) -> DslError {
-    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap_err()
+macro_rules! assert_err {
+    ($err:expr, $variant:ident) => {
+        match $err {
+            DslError::$variant(e) => e,
+            other => panic!("expected {} error, got {other:?}", stringify!($variant)),
+        }
+    };
 }
 
 fn test_grammars_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/test_grammars")
+}
+
+fn dsl(input: &str) -> InputGrammar {
+    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap()
+}
+
+fn dsl_err(input: &str) -> DslError {
+    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap_err()
 }
 
 fn native_grammar_path(name: &str) -> std::path::PathBuf {
@@ -46,8 +51,58 @@ fn find_rule<'a>(g: &'a InputGrammar, name: &str) -> &'a Rule {
         .rule
 }
 
-fn dsl_inherit(input: &str) -> InputGrammar {
-    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap()
+fn assert_grammar_eq(native: &InputGrammar, js: &InputGrammar) {
+    assert_eq!(native.name, js.name, "name mismatch");
+    let native_rules: rustc_hash::FxHashMap<&str, &Rule> = native
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.rule))
+        .collect();
+    let js_rules: rustc_hash::FxHashMap<&str, &Rule> = js
+        .variables
+        .iter()
+        .map(|v| (v.name.as_str(), &v.rule))
+        .collect();
+    let mut mismatches = Vec::new();
+    for (name, js_rule) in &js_rules {
+        match native_rules.get(name) {
+            None => mismatches.push(format!("MISSING: {name}")),
+            Some(native_rule) if native_rule != js_rule => {
+                mismatches.push(format!("MISMATCH: {name}"));
+            }
+            _ => {}
+        }
+    }
+    for name in native_rules.keys() {
+        if !js_rules.contains_key(name) {
+            mismatches.push(format!("EXTRA: {name}"));
+        }
+    }
+    if native.extra_symbols != js.extra_symbols {
+        mismatches.push("CONFIG: extras".into());
+    }
+    if native.expected_conflicts != js.expected_conflicts {
+        mismatches.push("CONFIG: conflicts".into());
+    }
+    if native.external_tokens != js.external_tokens {
+        mismatches.push("CONFIG: externals".into());
+    }
+    if native.variables_to_inline != js.variables_to_inline {
+        mismatches.push("CONFIG: inline".into());
+    }
+    if native.supertype_symbols != js.supertype_symbols {
+        mismatches.push("CONFIG: supertypes".into());
+    }
+    if native.word_token != js.word_token {
+        mismatches.push("CONFIG: word".into());
+    }
+    if native.precedence_orderings != js.precedence_orderings {
+        mismatches.push("CONFIG: precedences".into());
+    }
+    if !mismatches.is_empty() {
+        mismatches.sort();
+        panic!("{} issues:\n{}", mismatches.len(), mismatches.join("\n"));
+    }
 }
 
 // ===== Node size =====
@@ -671,9 +726,7 @@ fn error_type_mismatch_fn_args() {
         rule program { needs_int("not_an_int") }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
@@ -691,9 +744,7 @@ fn error_for_binding_count_mismatch() {
         rule bad { choice(for (a: str, b: int) in [("x")] { a }) }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::ForBindingCountMismatch {
@@ -711,9 +762,7 @@ fn error_unknown_identifier() {
         rule program { nonexistent }
     "#,
     );
-    let DslError::Resolve(e) = err else {
-        panic!("expected Resolve error, got {err:?}")
-    };
+    let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
         ResolveErrorKind::UnknownIdentifier("nonexistent".into())
@@ -729,9 +778,7 @@ fn error_duplicate_rule() {
         rule program { "b" }
     "#,
     );
-    let DslError::Resolve(e) = err else {
-        panic!("expected Resolve error, got {err:?}")
-    };
+    let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
         ResolveErrorKind::DuplicateDeclaration("program".into())
@@ -747,9 +794,7 @@ fn error_forward_reference_let() {
         let MY_VAR: str = "x"
     "#,
     );
-    let DslError::Resolve(e) = err else {
-        panic!("expected Resolve error, got {err:?}")
-    };
+    let e = assert_err!(err, Resolve);
     assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("MY_VAR".into()));
 }
 
@@ -761,9 +806,7 @@ fn error_unknown_grammar_field() {
         rule program { "x" }
     "#,
     );
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert_eq!(e.kind, ParseErrorKind::UnknownGrammarField("bogus".into()));
 }
 
@@ -824,54 +867,7 @@ fn javascript_native_grammar_roundtrip() {
     .unwrap();
     let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
     let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
-
-    assert_eq!(native.name, js.name, "name mismatch");
-
-    let native_rules: rustc_hash::FxHashMap<&str, &Rule> = native
-        .variables
-        .iter()
-        .map(|v| (v.name.as_str(), &v.rule))
-        .collect();
-    let js_rules: rustc_hash::FxHashMap<&str, &Rule> = js
-        .variables
-        .iter()
-        .map(|v| (v.name.as_str(), &v.rule))
-        .collect();
-
-    for (name, js_rule) in &js_rules {
-        let native_rule = native_rules
-            .get(name)
-            .unwrap_or_else(|| panic!("missing rule '{name}' in native grammar"));
-        assert_eq!(native_rule, js_rule, "rule mismatch for '{name}'");
-    }
-    for name in native_rules.keys() {
-        assert!(
-            js_rules.contains_key(name),
-            "extra rule '{name}' in native grammar"
-        );
-    }
-    assert_eq!(native.extra_symbols, js.extra_symbols, "extras mismatch");
-    assert_eq!(
-        native.expected_conflicts, js.expected_conflicts,
-        "conflicts mismatch"
-    );
-    assert_eq!(
-        native.external_tokens, js.external_tokens,
-        "externals mismatch"
-    );
-    assert_eq!(
-        native.variables_to_inline, js.variables_to_inline,
-        "inline mismatch"
-    );
-    assert_eq!(
-        native.supertype_symbols, js.supertype_symbols,
-        "supertypes mismatch"
-    );
-    assert_eq!(native.word_token, js.word_token, "word mismatch");
-    assert_eq!(
-        native.precedence_orderings, js.precedence_orderings,
-        "precedences mismatch"
-    );
+    assert_grammar_eq(&native, &js);
 }
 
 // ===== C++ grammar roundtrip =====
@@ -885,74 +881,17 @@ fn cpp_native_grammar_roundtrip() {
             .unwrap();
     let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
     let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
-
-    assert_eq!(native.name, js.name, "name mismatch");
-
-    let native_rules: rustc_hash::FxHashMap<&str, &Rule> = native
-        .variables
-        .iter()
-        .map(|v| (v.name.as_str(), &v.rule))
-        .collect();
-    let js_rules: rustc_hash::FxHashMap<&str, &Rule> = js
-        .variables
-        .iter()
-        .map(|v| (v.name.as_str(), &v.rule))
-        .collect();
-
-    // Collect all mismatches before asserting so we see the full picture
-    let mut mismatches = Vec::new();
-    for (name, js_rule) in &js_rules {
-        match native_rules.get(name) {
-            None => mismatches.push(format!("MISSING: {name}")),
-            Some(native_rule) if native_rule != js_rule => {
-                mismatches.push(format!("MISMATCH: {name}"));
-            }
-            _ => {}
-        }
-    }
-    for name in native_rules.keys() {
-        if !js_rules.contains_key(name) {
-            mismatches.push(format!("EXTRA: {name}"));
-        }
-    }
-    if native.extra_symbols != js.extra_symbols {
-        mismatches.push("CONFIG: extras".into());
-    }
-    if native.expected_conflicts != js.expected_conflicts {
-        mismatches.push("CONFIG: conflicts".into());
-    }
-    if native.external_tokens != js.external_tokens {
-        mismatches.push("CONFIG: externals".into());
-    }
-    if native.variables_to_inline != js.variables_to_inline {
-        mismatches.push("CONFIG: inline".into());
-    }
-    if native.supertype_symbols != js.supertype_symbols {
-        mismatches.push("CONFIG: supertypes".into());
-    }
-    if native.word_token != js.word_token {
-        mismatches.push("CONFIG: word".into());
-    }
-    if native.precedence_orderings != js.precedence_orderings {
-        mismatches.push("CONFIG: precedences".into());
-    }
-
-    if !mismatches.is_empty() {
-        mismatches.sort();
-        panic!("{} issues:\n{}", mismatches.len(), mismatches.join("\n"));
-    }
+    assert_grammar_eq(&native, &js);
 }
 
 // ===== Inheritance =====
 
 #[test]
 fn inherit_all_rules() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-    "#,
-    );
+    "#);
     assert_eq!(g.name, "derived");
     assert_eq!(
         rule_names(&g),
@@ -968,12 +907,10 @@ fn inherit_all_rules() {
 
 #[test]
 fn inherit_config() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-    "#,
-    );
+    "#);
     assert_eq!(g.word_token.as_deref(), Some("identifier"));
     assert_eq!(g.variables_to_inline, vec!["_inline_rule"]);
     assert_eq!(g.extra_symbols.len(), 1);
@@ -981,8 +918,7 @@ fn inherit_config() {
 
 #[test]
 fn inherit_config_append_inline() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar {
             language: "derived",
@@ -990,15 +926,13 @@ fn inherit_config_append_inline() {
             inline: append(base.inline, [_extra_inline]),
         }
         rule _extra_inline { "extra" }
-    "#,
-    );
+    "#);
     assert_eq!(g.variables_to_inline, vec!["_inline_rule", "_extra_inline"]);
 }
 
 #[test]
 fn inherit_config_append_extras() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar {
             language: "derived",
@@ -1006,8 +940,7 @@ fn inherit_config_append_extras() {
             extras: append(base.extras, [comment]),
         }
         rule comment { regexp(r"//.*") }
-    "#,
-    );
+    "#);
     assert_eq!(g.extra_symbols.len(), 2);
 }
 
@@ -1027,24 +960,20 @@ fn config_expr_let_binding() {
 
 #[test]
 fn config_expr_word() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, word: base.word }
-    "#,
-    );
+    "#);
     assert_eq!(g.word_token.as_deref(), Some("identifier"));
 }
 
 #[test]
 fn override_rule_replaces_body() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule expression { choice(identifier, "42") }
-    "#,
-    );
+    "#);
     assert_eq!(
         *find_rule(&g, "expression"),
         Rule::choice(vec![
@@ -1060,26 +989,22 @@ fn override_rule_replaces_body() {
 
 #[test]
 fn override_preserves_rule_order() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule statement { "overridden" }
-    "#,
-    );
+    "#);
     assert_eq!(g.variables[1].name, "statement");
     assert_eq!(g.variables[1].rule, Rule::String("overridden".into()));
 }
 
 #[test]
 fn new_rules_appended() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         rule new_rule { "hello" }
-    "#,
-    );
+    "#);
     assert_eq!(g.variables.last().unwrap().name, "new_rule");
     assert_eq!(
         g.variables.last().unwrap().rule,
@@ -1090,14 +1015,12 @@ fn new_rules_appended() {
 
 #[test]
 fn override_and_new_combined() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule expression { choice(identifier, number) }
         rule number { regexp("[0-9]+") }
-    "#,
-    );
+    "#);
     assert_eq!(g.variables.len(), 6);
     assert_eq!(
         *find_rule(&g, "expression"),
@@ -1110,50 +1033,42 @@ fn override_and_new_combined() {
 
 #[test]
 fn config_override_replaces() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar {
             language: "derived",
             inherits: base,
             extras: [regexp(r"\s"), regexp(r"//.*")],
         }
-    "#,
-    );
+    "#);
     assert_eq!(g.extra_symbols.len(), 2);
 }
 
 #[test]
 fn config_word_inherited() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-    "#,
-    );
+    "#);
     assert_eq!(g.word_token.as_deref(), Some("identifier"));
 }
 
 #[test]
 fn config_word_overridden() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, word: expression }
-    "#,
-    );
+    "#);
     assert_eq!(g.word_token.as_deref(), Some("expression"));
 }
 
 #[test]
 fn rule_inline_expands_base_rule_body() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule expression { choice(base::expression, "extended") }
-    "#,
-    );
+    "#);
     // c::rule_name inlines the body of the base rule (which is `identifier`,
     // i.e. NamedSymbol("identifier"))
     assert_eq!(
@@ -1167,25 +1082,21 @@ fn rule_inline_expands_base_rule_body() {
 
 #[test]
 fn config_access_extras() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         let base_extras = base.extras
-    "#,
-    );
+    "#);
     assert_eq!(g.name, "derived");
 }
 
 #[test]
 fn inherit_from_json() {
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let base = inherit("../grammars/json/src/grammar.json")
         grammar { language: "json_extended", inherits: base }
         rule new_type { "null" }
-    "#,
-    );
+    "#);
     assert_eq!(g.name, "json_extended");
     assert!(g.variables.iter().any(|v| v.name == "document"));
     assert!(g.variables.iter().any(|v| v.name == "new_type"));
@@ -1220,24 +1131,20 @@ fn error_override_without_inherit() {
         override rule foo { "bar" }
     "#,
     );
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert_eq!(e.kind, LowerErrorKind::OverrideWithoutInherit);
 }
 
 #[test]
 fn error_override_rule_not_found() {
-    let err = dsl_inherit_err(
+    let err = dsl_err(
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule nonexistent { "oops" }
     "#,
     );
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert_eq!(
         e.kind,
         LowerErrorKind::OverrideRuleNotFound("nonexistent".into())
@@ -1287,15 +1194,13 @@ rule extra { "hello" }
 
 #[test]
 fn error_inherit_bad_path() {
-    let err = dsl_inherit_err(
+    let err = dsl_err(
         r#"
         let base = inherit("nonexistent/grammar.tsg")
         grammar { language: "derived", inherits: base }
     "#,
     );
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert!(
         matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("nonexistent"))
     );
@@ -1315,9 +1220,7 @@ fn error_inherit_bad_extension() {
         bad_file.display()
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert!(
         matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("unsupported file extension"))
     );
@@ -1356,9 +1259,7 @@ fn error_inherit_cycle() {
     let source = std::fs::read_to_string(&a_path).unwrap();
     let err = parse_native_dsl(&source, dir.path()).unwrap_err();
     // a inherits b, b inherits a -> cycle detected when a is loaded recursively from b
-    let DslError::Inherited(outer) = err else {
-        panic!("expected Inherited error, got {err:?}")
-    };
+    let outer = assert_err!(err, Inherited);
     let DslError::Inherited(inner) = outer.inner.as_ref() else {
         panic!("expected nested Inherited error, got {:?}", outer.inner)
     };
@@ -1386,9 +1287,7 @@ fn error_append_mismatched_types() {
         rule program { "x" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
@@ -1409,9 +1308,7 @@ fn error_append_non_list() {
         rule program { "x" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::AppendRequiresList(Ty::Str));
 }
 
@@ -1424,9 +1321,7 @@ fn error_missing_grammar_block() {
         rule program { "x" }
     "#,
     );
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert_eq!(e.kind, LowerErrorKind::MissingGrammarBlock);
 }
 
@@ -1438,9 +1333,7 @@ fn error_missing_language_field() {
         rule program { "x" }
     "#,
     );
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert_eq!(e.kind, LowerErrorKind::MissingLanguageField);
 }
 
@@ -1453,9 +1346,7 @@ fn error_let_type_annotation_mismatch() {
         rule program { "x" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
@@ -1474,9 +1365,7 @@ fn error_undefined_function() {
         rule identifier { "x" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::UndefinedFunction("nonexistent_fn".into())
@@ -1492,9 +1381,7 @@ fn error_wrong_arg_count() {
         rule program { one_arg("a", "b") }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::ArgCountMismatch {
@@ -1514,9 +1401,7 @@ fn error_rule_inline_on_non_grammar() {
         rule program { obj::x }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::ConfigAccessOnNonGrammar(Ty::Object(vec![("x".into(), Ty::Int)]))
@@ -1532,9 +1417,7 @@ fn error_field_access_on_non_object() {
         rule program { prec(x.foo, "a") }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::FieldAccessOnNonObject(Ty::Int));
 }
 
@@ -1547,9 +1430,7 @@ fn error_field_not_found() {
         rule program { prec(x.b, "a") }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::FieldNotFound {
@@ -1561,16 +1442,14 @@ fn error_field_not_found() {
 
 #[test]
 fn error_config_access_unknown_field() {
-    let err = dsl_inherit_err(
+    let err = dsl_err(
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         let x = base.bogus
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::UnknownConfigField("bogus".into()));
 }
 
@@ -1584,9 +1463,7 @@ fn error_duplicate_let() {
         rule program { "x" }
     "#,
     );
-    let DslError::Resolve(e) = err else {
-        panic!("expected Resolve error, got {err:?}")
-    };
+    let e = assert_err!(err, Resolve);
     assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("X".into()));
 }
 
@@ -1600,9 +1477,7 @@ fn error_duplicate_fn() {
         rule program { "x" }
     "#,
     );
-    let DslError::Resolve(e) = err else {
-        panic!("expected Resolve error, got {err:?}")
-    };
+    let e = assert_err!(err, Resolve);
     assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("f".into()));
 }
 
@@ -1615,9 +1490,7 @@ fn error_for_requires_list() {
         rule program { choice(for (v: int) in x { prec(v, "a") }) }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::ForRequiresList(Ty::Int));
 }
 
@@ -1629,9 +1502,7 @@ fn error_rule_body_not_rule_typed() {
         rule program { 42 }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
@@ -1650,9 +1521,7 @@ fn error_fn_return_type_mismatch() {
         rule program { "x" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
@@ -1671,9 +1540,7 @@ fn error_prec_value_not_int_or_str() {
         rule identifier { "id" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
@@ -1692,9 +1559,7 @@ fn error_list_inconsistent_types() {
         rule program { "x" }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
         TypeErrorKind::ListElementTypeMismatch {
@@ -1713,9 +1578,7 @@ fn error_multiple_grammar_blocks() {
         rule program { "x" }
     "#,
     );
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert_eq!(e.kind, ParseErrorKind::DuplicateGrammarBlock);
 }
 
@@ -1723,14 +1586,12 @@ fn error_multiple_grammar_blocks() {
 fn multiple_inherit_bindings_only_first_used() {
     // Only the first inherit() is used as the base grammar.
     // Additional inherit() calls create Grammar values but don't affect inheritance.
-    let g = dsl_inherit(
-        r#"
+    let g = dsl(r#"
         let a = inherit("inherit_base/grammar.tsg")
         let b = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: a }
         rule extra { "x" }
-    "#,
-    );
+    "#);
     assert_eq!(g.name, "derived");
     assert_eq!(g.variables.last().unwrap().name, "extra");
 }
@@ -1740,63 +1601,49 @@ fn multiple_inherit_bindings_only_first_used() {
 #[test]
 fn error_unterminated_string() {
     let err = dsl_err(r#"grammar { language: "test }rule program { "x" }"#);
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::UnterminatedString));
 }
 
 #[test]
 fn error_newline_in_string() {
     let err = dsl_err("grammar { language: \"test\n\" }");
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::NewlineInString));
 }
 
 #[test]
 fn error_invalid_escape() {
     let err = dsl_err(r#"grammar { language: "te\qst" } rule program { "x" }"#);
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::InvalidEscape('q')));
 }
 
 #[test]
 fn error_unterminated_escape() {
     let err = dsl_err(r#"grammar { language: "test\"#);
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::UnterminatedEscape));
 }
 
 #[test]
 fn error_unterminated_raw_string() {
     let err = dsl_err(r#"grammar { language: r#"test } rule program { "x" }"#);
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::UnterminatedRawString));
 }
 
 #[test]
 fn error_expected_raw_string_quote() {
     let err = dsl_err(r#"grammar { language: r## } rule program { "x" }"#);
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::ExpectedRawStringQuote));
 }
 
 #[test]
 fn error_integer_overflow() {
     let err = dsl_err(r#"grammar { language: "test" } rule program { prec(99999999999, "x") }"#);
-    let DslError::Lex(e) = err else {
-        panic!("expected Lex error, got {err:?}")
-    };
+    let e = assert_err!(err, Lex);
     assert!(matches!(e.kind, LexErrorKind::IntegerOverflow));
 }
 
@@ -1805,45 +1652,35 @@ fn error_integer_overflow() {
 #[test]
 fn error_expected_token() {
     let err = dsl_err(r#"grammar { language: "test" } rule program { seq("a" "b") }"#);
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert!(matches!(e.kind, ParseErrorKind::ExpectedToken { .. }));
 }
 
 #[test]
 fn error_expected_expression() {
     let err = dsl_err(r#"grammar { language: "test" } rule program { seq(,) }"#);
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert!(matches!(e.kind, ParseErrorKind::ExpectedExpression));
 }
 
 #[test]
 fn error_expected_item() {
     let err = dsl_err(r#"grammar { language: "test" } "stray_string""#);
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert!(matches!(e.kind, ParseErrorKind::ExpectedItem));
 }
 
 #[test]
 fn error_unknown_type() {
     let err = dsl_err(r#"grammar { language: "test" } let x: foo = "y" rule program { "x" }"#);
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert_eq!(e.kind, ParseErrorKind::UnknownType("foo".into()));
 }
 
 #[test]
 fn error_missing_return_type() {
     let err = dsl_err(r#"grammar { language: "test" } fn f(x: rule) { x } rule program { "x" }"#);
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert!(matches!(e.kind, ParseErrorKind::MissingReturnType));
 }
 
@@ -1856,9 +1693,7 @@ fn error_expected_function_name() {
         rule program { x.a("y") }
     "#,
     );
-    let DslError::Parse(e) = err else {
-        panic!("expected Parse error, got {err:?}")
-    };
+    let e = assert_err!(err, Parse);
     assert!(matches!(e.kind, ParseErrorKind::ExpectedFunctionName));
 }
 
@@ -1874,9 +1709,7 @@ fn error_for_bindings_not_tuple() {
         rule program { seq(for (a: rule, b: rule) in items { a }) }
     "#,
     );
-    let DslError::Type(e) = err else {
-        panic!("expected Type error, got {err:?}")
-    };
+    let e = assert_err!(err, Type);
     assert!(matches!(
         e.kind,
         TypeErrorKind::ForBindingsNotTuple { bindings: 2, .. }
@@ -1887,16 +1720,14 @@ fn error_for_bindings_not_tuple() {
 
 #[test]
 fn error_inherit_rule_not_found() {
-    let err = dsl_inherit_err(
+    let err = dsl_err(
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         rule extra { base::nonexistent_rule }
     "#,
     );
-    let DslError::Lower(e) = err else {
-        panic!("expected Lower error, got {err:?}")
-    };
+    let e = assert_err!(err, Lower);
     assert_eq!(
         e.kind,
         LowerErrorKind::InheritRuleNotFound("nonexistent_rule".into())

@@ -1,18 +1,13 @@
 //! Arena-based AST for the native grammar DSL.
 //!
-//! All AST nodes live in a single `Vec<Node>` with a parallel `Vec<Span>`
-//! for source locations. Nodes reference each other through [`NodeId`], a
-//! typed wrapper around `NonZeroU32` (index 0 is reserved for a sentinel).
-//!
-//! Compound configuration (grammar settings, function signatures, for-loop
-//! bindings) is stored in [`AstContext`], separate from the node arena, so
-//! that later passes can mutate nodes while borrowing context immutably.
+//! Nodes and spans live in parallel vectors indexed by [`NodeId`]. Compound
+//! config (grammar settings, fn/for configs) is in [`AstContext`], separate
+//! from nodes so later passes can mutate nodes while reading context.
 
 use std::{fmt, num::NonZeroU32, path::PathBuf};
 
 use serde::Serialize;
 
-/// Error returned when the AST exceeds capacity limits.
 #[derive(Debug)]
 pub struct CapacityError;
 
@@ -22,16 +17,10 @@ impl fmt::Display for CapacityError {
     }
 }
 
-/// Typed index into the AST node arena.
-///
-/// Wraps `NonZeroU32` so that `Option<NodeId>` is the same size as `NodeId`.
-/// Index 0 is occupied by the `Node::Unreachable` sentinel and is never
-/// handed out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(NonZeroU32);
 
 impl NodeId {
-    /// Returns the index as a `usize` for indexing into the arena vectors.
     #[inline]
     #[must_use]
     pub const fn index(self) -> usize {
@@ -39,7 +28,6 @@ impl NodeId {
     }
 }
 
-/// Typed index into `AstContext::fn_configs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FnId(u32);
 
@@ -51,7 +39,6 @@ impl FnId {
     }
 }
 
-/// Typed index into `AstContext::for_configs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ForId(u32);
 
@@ -63,8 +50,7 @@ impl ForId {
     }
 }
 
-/// A secondary annotation on an error, pointing to a related source location.
-/// Carries its own path and source text so it can reference any file.
+/// Secondary annotation on an error, pointing to a related source location.
 #[derive(Clone, Debug, Serialize)]
 pub struct Note {
     pub message: NoteMessage,
@@ -75,15 +61,14 @@ pub struct Note {
     pub source: String,
 }
 
-/// The kind of secondary note attached to an error.
 #[derive(Clone, Debug, Serialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
     InheritedFromHere,
 }
 
-impl std::fmt::Display for NoteMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for NoteMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FirstDefinedHere => write!(f, "first defined here"),
             Self::InheritedFromHere => write!(f, "inherited from here"),
@@ -112,7 +97,6 @@ impl Span {
         }
     }
 
-    /// Returns a span covering both `self` and `other`.
     #[must_use]
     pub fn merge(self, other: Self) -> Self {
         Self {
@@ -121,93 +105,64 @@ impl Span {
         }
     }
 
-    /// Resolve this span to a `&str` slice of the source.
-    ///
-    /// # Safety (internal)
-    /// Span boundaries are produced by the lexer at ASCII byte positions
-    /// (all token delimiters are ASCII), which are always valid UTF-8
-    /// boundaries.
+    /// Resolve to a `&str` slice. Span boundaries are at ASCII byte positions
+    /// (all token delimiters are ASCII), which are always valid UTF-8.
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
     }
 }
 
-/// The complete AST for a grammar source file.
-///
-/// Nodes and spans are stored in parallel vectors indexed by [`NodeId`].
-/// Mutable and immutable data are split: `nodes` and `spans` can be mutated
-/// by later passes (e.g. resolve) while `context` remains shared/immutable.
 pub struct Ast<'src> {
     pub nodes: Vec<Node>,
     pub root_items: Vec<NodeId>,
     pub context: AstContext<'src>,
 }
 
-/// Immutable context data that accompanies the AST nodes.
-///
-/// Separated from `nodes`/`spans` so that passes like resolve can borrow
-/// `&mut ast.nodes` while simultaneously reading `&ast.context`. Holds the
-/// source text, grammar configuration, and all function/for-loop configs.
+/// Immutable context data split from nodes so resolve can borrow `&mut nodes`
+/// while reading `&context`.
 pub struct AstContext<'src> {
     pub grammar_config: Option<GrammarConfig>,
     pub fn_configs: Vec<FnConfig>,
     pub for_configs: Vec<ForConfig>,
-    /// Flat storage for object field (key, value) pairs, indexed by `ChildRange`.
     pub object_fields: Vec<(Span, NodeId)>,
     pub spans: Vec<Span>,
-    /// Shared storage for variadic node children (Seq, Choice, List, etc.).
     pub children: Vec<NodeId>,
     source: &'src str,
 }
 
 impl AstContext<'_> {
-    /// Look up the span for a node.
     #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
         self.spans[id.index()]
     }
-
-    /// Look up a function config by its index (stored in `Node::Fn(id)`).
     #[must_use]
     pub fn get_fn(&self, id: FnId) -> &FnConfig {
         &self.fn_configs[id.index()]
     }
-
-    /// Look up a for-loop config by its index (stored in `Node::For(id)`).
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         &self.for_configs[id.index()]
     }
-
-    /// Look up object fields by range (stored in `Node::Object`).
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
         &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
     }
-
-    /// Resolve a `ChildRange` to a slice of child `NodeId`s.
     #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         &self.children[range.start as usize..range.start as usize + range.len as usize]
     }
-
-    /// Returns the full source text.
     #[must_use]
     pub const fn source(&self) -> &str {
         self.source
     }
-
-    /// Resolve a span to the corresponding `&str` slice of source.
     #[inline]
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         span.resolve(self.source)
     }
-
-    /// Look up the source text for a node by its ID.
     #[inline]
     #[must_use]
     pub fn node_text(&self, id: NodeId) -> &str {
@@ -216,15 +171,11 @@ impl AstContext<'_> {
 }
 
 impl<'src> Ast<'src> {
-    /// Create a new AST arena pre-allocated based on source length.
-    ///
-    /// Pushes a `Node::Unreachable` sentinel at index 0 so that all valid
-    /// `NodeId`s use `NonZeroU32`.
     #[must_use]
     pub fn new(source: &'src str) -> Self {
-        let estimated_nodes = source.len() / 30;
-        let mut nodes = Vec::with_capacity(estimated_nodes);
-        let mut spans = Vec::with_capacity(estimated_nodes);
+        let cap = source.len() / 30;
+        let mut nodes = Vec::with_capacity(cap);
+        let mut spans = Vec::with_capacity(cap);
         nodes.push(Node::Unreachable);
         spans.push(Span::new(0, 0));
         Self {
@@ -236,17 +187,12 @@ impl<'src> Ast<'src> {
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
                 spans,
-                children: Vec::with_capacity(estimated_nodes),
+                children: Vec::with_capacity(cap),
                 source,
             },
         }
     }
 
-    /// Append a node and its span to the arena, returning its [`NodeId`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the arena exceeds `u32::MAX` nodes.
     #[inline]
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
         let index = self.nodes.len() as u32;
@@ -261,43 +207,24 @@ impl<'src> Ast<'src> {
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id.index()]
     }
-
-    #[inline]
-    pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        &mut self.nodes[id.index()]
-    }
-
     #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
         self.context.spans[id.index()]
     }
 
-    /// Store a function config and return its [`FnId`] for `Node::Fn`.
     pub fn push_fn(&mut self, config: FnConfig) -> FnId {
         let id = FnId(self.context.fn_configs.len() as u32);
         self.context.fn_configs.push(config);
         id
     }
 
-    #[must_use]
-    pub fn get_fn(&self, id: FnId) -> &FnConfig {
-        self.context.get_fn(id)
-    }
-
-    /// Store a for-loop config and return its [`ForId`] for `Node::For`.
     pub fn push_for(&mut self, config: ForConfig) -> ForId {
         let id = ForId(self.context.for_configs.len() as u32);
         self.context.for_configs.push(config);
         id
     }
 
-    #[must_use]
-    pub fn get_for(&self, id: ForId) -> &ForConfig {
-        self.context.get_for(id)
-    }
-
-    /// Store object fields and return a `ChildRange` for `Node::Object`.
     pub fn push_object(
         &mut self,
         fields: Vec<(Span, NodeId)>,
@@ -308,31 +235,6 @@ impl<'src> Ast<'src> {
         Ok(ChildRange::new(start, len))
     }
 
-    #[must_use]
-    pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
-        self.context.get_object(range)
-    }
-
-    #[must_use]
-    pub const fn source(&self) -> &str {
-        self.context.source
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn text(&self, span: Span) -> &str {
-        self.context.text(span)
-    }
-
-    /// Look up the source text for a node by its ID.
-    #[inline]
-    #[must_use]
-    pub fn node_text(&self, id: NodeId) -> &str {
-        self.context.node_text(id)
-    }
-
-    /// Push a list of child `NodeId`s into the shared children vector,
-    /// returning a `ChildRange` referencing them.
     pub fn push_children(&mut self, items: &[NodeId]) -> Result<ChildRange, CapacityError> {
         let start = self.context.children.len() as u32;
         let len = u16::try_from(items.len()).map_err(|_| CapacityError)?;
@@ -340,14 +242,39 @@ impl<'src> Ast<'src> {
         Ok(ChildRange::new(start, len))
     }
 
-    /// Resolve a `ChildRange` to a slice of child `NodeId`s.
+    // Delegating accessors used by all pipeline stages
+    #[must_use]
+    pub fn get_fn(&self, id: FnId) -> &FnConfig {
+        self.context.get_fn(id)
+    }
+    #[must_use]
+    pub fn get_for(&self, id: ForId) -> &ForConfig {
+        self.context.get_for(id)
+    }
+    #[must_use]
+    pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
+        self.context.get_object(range)
+    }
+    #[must_use]
+    pub const fn source(&self) -> &str {
+        self.context.source
+    }
+    #[inline]
+    #[must_use]
+    pub fn text(&self, span: Span) -> &str {
+        self.context.text(span)
+    }
+    #[inline]
+    #[must_use]
+    pub fn node_text(&self, id: NodeId) -> &str {
+        self.context.node_text(id)
+    }
     #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         self.context.child_slice(range)
     }
 
-    /// Get the raw content of a string literal (between quotes, not unescaped).
     #[must_use]
     pub fn string_lit_content(&self, id: NodeId) -> &str {
         let span = self.span(id);
@@ -357,35 +284,10 @@ impl<'src> Ast<'src> {
                 .get_unchecked((span.start + 1) as usize..(span.end - 1) as usize)
         }
     }
-
-    /// Check if a string literal contains escape sequences.
-    #[must_use]
-    pub fn string_lit_has_escapes(&self, id: NodeId) -> bool {
-        self.string_lit_content(id).contains('\\')
-    }
-
-    /// Get the raw content of a raw string literal (between delimiters).
-    #[must_use]
-    pub fn raw_string_lit_content(&self, id: NodeId, hash_count: u8) -> &str {
-        let span = self.span(id);
-        let prefix_len = 2 + u32::from(hash_count);
-        let suffix_len = 1 + u32::from(hash_count);
-        unsafe {
-            self.context
-                .source
-                .get_unchecked((span.start + prefix_len) as usize..(span.end - suffix_len) as usize)
-        }
-    }
 }
 
-/// A list of child node references, used by variadic constructs like `Seq`
-/// and `Choice`.
 pub type NodeList = Vec<NodeId>;
 
-/// A compact reference to a range of children in `Ast::children`.
-///
-/// Replaces inline `Vec<NodeId>` in Node variants to keep the enum small.
-/// 6 bytes instead of 24.
 #[derive(Clone, Copy, Debug)]
 pub struct ChildRange {
     pub start: u32,
@@ -399,25 +301,13 @@ impl ChildRange {
     }
 }
 
-/// Every AST construct lives in this enum.
-///
-/// The enum is kept at 16 bytes (4 nodes per 64-byte cache line) by storing
-/// large payloads out-of-line in [`AstContext`] - function/for configs by
-/// index, variadic children via [`ChildRange`], and identifier spans via the
-/// parallel spans vector.
-///
-/// After the resolve pass, all `Ident` nodes are replaced with either
-/// `RuleRef` or `VarRef`.
 #[derive(Clone, Debug)]
 pub enum Node {
-    // ---- Items ----
-    /// Marker node - actual config stored in `Ast::grammar_config`.
     Grammar,
     Rule {
         name: NodeId,
         body: NodeId,
     },
-    /// Override rule definition - replaces a rule from the base grammar.
     OverrideRule {
         name: NodeId,
         body: NodeId,
@@ -428,28 +318,18 @@ pub enum Node {
         value: NodeId,
     },
     Fn(FnId),
-
-    // ---- Expressions ----
-    /// String literal. Node span covers `"..."` including quotes.
     StringLit,
-    /// Raw string literal. Node span covers `r"..."` or `r#"..."#` etc.
-    /// Content is taken verbatim (no escape processing).
     RawStringLit {
         hash_count: u8,
     },
     IntLit(i32),
-    /// Unresolved identifier - replaced by name resolution pass.
-    /// Span comes from the parallel spans vec.
     Ident,
-    /// Resolved: reference to a grammar rule.
     RuleRef,
-    /// Resolved: reference to a variable (let binding, fn param, for binding).
     VarRef,
     FieldAccess {
         obj: NodeId,
         field: NodeId,
     },
-    /// `c::expression` - inline the body of a rule from a base grammar.
     RuleInline {
         obj: NodeId,
         rule: NodeId,
@@ -495,12 +375,9 @@ pub enum Node {
         pattern: NodeId,
         flags: Option<NodeId>,
     },
-    /// `inherit("path/to/grammar")` - loads a base grammar for inheritance.
-    /// The `path` `NodeId` points to the string literal containing the path.
     Inherit {
         path: NodeId,
     },
-    /// `append(list1, list2)` - concatenates two lists.
     Append {
         left: NodeId,
         right: NodeId,
@@ -512,25 +389,17 @@ pub enum Node {
     },
     List(ChildRange),
     Tuple(ChildRange),
-    /// Range into `AstContext::object_fields`.
     Object(ChildRange),
     Neg(NodeId),
-
-    // ---- Types ----
     TypeRule,
     TypeStr,
     TypeInt,
     TypeList(NodeId),
     TypeTuple(ChildRange),
-
-    // Sentinel (occupies index 0)
     Unreachable,
 }
 
 impl Node {
-    /// Returns the child range for variadic nodes (`Seq`, `Choice`,
-    /// `List`, `Tuple`, `Concat`), or `None` for other variants.
-    /// Use `Ast::child_slice()` to resolve the range to a `&[NodeId]`.
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {
@@ -542,51 +411,32 @@ impl Node {
     }
 }
 
-/// Configuration from the `grammar { ... }` block at the top of a source file.
-///
-/// Fields that accept expressions (`extras`, `externals`, `inline`,
-/// `supertypes`, `word`) store `Option<NodeId>` - `None` means not specified
-/// (inherit from base if present). Complex structured fields (`conflicts`,
-/// `precedences`, `reserved`) use specialized representations.
 #[derive(Clone, Debug, Default)]
 pub struct GrammarConfig {
-    /// Language name - processed string (from string literal).
     pub language: Option<String>,
-    /// Base grammar to inherit from (the `inherits:` field).
     pub inherits: Option<NodeId>,
     pub extras: Option<NodeId>,
     pub externals: Option<NodeId>,
     pub inline: Option<NodeId>,
     pub supertypes: Option<NodeId>,
     pub word: Option<NodeId>,
-    /// Conflict groups - identifiers stored as spans.
     pub conflicts: Vec<Vec<Span>>,
     pub precedences: Vec<Vec<PrecEntry>>,
     pub reserved: Vec<ReservedWordSet>,
 }
 
-/// An entry in a precedence ordering: either a quoted string name or a bare
-/// rule identifier.
 #[derive(Clone, Debug)]
 pub enum PrecEntry {
-    /// Quoted string - processed value.
     Name(String),
-    /// Bare identifier - span into source.
     Symbol(Span),
 }
 
-/// A named set of reserved words (e.g. `reserved { default: [...] }`).
 #[derive(Clone, Debug)]
 pub struct ReservedWordSet {
-    /// Context name - span (identifier).
     pub name: Span,
     pub words: NodeList,
 }
 
-/// Configuration for a user-defined function (`fn name(params) -> ty { body }`).
-///
-/// Stored out-of-line in `AstContext::fn_configs` and referenced by index
-/// from `Node::Fn(idx)`.
 #[derive(Clone, Debug)]
 pub struct FnConfig {
     pub name: NodeId,
@@ -595,20 +445,14 @@ pub struct FnConfig {
     pub body: NodeId,
 }
 
-/// A function parameter: `name: type`.
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: NodeId,
     pub ty: NodeId,
 }
 
-/// Configuration for a `for` expression (`for (bindings) in iterable { body }`).
-///
-/// Stored out-of-line in `AstContext::for_configs` and referenced by index
-/// from `Node::For(idx)`.
 #[derive(Clone, Debug)]
 pub struct ForConfig {
-    /// (`binding_name` span, `type_node_id`)
     pub bindings: Vec<(Span, NodeId)>,
     pub iterable: NodeId,
     pub body: NodeId,
