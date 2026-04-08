@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, AstContext, FileId, FileSpan, Node, NodeId, Note, NoteMessage, Param, Span};
+use super::ast::{Ast, AstContext, Node, NodeId, Note, NoteMessage, Param, Span};
 
 /// Zero-allocation scope chain for local variable names.
 ///
@@ -93,9 +93,9 @@ pub fn resolve(
     ast: &mut Ast<'_>,
     base_rule_names: &[String],
     inherit_span: Option<Span>,
-    file: FileId,
+    grammar_path: &std::path::Path,
 ) -> Result<(), ResolveError> {
-    let mut names = collect_names(ast, file)?;
+    let mut names = collect_names(ast, grammar_path)?;
     // Register inherited rule names so they resolve to RuleRef.
     // Use the inherit statement's span so "first defined here" points there.
     let inherit_span = inherit_span.unwrap_or(Span::new(0, 0));
@@ -112,9 +112,9 @@ pub fn resolve(
         if let Node::Let { name, .. } = ast.node(item_id) {
             let name_text = ast.node_text(*name);
             let span = ast.span(item_id);
-            names.insert(name_text, Decl::Var, span, file)?;
+            names.insert(name_text, Decl::Var, span)?;
         }
-        resolve_item(ast, &names, item_id, file)?;
+        resolve_item(ast, &names, item_id)?;
     }
     Ok(())
 }
@@ -131,32 +131,29 @@ enum Decl {
 /// Map of top-level declaration names to their kinds and definition spans.
 struct Names {
     decls: FxHashMap<String, (Decl, Span)>,
+    grammar_path: std::path::PathBuf,
+    source: String,
 }
 
 impl Names {
-    fn new() -> Self {
+    fn new(grammar_path: std::path::PathBuf, source: String) -> Self {
         Self {
             decls: FxHashMap::default(),
+            grammar_path,
+            source,
         }
     }
 
-    fn insert(
-        &mut self,
-        name: &str,
-        kind: Decl,
-        span: Span,
-        file: FileId,
-    ) -> Result<(), ResolveError> {
+    fn insert(&mut self, name: &str, kind: Decl, span: Span) -> Result<(), ResolveError> {
         if let Some((_, first_span)) = self.decls.get(name) {
             return Err(ResolveError {
                 kind: ResolveErrorKind::DuplicateDeclaration(name.to_string()),
-                span: FileSpan { file, span },
+                span,
                 note: Some(Note {
                     message: NoteMessage::FirstDefinedHere,
-                    span: FileSpan {
-                        span: *first_span,
-                        file,
-                    },
+                    span: *first_span,
+                    path: self.grammar_path.clone(),
+                    source: self.source.clone(),
                 }),
             });
         }
@@ -173,8 +170,8 @@ impl Names {
 ///
 /// Rules, let-bindings, functions, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
-fn collect_names(ast: &Ast<'_>, file: FileId) -> Result<Names, ResolveError> {
-    let mut names = Names::new();
+fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names, ResolveError> {
+    let mut names = Names::new(grammar_path.to_path_buf(), ast.source().to_string());
 
     // Register rules and fns upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
@@ -183,11 +180,11 @@ fn collect_names(ast: &Ast<'_>, file: FileId) -> Result<Names, ResolveError> {
         let span = ast.span(item_id);
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
-                names.insert(ast.node_text(*name), Decl::Rule, span, file)?;
+                names.insert(ast.node_text(*name), Decl::Rule, span)?;
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                names.insert(ast.node_text(config.name), Decl::Fn, span, file)?;
+                names.insert(ast.node_text(config.name), Decl::Fn, span)?;
             }
             _ => {}
         }
@@ -200,7 +197,7 @@ fn collect_names(ast: &Ast<'_>, file: FileId) -> Result<Names, ResolveError> {
             if let Node::Ident = ast.node(ext_id) {
                 let name = ast.text(ast.span(ext_id));
                 if names.get(name).is_none() {
-                    names.insert(name, Decl::Rule, ast.span(ext_id), file)?;
+                    names.insert(name, Decl::Rule, ast.span(ext_id))?;
                 }
             }
         }
@@ -217,7 +214,6 @@ fn resolve_item(
     ast: &mut Ast<'_>,
     names: &Names,
     item_id: NodeId,
-    file: FileId,
 ) -> Result<(), ResolveError> {
     match ast.node(item_id) {
         Node::Grammar => {
@@ -226,17 +222,17 @@ fn resolve_item(
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
             let nodes = &mut ast.nodes;
             if let Some(inherits) = grammar_config.inherits {
-                resolve_expr(nodes, ctx, names, inherits, &Locals::EMPTY, file)?;
+                resolve_expr(nodes, ctx, names, inherits, &Locals::EMPTY)?;
             }
             for &id in &grammar_config.extras {
-                resolve_expr(nodes, ctx, names, id, &Locals::EMPTY, file)?;
+                resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
             }
             for &id in &grammar_config.externals {
-                resolve_expr(nodes, ctx, names, id, &Locals::EMPTY, file)?;
+                resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
             }
             for rws in &grammar_config.reserved {
                 for &id in &rws.words {
-                    resolve_expr(nodes, ctx, names, id, &Locals::EMPTY, file)?;
+                    resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
                 }
             }
             Ok(())
@@ -249,7 +245,6 @@ fn resolve_item(
                 names,
                 body,
                 &Locals::EMPTY,
-                file,
             )
         }
         Node::Let { value, .. } => {
@@ -260,7 +255,6 @@ fn resolve_item(
                 names,
                 value,
                 &Locals::EMPTY,
-                file,
             )
         }
         Node::Fn(fn_idx) => {
@@ -270,7 +264,7 @@ fn resolve_item(
                 scope: LocalScope::FnParams(&fn_config.params),
                 parent: None,
             };
-            resolve_expr(&mut ast.nodes, &ast.context, names, body, &locals, file)
+            resolve_expr(&mut ast.nodes, &ast.context, names, body, &locals)
         }
         _ => Ok(()),
     }
@@ -289,7 +283,6 @@ fn resolve_expr(
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
-    file: FileId,
 ) -> Result<(), ResolveError> {
     // Handle Ident mutation first
     if let Node::Ident = &nodes[id.index()] {
@@ -305,7 +298,7 @@ fn resolve_expr(
         } else {
             return Err(ResolveError {
                 kind: ResolveErrorKind::UnknownIdentifier(name.to_string()),
-                span: FileSpan { file, span },
+                span,
                 note: None,
             });
         }
@@ -315,11 +308,11 @@ fn resolve_expr(
     // Alias target gets special handling - Ident becomes RuleRef
     if let Node::Alias { content, target } = &nodes[id.index()] {
         let (content, target) = (*content, *target);
-        resolve_expr(nodes, ctx, names, content, locals, file)?;
+        resolve_expr(nodes, ctx, names, content, locals)?;
         if let Node::Ident = &nodes[target.index()] {
             nodes[target.index()] = Node::RuleRef;
         } else {
-            resolve_expr(nodes, ctx, names, target, locals, file)?;
+            resolve_expr(nodes, ctx, names, target, locals)?;
         }
         return Ok(());
     }
@@ -330,16 +323,16 @@ fn resolve_expr(
         let iterable = config.iterable;
         let body = config.body;
         let bindings = &config.bindings;
-        resolve_expr(nodes, ctx, names, iterable, locals, file)?;
+        resolve_expr(nodes, ctx, names, iterable, locals)?;
         let inner = Locals {
             scope: LocalScope::ForBindings(bindings),
             parent: Some(locals),
         };
-        return resolve_expr(nodes, ctx, names, body, &inner, file);
+        return resolve_expr(nodes, ctx, names, body, &inner);
     }
 
     // All remaining cases
-    resolve_children(nodes, ctx, names, id, locals, file)
+    resolve_children(nodes, ctx, names, id, locals)
 }
 
 /// Recursively resolve identifiers in the children of a node.
@@ -353,13 +346,12 @@ fn resolve_children(
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
-    file: FileId,
 ) -> Result<(), ResolveError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = nodes[id.index()].child_range() {
         let children = ctx.child_slice(range);
         for i in 0..children.len() {
-            resolve_expr(nodes, ctx, names, children[i], locals, file)?;
+            resolve_expr(nodes, ctx, names, children[i], locals)?;
         }
         return Ok(());
     }
@@ -368,14 +360,14 @@ fn resolve_children(
         Node::Call { args, .. } => {
             let args = ctx.child_slice(*args);
             for i in 0..args.len() {
-                resolve_expr(nodes, ctx, names, args[i], locals, file)?;
+                resolve_expr(nodes, ctx, names, args[i], locals)?;
             }
             Ok(())
         }
         &Node::Object(range) => {
             let fields = ctx.get_object(range);
             for i in 0..fields.len() {
-                resolve_expr(nodes, ctx, names, fields[i].1, locals, file)?;
+                resolve_expr(nodes, ctx, names, fields[i].1, locals)?;
             }
             Ok(())
         }
@@ -386,36 +378,36 @@ fn resolve_children(
         | Node::TokenImmediate(inner)
         | Node::Neg(inner) => {
             let inner = *inner;
-            resolve_expr(nodes, ctx, names, inner, locals, file)
+            resolve_expr(nodes, ctx, names, inner, locals)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
             let content = *content;
-            resolve_expr(nodes, ctx, names, content, locals, file)
+            resolve_expr(nodes, ctx, names, content, locals)
         }
         Node::Append { left, right } => {
             let (left, right) = (*left, *right);
-            resolve_expr(nodes, ctx, names, left, locals, file)?;
-            resolve_expr(nodes, ctx, names, right, locals, file)
+            resolve_expr(nodes, ctx, names, left, locals)?;
+            resolve_expr(nodes, ctx, names, right, locals)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content }
         | Node::PrecDynamic { value, content } => {
             let (value, content) = (*value, *content);
-            resolve_expr(nodes, ctx, names, value, locals, file)?;
-            resolve_expr(nodes, ctx, names, content, locals, file)
+            resolve_expr(nodes, ctx, names, value, locals)?;
+            resolve_expr(nodes, ctx, names, content, locals)
         }
         Node::DynRegex { pattern, flags } => {
             let (pattern, flags) = (*pattern, *flags);
-            resolve_expr(nodes, ctx, names, pattern, locals, file)?;
+            resolve_expr(nodes, ctx, names, pattern, locals)?;
             if let Some(flags) = flags {
-                resolve_expr(nodes, ctx, names, flags, locals, file)?;
+                resolve_expr(nodes, ctx, names, flags, locals)?;
             }
             Ok(())
         }
         Node::FieldAccess { obj, .. } | Node::RuleInline { obj, .. } => {
             let obj = *obj;
-            resolve_expr(nodes, ctx, names, obj, locals, file)
+            resolve_expr(nodes, ctx, names, obj, locals)
         }
         _ => Ok(()),
     }
@@ -425,7 +417,7 @@ fn resolve_children(
 #[derive(Debug, Serialize, Error)]
 pub struct ResolveError {
     pub kind: ResolveErrorKind,
-    pub span: FileSpan,
+    pub span: Span,
     pub note: Option<Note>,
 }
 
