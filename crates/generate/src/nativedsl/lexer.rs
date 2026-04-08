@@ -430,6 +430,7 @@ pub enum LexErrorKind {
     NewlineInString,
     ExpectedRawStringQuote,
     IntegerOverflow,
+    InputTooLarge,
 }
 
 impl std::fmt::Display for LexError {
@@ -456,6 +457,9 @@ impl std::fmt::Display for LexError {
                     i32::MIN,
                     i32::MAX,
                 )
+            }
+            LexErrorKind::InputTooLarge => {
+                write!(f, "input exceeds maximum size of {} bytes", u32::MAX)
             }
         }
     }
