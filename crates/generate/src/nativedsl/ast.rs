@@ -53,6 +53,27 @@ impl ForId {
     }
 }
 
+/// A secondary annotation on an error, pointing to a related source location.
+#[derive(Clone, Debug, Serialize)]
+pub struct Note {
+    pub message: NoteMessage,
+    pub span: Span,
+}
+
+/// The kind of secondary note attached to an error.
+#[derive(Clone, Debug, Serialize)]
+pub enum NoteMessage {
+    FirstDefinedHere,
+}
+
+impl std::fmt::Display for NoteMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FirstDefinedHere => write!(f, "first defined here"),
+        }
+    }
+}
+
 /// Byte offset range `[start, end)` in the source text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Span {
