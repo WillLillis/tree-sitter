@@ -450,21 +450,23 @@ impl<'src> Evaluator<'src> {
                 Self::alloc_rule_s(rules, ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) => {
+                let imported: Vec<RuleId> = members
+                    .iter()
+                    .map(|m| Self::import_rule(m, rules, rule_children, strings))
+                    .collect();
                 let start = rule_children.len() as u32;
-                for m in members {
-                    let mid = Self::import_rule(m, rules, rule_children, strings);
-                    rule_children.push(mid);
-                }
-                let len = (rule_children.len() as u32 - start) as u16;
+                rule_children.extend_from_slice(&imported);
+                let len = imported.len() as u16;
                 Self::alloc_rule_s(rules, ARule::Choice(start, len))
             }
             Rule::Seq(members) => {
+                let imported: Vec<RuleId> = members
+                    .iter()
+                    .map(|m| Self::import_rule(m, rules, rule_children, strings))
+                    .collect();
                 let start = rule_children.len() as u32;
-                for m in members {
-                    let mid = Self::import_rule(m, rules, rule_children, strings);
-                    rule_children.push(mid);
-                }
-                let len = (rule_children.len() as u32 - start) as u16;
+                rule_children.extend_from_slice(&imported);
+                let len = imported.len() as u16;
                 Self::alloc_rule_s(rules, ARule::Seq(start, len))
             }
             Rule::Repeat(inner) => {
@@ -556,7 +558,7 @@ pub fn lower_with_base(
         match ast.node(item_id) {
             Node::Grammar => {}
             Node::Let { name, value, .. } => {
-                let val = eval.eval_expr(*value);
+                let val = eval.eval_expr(*value)?;
                 eval.bind(ast.node_text(*name), val);
             }
             Node::Fn(fn_idx) => {
@@ -565,12 +567,12 @@ pub fn lower_with_base(
             }
             Node::Rule { name, body } => {
                 let rule_name = ast.node_text(*name).to_string();
-                let rule_id = eval.lower_to_rule(*body);
+                let rule_id = eval.lower_to_rule(*body)?;
                 rule_entries.push((rule_name, rule_id));
             }
             Node::OverrideRule { name, body } => {
                 let rule_name = ast.node_text(*name).to_string();
-                let rule_id = eval.lower_to_rule(*body);
+                let rule_id = eval.lower_to_rule(*body)?;
                 override_entries.push((rule_name, rule_id, ast.span(*name)));
             }
             _ => unreachable!(),
@@ -592,19 +594,19 @@ pub fn lower_with_base(
 
     let mut extra_symbols = Vec::with_capacity(config.extras.len());
     for &id in &config.extras {
-        let rid = eval.lower_to_rule(id);
+        let rid = eval.lower_to_rule(id)?;
         extra_symbols.push(eval.build_rule(rid));
     }
     let mut external_tokens = Vec::with_capacity(config.externals.len());
     for &id in &config.externals {
-        let rid = eval.lower_to_rule(id);
+        let rid = eval.lower_to_rule(id)?;
         external_tokens.push(eval.build_rule(rid));
     }
     let mut reserved_words = Vec::with_capacity(config.reserved.len());
     for rws in &config.reserved {
         let mut words = Vec::with_capacity(rws.words.len());
         for &id in &rws.words {
-            let rid = eval.lower_to_rule(id);
+            let rid = eval.lower_to_rule(id)?;
             words.push(eval.build_rule(rid));
         }
         reserved_words.push(ReservedWordContext {
@@ -668,7 +670,7 @@ pub fn lower_with_base(
     } else {
         let mut syms = Vec::with_capacity(config.extras.len());
         for &id in &config.extras {
-            let rid = eval.lower_to_rule(id);
+            let rid = eval.lower_to_rule(id)?;
             syms.push(eval.build_rule(rid));
         }
         syms
@@ -679,7 +681,7 @@ pub fn lower_with_base(
     } else {
         let mut toks = Vec::with_capacity(config.externals.len());
         for &id in &config.externals {
-            let rid = eval.lower_to_rule(id);
+            let rid = eval.lower_to_rule(id)?;
             toks.push(eval.build_rule(rid));
         }
         toks
@@ -744,7 +746,7 @@ pub fn lower_with_base(
         for rws in &config.reserved {
             let mut words = Vec::with_capacity(rws.words.len());
             for &id in &rws.words {
-                let rid = eval.lower_to_rule(id);
+                let rid = eval.lower_to_rule(id)?;
                 words.push(eval.build_rule(rid));
             }
             result.push(ReservedWordContext {
@@ -775,20 +777,20 @@ impl Evaluator<'_> {
     /// Literals become `Value::Int`/`Value::Str`, identifiers are looked up
     /// in the scope chain, combinators are delegated to `eval_combinator`,
     /// and function calls are expanded inline.
-    fn eval_expr(&mut self, id: NodeId) -> ValueId {
+    fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
         let ast = self.ast;
         let span = ast.span(id);
         match ast.node(id) {
-            Node::IntLit(n) => self.alloc_val(Value::Int(*n)),
+            Node::IntLit(n) => Ok(self.alloc_val(Value::Int(*n))),
             Node::StringLit => {
                 let content_span = Span::new(span.start + 1, span.end - 1);
                 let raw = ast.text(content_span);
                 if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
                     let sid = self.strings.intern_owned(unescape_string(raw));
-                    self.alloc_val(Value::Str(sid))
+                    Ok(self.alloc_val(Value::Str(sid)))
                 } else {
                     let sid = self.strings.intern_span(content_span);
-                    self.alloc_val(Value::Str(sid))
+                    Ok(self.alloc_val(Value::Str(sid)))
                 }
             }
             Node::RawStringLit { hash_count } => {
@@ -797,16 +799,15 @@ impl Evaluator<'_> {
                 let suffix_len = 1 + u32::from(hash_count); // " + hashes
                 let content_span = Span::new(span.start + prefix_len, span.end - suffix_len);
                 let sid = self.strings.intern_span(content_span);
-                self.alloc_val(Value::Str(sid))
+                Ok(self.alloc_val(Value::Str(sid)))
             }
             Node::Neg(inner) => {
                 let inner = *inner;
-                let vid = self.eval_expr(inner);
-                // Typecheck ensures this is an int
+                let vid = self.eval_expr(inner)?;
                 let Value::Int(n) = self.get_val(vid) else {
                     unreachable!();
                 };
-                self.alloc_val(Value::Int(-*n))
+                Ok(self.alloc_val(Value::Int(-*n)))
             }
             Node::Ident => {
                 unreachable!("resolve pass should have replaced all Ident nodes")
@@ -814,17 +815,17 @@ impl Evaluator<'_> {
             Node::RuleRef => {
                 let sid = self.strings.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                self.alloc_val(Value::Rule(rid))
+                Ok(self.alloc_val(Value::Rule(rid)))
             }
             Node::VarRef => {
                 let name = ast.text(span);
-                self.lookup(name).expect("resolve pass validated this")
+                Ok(self.lookup(name).unwrap())
             }
-            Node::Inherit { .. } => self.alloc_val(Value::Grammar),
+            Node::Inherit { .. } => Ok(self.alloc_val(Value::Grammar)),
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
-                let left_val = self.eval_expr(left);
-                let right_val = self.eval_expr(right);
+                let left_val = self.eval_expr(left)?;
+                let right_val = self.eval_expr(right)?;
                 let Value::List(left_items) = self.get_val(left_val) else {
                     unreachable!();
                 };
@@ -833,29 +834,45 @@ impl Evaluator<'_> {
                 };
                 let mut combined = left_items.clone();
                 combined.extend_from_slice(right_items);
-                self.alloc_val(Value::List(combined))
+                Ok(self.alloc_val(Value::List(combined)))
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
-                let obj_val = self.eval_expr(obj);
+                let obj_val = self.eval_expr(obj)?;
                 let field_name = ast.node_text(field);
                 match self.get_val(obj_val) {
-                    Value::Object(map) => *map.get(field_name).unwrap(),
-                    // c.rule_name -> NamedSymbol reference to the base rule
-                    Value::Grammar => {
-                        let sid = self.strings.intern_span(ast.span(field));
-                        let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                        self.alloc_val(Value::Rule(rid))
-                    }
+                    // TODO: This  likely needs to be a  runtime error as well
+                    Value::Object(map) => Ok(*map.get(field_name).unwrap()),
+                    // c.extras, c.inline, etc. - config field access
+                    Value::Grammar => Ok(self.import_config_field(field_name)),
                     _ => unreachable!(),
                 }
             }
-            Node::ConfigAccess { obj, field } => {
-                let (obj, field) = (*obj, *field);
-                let obj_val = self.eval_expr(obj);
-                let field_name = ast.node_text(field);
+            // c::rule_name - inline the body of a rule from the base grammar
+            Node::RuleInline { obj, rule } => {
+                let (obj, rule) = (*obj, *rule);
+                let obj_val = self.eval_expr(obj)?;
                 debug_assert!(matches!(self.get_val(obj_val), Value::Grammar));
-                self.import_config_field(field_name)
+                let rule_name = ast.node_text(rule);
+                let grammar = self.base_grammar.take().unwrap();
+                let var = grammar.variables.iter().find(|v| v.name == rule_name);
+                let result = match var {
+                    Some(var) => {
+                        let rid = Self::import_rule(
+                            &var.rule,
+                            &mut self.rules,
+                            &mut self.rule_children,
+                            &mut self.strings,
+                        );
+                        Ok(self.alloc_val(Value::Rule(rid)))
+                    }
+                    None => Err(LowerError {
+                        kind: LowerErrorKind::InheritRuleNotFound(rule_name.to_string()),
+                        span: ast.span(rule),
+                    }),
+                };
+                self.base_grammar = Some(grammar);
+                result
             }
             Node::Object(range) => {
                 let fields = ast.get_object(*range);
@@ -863,10 +880,10 @@ impl Evaluator<'_> {
                     FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
                 for i in 0..fields.len() {
                     let (key_span, value_id) = ast.get_object(*range)[i];
-                    let val = self.eval_expr(value_id);
+                    let val = self.eval_expr(value_id)?;
                     map.insert(ast.text(key_span), val);
                 }
-                self.alloc_val(Value::Object(map))
+                Ok(self.alloc_val(Value::Object(map)))
             }
             Node::List(range) | Node::Tuple(range) => {
                 let make = match ast.node(id) {
@@ -877,60 +894,60 @@ impl Evaluator<'_> {
                 let items = ast.child_slice(*range);
                 let mut vals = Vec::with_capacity(items.len());
                 for &item_id in items {
-                    vals.push(self.eval_expr(item_id));
+                    vals.push(self.eval_expr(item_id)?);
                 }
-                self.alloc_val(make(vals))
+                Ok(self.alloc_val(make(vals)))
             }
             Node::Concat(range) => {
                 let parts = ast.child_slice(*range);
                 let mut result = String::new();
                 for &part_id in parts {
-                    let vid = self.eval_expr(part_id);
+                    let vid = self.eval_expr(part_id)?;
                     let s = self.get_str_val(vid);
                     result.push_str(self.strings.resolve(s));
                 }
                 let sid = self.strings.intern_owned(result);
-                self.alloc_val(Value::Str(sid))
+                Ok(self.alloc_val(Value::Str(sid)))
             }
             Node::DynRegex { pattern, flags } => {
                 let (pattern, flags) = (*pattern, *flags);
-                let pattern_val = self.eval_expr(pattern);
+                let pattern_val = self.eval_expr(pattern)?;
                 let pattern_str = self.get_str_val(pattern_val);
                 let flags_str = match flags {
                     Some(flags_id) => {
-                        let flags_val = self.eval_expr(flags_id);
+                        let flags_val = self.eval_expr(flags_id)?;
                         Some(self.get_str_val(flags_val))
                     }
                     None => None,
                 };
                 let rid = self.alloc_rule(ARule::Pattern(pattern_str, flags_str));
-                self.alloc_val(Value::Rule(rid))
+                Ok(self.alloc_val(Value::Rule(rid)))
             }
             Node::Call { name, args } => {
                 let (name, args) = (*name, *args);
                 let arg_ids = ast.child_slice(args);
                 let mut arg_vals = Vec::with_capacity(arg_ids.len());
                 for &arg_id in arg_ids {
-                    arg_vals.push(self.eval_expr(arg_id));
+                    arg_vals.push(self.eval_expr(arg_id)?);
                 }
                 self.eval_fn_call_with_vals(ast.node_text(name), &arg_vals)
             }
             _ => {
-                let rule_id = self.eval_combinator(id);
-                self.alloc_val(Value::Rule(rule_id))
+                let rule_id = self.eval_combinator(id)?;
+                Ok(self.alloc_val(Value::Rule(rule_id)))
             }
         }
     }
 
     /// Convert an AST node directly to an arena rule, short-circuiting the
     /// value arena for common cases (RuleRef, StringLit, combinators).
-    fn lower_to_rule(&mut self, id: NodeId) -> RuleId {
+    fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
         match ast.node(id) {
             // Fast paths: skip the value arena entirely
             Node::RuleRef => {
                 let sid = self.strings.intern_span(ast.span(id));
-                self.alloc_rule(ARule::NamedSymbol(sid))
+                Ok(self.alloc_rule(ARule::NamedSymbol(sid)))
             }
             Node::StringLit => {
                 let span = ast.span(id);
@@ -938,10 +955,10 @@ impl Evaluator<'_> {
                 let raw = ast.text(content_span);
                 if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
                     let sid = self.strings.intern_owned(unescape_string(raw));
-                    self.alloc_rule(ARule::String(sid))
+                    Ok(self.alloc_rule(ARule::String(sid)))
                 } else {
                     let sid = self.strings.intern_span(content_span);
-                    self.alloc_rule(ARule::String(sid))
+                    Ok(self.alloc_rule(ARule::String(sid)))
                 }
             }
             Node::RawStringLit { hash_count } => {
@@ -951,7 +968,7 @@ impl Evaluator<'_> {
                 let suffix_len = 1 + u32::from(hash_count);
                 let content_span = Span::new(span.start + prefix_len, span.end - suffix_len);
                 let sid = self.strings.intern_span(content_span);
-                self.alloc_rule(ARule::String(sid))
+                Ok(self.alloc_rule(ARule::String(sid)))
             }
             // Combinators go directly to rules
             Node::Seq(_)
@@ -971,8 +988,8 @@ impl Evaluator<'_> {
             | Node::Reserved { .. } => self.eval_combinator(id),
             // Everything else goes through eval_expr
             _ => {
-                let vid = self.eval_expr(id);
-                self.value_to_rule(vid)
+                let vid = self.eval_expr(id)?;
+                Ok(self.value_to_rule(vid))
             }
         }
     }
@@ -1010,7 +1027,7 @@ impl Evaluator<'_> {
     /// Handles `seq`, `choice`, `repeat`, `repeat1`, `optional`, `blank`,
     /// `field`, `alias`, `token`, `prec` variants, and `reserved`. For
     /// `seq`/`choice`, inline `for` expressions are expanded in-place.
-    fn eval_combinator(&mut self, id: NodeId) -> RuleId {
+    fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
         let ast = self.ast;
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
@@ -1024,9 +1041,9 @@ impl Evaluator<'_> {
                             _ => unreachable!(),
                         };
                         let config = ast.get_for(for_idx);
-                        child_ids.extend(self.eval_for_to_rules(config));
+                        child_ids.extend(self.eval_for_to_rules(config)?);
                     } else {
-                        child_ids.push(self.lower_to_rule(member));
+                        child_ids.push(self.lower_to_rule(member)?);
                     }
                 }
                 let start = self.children_start();
@@ -1035,62 +1052,62 @@ impl Evaluator<'_> {
                 }
                 let (offset, len) = self.children_range(start);
                 if is_seq {
-                    self.alloc_rule(ARule::Seq(offset, len))
+                    Ok(self.alloc_rule(ARule::Seq(offset, len)))
                 } else {
-                    self.alloc_rule(ARule::Choice(offset, len))
+                    Ok(self.alloc_rule(ARule::Choice(offset, len)))
                 }
             }
             Node::Repeat(inner) => {
-                let inner = self.lower_to_rule(*inner);
+                let inner = self.lower_to_rule(*inner)?;
                 let rep = self.alloc_rule(ARule::Repeat(inner));
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.push_child(rep);
                 self.push_child(blank);
                 let (s, l) = self.children_range(start);
-                self.alloc_rule(ARule::Choice(s, l))
+                Ok(self.alloc_rule(ARule::Choice(s, l)))
             }
             Node::Repeat1(inner) => {
-                let inner = self.lower_to_rule(*inner);
-                self.alloc_rule(ARule::Repeat(inner))
+                let inner = self.lower_to_rule(*inner)?;
+                Ok(self.alloc_rule(ARule::Repeat(inner)))
             }
             Node::Optional(inner) => {
-                let inner = self.lower_to_rule(*inner);
+                let inner = self.lower_to_rule(*inner)?;
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.push_child(inner);
                 self.push_child(blank);
                 let (s, l) = self.children_range(start);
-                self.alloc_rule(ARule::Choice(s, l))
+                Ok(self.alloc_rule(ARule::Choice(s, l)))
             }
-            Node::Blank => self.alloc_rule(ARule::Blank),
+            Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             Node::Field { name, content } => {
                 let (name, content) = (*name, *content);
-                let inner = self.lower_to_rule(content);
+                let inner = self.lower_to_rule(content)?;
                 let sid = self.strings.intern_span(ast.span(name));
-                self.alloc_rule(ARule::Field(sid, inner))
+                Ok(self.alloc_rule(ARule::Field(sid, inner)))
             }
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
-                let inner = self.lower_to_rule(content);
+                let inner = self.lower_to_rule(content)?;
                 match ast.node(target) {
                     Node::RuleRef | Node::VarRef => {
                         let sid = self.strings.intern_span(ast.span(target));
-                        self.alloc_rule(ARule::Alias(sid, true, inner))
+                        Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
                     }
                     _ => {
-                        let vid = self.eval_expr(target);
+                        let vid = self.eval_expr(target)?;
                         match self.get_val(vid) {
                             Value::Str(str_handle) => {
                                 let str_handle = *str_handle;
-                                self.alloc_rule(ARule::Alias(str_handle, false, inner))
+                                Ok(self.alloc_rule(ARule::Alias(str_handle, false, inner)))
                             }
                             Value::Rule(rid) => {
                                 let str_handle = match &self.rules[rid.0 as usize] {
                                     ARule::NamedSymbol(str_handle) => *str_handle,
                                     _ => unreachable!(),
                                 };
-                                self.alloc_rule(ARule::Alias(str_handle, true, inner))
+                                Ok(self.alloc_rule(ARule::Alias(str_handle, true, inner)))
                             }
                             _ => unreachable!(),
                         }
@@ -1098,43 +1115,43 @@ impl Evaluator<'_> {
                 }
             }
             Node::Token(inner) => {
-                let inner = self.lower_to_rule(*inner);
-                self.alloc_rule(ARule::Token(inner))
+                let inner = self.lower_to_rule(*inner)?;
+                Ok(self.alloc_rule(ARule::Token(inner)))
             }
             Node::TokenImmediate(inner) => {
-                let inner = self.lower_to_rule(*inner);
-                self.alloc_rule(ARule::ImmediateToken(inner))
+                let inner = self.lower_to_rule(*inner)?;
+                Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
             }
             Node::Prec { value, content }
             | Node::PrecLeft { value, content }
             | Node::PrecRight { value, content } => {
                 let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value);
+                let vid = self.eval_expr(value)?;
                 let prec = self.value_to_prec(vid);
-                let inner = self.lower_to_rule(content);
+                let inner = self.lower_to_rule(content)?;
                 let make_rule: fn(APrec, RuleId) -> ARule = match ast.node(id) {
                     Node::Prec { .. } => ARule::Prec,
                     Node::PrecLeft { .. } => ARule::PrecLeft,
                     Node::PrecRight { .. } => ARule::PrecRight,
                     _ => unreachable!(),
                 };
-                self.alloc_rule(make_rule(prec, inner))
+                Ok(self.alloc_rule(make_rule(prec, inner)))
             }
             Node::PrecDynamic { value, content } => {
                 let (value, content) = (*value, *content);
-                let vid = self.eval_expr(value);
+                let vid = self.eval_expr(value)?;
                 let prec_value = match self.get_val(vid) {
                     Value::Int(n) => *n,
                     _ => unreachable!(),
                 };
-                let inner = self.lower_to_rule(content);
-                self.alloc_rule(ARule::PrecDynamic(prec_value, inner))
+                let inner = self.lower_to_rule(content)?;
+                Ok(self.alloc_rule(ARule::PrecDynamic(prec_value, inner)))
             }
             Node::Reserved { context, content } => {
                 let (context, content) = (*context, *content);
-                let inner = self.lower_to_rule(content);
+                let inner = self.lower_to_rule(content)?;
                 let sid = self.strings.intern_span(ast.span(context));
-                self.alloc_rule(ARule::Reserved(sid, inner))
+                Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
             _ => unreachable!(),
         }
@@ -1144,7 +1161,11 @@ impl Evaluator<'_> {
     ///
     /// Looks up the function by name, pushes a new scope with parameters
     /// bound to the argument values, evaluates the body, then pops the scope.
-    fn eval_fn_call_with_vals(&mut self, name: &str, arg_vals: &[ValueId]) -> ValueId {
+    fn eval_fn_call_with_vals(
+        &mut self,
+        name: &str,
+        arg_vals: &[ValueId],
+    ) -> Result<ValueId, LowerError> {
         // Resolve pass ensures all called functions are registered
         let &fn_id = self.fns.get(name).unwrap();
 
@@ -1168,12 +1189,12 @@ impl Evaluator<'_> {
     /// Evaluates the iterable, then for each element binds the loop
     /// variables and evaluates the body to a rule. Used by `seq`/`choice`
     /// to splice for-expression results inline.
-    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Vec<RuleId> {
+    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
         let iterable = config.iterable;
         let body = config.body;
         let n_bindings = config.bindings.len();
 
-        let iter_vid = self.eval_expr(iterable);
+        let iter_vid = self.eval_expr(iterable)?;
         // Typecheck ensures iterable is a list
         let n_items = match self.get_val(iter_vid) {
             Value::List(items) => items.len(),
@@ -1195,10 +1216,10 @@ impl Evaluator<'_> {
                 let (name_span, _) = config.bindings[j];
                 self.bind(self.ast.text(name_span), value_id);
             }
-            results.push(self.lower_to_rule(body));
+            results.push(self.lower_to_rule(body)?);
             self.pop_scope();
         }
-        results
+        Ok(results)
     }
 }
 
@@ -1396,7 +1417,7 @@ pub struct LowerError {
 }
 
 /// The specific kind of lowering error.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum LowerErrorKind {
     MissingGrammarBlock,
     MissingLanguageField,
@@ -1404,6 +1425,7 @@ pub enum LowerErrorKind {
     OverrideWithoutInherit,
     InheritLoadError(String),
     InheritCycle(String),
+    InheritRuleNotFound(String),
 }
 
 impl std::fmt::Display for LowerError {
@@ -1424,6 +1446,12 @@ impl std::fmt::Display for LowerError {
             }
             LowerErrorKind::InheritCycle(chain) => {
                 write!(f, "inheritance cycle detected: {chain}")
+            }
+            LowerErrorKind::InheritRuleNotFound(name) => {
+                write!(
+                    f,
+                    "rule '{name}' not found in base grammar (use '.' for config fields)"
+                )
             }
         }
     }

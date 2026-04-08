@@ -412,15 +412,26 @@ fn type_of<'src>(
                         },
                         span,
                     }),
-                // c.rule_name -> rule reference from the base grammar
-                Ty::Grammar => Ok(Ty::Rule),
+                // c.extras, c.inline, etc. - config field access on a grammar
+                Ty::Grammar => match field_name {
+                    "extras" | "externals" => Ok(Ty::List(Box::new(Ty::Rule))),
+                    "inline" | "supertypes" => Ok(Ty::List(Box::new(Ty::Rule))),
+                    "conflicts" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
+                    "precedences" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
+                    "word" => Ok(Ty::Rule),
+                    _ => Err(TypeError {
+                        kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
+                        span: ast.span(*field),
+                    }),
+                },
                 _ => Err(TypeError {
                     kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty.clone()),
                     span: ast.span(*obj),
                 }),
             }
         }
-        Node::ConfigAccess { obj, field } => {
+        // c::rule_name - inline the body of a rule from the base grammar
+        Node::RuleInline { obj, .. } => {
             let obj_ty = type_of(ast, *obj, env)?;
             if obj_ty != Ty::Grammar {
                 return Err(TypeError {
@@ -428,18 +439,7 @@ fn type_of<'src>(
                     span: ast.span(*obj),
                 });
             }
-            let field_name = ast.node_text(*field);
-            match field_name {
-                "extras" | "externals" => Ok(Ty::List(Box::new(Ty::Rule))),
-                "inline" | "supertypes" => Ok(Ty::List(Box::new(Ty::Rule))),
-                "conflicts" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
-                "precedences" => Ok(Ty::List(Box::new(Ty::List(Box::new(Ty::Rule))))),
-                "word" => Ok(Ty::Rule),
-                _ => Err(TypeError {
-                    kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                    span: ast.span(*field),
-                }),
-            }
+            Ok(Ty::Rule)
         }
         Node::Neg(inner) => {
             let ty = type_of(ast, *inner, env)?;
@@ -657,7 +657,7 @@ pub struct TypeError {
 }
 
 /// The specific kind of type error.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum TypeErrorKind {
     TypeMismatch {
         expected: Ty,
