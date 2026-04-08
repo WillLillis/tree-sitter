@@ -426,8 +426,8 @@ pub fn lower_with_base(
     base_grammar: Option<&InputGrammar>,
 ) -> Result<InputGrammar, LowerError> {
     let mut eval = Evaluator::new(ast, base_grammar);
-    let mut rule_entries: Vec<(String, RuleId)> = Vec::with_capacity(ast.root_items.len());
-    let mut override_entries: Vec<(String, RuleId, Span)> = Vec::new();
+    let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
+    let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
@@ -442,11 +442,11 @@ pub fn lower_with_base(
             }
             Node::Rule { name, body } => {
                 let rule_id = eval.lower_to_rule(*body)?;
-                rule_entries.push((ast.node_text(*name).to_string(), rule_id));
+                rule_entries.push((ast.node_text(*name), rule_id));
             }
             Node::OverrideRule { name, body } => {
                 let rule_id = eval.lower_to_rule(*body)?;
-                override_entries.push((ast.node_text(*name).to_string(), rule_id, ast.span(*name)));
+                override_entries.push((ast.node_text(*name), rule_id, ast.span(*name)));
             }
             _ => unreachable!(),
         }
@@ -465,7 +465,7 @@ pub fn lower_with_base(
     let variables = if let Some(base) = base_grammar {
         if !override_entries.is_empty() && base.variables.is_empty() {
             return Err(LowerError::new(
-                LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.clone()),
+                LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.to_string()),
                 override_entries[0].2,
             ));
         }
@@ -475,14 +475,14 @@ pub fn lower_with_base(
                 var.rule = eval.build_rule(*rid);
             } else {
                 return Err(LowerError::new(
-                    LowerErrorKind::OverrideRuleNotFound(name.clone()),
+                    LowerErrorKind::OverrideRuleNotFound(name.to_string()),
                     *span,
                 ));
             }
         }
         for (name, rid) in &rule_entries {
             vars.push(Variable {
-                name: name.clone(),
+                name: name.to_string(),
                 kind: VariableType::Named,
                 rule: eval.build_rule(*rid),
             });
@@ -498,7 +498,7 @@ pub fn lower_with_base(
         rule_entries
             .into_iter()
             .map(|(name, rid)| Variable {
-                name,
+                name: name.to_string(),
                 kind: VariableType::Named,
                 rule: eval.build_rule(rid),
             })
