@@ -250,7 +250,7 @@ impl<'src> Lexer<'src> {
             _ => {
                 return Err(LexError {
                     kind: LexErrorKind::UnexpectedChar(b as char),
-                    span: self.file_span(Span::from_usize(start, self.pos)),
+                    span: Span::from_usize(start, self.pos),
                 });
             }
         };
@@ -269,7 +269,7 @@ impl<'src> Lexer<'src> {
                 None => {
                     return Err(LexError {
                         kind: LexErrorKind::UnterminatedString,
-                        span: self.file_span(Span::from_usize(start, self.source.len())),
+                        span: Span::from_usize(start, self.source.len()),
                     });
                 }
                 Some(offset) => {
@@ -277,7 +277,7 @@ impl<'src> Lexer<'src> {
                     if let Some(nl) = memchr(b'\n', &self.source[self.pos..self.pos + offset]) {
                         return Err(LexError {
                             kind: LexErrorKind::NewlineInString,
-                            span: self.file_span(Span::from_usize(start, self.pos + nl)),
+                            span: Span::from_usize(start, self.pos + nl),
                         });
                     }
                     self.pos += offset;
@@ -292,8 +292,7 @@ impl<'src> Lexer<'src> {
                             if self.pos >= self.source.len() {
                                 return Err(LexError {
                                     kind: LexErrorKind::UnterminatedEscape,
-                                    span: self
-                                        .file_span(Span::from_usize(esc_pos, self.source.len())),
+                                    span: Span::from_usize(esc_pos, self.source.len()),
                                 });
                             }
                             match self.source[self.pos] {
@@ -301,8 +300,7 @@ impl<'src> Lexer<'src> {
                                 other => {
                                     return Err(LexError {
                                         kind: LexErrorKind::InvalidEscape(other as char),
-                                        span: self
-                                            .file_span(Span::from_usize(esc_pos, self.pos + 1)),
+                                        span: Span::from_usize(esc_pos, self.pos + 1),
                                     });
                                 }
                             }
@@ -326,7 +324,7 @@ impl<'src> Lexer<'src> {
         if self.peek() != Some(b'"') {
             return Err(LexError {
                 kind: LexErrorKind::ExpectedRawStringQuote,
-                span: self.file_span(Span::from_usize(start, self.pos)),
+                span: Span::from_usize(start, self.pos),
             });
         }
         self.advance(); // skip opening "
@@ -337,7 +335,7 @@ impl<'src> Lexer<'src> {
                 None => {
                     return Err(LexError {
                         kind: LexErrorKind::UnterminatedRawString,
-                        span: self.file_span(Span::from_usize(start, self.source.len())),
+                        span: Span::from_usize(start, self.source.len()),
                     });
                 }
                 Some(offset) => {
@@ -370,7 +368,7 @@ impl<'src> Lexer<'src> {
         let text = unsafe { std::str::from_utf8_unchecked(&self.source[int_start..self.pos]) };
         let value: i32 = text.parse().map_err(|_| LexError {
             kind: LexErrorKind::IntegerOverflow,
-            span: self.file_span(Span::from_usize(start, self.pos)),
+            span: Span::from_usize(start, self.pos),
         })?;
         Ok(TokenKind::IntLit(value))
     }
@@ -418,7 +416,7 @@ impl<'src> Lexer<'src> {
 #[derive(Debug, Serialize, Error)]
 pub struct LexError {
     pub kind: LexErrorKind,
-    pub span: FileSpan,
+    pub span: Span,
 }
 
 /// The specific kind of lexer error.
