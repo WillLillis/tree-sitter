@@ -621,10 +621,10 @@ impl<'src> Parser<'src> {
                 id = self.ast.push(Node::FieldAccess { obj: id, field }, span);
             } else if self.at(&TokenKind::ColonColon) {
                 self.pos += 1;
-                let field = self.expect_ident_node()?;
-                let field_span = self.ast.span(field);
-                let span = start.merge(field_span);
-                id = self.ast.push(Node::ConfigAccess { obj: id, field }, span);
+                let rule = self.expect_ident_node()?;
+                let rule_span = self.ast.span(rule);
+                let span = start.merge(rule_span);
+                id = self.ast.push(Node::RuleInline { obj: id, rule }, span);
             } else if self.at(&TokenKind::LParen) {
                 if !matches!(self.ast.node(id), Node::Ident) {
                     return Err(self.error(ParseErrorKind::OnlySimpleNamesCallable));
@@ -720,7 +720,7 @@ pub struct ParseError {
 }
 
 /// The specific kind of parse error.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum ParseErrorKind {
     ExpectedToken { expected: TokenKind, got: TokenKind },
     ExpectedIdent,
