@@ -98,7 +98,7 @@ pub fn resolve(
         if let Node::Let { name, .. } = ast.node(item_id) {
             let name_text = ast.node_text(*name);
             let span = ast.span(item_id);
-            names.insert(name_text, Decl::Var, span)?;
+            names.insert(name_text, Decl::Var, span, grammar_path, ast.source())?;
         }
         resolve_item(ast, &names, item_id)?;
     }
@@ -112,22 +112,19 @@ enum Decl {
     Fn,
 }
 
-struct Names<'a> {
+struct Names {
     decls: FxHashMap<String, (Decl, Span)>,
-    grammar_path: &'a std::path::Path,
-    source: &'a str,
 }
 
-impl<'a> Names<'a> {
-    fn new(grammar_path: &'a std::path::Path, source: &'a str) -> Self {
-        Self {
-            decls: FxHashMap::default(),
-            grammar_path,
-            source,
-        }
-    }
-
-    fn insert(&mut self, name: &str, kind: Decl, span: Span) -> Result<(), ResolveError> {
+impl Names {
+    fn insert(
+        &mut self,
+        name: &str,
+        kind: Decl,
+        span: Span,
+        grammar_path: &std::path::Path,
+        source: &str,
+    ) -> Result<(), ResolveError> {
         if let Some((_, first_span)) = self.decls.get(name) {
             return Err(ResolveError {
                 kind: ResolveErrorKind::DuplicateDeclaration(name.to_string()),
@@ -135,8 +132,8 @@ impl<'a> Names<'a> {
                 note: Some(Note {
                     message: NoteMessage::FirstDefinedHere,
                     span: *first_span,
-                    path: self.grammar_path.to_path_buf(),
-                    source: self.source.to_string(),
+                    path: grammar_path.to_path_buf(),
+                    source: source.to_string(),
                 }),
             });
         }
@@ -153,8 +150,11 @@ impl<'a> Names<'a> {
 ///
 /// Rules, let-bindings, functions, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
-fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names<'_>, ResolveError> {
-    let mut names = Names::new(grammar_path, ast.source());
+fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names, ResolveError> {
+    let mut names = Names {
+        decls: FxHashMap::default(),
+    };
+    let source = ast.source();
 
     // Register rules and fns upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
@@ -163,11 +163,17 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names<
         let span = ast.span(item_id);
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
-                names.insert(ast.node_text(*name), Decl::Rule, span)?;
+                names.insert(ast.node_text(*name), Decl::Rule, span, grammar_path, source)?;
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                names.insert(ast.node_text(config.name), Decl::Fn, span)?;
+                names.insert(
+                    ast.node_text(config.name),
+                    Decl::Fn,
+                    span,
+                    grammar_path,
+                    source,
+                )?;
             }
             _ => {}
         }
@@ -186,7 +192,13 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names<
                     if matches!(ast.node(child), Node::Ident) {
                         let name = ast.text(ast.span(child));
                         if names.get(name).is_none() {
-                            names.insert(name, Decl::Rule, ast.span(child))?;
+                            names.insert(
+                                name,
+                                Decl::Rule,
+                                ast.span(child),
+                                grammar_path,
+                                source,
+                            )?;
                         }
                     }
                 }
@@ -197,7 +209,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names<
         {
             let name = ast.text(ast.span(word_id));
             if names.get(name).is_none() {
-                names.insert(name, Decl::Rule, ast.span(word_id))?;
+                names.insert(name, Decl::Rule, ast.span(word_id), grammar_path, source)?;
             }
         }
     }
