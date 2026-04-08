@@ -531,26 +531,24 @@ impl Node {
 
 /// Configuration from the `grammar { ... }` block at the top of a source file.
 ///
-/// All identifier-like fields (extras, externals, word, conflicts, etc.) store
-/// [`Span`]s or [`NodeId`]s pointing back into the source/AST rather than owned
-/// strings, to avoid allocations during parsing.
+/// Fields that accept expressions (`extras`, `externals`, `inline`,
+/// `supertypes`, `word`) store `Option<NodeId>` - `None` means not specified
+/// (inherit from base if present). Complex structured fields (`conflicts`,
+/// `precedences`, `reserved`) use specialized representations.
 #[derive(Clone, Debug, Default)]
 pub struct GrammarConfig {
     /// Language name - processed string (from string literal).
     pub language: Option<String>,
     /// Base grammar to inherit from (the `inherits:` field).
     pub inherits: Option<NodeId>,
-    pub extras: NodeList,
-    pub externals: NodeList,
+    pub extras: Option<NodeId>,
+    pub externals: Option<NodeId>,
+    pub inline: Option<NodeId>,
+    pub supertypes: Option<NodeId>,
+    pub word: Option<NodeId>,
     /// Conflict groups - identifiers stored as spans.
     pub conflicts: Vec<Vec<Span>>,
     pub precedences: Vec<Vec<PrecEntry>>,
-    /// Inline rule names - spans.
-    pub inline: Vec<Span>,
-    /// Supertype rule names - spans.
-    pub supertypes: Vec<Span>,
-    /// Word token name - span.
-    pub word: Option<Span>,
     pub reserved: Vec<ReservedWordSet>,
 }
 

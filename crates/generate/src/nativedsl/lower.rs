@@ -171,11 +171,11 @@ struct Evaluator<'src> {
     // Unified string pool
     strings: StringPool<'src>,
     /// Pre-loaded base grammar from `inherit()`, if any.
-    base_grammar: Option<InputGrammar>,
+    base_grammar: Option<&'src InputGrammar>,
 }
 
 impl<'src> Evaluator<'src> {
-    fn new(ast: &'src Ast<'src>, base_grammar: Option<InputGrammar>) -> Self {
+    fn new(ast: &'src Ast<'src>, base_grammar: Option<&'src InputGrammar>) -> Self {
         Self {
             ast,
             values: Vec::new(),
@@ -313,6 +313,52 @@ impl<'src> Evaluator<'src> {
         match prec {
             APrec::Integer(n) => Precedence::Integer(n),
             APrec::Name(sid) => Precedence::Name(self.strings.to_string(sid)),
+        }
+    }
+
+    /// Evaluate a config expression to a list of output `Rule`s.
+    fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
+        let vid = self.eval_expr(id)?;
+        let Value::List(items) = self.get_val(vid) else {
+            unreachable!("type checker ensures config list fields are lists")
+        };
+        items
+            .iter()
+            .map(|&item_vid| match self.get_val(item_vid) {
+                Value::Rule(rid) => Ok(self.build_rule(*rid)),
+                Value::Str(sid) => Ok(Rule::String(self.strings.to_string(*sid))),
+                _ => unreachable!("config list elements should be rules or strings"),
+            })
+            .collect()
+    }
+
+    /// Evaluate a config expression to a list of rule name strings.
+    fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
+        let vid = self.eval_expr(id)?;
+        let Value::List(items) = self.get_val(vid) else {
+            unreachable!("type checker ensures config list fields are lists")
+        };
+        let items = items.clone();
+        items
+            .iter()
+            .map(|&item_vid| {
+                let Value::Rule(rid) = *self.get_val(item_vid) else {
+                    unreachable!("type checker ensures list elements are rules")
+                };
+                match &self.rules[rid.0 as usize] {
+                    ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
+                    _ => unreachable!("inline/supertypes should be named symbols"),
+                }
+            })
+            .collect()
+    }
+
+    /// Evaluate a config expression to a single rule name string.
+    fn eval_rule_name(&mut self, id: NodeId) -> Result<String, LowerError> {
+        let rid = self.lower_to_rule(id)?;
+        match &self.rules[rid.0 as usize] {
+            ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
+            _ => unreachable!("word should be a named symbol"),
         }
     }
 
@@ -550,7 +596,7 @@ pub fn lower_with_base(
     ast: &Ast<'_>,
     base_grammar: Option<InputGrammar>,
 ) -> Result<InputGrammar, LowerError> {
-    let mut eval = Evaluator::new(ast, base_grammar);
+    let mut eval = Evaluator::new(ast, base_grammar.as_ref());
     let mut rule_entries: Vec<(String, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(String, RuleId, Span)> = Vec::new();
 
@@ -592,32 +638,6 @@ pub fn lower_with_base(
         span: Span::new(0, 0),
     })?;
 
-    let mut extra_symbols = Vec::with_capacity(config.extras.len());
-    for &id in &config.extras {
-        let rid = eval.lower_to_rule(id)?;
-        extra_symbols.push(eval.build_rule(rid));
-    }
-    let mut external_tokens = Vec::with_capacity(config.externals.len());
-    for &id in &config.externals {
-        let rid = eval.lower_to_rule(id)?;
-        external_tokens.push(eval.build_rule(rid));
-    }
-    let mut reserved_words = Vec::with_capacity(config.reserved.len());
-    for rws in &config.reserved {
-        let mut words = Vec::with_capacity(rws.words.len());
-        for &id in &rws.words {
-            let rid = eval.lower_to_rule(id)?;
-            words.push(eval.build_rule(rid));
-        }
-        reserved_words.push(ReservedWordContext {
-            name: ast.text(rws.name).to_string(),
-            reserved_words: words,
-        });
-    }
-
-    // Look up the base grammar if `inherits:` is set
-    // Take base grammar out of eval to avoid borrow conflicts
-    let base_grammar = eval.base_grammar.take();
     let base = base_grammar.as_ref();
 
     // Build variables: merge base + overrides + new rules
@@ -664,27 +684,29 @@ pub fn lower_with_base(
             .collect()
     };
 
-    // Build config - use derived values if non-empty, else inherit from base
-    let extra_symbols = if config.extras.is_empty() {
-        base.map_or_else(Vec::new, |b| b.extra_symbols.clone())
-    } else {
-        let mut syms = Vec::with_capacity(config.extras.len());
-        for &id in &config.extras {
-            let rid = eval.lower_to_rule(id)?;
-            syms.push(eval.build_rule(rid));
-        }
-        syms
+    let extra_symbols = match config.extras {
+        Some(id) => eval.eval_rule_list(id)?,
+        None => base.map_or_else(Vec::new, |b| b.extra_symbols.clone()),
     };
 
-    let external_tokens = if config.externals.is_empty() {
-        base.map_or_else(Vec::new, |b| b.external_tokens.clone())
-    } else {
-        let mut toks = Vec::with_capacity(config.externals.len());
-        for &id in &config.externals {
-            let rid = eval.lower_to_rule(id)?;
-            toks.push(eval.build_rule(rid));
-        }
-        toks
+    let external_tokens = match config.externals {
+        Some(id) => eval.eval_rule_list(id)?,
+        None => base.map_or_else(Vec::new, |b| b.external_tokens.clone()),
+    };
+
+    let variables_to_inline = match config.inline {
+        Some(id) => eval.eval_name_list(id)?,
+        None => base.map_or_else(Vec::new, |b| b.variables_to_inline.clone()),
+    };
+
+    let supertype_symbols = match config.supertypes {
+        Some(id) => eval.eval_name_list(id)?,
+        None => base.map_or_else(Vec::new, |b| b.supertype_symbols.clone()),
+    };
+
+    let word_token = match config.word {
+        Some(id) => Some(eval.eval_rule_name(id)?),
+        None => base.and_then(|b| b.word_token.clone()),
     };
 
     let expected_conflicts = if config.conflicts.is_empty() {
@@ -713,31 +735,6 @@ pub fn lower_with_base(
             })
             .collect()
     };
-
-    let variables_to_inline = if config.inline.is_empty() {
-        base.map_or_else(Vec::new, |b| b.variables_to_inline.clone())
-    } else {
-        config
-            .inline
-            .iter()
-            .map(|s| ast.text(*s).to_string())
-            .collect()
-    };
-
-    let supertype_symbols = if config.supertypes.is_empty() {
-        base.map_or_else(Vec::new, |b| b.supertype_symbols.clone())
-    } else {
-        config
-            .supertypes
-            .iter()
-            .map(|s| ast.text(*s).to_string())
-            .collect()
-    };
-
-    let word_token = config
-        .word
-        .map(|s| ast.text(s).to_string())
-        .or_else(|| base.and_then(|b| b.word_token.clone()));
 
     let reserved_words = if config.reserved.is_empty() {
         base.map_or_else(Vec::new, |b| b.reserved_words.clone())
@@ -854,9 +851,8 @@ impl Evaluator<'_> {
                 let obj_val = self.eval_expr(obj)?;
                 debug_assert!(matches!(self.get_val(obj_val), Value::Grammar));
                 let rule_name = ast.node_text(rule);
-                let grammar = self.base_grammar.take().unwrap();
-                let var = grammar.variables.iter().find(|v| v.name == rule_name);
-                let result = match var {
+                let grammar = self.base_grammar.unwrap();
+                match grammar.variables.iter().find(|v| v.name == rule_name) {
                     Some(var) => {
                         let rid = Self::import_rule(
                             &var.rule,
@@ -864,15 +860,13 @@ impl Evaluator<'_> {
                             &mut self.rule_children,
                             &mut self.strings,
                         );
-                        Ok(self.alloc_val(Value::Rule(rid)))
+                        Ok(Self::alloc_val_s(&mut self.values, Value::Rule(rid)))
                     }
                     None => Err(LowerError {
                         kind: LowerErrorKind::InheritRuleNotFound(rule_name.to_string()),
                         span: ast.span(rule),
                     }),
-                };
-                self.base_grammar = Some(grammar);
-                result
+                }
             }
             Node::Object(range) => {
                 let fields = ast.get_object(*range);
