@@ -979,6 +979,63 @@ fn inherit_config() {
 }
 
 #[test]
+fn inherit_config_append_inline() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            inline: append(base.inline, [_extra_inline]),
+        }
+        rule _extra_inline { "extra" }
+    "#,
+    );
+    assert_eq!(g.variables_to_inline, vec!["_inline_rule", "_extra_inline"]);
+}
+
+#[test]
+fn inherit_config_append_extras() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            extras: append(base.extras, [comment]),
+        }
+        rule comment { regexp(r"//.*") }
+    "#,
+    );
+    assert_eq!(g.extra_symbols.len(), 2);
+}
+
+#[test]
+fn config_expr_let_binding() {
+    let g = dsl(r#"
+        let my_extras: list<rule> = [regexp(r"\s"), comment]
+        grammar {
+            language: "test",
+            extras: my_extras,
+        }
+        rule program { "x" }
+        rule comment { regexp(r"//.*") }
+    "#);
+    assert_eq!(g.extra_symbols.len(), 2);
+}
+
+#[test]
+fn config_expr_word() {
+    let g = dsl_inherit(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, word: base.word }
+    "#,
+    );
+    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+}
+
+#[test]
 fn override_rule_replaces_body() {
     let g = dsl_inherit(
         r#"
