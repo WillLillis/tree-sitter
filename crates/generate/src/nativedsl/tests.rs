@@ -4,8 +4,8 @@ use crate::grammars::{InputGrammar, VariableType};
 use crate::rules::{Precedence, Rule};
 
 use super::{
-    DslError, LowerErrorKind, ParseErrorKind, ResolveErrorKind, Ty, TypeErrorKind, ast,
-    parse_native_dsl, parse_native_dsl_to_json,
+    DslError, LexErrorKind, LowerErrorKind, ParseErrorKind, ResolveErrorKind, Ty, TypeErrorKind,
+    ast, parse_native_dsl, parse_native_dsl_to_json,
 };
 
 fn dsl(input: &str) -> InputGrammar {
@@ -1733,6 +1733,132 @@ fn multiple_inherit_bindings_only_first_used() {
     );
     assert_eq!(g.name, "derived");
     assert_eq!(g.variables.last().unwrap().name, "extra");
+}
+
+// ===== Lexer error tests =====
+
+#[test]
+fn error_unterminated_string() {
+    let err = dsl_err(r#"grammar { language: "test }rule program { "x" }"#);
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::UnterminatedString));
+}
+
+#[test]
+fn error_newline_in_string() {
+    let err = dsl_err("grammar { language: \"test\n\" }");
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::NewlineInString));
+}
+
+#[test]
+fn error_invalid_escape() {
+    let err = dsl_err(r#"grammar { language: "te\qst" } rule program { "x" }"#);
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::InvalidEscape('q')));
+}
+
+#[test]
+fn error_unterminated_escape() {
+    let err = dsl_err(r#"grammar { language: "test\"#);
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::UnterminatedEscape));
+}
+
+#[test]
+fn error_unterminated_raw_string() {
+    let err = dsl_err(r##"grammar { language: r#"test } rule program { "x" }"##);
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::UnterminatedRawString));
+}
+
+#[test]
+fn error_expected_raw_string_quote() {
+    let err = dsl_err(r#"grammar { language: r## } rule program { "x" }"#);
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::ExpectedRawStringQuote));
+}
+
+#[test]
+fn error_integer_overflow() {
+    let err = dsl_err(r#"grammar { language: "test" } rule program { prec(99999999999, "x") }"#);
+    let DslError::Lex(e) = err else { panic!("expected Lex error, got {err:?}") };
+    assert!(matches!(e.kind, LexErrorKind::IntegerOverflow));
+}
+
+// ===== Parser error tests =====
+
+#[test]
+fn error_expected_token() {
+    let err = dsl_err(r#"grammar { language: "test" } rule program { seq("a" "b") }"#);
+    let DslError::Parse(e) = err else { panic!("expected Parse error, got {err:?}") };
+    assert!(matches!(e.kind, ParseErrorKind::ExpectedToken { .. }));
+}
+
+#[test]
+fn error_expected_expression() {
+    let err = dsl_err(r#"grammar { language: "test" } rule program { seq(,) }"#);
+    let DslError::Parse(e) = err else { panic!("expected Parse error, got {err:?}") };
+    assert!(matches!(e.kind, ParseErrorKind::ExpectedExpression));
+}
+
+#[test]
+fn error_expected_item() {
+    let err = dsl_err(r#"grammar { language: "test" } "stray_string""#);
+    let DslError::Parse(e) = err else { panic!("expected Parse error, got {err:?}") };
+    assert!(matches!(e.kind, ParseErrorKind::ExpectedItem));
+}
+
+#[test]
+fn error_unknown_type() {
+    let err = dsl_err(r#"grammar { language: "test" } let x: foo = "y" rule program { "x" }"#);
+    let DslError::Parse(e) = err else { panic!("expected Parse error, got {err:?}") };
+    assert_eq!(e.kind, ParseErrorKind::UnknownType("foo".into()));
+}
+
+#[test]
+fn error_missing_return_type() {
+    let err = dsl_err(r#"grammar { language: "test" } fn f(x: rule) { x } rule program { "x" }"#);
+    let DslError::Parse(e) = err else { panic!("expected Parse error, got {err:?}") };
+    assert!(matches!(e.kind, ParseErrorKind::MissingReturnType));
+}
+
+#[test]
+fn error_expected_function_name() {
+    let err = dsl_err(r#"
+        grammar { language: "test" }
+        let x = { a: 1 }
+        rule program { x.a("y") }
+    "#);
+    let DslError::Parse(e) = err else { panic!("expected Parse error, got {err:?}") };
+    assert!(matches!(e.kind, ParseErrorKind::ExpectedFunctionName));
+}
+
+// ===== Typecheck error tests =====
+
+#[test]
+fn error_for_bindings_not_tuple() {
+    let err = dsl_err(r#"
+        grammar { language: "test" }
+        let items: list<rule> = [identifier]
+        rule identifier { regexp("[a-z]+") }
+        rule program { seq(for (a: rule, b: rule) in items { a }) }
+    "#);
+    let DslError::Type(e) = err else { panic!("expected Type error, got {err:?}") };
+    assert!(matches!(e.kind, TypeErrorKind::ForBindingsNotTuple { bindings: 2, .. }));
+}
+
+// ===== Lower error tests =====
+
+#[test]
+fn error_inherit_rule_not_found() {
+    let err = dsl_inherit_err(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        rule extra { base::nonexistent_rule }
+    "#);
+    let DslError::Lower(e) = err else { panic!("expected Lower error, got {err:?}") };
+    assert_eq!(e.kind, LowerErrorKind::InheritRuleNotFound("nonexistent_rule".into()));
 }
 
 // ===== Benchmarks =====

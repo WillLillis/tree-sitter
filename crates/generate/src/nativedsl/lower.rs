@@ -229,8 +229,11 @@ impl<'src> Evaluator<'src> {
     fn push_child(&mut self, id: RuleId) {
         self.rule_children.push(id);
     }
-    const fn children_range(&self, start: u32) -> (u32, u16) {
-        (start, (self.rule_children.len() as u32 - start) as u16)
+    fn children_range(&self, start: u32, span: Span) -> Result<(u32, u16), LowerError> {
+        let count = self.rule_children.len() as u32 - start;
+        let len = u16::try_from(count)
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+        Ok((start, len))
     }
 
     fn get_fn_config(&self, fn_id: NodeId) -> &'src FnConfig {
@@ -1034,7 +1037,7 @@ impl Evaluator<'_> {
                 for id in child_ids {
                     self.push_child(id);
                 }
-                let (offset, len) = self.children_range(start);
+                let (offset, len) = self.children_range(start, ast.span(id))?;
                 if is_seq {
                     Ok(self.alloc_rule(ARule::Seq(offset, len)))
                 } else {
@@ -1048,7 +1051,7 @@ impl Evaluator<'_> {
                 let start = self.children_start();
                 self.push_child(rep);
                 self.push_child(blank);
-                let (s, l) = self.children_range(start);
+                let (s, l) = self.children_range(start, ast.span(id)).unwrap();
                 Ok(self.alloc_rule(ARule::Choice(s, l)))
             }
             Node::Repeat1(inner) => {
@@ -1061,7 +1064,7 @@ impl Evaluator<'_> {
                 let start = self.children_start();
                 self.push_child(inner);
                 self.push_child(blank);
-                let (s, l) = self.children_range(start);
+                let (s, l) = self.children_range(start, ast.span(id)).unwrap();
                 Ok(self.alloc_rule(ARule::Choice(s, l)))
             }
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
@@ -1423,6 +1426,7 @@ pub enum LowerErrorKind {
     InheritLoadError(String),
     InheritCycle(Vec<std::path::PathBuf>),
     InheritRuleNotFound(String),
+    TooManyChildren,
 }
 
 impl std::fmt::Display for LowerError {
@@ -1456,6 +1460,9 @@ impl std::fmt::Display for LowerError {
                     f,
                     "rule '{name}' not found in base grammar (use '.' for config fields)"
                 )
+            }
+            LowerErrorKind::TooManyChildren => {
+                write!(f, "too many elements (maximum {})", u16::MAX)
             }
         }
     }
