@@ -200,7 +200,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
         for list_id in config_lists.into_iter().flatten() {
             if let Node::List(range) = ast.node(list_id) {
                 for &child in ast.child_slice(*range) {
-                    if let Node::Ident = ast.node(child) {
+                    if matches!(ast.node(child), Node::Ident) {
                         let name = ast.text(ast.span(child));
                         if names.get(name).is_none() {
                             names.insert(name, Decl::Rule, ast.span(child))?;
@@ -209,12 +209,12 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
                 }
             }
         }
-        if let Some(word_id) = config.word {
-            if let Node::Ident = ast.node(word_id) {
-                let name = ast.text(ast.span(word_id));
-                if names.get(name).is_none() {
-                    names.insert(name, Decl::Rule, ast.span(word_id))?;
-                }
+        if let Some(word_id) = config.word
+            && matches!(ast.node(word_id), Node::Ident)
+        {
+            let name = ast.text(ast.span(word_id));
+            if names.get(name).is_none() {
+                names.insert(name, Decl::Rule, ast.span(word_id))?;
             }
         }
     }
@@ -289,7 +289,7 @@ fn resolve_expr(
     locals: &Locals<'_>,
 ) -> Result<(), ResolveError> {
     // Handle Ident mutation first
-    if let Node::Ident = &nodes[id.index()] {
+    if matches!(nodes[id.index()], Node::Ident) {
         let span = ctx.span(id);
         let name = ctx.text(span);
         if locals.contains(ctx, name) {
@@ -313,7 +313,7 @@ fn resolve_expr(
     if let Node::Alias { content, target } = &nodes[id.index()] {
         let (content, target) = (*content, *target);
         resolve_expr(nodes, ctx, names, content, locals)?;
-        if let Node::Ident = &nodes[target.index()] {
+        if matches!(nodes[target.index()], Node::Ident) {
             nodes[target.index()] = Node::RuleRef;
         } else {
             resolve_expr(nodes, ctx, names, target, locals)?;
@@ -353,25 +353,22 @@ fn resolve_children(
 ) -> Result<(), ResolveError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = nodes[id.index()].child_range() {
-        let children = ctx.child_slice(range);
-        for i in 0..children.len() {
-            resolve_expr(nodes, ctx, names, children[i], locals)?;
+        for child in ctx.child_slice(range) {
+            resolve_expr(nodes, ctx, names, *child, locals)?;
         }
         return Ok(());
     }
 
     match &nodes[id.index()] {
         Node::Call { args, .. } => {
-            let args = ctx.child_slice(*args);
-            for i in 0..args.len() {
-                resolve_expr(nodes, ctx, names, args[i], locals)?;
+            for arg in ctx.child_slice(*args) {
+                resolve_expr(nodes, ctx, names, *arg, locals)?;
             }
             Ok(())
         }
         &Node::Object(range) => {
-            let fields = ctx.get_object(range);
-            for i in 0..fields.len() {
-                resolve_expr(nodes, ctx, names, fields[i].1, locals)?;
+            for field in ctx.get_object(range) {
+                resolve_expr(nodes, ctx, names, field.1, locals)?;
             }
             Ok(())
         }
@@ -426,7 +423,7 @@ pub struct ResolveError {
 }
 
 /// The specific kind of resolve error.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum ResolveErrorKind {
     DuplicateDeclaration(String),
     UnknownIdentifier(String),
