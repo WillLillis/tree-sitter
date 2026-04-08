@@ -134,10 +134,15 @@ impl SourceFile {
 }
 
 /// A secondary annotation on an error, pointing to a related source location.
+/// Carries its own path and source text so it can reference any file.
 #[derive(Clone, Debug, Serialize)]
 pub struct Note {
     pub message: NoteMessage,
-    pub span: FileSpan,
+    pub span: Span,
+    #[serde(skip)]
+    pub path: PathBuf,
+    #[serde(skip)]
+    pub source: String,
 }
 
 /// The kind of secondary note attached to an error.
