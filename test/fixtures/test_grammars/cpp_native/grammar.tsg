@@ -142,7 +142,7 @@ override rule type_qualifier {
     choice(c::type_qualifier, "mutable", "constinit", "consteval")
 }
 
-override rule type_descriptor { prec.right(0, c::type_descriptor) }
+override rule type_descriptor { prec_right(0, c::type_descriptor) }
 
 // attribute: prepend optional `using namespace:` before C's attribute body
 override rule attribute {
@@ -232,7 +232,7 @@ override rule _non_case_statement {
 }
 
 override rule _for_statement_body {
-    prec.dynamic(1, c::_for_statement_body)
+    prec_dynamic(1, c::_for_statement_body)
 }
 
 override rule return_statement {
@@ -249,7 +249,7 @@ override rule _expression_not_binary {
 }
 
 override rule call_expression {
-    prec.dynamic(1, choice(
+    prec_dynamic(1, choice(
         c::call_expression,
         seq(field(function, choice(
             primitive_type,
@@ -259,7 +259,7 @@ override rule call_expression {
 }
 
 override rule sizeof_expression {
-    prec.right(PREC.SIZEOF, choice(
+    prec_right(PREC.SIZEOF, choice(
         c::sizeof_expression,
         seq("sizeof", "...", "(", field(value, identifier), ")"),
     ))
@@ -268,7 +268,7 @@ override rule sizeof_expression {
 override rule unary_expression {
     choice(
         c::unary_expression,
-        prec.left(PREC.UNARY, seq(field(operator, choice("not", "compl")), field(argument, expression))),
+        prec_left(PREC.UNARY, seq(field(operator, choice("not", "compl")), field(argument, expression))),
     )
 }
 
@@ -281,7 +281,7 @@ override rule binary_expression {
             ("bitor", PREC.INCLUSIVE_OR), ("xor", PREC.EXCLUSIVE_OR),
             ("bitand", PREC.BITWISE_AND), ("not_eq", PREC.EQUAL),
         ] {
-            prec.left(p, seq(field(left, expression), field(operator, op), field(right, expression)))
+            prec_left(p, seq(field(left, expression), field(operator, op), field(right, expression)))
         }
     )
 }
@@ -322,7 +322,7 @@ override rule type_specifier {
         class_specifier, sized_type_specifier, primitive_type,
         template_type, dependent_type, splice_type_specifier,
         placeholder_type_specifier, decltype,
-        prec.right(0, choice(
+        prec_right(0, choice(
             alias(qualified_type_identifier, qualified_identifier),
             _type_identifier,
         )),
@@ -351,7 +351,7 @@ override rule while_statement {
 }
 
 override rule if_statement {
-    prec.right(0, seq("if", optional("constexpr"),
+    prec_right(0, seq("if", optional("constexpr"),
         field(condition, condition_clause),
         field(consequence, statement),
         optional(field(alternative, else_clause))))
@@ -368,7 +368,7 @@ override rule field_expression {
             field(operator, choice(".", ".*", "->")),
         )),
         field(field, choice(
-            prec.dynamic(1, _field_identifier),
+            prec_dynamic(1, _field_identifier),
             alias(qualified_field_identifier, qualified_identifier),
             destructor_name, template_method,
             alias(dependent_field_identifier, dependent_name),
@@ -421,7 +421,7 @@ override rule parameter_list {
 }
 
 override rule assignment_expression {
-    prec.right(PREC.ASSIGNMENT, seq(
+    prec_right(PREC.ASSIGNMENT, seq(
         field(left, _assignment_left_expression),
         field(operator, choice(for (op: str) in ASSIGNMENT_OPERATORS { op })),
         field(right, choice(expression, initializer_list)),
@@ -438,7 +438,7 @@ rule _class_declaration {
 }
 
 rule _class_declaration_item {
-    prec.right(0, seq(
+    prec_right(0, seq(
         choice(
             field(name, _class_name),
             seq(optional(field(name, _class_name)),
@@ -455,7 +455,7 @@ rule union_specifier { seq("union", _class_declaration) }
 rule struct_specifier { seq("struct", _class_declaration) }
 
 rule _class_name {
-    prec.right(0, choice(
+    prec_right(0, choice(
         _type_identifier, template_type, splice_type_specifier,
         alias(qualified_type_identifier, qualified_identifier),
     ))
@@ -482,7 +482,7 @@ rule base_class_clause {
 }
 
 rule enum_specifier {
-    prec.right(0, seq("enum", optional(choice("class", "struct")),
+    prec_right(0, seq("enum", optional(choice("class", "struct")),
         choice(
             seq(field(name, _class_name), optional(_enum_base_clause),
                 optional(field(body, enumerator_list))),
@@ -492,13 +492,13 @@ rule enum_specifier {
 }
 
 rule _enum_base_clause {
-    prec.left(0, seq(":", field(base, choice(
+    prec_left(0, seq(":", field(base, choice(
         alias(qualified_type_identifier, qualified_identifier),
         _type_identifier, primitive_type, sized_type_specifier,
     ))))
 }
 
-rule dependent_type { prec.dynamic(-1, prec.right(0, seq("typename", type_specifier))) }
+rule dependent_type { prec_dynamic(-1, prec_right(0, seq("typename", type_specifier))) }
 
 rule placeholder_type_specifier {
     prec(1, seq(
@@ -605,7 +605,7 @@ rule variadic_declarator { seq("...", optional(identifier)) }
 rule variadic_reference_declarator { seq(choice("&&", "&"), variadic_declarator) }
 
 rule operator_cast {
-    prec.right(1, seq("operator", _declaration_specifiers,
+    prec_right(1, seq("operator", _declaration_specifiers,
                       field(declarator, _abstract_declarator)))
 }
 
@@ -679,13 +679,13 @@ rule friend_declaration {
 
 rule access_specifier { choice("public", "private", "protected") }
 
-rule reference_declarator { prec.dynamic(1, prec.right(0, seq(choice("&", "&&"), _declarator))) }
-rule reference_field_declarator { prec.dynamic(1, prec.right(0, seq(choice("&", "&&"), _field_declarator))) }
-rule reference_type_declarator { prec.dynamic(1, prec.right(0, seq(choice("&", "&&"), _type_declarator))) }
-rule abstract_reference_declarator { prec.right(0, seq(choice("&", "&&"), optional(_abstract_declarator))) }
+rule reference_declarator { prec_dynamic(1, prec_right(0, seq(choice("&", "&&"), _declarator))) }
+rule reference_field_declarator { prec_dynamic(1, prec_right(0, seq(choice("&", "&&"), _field_declarator))) }
+rule reference_type_declarator { prec_dynamic(1, prec_right(0, seq(choice("&", "&&"), _type_declarator))) }
+rule abstract_reference_declarator { prec_right(0, seq(choice("&", "&&"), optional(_abstract_declarator))) }
 
 rule structured_binding_declarator {
-    prec.dynamic(PREC.STRUCTURED_BINDING, seq("[", comma_sep1(identifier), "]"))
+    prec_dynamic(PREC.STRUCTURED_BINDING, seq("[", comma_sep1(identifier), "]"))
 }
 
 rule ref_qualifier { choice("&", "&&") }
@@ -710,7 +710,7 @@ rule _function_attributes_start {
 rule _function_exception_specification { choice(noexcept, throw_specifier) }
 
 rule _function_attributes_end {
-    prec.right(0, seq(
+    prec_right(0, seq(
         optional(gnu_asm_expression),
         choice(
             seq(repeat1(attribute_specifier), repeat(attribute_declaration)),
@@ -719,15 +719,15 @@ rule _function_attributes_end {
 }
 
 rule _function_postfix {
-    prec.right(0, choice(repeat1(virtual_specifier), requires_clause))
+    prec_right(0, choice(repeat1(virtual_specifier), requires_clause))
 }
 
 rule function_declarator {
-    prec.dynamic(1, seq(field(declarator, _declarator), _function_declarator_seq))
+    prec_dynamic(1, seq(field(declarator, _declarator), _function_declarator_seq))
 }
 
 rule function_field_declarator {
-    prec.dynamic(1, seq(field(declarator, _field_declarator), _function_declarator_seq))
+    prec_dynamic(1, seq(field(declarator, _field_declarator), _function_declarator_seq))
 }
 
 rule abstract_function_declarator {
@@ -737,7 +737,7 @@ rule abstract_function_declarator {
 rule trailing_return_type { seq("->", type_descriptor) }
 
 rule noexcept {
-    prec.right(0, seq("noexcept", optional(seq("(", optional(expression), ")"))))
+    prec_right(0, seq("noexcept", optional(seq("(", optional(expression), ")"))))
 }
 
 rule throw_specifier { seq("throw", seq("(", comma_sep(type_descriptor), ")")) }
@@ -757,9 +757,9 @@ rule template_function {
 
 rule template_argument_list {
     seq("<", comma_sep(choice(
-        prec.dynamic(3, type_descriptor),
-        prec.dynamic(2, alias(type_parameter_pack_expansion, parameter_pack_expansion)),
-        prec.dynamic(1, expression),
+        prec_dynamic(3, type_descriptor),
+        prec_dynamic(2, alias(type_parameter_pack_expansion, parameter_pack_expansion)),
+        prec_dynamic(1, expression),
     )), alias(token(prec(1, ">")), ">"))
 }
 
@@ -864,11 +864,11 @@ rule subscript_argument_list {
 }
 
 rule co_await_expression {
-    prec.left(PREC.UNARY, seq(field(operator, "co_await"), field(argument, expression)))
+    prec_left(PREC.UNARY, seq(field(operator, "co_await"), field(argument, expression)))
 }
 
 rule new_expression {
-    prec.right(PREC.NEW, seq(
+    prec_right(PREC.NEW, seq(
         optional("::"), "new",
         field(placement, optional(argument_list)),
         field(type, type_specifier),
@@ -878,7 +878,7 @@ rule new_expression {
 }
 
 rule new_declarator {
-    prec.right(0, seq("[", field(length, expression), "]", optional(new_declarator)))
+    prec_right(0, seq("[", field(length, expression), "]", optional(new_declarator)))
 }
 
 rule delete_expression { seq(optional("::"), "delete", optional(seq("[", "]")), expression) }
@@ -893,14 +893,14 @@ rule _requirement { choice(alias(expression_statement, simple_requirement), type
 rule requirement_seq { seq("{", repeat(_requirement), "}") }
 
 rule constraint_conjunction {
-    prec.left(PREC.LOGICAL_AND, seq(
+    prec_left(PREC.LOGICAL_AND, seq(
         field(left, _requirement_clause_constraint),
         field(operator, choice("&&", "and")),
         field(right, _requirement_clause_constraint)))
 }
 
 rule constraint_disjunction {
-    prec.left(PREC.LOGICAL_OR, seq(
+    prec_left(PREC.LOGICAL_OR, seq(
         field(left, _requirement_clause_constraint),
         field(operator, choice("||", "or")),
         field(right, _requirement_clause_constraint)))
@@ -1013,7 +1013,7 @@ rule qualified_field_identifier {
             alias(dependent_field_identifier, dependent_name),
             alias(qualified_field_identifier, qualified_identifier),
             template_method,
-            prec.dynamic(2, _field_identifier),
+            prec_dynamic(2, _field_identifier),
         )))
 }
 
@@ -1022,7 +1022,7 @@ rule qualified_identifier {
         field(name, choice(
             alias(dependent_identifier, dependent_name),
             qualified_identifier, template_function,
-            prec.dynamic(1, seq(optional("template"), identifier)),
+            prec_dynamic(1, seq(optional("template"), identifier)),
             operator_name, destructor_name, pointer_type_declarator,
         )))
 }
@@ -1033,7 +1033,7 @@ rule qualified_type_identifier {
             alias(dependent_type_identifier, dependent_name),
             alias(qualified_type_identifier, qualified_identifier),
             template_type,
-            prec.dynamic(1, _type_identifier),
+            prec_dynamic(1, _type_identifier),
         )))
 }
 
@@ -1052,13 +1052,13 @@ rule _assignment_expression_lhs {
 }
 
 rule reflect_expression {
-    prec.right(0, seq("^^", choice("::", expression, type_descriptor)))
+    prec_right(0, seq("^^", choice("::", expression, type_descriptor)))
 }
 
 rule splice_specifier { seq("[:", expression, ":]") }
 rule _splice_specialization_specifier { seq(splice_specifier, template_argument_list) }
-rule splice_type_specifier { prec.right(0, choice(splice_specifier, _splice_specialization_specifier)) }
-rule splice_expression { prec.right(0, choice(splice_specifier, seq("template", _splice_specialization_specifier))) }
+rule splice_type_specifier { prec_right(0, choice(splice_specifier, _splice_specialization_specifier)) }
+rule splice_expression { prec_right(0, choice(splice_specifier, seq("template", _splice_specialization_specifier))) }
 
 rule expansion_statement {
     seq("template", "for", "(", _for_range_loop_body, ")", field(body, statement))
@@ -1091,7 +1091,7 @@ rule operator_name {
 rule this { "this" }
 
 rule concatenated_string {
-    prec.right(0, seq(
+    prec_right(0, seq(
         choice(identifier, string_literal, raw_string_literal),
         choice(string_literal, raw_string_literal),
         repeat(choice(identifier, string_literal, raw_string_literal)),
