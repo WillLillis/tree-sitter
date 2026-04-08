@@ -170,19 +170,6 @@ fn load_base_grammar(
 }
 
 /// Parse a native DSL source file and serialize to `grammar.json` format.
-///
-/// This is a convenience wrapper around [`parse_native_dsl`] followed by
-/// JSON serialization. The output is intended to be compatible with the
-/// existing `grammar.json` format consumed by the tree-sitter generator.
-///
-/// # Errors
-///
-/// Returns [`DslError`] if parsing fails.
-///
-/// # Panics
-///
-/// Panics if JSON serialization of the grammar fails (should not happen with
-/// valid grammar data).
 pub fn parse_native_dsl_to_json(input: &str, grammar_path: &Path) -> Result<String, DslError> {
     let grammar = parse_native_dsl(input, grammar_path)?;
     Ok(
@@ -191,10 +178,6 @@ pub fn parse_native_dsl_to_json(input: &str, grammar_path: &Path) -> Result<Stri
     )
 }
 
-/// Unified error type for all pipeline stages.
-///
-/// Each variant wraps the stage-specific error and can be converted from it
-/// via `From`/`?`. Use [`DslError::span`] to get the source location.
 #[derive(Debug, Error, Serialize)]
 pub enum DslError {
     #[error(transparent)]
@@ -211,27 +194,20 @@ pub enum DslError {
     Inherited(#[from] InheritedError),
 }
 
-/// An error from an inherited grammar, carrying the inherited file's context
-/// so that diagnostics can render with the correct file path and source.
 #[derive(Debug, Serialize, Error)]
 #[error("{inner}")]
 pub struct InheritedError {
-    /// The actual error from the inherited grammar.
     pub inner: Box<DslError>,
-    /// Source text of the inherited file.
     #[serde(skip)]
     pub source_text: String,
-    /// Path to the inherited file.
     #[serde(skip)]
     pub path: PathBuf,
-    /// Span of the `inherit("...")` call in the parent file.
     pub inherit_span: Span,
 }
 
 use ast::Note;
 
 impl DslError {
-    /// Returns the source span where the error occurred.
     #[must_use]
     pub const fn span(&self) -> Span {
         match self {
@@ -244,7 +220,6 @@ impl DslError {
         }
     }
 
-    /// Returns an optional secondary note with a related source location.
     #[must_use]
     pub fn note(&self) -> Option<&Note> {
         match self {
@@ -257,12 +232,7 @@ impl DslError {
     }
 }
 
-/// A DSL pipeline error bundled with the source text and file path needed
-/// for rich diagnostic rendering.
-///
-/// This is the error type produced by [`crate::LoadGrammarError::NativeDsl`].
-/// Its [`Display`](std::fmt::Display) impl renders a Rust-style diagnostic
-/// with source context, line numbers, and underline pointers.
+/// A [`DslError`] bundled with source text and file path for diagnostic rendering.
 #[derive(Debug, Error, Serialize)]
 #[error("{}", render_diagnostic(error, source_text, path))]
 pub struct NativeDslError {

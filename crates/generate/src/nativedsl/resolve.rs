@@ -35,39 +35,25 @@ use thiserror::Error;
 
 use super::ast::{Ast, AstContext, Node, NodeId, Note, NoteMessage, Param, Span};
 
-/// Zero-allocation scope chain for local variable names.
-///
-/// Each level borrows directly from `FnConfig.params` or
-/// `ForConfig.bindings` without copying. The `parent` pointer forms a linked
-/// list on the stack, so no heap allocation is needed for nested scopes.
+/// Zero-allocation scope chain (linked list on stack, borrows from configs).
 struct Locals<'a> {
     scope: LocalScope<'a>,
     #[expect(clippy::use_self, reason = "no Self with generics")]
     parent: Option<&'a Locals<'a>>,
 }
 
-/// The payload of a single scope level.
-///
-/// Using an enum avoids a `dyn` trait object or copying data into a uniform
-/// format. `FnParams` borrows the parameter list from `FnConfig`, while
-/// `ForBindings` borrows the binding list from `ForConfig`.
 enum LocalScope<'a> {
-    /// Sentinel for the root scope (no local variables).
     Empty,
-    /// Function parameters - borrows `&FnConfig.params`.
     FnParams(&'a [Param]),
-    /// For-loop bindings - borrows `&ForConfig.bindings`.
     ForBindings(&'a [(Span, NodeId)]),
 }
 
 impl Locals<'_> {
-    /// A static empty scope for use as the initial scope at top level.
     const EMPTY: Locals<'static> = Locals {
         scope: LocalScope::Empty,
         parent: None,
     };
 
-    /// Check whether `name` is bound in this scope or any parent.
     fn contains(&self, ctx: &AstContext<'_>, name: &str) -> bool {
         let found = match &self.scope {
             LocalScope::Empty => false,
@@ -119,8 +105,6 @@ pub fn resolve(
     Ok(())
 }
 
-/// The kind of a top-level declaration, used to decide whether an identifier
-/// resolves to `RuleRef` or `VarRef`.
 #[derive(Clone, Copy)]
 enum Decl {
     Rule,
@@ -128,15 +112,14 @@ enum Decl {
     Fn,
 }
 
-/// Map of top-level declaration names to their kinds and definition spans.
-struct Names {
+struct Names<'a> {
     decls: FxHashMap<String, (Decl, Span)>,
-    grammar_path: std::path::PathBuf,
-    source: String,
+    grammar_path: &'a std::path::Path,
+    source: &'a str,
 }
 
-impl Names {
-    fn new(grammar_path: std::path::PathBuf, source: String) -> Self {
+impl<'a> Names<'a> {
+    fn new(grammar_path: &'a std::path::Path, source: &'a str) -> Self {
         Self {
             decls: FxHashMap::default(),
             grammar_path,
@@ -152,8 +135,8 @@ impl Names {
                 note: Some(Note {
                     message: NoteMessage::FirstDefinedHere,
                     span: *first_span,
-                    path: self.grammar_path.clone(),
-                    source: self.source.clone(),
+                    path: self.grammar_path.to_path_buf(),
+                    source: self.source.to_string(),
                 }),
             });
         }
@@ -170,8 +153,8 @@ impl Names {
 ///
 /// Rules, let-bindings, functions, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
-fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names, ResolveError> {
-    let mut names = Names::new(grammar_path.to_path_buf(), ast.source().to_string());
+fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names<'_>, ResolveError> {
+    let mut names = Names::new(grammar_path, ast.source());
 
     // Register rules and fns upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
@@ -222,10 +205,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
     Ok(names)
 }
 
-/// Pass 2: resolve all identifiers within a single top-level item.
-///
-/// Splits the borrow on `ast` into `&mut ast.nodes` and `&ast.context` so
-/// that nodes can be mutated while reading source text and configs.
+/// Pass 2: resolve identifiers within a single top-level item.
 fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(), ResolveError> {
     match ast.node(item_id) {
         Node::Grammar => {
@@ -275,12 +255,6 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
 }
 
 /// Resolve identifiers within a single expression.
-///
-/// Handles three special cases before falling through to child traversal:
-/// 1. `Node::Ident` - looks up in locals first, then top-level names, and
-///    rewrites to `RuleRef` or `VarRef`.
-/// 2. `Node::Alias` - the target identifier always becomes `RuleRef`.
-/// 3. `Node::For` - extends the scope chain with the for-loop bindings.
 fn resolve_expr(
     nodes: &mut [Node],
     ctx: &AstContext<'_>,
@@ -339,11 +313,7 @@ fn resolve_expr(
     resolve_children(nodes, ctx, names, id, locals)
 }
 
-/// Recursively resolve identifiers in the children of a node.
-///
-/// This handles the mechanical traversal for all remaining node variants.
-/// Each child is re-read from the `nodes` slice inside the loop because
-/// earlier children may have been mutated by `resolve_expr`.
+/// Resolve identifiers in children of a node (mechanical traversal).
 fn resolve_children(
     nodes: &mut [Node],
     ctx: &AstContext<'_>,
@@ -414,7 +384,6 @@ fn resolve_children(
     }
 }
 
-/// An error encountered during name resolution.
 #[derive(Debug, Serialize, Error)]
 pub struct ResolveError {
     pub kind: ResolveErrorKind,
@@ -422,7 +391,6 @@ pub struct ResolveError {
     pub note: Option<Note>,
 }
 
-/// The specific kind of resolve error.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum ResolveErrorKind {
     DuplicateDeclaration(String),
