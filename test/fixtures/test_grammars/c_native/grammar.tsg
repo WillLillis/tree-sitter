@@ -191,7 +191,7 @@ rule preproc_defined {
 }
 
 rule preproc_unary_expression {
-    prec.left(PREC.UNARY, seq(
+    prec_left(PREC.UNARY, seq(
         field(operator, choice("!", "~", "-", "+")),
         field(argument, _preproc_expression),
     ))
@@ -218,7 +218,7 @@ rule preproc_binary_expression {
             ("<=", PREC.RELATIONAL), ("<", PREC.RELATIONAL),
             ("<<", PREC.SHIFT), (">>", PREC.SHIFT),
         ] {
-            prec.left(p, seq(
+            prec_left(p, seq(
                 field(left, _preproc_expression),
                 field(operator, op),
                 field(right, _preproc_expression),
@@ -268,7 +268,7 @@ rule _declaration_modifiers {
 }
 
 rule _declaration_specifiers {
-    prec.right(0, seq(repeat(_declaration_modifiers), field(type, type_specifier),
+    prec_right(0, seq(repeat(_declaration_modifiers), field(type, type_specifier),
                    repeat(_declaration_modifiers)))
 }
 
@@ -329,29 +329,29 @@ rule _abstract_declarator {
            abstract_array_declarator, abstract_parenthesized_declarator)
 }
 
-rule parenthesized_declarator { prec.dynamic(PREC.PAREN_DECLARATOR, seq("(", optional(ms_call_modifier), _declarator, ")")) }
-rule parenthesized_field_declarator { prec.dynamic(PREC.PAREN_DECLARATOR, seq("(", optional(ms_call_modifier), _field_declarator, ")")) }
-rule parenthesized_type_declarator { prec.dynamic(PREC.PAREN_DECLARATOR, seq("(", optional(ms_call_modifier), _type_declarator, ")")) }
+rule parenthesized_declarator { prec_dynamic(PREC.PAREN_DECLARATOR, seq("(", optional(ms_call_modifier), _declarator, ")")) }
+rule parenthesized_field_declarator { prec_dynamic(PREC.PAREN_DECLARATOR, seq("(", optional(ms_call_modifier), _field_declarator, ")")) }
+rule parenthesized_type_declarator { prec_dynamic(PREC.PAREN_DECLARATOR, seq("(", optional(ms_call_modifier), _type_declarator, ")")) }
 rule abstract_parenthesized_declarator { prec(1, seq("(", optional(ms_call_modifier), _abstract_declarator, ")")) }
 
-rule attributed_declarator { prec.right(0, seq(_declarator, repeat1(attribute_declaration))) }
-rule attributed_field_declarator { prec.right(0, seq(_field_declarator, repeat1(attribute_declaration))) }
-rule attributed_type_declarator { prec.right(0, seq(_type_declarator, repeat1(attribute_declaration))) }
+rule attributed_declarator { prec_right(0, seq(_declarator, repeat1(attribute_declaration))) }
+rule attributed_field_declarator { prec_right(0, seq(_field_declarator, repeat1(attribute_declaration))) }
+rule attributed_type_declarator { prec_right(0, seq(_type_declarator, repeat1(attribute_declaration))) }
 
-rule pointer_declarator { prec.dynamic(1, prec.right(0, seq(optional(ms_based_modifier), "*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, _declarator)))) }
-rule pointer_field_declarator { prec.dynamic(1, prec.right(0, seq(optional(ms_based_modifier), "*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, _field_declarator)))) }
-rule pointer_type_declarator { prec.dynamic(1, prec.right(0, seq(optional(ms_based_modifier), "*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, _type_declarator)))) }
-rule abstract_pointer_declarator { prec.dynamic(1, prec.right(0, seq("*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, optional(_abstract_declarator))))) }
+rule pointer_declarator { prec_dynamic(1, prec_right(0, seq(optional(ms_based_modifier), "*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, _declarator)))) }
+rule pointer_field_declarator { prec_dynamic(1, prec_right(0, seq(optional(ms_based_modifier), "*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, _field_declarator)))) }
+rule pointer_type_declarator { prec_dynamic(1, prec_right(0, seq(optional(ms_based_modifier), "*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, _type_declarator)))) }
+rule abstract_pointer_declarator { prec_dynamic(1, prec_right(0, seq("*", repeat(ms_pointer_modifier), repeat(type_qualifier), field(declarator, optional(_abstract_declarator))))) }
 
 rule function_declarator {
-    prec.right(1, seq(
+    prec_right(1, seq(
         field(declarator, _declarator), field(parameters, parameter_list),
         optional(gnu_asm_expression),
         repeat(choice(attribute_specifier, identifier, alias(preproc_call_expression, call_expression)))))
 }
 
 rule _function_declaration_declarator {
-    prec.right(1, seq(
+    prec_right(1, seq(
         field(declarator, _declarator), field(parameters, parameter_list),
         optional(gnu_asm_expression), repeat(attribute_specifier)))
 }
@@ -395,11 +395,11 @@ rule type_specifier {
 rule sized_type_specifier {
     choice(
         seq(repeat(choice("signed", "unsigned", "long", "short")),
-            field(type, optional(choice(prec.dynamic(-1, _type_identifier), primitive_type))),
+            field(type, optional(choice(prec_dynamic(-1, _type_identifier), primitive_type))),
             repeat1(choice("signed", "unsigned", "long", "short"))),
         seq(repeat1(choice("signed", "unsigned", "long", "short")),
             repeat(type_qualifier),
-            field(type, optional(choice(prec.dynamic(-1, _type_identifier), primitive_type))),
+            field(type, optional(choice(prec_dynamic(-1, _type_identifier), primitive_type))),
             repeat(choice("signed", "unsigned", "long", "short"))),
     )
 }
@@ -440,14 +440,14 @@ rule enumerator_list {
 }
 
 rule struct_specifier {
-    prec.right(0, seq("struct", optional(attribute_specifier), optional(ms_declspec_modifier),
+    prec_right(0, seq("struct", optional(attribute_specifier), optional(ms_declspec_modifier),
         choice(seq(field(name, _type_identifier), field(body, optional(field_declaration_list))),
                field(body, field_declaration_list)),
         optional(attribute_specifier)))
 }
 
 rule union_specifier {
-    prec.right(0, seq("union", optional(ms_declspec_modifier),
+    prec_right(0, seq("union", optional(ms_declspec_modifier),
         choice(seq(field(name, _type_identifier), field(body, optional(field_declaration_list))),
                field(body, field_declaration_list)),
         optional(attribute_specifier)))
@@ -517,7 +517,7 @@ rule _top_level_expression_statement { seq(optional(_expression_not_binary), ";"
 rule expression_statement { seq(optional(choice(expression, comma_expression)), ";") }
 
 rule if_statement {
-    prec.right(0, seq("if", field(condition, parenthesized_expression),
+    prec_right(0, seq("if", field(condition, parenthesized_expression),
         field(consequence, statement), optional(field(alternative, else_clause))))
 }
 
@@ -526,7 +526,7 @@ rule else_clause { seq("else", statement) }
 rule switch_statement { seq("switch", field(condition, parenthesized_expression), field(body, compound_statement)) }
 
 rule case_statement {
-    prec.right(0, seq(
+    prec_right(0, seq(
         choice(seq("case", field(value, expression)), "default"), ":",
         repeat(choice(_non_case_statement, declaration, type_definition))))
 }
@@ -569,12 +569,12 @@ rule _expression_not_binary {
            parenthesized_expression, gnu_asm_expression, extension_expression)
 }
 
-rule _string { prec.left(0, choice(string_literal, concatenated_string)) }
+rule _string { prec_left(0, choice(string_literal, concatenated_string)) }
 
 rule comma_expression { seq(field(left, expression), ",", field(right, choice(expression, comma_expression))) }
 
 rule conditional_expression {
-    prec.right(PREC.CONDITIONAL, seq(
+    prec_right(PREC.CONDITIONAL, seq(
         field(condition, expression), "?",
         optional(field(consequence, choice(expression, comma_expression))),
         ":", field(alternative, expression)))
@@ -586,14 +586,14 @@ rule _assignment_left_expression {
 }
 
 rule assignment_expression {
-    prec.right(PREC.ASSIGNMENT, seq(
+    prec_right(PREC.ASSIGNMENT, seq(
         field(left, _assignment_left_expression),
         field(operator, choice("=", "*=", "/=", "%=", "+=", "-=", "<<=", ">>=", "&=", "^=", "|=")),
         field(right, expression)))
 }
 
-rule pointer_expression { prec.left(PREC.CAST, seq(field(operator, choice("*", "&")), field(argument, expression))) }
-rule unary_expression { prec.left(PREC.UNARY, seq(field(operator, choice("!", "~", "-", "+")), field(argument, expression))) }
+rule pointer_expression { prec_left(PREC.CAST, seq(field(operator, choice("*", "&")), field(argument, expression))) }
+rule unary_expression { prec_left(PREC.UNARY, seq(field(operator, choice("!", "~", "-", "+")), field(argument, expression))) }
 
 rule binary_expression {
     choice(
@@ -607,13 +607,13 @@ rule binary_expression {
             ("<=", PREC.RELATIONAL), ("<", PREC.RELATIONAL),
             ("<<", PREC.SHIFT), (">>", PREC.SHIFT),
         ] {
-            prec.left(p, seq(field(left, expression), field(operator, op), field(right, expression)))
+            prec_left(p, seq(field(left, expression), field(operator, op), field(right, expression)))
         }
     )
 }
 
 rule update_expression {
-    prec.right(PREC.UNARY, choice(
+    prec_right(PREC.UNARY, choice(
         seq(field(operator, choice("--", "++")), field(argument, expression)),
         seq(field(argument, expression), field(operator, choice("--", "++")))))
 }
@@ -735,7 +735,7 @@ rule char_literal {
 }
 
 rule concatenated_string {
-    prec.right(0, seq(
+    prec_right(0, seq(
         choice(seq(identifier, string_literal), seq(string_literal, string_literal), seq(string_literal, identifier)),
         repeat(choice(string_literal, identifier))))
 }
@@ -765,7 +765,7 @@ rule _statement_identifier { alias(identifier, statement_identifier) }
 rule _empty_declaration { seq(type_specifier, ";") }
 
 rule macro_type_specifier {
-    prec.dynamic(-1, seq(field(name, identifier), "(", field(type, type_descriptor), ")"))
+    prec_dynamic(-1, seq(field(name, identifier), "(", field(type, type_descriptor), ")"))
 }
 
 rule comment {

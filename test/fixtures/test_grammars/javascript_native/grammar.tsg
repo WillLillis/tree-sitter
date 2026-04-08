@@ -278,13 +278,13 @@ rule variable_declarator {
 }
 
 rule statement_block {
-    prec.right(0, seq("{", repeat(statement), "}", optional(_automatic_semicolon)))
+    prec_right(0, seq("{", repeat(statement), "}", optional(_automatic_semicolon)))
 }
 
 rule else_clause { seq("else", statement) }
 
 rule if_statement {
-    prec.right(0, seq(
+    prec_right(0, seq(
         "if",
         field(condition, parenthesized_expression),
         field(consequence, statement),
@@ -351,7 +351,7 @@ rule while_statement {
 }
 
 rule do_statement {
-    prec.right(0, seq(
+    prec_right(0, seq(
         "do",
         field(body, statement),
         "while",
@@ -390,7 +390,7 @@ rule throw_statement { seq("throw", _expressions, _semicolon) }
 rule empty_statement { ";" }
 
 rule labeled_statement {
-    prec.dynamic(-1, seq(
+    prec_dynamic(-1, seq(
         field(label, alias(choice(identifier, _reserved_identifier), statement_identifier)),
         ":",
         field(body, statement),
@@ -475,7 +475,7 @@ rule primary_expression {
 }
 
 rule yield_expression {
-    prec.right(0, seq("yield", choice(seq("*", expression), optional(expression))))
+    prec_right(0, seq("yield", choice(seq("*", expression), optional(expression))))
 }
 
 rule object {
@@ -552,7 +552,7 @@ rule jsx_expression {
 rule _jsx_child { choice(jsx_text, html_character_reference, _jsx_element, jsx_expression) }
 
 rule jsx_opening_element {
-    prec.dynamic(-1, seq(
+    prec_dynamic(-1, seq(
         "<",
         optional(seq(
             field(name, _jsx_element_name),
@@ -708,7 +708,7 @@ rule function_expression {
 }
 
 rule function_declaration {
-    prec.right("declaration", seq(
+    prec_right("declaration", seq(
         optional("async"),
         "function",
         field(name, identifier),
@@ -729,7 +729,7 @@ rule generator_function {
 }
 
 rule generator_function_declaration {
-    prec.right("declaration", seq(
+    prec_right("declaration", seq(
         optional("async"),
         "function", "*",
         field(name, identifier),
@@ -775,10 +775,10 @@ rule call_expression {
 }
 
 rule new_expression {
-    prec.right("new", seq(
+    prec_right("new", seq(
         "new",
         field(constructor, choice(primary_expression, new_expression)),
-        field(arguments, optional(prec.dynamic(1, arguments))),
+        field(arguments, optional(prec_dynamic(1, arguments))),
     ))
 }
 
@@ -796,7 +796,7 @@ rule member_expression {
 }
 
 rule subscript_expression {
-    prec.right("member", seq(
+    prec_right("member", seq(
         field(object, choice(expression, primary_expression)),
         optional(field(optional_chain, optional_chain)),
         "[", field(index, _expressions), "]",
@@ -814,7 +814,7 @@ rule _lhs_expression {
 }
 
 rule assignment_expression {
-    prec.right("assign", seq(
+    prec_right("assign", seq(
         field(left, choice(parenthesized_expression, _lhs_expression)),
         "=",
         field(right, expression),
@@ -832,7 +832,7 @@ rule _augmented_assignment_lhs {
 }
 
 rule augmented_assignment_expression {
-    prec.right("assign", seq(
+    prec_right("assign", seq(
         field(left, _augmented_assignment_lhs),
         field(operator, choice(
             "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
@@ -849,7 +849,7 @@ rule _destructuring_pattern { choice(object_pattern, array_pattern) }
 rule spread_element { seq("...", expression) }
 
 rule ternary_expression {
-    prec.right("ternary", seq(
+    prec_right("ternary", seq(
         field(condition, expression),
         alias(_ternary_qmark, "?"),
         field(consequence, expression),
@@ -879,14 +879,14 @@ rule binary_expression {
             ("/", "binary_times"),
             ("%", "binary_times"),
         ] {
-            prec.left(prec_name, seq(
+            prec_left(prec_name, seq(
                 field(left, expression),
                 field(operator, op),
                 field(right, expression),
             ))
         },
         // ** is right-associative and appears between % and <
-        prec.right("binary_exp", seq(
+        prec_right("binary_exp", seq(
             field(left, expression),
             field(operator, "**"),
             field(right, expression),
@@ -903,14 +903,14 @@ rule binary_expression {
             ("??", "ternary"),
             ("instanceof", "binary_relation"),
         ] {
-            prec.left(prec_name, seq(
+            prec_left(prec_name, seq(
                 field(left, expression),
                 field(operator, op),
                 field(right, expression),
             ))
         },
         // 'in' - left operand can also be private_property_identifier
-        prec.left("binary_relation", seq(
+        prec_left("binary_relation", seq(
             field(left, choice(expression, private_property_identifier)),
             field(operator, "in"),
             field(right, expression),
@@ -919,20 +919,20 @@ rule binary_expression {
 }
 
 rule unary_expression {
-    prec.left("unary_void", seq(
+    prec_left("unary_void", seq(
         field(operator, choice("!", "~", "-", "+", "typeof", "void", "delete")),
         field(argument, expression),
     ))
 }
 
 rule update_expression {
-    prec.left(0, choice(
+    prec_left(0, choice(
         seq(field(argument, expression), field(operator, choice("++", "--"))),
         seq(field(operator, choice("++", "--")), field(argument, expression)),
     ))
 }
 
-rule sequence_expression { prec.right(0, commaSep1(expression)) }
+rule sequence_expression { prec_right(0, commaSep1(expression)) }
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -1094,9 +1094,9 @@ rule decorator_call_expression {
 // Patterns and properties
 // ---------------------------------------------------------------------------
 
-rule pattern { prec.dynamic(-1, choice(_lhs_expression, rest_pattern)) }
+rule pattern { prec_dynamic(-1, choice(_lhs_expression, rest_pattern)) }
 
-rule rest_pattern { prec.right(0, seq("...", _lhs_expression)) }
+rule rest_pattern { prec_right(0, seq("...", _lhs_expression)) }
 
 rule method_definition {
     seq(
