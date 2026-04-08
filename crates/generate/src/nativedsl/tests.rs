@@ -219,7 +219,7 @@ fn prec_default() {
 fn prec_left() {
     let g = dsl(r#"
         grammar { language: "test" }
-        rule program { prec.left(2, "x") }
+        rule program { prec_left(2, "x") }
     "#);
     assert_eq!(
         g.variables[0].rule,
@@ -231,7 +231,7 @@ fn prec_left() {
 fn prec_right() {
     let g = dsl(r#"
         grammar { language: "test" }
-        rule program { prec.right(3, "x") }
+        rule program { prec_right(3, "x") }
     "#);
     assert_eq!(
         g.variables[0].rule,
@@ -243,7 +243,7 @@ fn prec_right() {
 fn prec_dynamic() {
     let g = dsl(r#"
         grammar { language: "test" }
-        rule program { prec.dynamic(4, "x") }
+        rule program { prec_dynamic(4, "x") }
     "#);
     assert_eq!(
         g.variables[0].rule,
@@ -255,7 +255,7 @@ fn prec_dynamic() {
 fn prec_with_string_name() {
     let g = dsl(r#"
         grammar { language: "test" }
-        rule program { prec.left("assign", "x") }
+        rule program { prec_left("assign", "x") }
     "#);
     assert_eq!(
         g.variables[0].rule,
@@ -283,8 +283,8 @@ fn let_binding_object_field_access() {
     let g = dsl(r#"
         grammar { language: "test" }
         let PREC: int = { ADD: 1, MUL: 2 }
-        rule add { prec.left(PREC.ADD, seq(expr, "+", expr)) }
-        rule mul { prec.left(PREC.MUL, seq(expr, "*", expr)) }
+        rule add { prec_left(PREC.ADD, seq(expr, "+", expr)) }
+        rule mul { prec_left(PREC.MUL, seq(expr, "*", expr)) }
         rule expr { choice(add, mul) }
     "#);
     assert_eq!(
@@ -378,7 +378,7 @@ fn for_tuple_destructure() {
         rule binary {
             choice(
                 for (op: str, p: int) in [("+", 1), ("*", 2)] {
-                    prec.left(p, seq(expr, op, expr))
+                    prec_left(p, seq(expr, op, expr))
                 }
             )
         }

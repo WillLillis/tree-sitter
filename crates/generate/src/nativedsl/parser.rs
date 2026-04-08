@@ -138,6 +138,9 @@ impl<'src> Parser<'src> {
             | TokenKind::KwOptional
             | TokenKind::KwBlank
             | TokenKind::KwPrec
+            | TokenKind::KwPrecLeft
+            | TokenKind::KwPrecRight
+            | TokenKind::KwPrecDynamic
             | TokenKind::KwReserved
             | TokenKind::KwTokenImmediate
             | TokenKind::KwConcat
@@ -425,7 +428,10 @@ impl<'src> Parser<'src> {
             TokenKind::KwAlias => self.parse_alias_combinator(start),
             TokenKind::KwToken => self.parse_unary_wrapper(start, Node::Token),
             TokenKind::KwTokenImmediate => self.parse_unary_wrapper(start, Node::TokenImmediate),
-            TokenKind::KwPrec => self.parse_prec_combinator(start),
+            TokenKind::KwPrec => self.parse_prec_combinator(start, PrecVariant::Default),
+            TokenKind::KwPrecLeft => self.parse_prec_combinator(start, PrecVariant::Left),
+            TokenKind::KwPrecRight => self.parse_prec_combinator(start, PrecVariant::Right),
+            TokenKind::KwPrecDynamic => self.parse_prec_combinator(start, PrecVariant::Dynamic),
             TokenKind::KwReserved => self.parse_reserved_combinator(start),
             TokenKind::KwConcat => self.parse_concat(start),
             TokenKind::KwRegexp => self.parse_dyn_regex(start),
@@ -540,27 +546,12 @@ impl<'src> Parser<'src> {
             .push(Node::DynRegex { pattern, flags }, start.merge(end)))
     }
 
-    fn parse_prec_combinator(&mut self, start: Span) -> Result<NodeId, ParseError> {
+    fn parse_prec_combinator(
+        &mut self,
+        start: Span,
+        variant: PrecVariant,
+    ) -> Result<NodeId, ParseError> {
         self.pos += 1;
-        let variant = if self.eat(&TokenKind::Dot).is_some() {
-            let id_span = self.expect_ident()?;
-            let id = self.ast.text(id_span);
-            match id {
-                "left" => PrecVariant::Left,
-                "right" => PrecVariant::Right,
-                "dynamic" => PrecVariant::Dynamic,
-                _ => {
-                    return Err(ParseError {
-                        kind: ParseErrorKind::ExpectedPrecVariant(id.to_string()),
-                        span: id_span,
-                        note: None,
-                    });
-                }
-            }
-        } else {
-            PrecVariant::Default
-        };
-
         self.expect(&TokenKind::LParen)?;
         let value = self.parse_expr()?;
         self.expect(&TokenKind::Comma)?;
@@ -731,7 +722,7 @@ impl<'src> Parser<'src> {
     }
 }
 
-/// Which `prec` variant is being parsed: `prec(...)`, `prec.left(...)`, etc.
+/// Which `prec` variant is being parsed: `prec`, `prec_left`, `prec_right`, `prec_dynamic`.
 enum PrecVariant {
     Default,
     Left,
@@ -760,7 +751,6 @@ pub enum ParseErrorKind {
     UnknownType(String),
     UnknownGrammarField(String),
     MissingReturnType,
-    ExpectedPrecVariant(String),
     OnlySimpleNamesCallable,
     ExpectedStringOrIdent,
     DuplicateGrammarBlock,
@@ -786,9 +776,6 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorKind::MissingReturnType => {
                 write!(f, "function must have a return type annotation (-> type)")
-            }
-            ParseErrorKind::ExpectedPrecVariant(found) => {
-                write!(f, "expected 'left', 'right', or 'dynamic', found '{found}'")
             }
             ParseErrorKind::OnlySimpleNamesCallable => {
                 write!(f, "only simple names can be called")
