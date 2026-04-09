@@ -130,14 +130,25 @@ impl<'src> Parser<'src> {
         }
     }
 
+    fn err_arg_count(&self, name: &'static str, expected: u8, got: u8, start: Span) -> ParseError {
+        ParseError {
+            kind: ParseErrorKind::WrongArgumentCount {
+                name,
+                expected,
+                got,
+            },
+            span: start.merge(self.span()),
+            note: None,
+        }
+    }
+
     /// After parsing the expected number of args, check that the next token
     /// is `)` and not `,` (which would indicate extra arguments).
-    /// `call_start` is the span of the function keyword for error reporting.
     fn expect_close_args(
         &mut self,
         name: &'static str,
         expected: u8,
-        call_start: Span,
+        start: Span,
     ) -> Result<(), ParseError> {
         if self.at(TokenKind::Comma) {
             let mut got = expected;
@@ -148,15 +159,7 @@ impl<'src> Parser<'src> {
                 self.parse_expr()?;
                 got += 1;
             }
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name,
-                    expected,
-                    got,
-                },
-                span: call_start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count(name, expected, got, start));
         }
         Ok(())
     }
@@ -414,15 +417,7 @@ impl<'src> Parser<'src> {
                             break;
                         }
                     }
-                    return Err(ParseError {
-                        kind: ParseErrorKind::WrongArgumentCount {
-                            name: "blank",
-                            expected: 0,
-                            got,
-                        },
-                        span: start.merge(self.span()),
-                        note: None,
-                    });
+                    return Err(self.err_arg_count("blank", 0, got, start));
                 }
                 let end = self.expect(TokenKind::RParen)?;
                 Ok(self.ast.push(Node::Blank, start.merge(end)))
@@ -495,15 +490,7 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name,
-                    expected: 1,
-                    got: 0,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count(name, 1, 0, start));
         }
         let inner = self.parse_expr()?;
         self.expect_close_args(name, 1, start)?;
@@ -517,15 +504,7 @@ impl<'src> Parser<'src> {
         let name_span = self.expect_name()?;
         let name = self.ast.push(Node::Ident, name_span);
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name: "field",
-                    expected: 2,
-                    got: 1,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count("field", 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
         let content = self.parse_expr()?;
@@ -541,15 +520,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LParen)?;
         let content = self.parse_expr()?;
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name: "alias",
-                    expected: 2,
-                    got: 1,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count("alias", 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
         let target = self.parse_expr()?;
@@ -570,27 +541,11 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name,
-                    expected: 2,
-                    got: 0,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count(name, 2, 0, start));
         }
         let value = self.parse_expr()?;
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name,
-                    expected: 2,
-                    got: 1,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count(name, 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
         let content = self.parse_expr()?;
@@ -613,15 +568,7 @@ impl<'src> Parser<'src> {
             .ast
             .push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1));
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name: "reserved",
-                    expected: 2,
-                    got: 1,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count("reserved", 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
         let content = self.parse_expr()?;
@@ -651,15 +598,7 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name: "inherit",
-                    expected: 1,
-                    got: 0,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count("inherit", 1, 0, start));
         }
         let path_span = self.expect_string()?;
         let path = self.ast.push(Node::StringLit, path_span);
@@ -673,15 +612,7 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LParen)?;
         let left = self.parse_expr()?;
         if self.at(TokenKind::RParen) {
-            return Err(ParseError {
-                kind: ParseErrorKind::WrongArgumentCount {
-                    name: "append",
-                    expected: 2,
-                    got: 1,
-                },
-                span: start.merge(self.span()),
-                note: None,
-            });
+            return Err(self.err_arg_count("append", 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
         let right = self.parse_expr()?;
