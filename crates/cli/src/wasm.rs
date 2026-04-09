@@ -44,8 +44,9 @@ pub fn compile_language_to_wasm(
     output_dir: &Path,
     output_file: Option<PathBuf>,
 ) -> Result<()> {
-    let grammar_name = get_grammar_name(language_dir)
-        .or_else(|_| load_grammar_file(&language_dir.join("grammar.js"), None))?;
+    let grammar_name = get_grammar_name(language_dir).or_else(|_| {
+        load_grammar_file(&language_dir.join("grammar.js"), None).map(|g| g.into_json())
+    })?;
     let output_filename =
         output_file.unwrap_or_else(|| output_dir.join(format!("tree-sitter-{grammar_name}.wasm")));
     let src_path = language_dir.join("src");

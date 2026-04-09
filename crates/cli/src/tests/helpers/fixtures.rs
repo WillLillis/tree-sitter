@@ -58,7 +58,7 @@ fn get_test_fixture_language_internal(name: &str, wasm: bool) -> Language {
     let grammar_dir_path = fixtures_dir().join("test_grammars").join(name);
     let grammar_path = find_grammar_file(&grammar_dir_path)
         .unwrap_or_else(|| panic!("no grammar file found in {}", grammar_dir_path.display()));
-    let grammar_json = load_grammar_file(&grammar_path, None).unwrap();
+    let grammar_json = load_grammar_file(&grammar_path, None).unwrap().into_json();
     let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
     get_test_language_internal(&parser_name, &parser_code, Some(&grammar_dir_path), wasm)
 }

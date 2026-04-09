@@ -126,6 +126,28 @@ impl std::fmt::Display for IoError {
 pub type LoadGrammarFileResult<T> = Result<T, LoadGrammarError>;
 
 #[cfg(feature = "load")]
+pub enum GrammarSource {
+    Json(String),
+    #[cfg(feature = "nativedsl")]
+    Grammar(InputGrammar),
+}
+
+#[cfg(feature = "load")]
+impl GrammarSource {
+    /// Extract the JSON string, generating it if this is a pre-parsed grammar.
+    pub fn into_json(self) -> String {
+        match self {
+            Self::Json(json) => json,
+            #[cfg(feature = "nativedsl")]
+            Self::Grammar(grammar) => {
+                serde_json::to_string_pretty(&nativedsl::lower::grammar_to_json(&grammar))
+                    .expect("grammar JSON serialization should not fail")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "load")]
 #[derive(Debug, Error, Serialize)]
 pub enum LoadGrammarError {
     #[error("Path to a grammar file with `.js`, `.json`, or `.tsg` extension is required")]
@@ -264,7 +286,7 @@ where
     };
 
     // Read the grammar file.
-    let grammar_json = load_grammar_file(&grammar_path, js_runtime)?;
+    let grammar_source = load_grammar_file(&grammar_path, js_runtime)?;
 
     let src_path = out_path.map_or_else(|| repo_path.join("src"), std::convert::Into::into);
     let header_path = src_path.join("tree_sitter");
@@ -273,13 +295,21 @@ where
     fs::create_dir_all(&src_path)
         .map_err(|e| GenerateError::IO(IoError::new(&e, Some(src_path.as_path()))))?;
 
+    let (input_grammar, grammar_json) = match grammar_source {
+        GrammarSource::Json(json) => (parse_grammar(&json)?, json),
+        #[cfg(feature = "nativedsl")]
+        GrammarSource::Grammar(grammar) => {
+            let json = serde_json::to_string_pretty(&nativedsl::lower::grammar_to_json(&grammar))
+                .expect("grammar JSON serialization should not fail");
+            // Feed through parse_grammar to get the same normalization as the JSON path
+            (parse_grammar(&json)?, json)
+        }
+    };
+
     if grammar_path.file_name().unwrap() != "grammar.json" {
         fs::write(src_path.join("grammar.json"), &grammar_json)
             .map_err(|e| GenerateError::IO(IoError::new(&e, Some(src_path.as_path()))))?;
     }
-
-    // If our job is only to generate `grammar.json` and not `parser.c`, stop here.
-    let input_grammar = parse_grammar(&grammar_json)?;
 
     if !generate_parser {
         let node_types_json = generate_node_types_from_grammar(&input_grammar)?.node_types_json;
@@ -469,32 +499,35 @@ fn find_grammar_file(dir: &Path) -> PathBuf {
 pub fn load_grammar_file(
     grammar_path: &Path,
     js_runtime: Option<&str>,
-) -> LoadGrammarFileResult<String> {
+) -> LoadGrammarFileResult<GrammarSource> {
     if grammar_path.is_dir() {
         Err(LoadGrammarError::InvalidPath)?;
     }
-    let start = std::time::Instant::now();
-    let g = match grammar_path.extension().and_then(|e| e.to_str()) {
-        Some("js") => Ok(load_js_grammar_file(grammar_path, js_runtime)?),
-        Some("json") => Ok(fs::read_to_string(grammar_path)
-            .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?),
+    match grammar_path.extension().and_then(|e| e.to_str()) {
+        Some("js") => Ok(GrammarSource::Json(load_js_grammar_file(
+            grammar_path,
+            js_runtime,
+        )?)),
+        Some("json") => Ok(GrammarSource::Json(
+            fs::read_to_string(grammar_path)
+                .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?,
+        )),
         #[cfg(feature = "nativedsl")]
         Some("tsg") => {
             let source_text = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
-            nativedsl::parse_native_dsl_to_json(&source_text, grammar_path).map_err(|error| {
-                LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
-                    error,
-                    source_text,
-                    path: grammar_path.to_owned(),
-                }))
-            })
+            let grammar =
+                nativedsl::parse_native_dsl(&source_text, grammar_path).map_err(|error| {
+                    LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
+                        error,
+                        source_text,
+                        path: grammar_path.to_owned(),
+                    }))
+                })?;
+            Ok(GrammarSource::Grammar(grammar))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
-    };
-    println!("grammar time: {:?} ({:?})", start.elapsed(), grammar_path.extension());
-
-    g
+    }
 }
 
 #[cfg(feature = "load")]

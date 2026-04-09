@@ -374,7 +374,8 @@ fn test_feature_corpus_files() {
                     grammar_path.display()
                 )
             })
-            .unwrap();
+            .unwrap()
+            .into_json();
         let generate_result =
             tree_sitter_generate::generate_parser_for_grammar(&grammar_json, Some((0, 0, 0)));
 
