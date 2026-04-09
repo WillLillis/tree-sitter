@@ -873,6 +873,25 @@ fn javascript_native_grammar_roundtrip() {
 // ===== C++ grammar roundtrip =====
 
 #[test]
+fn cpp_direct_vs_json_roundtrip() {
+    // Verify the direct path (GrammarSource::Grammar) matches the JSON roundtrip.
+    let dir = native_grammar_path("cpp_native");
+    let source = read_native_grammar("cpp_native");
+
+    // Direct path: parse_native_dsl -> grammar_to_json -> parse_grammar
+    let direct = parse_native_dsl(&source, &dir).unwrap();
+    let direct_json =
+        serde_json::to_string_pretty(&super::lower::grammar_to_json(&direct)).unwrap();
+    let normalized = crate::parse_grammar::parse_grammar(&direct_json).unwrap();
+
+    // JSON roundtrip: parse_native_dsl_to_json -> parse_grammar
+    let roundtrip_json = parse_native_dsl_to_json(&source, &dir).unwrap();
+    let roundtrip = crate::parse_grammar::parse_grammar(&roundtrip_json).unwrap();
+
+    assert_grammar_eq(&normalized, &roundtrip);
+}
+
+#[test]
 fn cpp_native_grammar_roundtrip() {
     let dir = native_grammar_path("cpp_native");
     let native_json = parse_native_dsl_to_json(&read_native_grammar("cpp_native"), &dir).unwrap();
