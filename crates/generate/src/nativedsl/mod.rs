@@ -169,15 +169,6 @@ fn load_base_grammar(
     Ok(None)
 }
 
-/// Parse a native DSL source file and serialize to `grammar.json` format.
-pub fn parse_native_dsl_to_json(input: &str, grammar_path: &Path) -> Result<String, DslError> {
-    let grammar = parse_native_dsl(input, grammar_path)?;
-    Ok(
-        serde_json::to_string_pretty(&lower::grammar_to_json(&grammar))
-            .expect("grammar JSON serialization should not fail"),
-    )
-}
-
 #[derive(Debug, Error, Serialize)]
 pub enum DslError {
     #[error(transparent)]
