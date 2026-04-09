@@ -29,7 +29,7 @@ fn dsl_err(input: &str) -> DslError {
     parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap_err()
 }
 
-/// Follows the same path as the CLI: parse_native_dsl -> normalize -> grammar_to_json.
+/// Follows the same path as the CLI: `parse_native_dsl` -> normalize -> `grammar_to_json`.
 fn dsl_to_json(input: &str, path: &std::path::Path) -> (InputGrammar, String) {
     let mut grammar = parse_native_dsl(input, path).unwrap();
     crate::parse_grammar::normalize_grammar(&mut grammar);
@@ -892,8 +892,8 @@ fn cpp_native_grammar_roundtrip() {
     assert_grammar_eq(&native, &js);
 }
 
-/// Verify the direct path (no JSON roundtrip) works through prepare_grammar.
-/// This is the same path the CLI takes via GrammarSource::Grammar.
+/// Verify the direct path (no JSON roundtrip) works through `prepare_grammar`.
+/// This is the same path the CLI takes via `GrammarSource::Grammar`.
 #[test]
 fn cpp_direct_prepare_grammar() {
     let dir = native_grammar_path("cpp_native");
