@@ -545,125 +545,76 @@ pub fn lower_with_base(
                 .collect(),
         )
     };
-    // eval is no longer used - base_grammar borrow released
     drop(eval);
 
-    // Take ownership of base grammar - move fields instead of cloning
-    let (base_variables, base_config) = match base_grammar {
-        Some(base) => (
-            Some(base.variables),
-            Some((
-                base.extra_symbols,
-                base.external_tokens,
-                base.variables_to_inline,
-                base.supertype_symbols,
-                base.word_token,
-                base.expected_conflicts,
-                base.precedence_orderings,
-                base.reserved_words,
-            )),
-        ),
-        None => (None, None),
-    };
+    // Build the output grammar. Start from the base (moved, not cloned) and
+    // overwrite fields that the derived grammar specifies.
+    let mut out = base_grammar.unwrap_or_else(|| InputGrammar {
+        name: String::new(),
+        variables: Vec::new(),
+        extra_symbols: Vec::new(),
+        expected_conflicts: Vec::new(),
+        precedence_orderings: Vec::new(),
+        external_tokens: Vec::new(),
+        variables_to_inline: Vec::new(),
+        supertype_symbols: Vec::new(),
+        word_token: None,
+        reserved_words: Vec::new(),
+    });
+    out.name.clone_from(language);
 
-    let variables = if let Some(mut vars) = base_variables {
-        if !built_overrides.is_empty() && vars.is_empty() {
+    // Merge rules: apply overrides to base, then append new rules
+    if !built_overrides.is_empty() && out.variables.is_empty() {
+        return Err(LowerError::new(
+            LowerErrorKind::OverrideWithoutInherit,
+            built_overrides[0].2,
+        ));
+    }
+    for (name, rule, span) in built_overrides {
+        if let Some(var) = out.variables.iter_mut().find(|v| v.name == name) {
+            var.rule = rule;
+        } else {
             return Err(LowerError::new(
-                LowerErrorKind::OverrideRuleNotFound(built_overrides[0].0.to_string()),
-                built_overrides[0].2,
+                LowerErrorKind::OverrideRuleNotFound(name.to_string()),
+                span,
             ));
         }
-        for (name, rule, span) in built_overrides {
-            if let Some(var) = vars.iter_mut().find(|v| v.name == name) {
-                var.rule = rule;
-            } else {
-                return Err(LowerError::new(
-                    LowerErrorKind::OverrideRuleNotFound(name.to_string()),
-                    span,
-                ));
-            }
-        }
-        for (name, rule) in built_rules {
-            vars.push(Variable {
-                name: name.to_string(),
-                kind: VariableType::Named,
-                rule,
-            });
-        }
-        vars
-    } else {
-        if !built_overrides.is_empty() {
-            return Err(LowerError::new(
-                LowerErrorKind::OverrideWithoutInherit,
-                built_overrides[0].2,
-            ));
-        }
-        built_rules
-            .into_iter()
-            .map(|(name, rule)| Variable {
-                name: name.to_string(),
-                kind: VariableType::Named,
-                rule,
-            })
-            .collect()
-    };
+    }
+    for (name, rule) in built_rules {
+        out.variables.push(Variable {
+            name: name.to_string(),
+            kind: VariableType::Named,
+            rule,
+        });
+    }
 
-    #[allow(clippy::type_complexity)]
-    let (
-        extra_symbols,
-        external_tokens,
-        variables_to_inline,
-        supertype_symbols,
-        word_token,
-        expected_conflicts,
-        precedence_orderings,
-        reserved_words,
-    ) = if let Some((
-        b_extras,
-        b_externals,
-        b_inline,
-        b_supertypes,
-        b_word,
-        b_conflicts,
-        b_precs,
-        b_reserved,
-    )) = base_config
-    {
-        (
-            eval_extras.unwrap_or(b_extras),
-            eval_externals.unwrap_or(b_externals),
-            eval_inline.unwrap_or(b_inline),
-            eval_supertypes.unwrap_or(b_supertypes),
-            eval_word.or(b_word),
-            eval_conflicts.unwrap_or(b_conflicts),
-            eval_precedences.unwrap_or(b_precs),
-            eval_reserved.unwrap_or(b_reserved),
-        )
-    } else {
-        (
-            eval_extras.unwrap_or_default(),
-            eval_externals.unwrap_or_default(),
-            eval_inline.unwrap_or_default(),
-            eval_supertypes.unwrap_or_default(),
-            eval_word,
-            eval_conflicts.unwrap_or_default(),
-            eval_precedences.unwrap_or_default(),
-            eval_reserved.unwrap_or_default(),
-        )
-    };
+    // Config: derived values override base (which was moved in)
+    if let Some(v) = eval_extras {
+        out.extra_symbols = v;
+    }
+    if let Some(v) = eval_externals {
+        out.external_tokens = v;
+    }
+    if let Some(v) = eval_inline {
+        out.variables_to_inline = v;
+    }
+    if let Some(v) = eval_supertypes {
+        out.supertype_symbols = v;
+    }
+    if let Some(v) = eval_word {
+        out.word_token = Some(v);
+    }
+    if let Some(v) = eval_conflicts {
+        out.expected_conflicts = v;
+    }
+    if let Some(v) = eval_precedences {
+        out.precedence_orderings = v;
+    }
+    if let Some(v) = eval_reserved {
+        out.reserved_words = v;
+    }
 
-    Ok(InputGrammar {
-        name: language.clone(),
-        variables,
-        extra_symbols,
-        expected_conflicts,
-        precedence_orderings,
-        external_tokens,
-        variables_to_inline,
-        supertype_symbols,
-        word_token,
-        reserved_words,
-    })
+    Ok(out)
 }
 
 impl Evaluator<'_> {
