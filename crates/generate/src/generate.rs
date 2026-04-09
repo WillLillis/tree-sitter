@@ -298,11 +298,11 @@ where
     let (input_grammar, grammar_json) = match grammar_source {
         GrammarSource::Json(json) => (parse_grammar(&json)?, json),
         #[cfg(feature = "nativedsl")]
-        GrammarSource::Grammar(grammar) => {
+        GrammarSource::Grammar(mut grammar) => {
+            parse_grammar::normalize_grammar(&mut grammar);
             let json = serde_json::to_string_pretty(&nativedsl::lower::grammar_to_json(&grammar))
                 .expect("grammar JSON serialization should not fail");
-            // Feed through parse_grammar to get the same normalization as the JSON path
-            (parse_grammar(&json)?, json)
+            (grammar, json)
         }
     };
 
@@ -503,7 +503,8 @@ pub fn load_grammar_file(
     if grammar_path.is_dir() {
         Err(LoadGrammarError::InvalidPath)?;
     }
-    match grammar_path.extension().and_then(|e| e.to_str()) {
+    let start = std::time::Instant::now();
+    let g = match grammar_path.extension().and_then(|e| e.to_str()) {
         Some("js") => Ok(GrammarSource::Json(load_js_grammar_file(
             grammar_path,
             js_runtime,
@@ -527,7 +528,14 @@ pub fn load_grammar_file(
             Ok(GrammarSource::Grammar(grammar))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
-    }
+    };
+    println!(
+        "Generate time: {:?} ({:?})",
+        start.elapsed(),
+        grammar_path.extension()
+    );
+
+    g
 }
 
 #[cfg(feature = "load")]
