@@ -129,12 +129,13 @@ pub type LoadGrammarFileResult<T> = Result<T, LoadGrammarError>;
 pub enum GrammarSource {
     Json(String),
     #[cfg(feature = "nativedsl")]
-    Grammar(InputGrammar),
+    Grammar(Box<InputGrammar>),
 }
 
 #[cfg(feature = "load")]
 impl GrammarSource {
     /// Extract the JSON string, generating it if this is a pre-parsed grammar.
+    #[must_use]
     pub fn into_json(self) -> String {
         match self {
             Self::Json(json) => json,
@@ -156,7 +157,6 @@ pub enum LoadGrammarError {
     LoadJSGrammarFile(#[from] JSError),
     #[error("Failed to load grammar.json -- {0}")]
     IO(IoError),
-    // TODO: Find a better solution  to this being so large
     #[cfg(feature = "nativedsl")]
     #[error(transparent)]
     NativeDsl(Box<nativedsl::NativeDslError>),
@@ -302,7 +302,7 @@ where
             parse_grammar::normalize_grammar(&mut grammar);
             let json = serde_json::to_string_pretty(&nativedsl::lower::grammar_to_json(&grammar))
                 .expect("grammar JSON serialization should not fail");
-            (grammar, json)
+            (*grammar, json)
         }
     };
 
@@ -525,7 +525,7 @@ pub fn load_grammar_file(
                         path: grammar_path.to_owned(),
                     }))
                 })?;
-            Ok(GrammarSource::Grammar(grammar))
+            Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
     };
