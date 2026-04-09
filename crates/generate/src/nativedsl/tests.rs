@@ -5,7 +5,7 @@ use crate::rules::{Precedence, Rule};
 
 use super::{
     DslError, LexErrorKind, LowerErrorKind, ParseErrorKind, ResolveErrorKind, Ty, TypeErrorKind,
-    ast, parse_native_dsl, parse_native_dsl_to_json,
+    ast, parse_native_dsl,
 };
 
 macro_rules! assert_err {
@@ -27,6 +27,15 @@ fn dsl(input: &str) -> InputGrammar {
 
 fn dsl_err(input: &str) -> DslError {
     parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap_err()
+}
+
+/// Follows the same path as the CLI: parse_native_dsl -> normalize -> grammar_to_json.
+fn dsl_to_json(input: &str, path: &std::path::Path) -> (InputGrammar, String) {
+    let mut grammar = parse_native_dsl(input, path).unwrap();
+    crate::parse_grammar::normalize_grammar(&mut grammar);
+    let json = serde_json::to_string_pretty(&super::lower::grammar_to_json(&grammar))
+        .expect("grammar JSON serialization should not fail");
+    (grammar, json)
 }
 
 fn native_grammar_path(name: &str) -> std::path::PathBuf {
@@ -562,8 +571,8 @@ fn json_roundtrip() {
         rule pair { seq(field(key, string), ":", field(value, string)) }
         rule string { regexp(r#""[^"]*""#) }
     "##;
-    let grammar = dsl(input);
-    let json_str = parse_native_dsl_to_json(input, Path::new(".")).unwrap();
+    let path = test_grammars_dir().join("grammar.tsg");
+    let (grammar, json_str) = dsl_to_json(input, &path);
     let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
     assert_eq!(grammar.name, reparsed.name);
     assert_eq!(grammar.variables.len(), reparsed.variables.len());
@@ -835,7 +844,7 @@ fn prec_inside_token_immediate() {
 #[test]
 fn json_native_grammar_roundtrip() {
     let dir = native_grammar_path("json_native");
-    let native_json = parse_native_dsl_to_json(&read_native_grammar("json_native"), &dir).unwrap();
+    let (_, native_json) = dsl_to_json(&read_native_grammar("json_native"), &dir);
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/json/src/grammar.json"))
             .unwrap();
@@ -847,7 +856,7 @@ fn json_native_grammar_roundtrip() {
 #[test]
 fn c_native_grammar_roundtrip() {
     let dir = native_grammar_path("c_native");
-    let native_json = parse_native_dsl_to_json(&read_native_grammar("c_native"), &dir).unwrap();
+    let (_, native_json) = dsl_to_json(&read_native_grammar("c_native"), &dir);
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
             .unwrap();
@@ -859,8 +868,7 @@ fn c_native_grammar_roundtrip() {
 #[test]
 fn javascript_native_grammar_roundtrip() {
     let dir = native_grammar_path("javascript_native");
-    let native_json =
-        parse_native_dsl_to_json(&read_native_grammar("javascript_native"), &dir).unwrap();
+    let (_, native_json) = dsl_to_json(&read_native_grammar("javascript_native"), &dir);
     let js_json = std::fs::read_to_string(
         test_grammars_dir().join("../grammars/javascript/src/grammar.json"),
     )
@@ -873,34 +881,25 @@ fn javascript_native_grammar_roundtrip() {
 // ===== C++ grammar roundtrip =====
 
 #[test]
-fn cpp_direct_vs_json_roundtrip() {
-    // Verify the direct path (GrammarSource::Grammar) matches the JSON roundtrip.
-    let dir = native_grammar_path("cpp_native");
-    let source = read_native_grammar("cpp_native");
-
-    // Direct path: parse_native_dsl -> grammar_to_json -> parse_grammar
-    let direct = parse_native_dsl(&source, &dir).unwrap();
-    let direct_json =
-        serde_json::to_string_pretty(&super::lower::grammar_to_json(&direct)).unwrap();
-    let normalized = crate::parse_grammar::parse_grammar(&direct_json).unwrap();
-
-    // JSON roundtrip: parse_native_dsl_to_json -> parse_grammar
-    let roundtrip_json = parse_native_dsl_to_json(&source, &dir).unwrap();
-    let roundtrip = crate::parse_grammar::parse_grammar(&roundtrip_json).unwrap();
-
-    assert_grammar_eq(&normalized, &roundtrip);
-}
-
-#[test]
 fn cpp_native_grammar_roundtrip() {
     let dir = native_grammar_path("cpp_native");
-    let native_json = parse_native_dsl_to_json(&read_native_grammar("cpp_native"), &dir).unwrap();
+    let (_, native_json) = dsl_to_json(&read_native_grammar("cpp_native"), &dir);
     let js_json =
         std::fs::read_to_string(test_grammars_dir().join("../grammars/cpp/src/grammar.json"))
             .unwrap();
     let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
     let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
     assert_grammar_eq(&native, &js);
+}
+
+/// Verify the direct path (no JSON roundtrip) works through prepare_grammar.
+/// This is the same path the CLI takes via GrammarSource::Grammar.
+#[test]
+fn cpp_direct_prepare_grammar() {
+    let dir = native_grammar_path("cpp_native");
+    let mut grammar = parse_native_dsl(&read_native_grammar("cpp_native"), &dir).unwrap();
+    crate::parse_grammar::normalize_grammar(&mut grammar);
+    crate::prepare_grammar::prepare_grammar(&grammar).unwrap();
 }
 
 // ===== Inheritance =====
