@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use super::{
     ast::{
-        Ast, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note, NoteMessage, Param,
-        PrecEntry, ReservedWordSet, Span,
+        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note,
+        NoteMessage, Param, PrecEntry, ReservedWordSet, Span,
     },
     lexer::{Token, TokenKind},
 };
@@ -22,6 +22,7 @@ pub struct Parser<'src> {
     pos: usize,
     grammar_path: PathBuf,
     pub ast: Ast<'src>,
+    scratch: Vec<NodeId>,
 }
 
 impl<'src> Parser<'src> {
@@ -31,6 +32,7 @@ impl<'src> Parser<'src> {
             pos: 0,
             grammar_path,
             ast: Ast::new(source),
+            scratch: Vec::new(),
         }
     }
 
@@ -345,12 +347,8 @@ impl<'src> Parser<'src> {
             };
         }
         if self.eat(TokenKind::LParen).is_some() {
-            let elems = self.comma_sep(TokenKind::RParen, Self::parse_type)?;
+            let range = self.comma_sep_children(TokenKind::RParen, Self::parse_type)?;
             let end = self.expect(TokenKind::RParen)?;
-            let range = self
-                .ast
-                .push_children(&elems)
-                .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
             return Ok(self.ast.push(Node::TypeTuple(range), start.merge(end)));
         }
         if self.eat(TokenKind::KwRule).is_some() {
@@ -425,12 +423,8 @@ impl<'src> Parser<'src> {
     fn parse_variadic(&mut self, start: Span, name: &str) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
-        let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
+        let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
-        let range = self
-            .ast
-            .push_children(&args)
-            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         let node = match name {
             "seq" => Node::Seq(range),
             "choice" => Node::Choice(range),
@@ -585,12 +579,8 @@ impl<'src> Parser<'src> {
                     return Err(self.error(ParseErrorKind::ExpectedFunctionName));
                 }
                 self.pos += 1;
-                let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
+                let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
                 let end = self.expect(TokenKind::RParen)?;
-                let args = self
-                    .ast
-                    .push_children(&args)
-                    .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
                 id = self.ast.push(
                     Node::Call {
                         name: name_id,
@@ -608,23 +598,15 @@ impl<'src> Parser<'src> {
 
     fn parse_list(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
-        let items = self.comma_sep(TokenKind::RBracket, Self::parse_expr)?;
+        let range = self.comma_sep_children(TokenKind::RBracket, Self::parse_expr)?;
         let end = self.expect(TokenKind::RBracket)?;
-        let range = self
-            .ast
-            .push_children(&items)
-            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::List(range), start.merge(end)))
     }
 
     fn parse_tuple(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
-        let items = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
+        let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
-        let range = self
-            .ast
-            .push_children(&items)
-            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::Tuple(range), start.merge(end)))
     }
 
@@ -641,6 +623,38 @@ impl<'src> Parser<'src> {
             .push_object(fields)
             .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::Object(range), start.merge(end)))
+    }
+
+    /// Parse comma-separated children directly into a [`ChildRange`].
+    ///
+    /// Uses a scratch buffer as a stack to avoid per-call heap allocation.
+    /// Nested calls push above the parent's items and truncate back, so
+    /// interleaving is impossible.
+    fn comma_sep_children(
+        &mut self,
+        close: TokenKind,
+        mut parse_item: impl FnMut(&mut Self) -> Result<NodeId, ParseError>,
+    ) -> Result<ChildRange, ParseError> {
+        let saved = self.scratch.len();
+        loop {
+            if self.at(close) {
+                break;
+            }
+            let id = parse_item(self)?;
+            self.scratch.push(id);
+            if self.eat(TokenKind::Comma).is_none() {
+                break;
+            }
+            if self.at(close) {
+                break;
+            }
+        }
+        let range = self
+            .ast
+            .push_children(&self.scratch[saved..])
+            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
+        self.scratch.truncate(saved);
+        Ok(range)
     }
 
     fn comma_sep<T>(
