@@ -424,9 +424,9 @@ impl<'src> Evaluator<'src> {
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(
     ast: &Ast<'_>,
-    base_grammar: Option<&InputGrammar>,
+    base_grammar: Option<InputGrammar>,
 ) -> Result<InputGrammar, LowerError> {
-    let mut eval = Evaluator::new(ast, base_grammar);
+    let mut eval = Evaluator::new(ast, base_grammar.as_ref());
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
@@ -463,115 +463,193 @@ pub fn lower_with_base(
         .as_ref()
         .ok_or_else(|| LowerError::new(LowerErrorKind::MissingLanguageField, Span::new(0, 0)))?;
 
-    let variables = if let Some(base) = base_grammar {
-        if !override_entries.is_empty() && base.variables.is_empty() {
+    // Evaluate all expressions and build output Rules while eval borrows base_grammar.
+    // After this block, eval is dropped and base_grammar can be moved.
+    let built_overrides: Vec<(&str, Rule, Span)> = override_entries
+        .iter()
+        .map(|(name, rid, span)| (*name, eval.build_rule(*rid), *span))
+        .collect();
+    let built_rules: Vec<(&str, Rule)> = rule_entries
+        .iter()
+        .map(|(name, rid)| (*name, eval.build_rule(*rid)))
+        .collect();
+    let eval_extras = config
+        .extras
+        .map(|id| eval.eval_rule_list(id))
+        .transpose()?;
+    let eval_externals = config
+        .externals
+        .map(|id| eval.eval_rule_list(id))
+        .transpose()?;
+    let eval_inline = config
+        .inline
+        .map(|id| eval.eval_name_list(id))
+        .transpose()?;
+    let eval_supertypes = config
+        .supertypes
+        .map(|id| eval.eval_name_list(id))
+        .transpose()?;
+    let eval_word = config.word.map(|id| eval.eval_rule_name(id)).transpose()?;
+    let eval_reserved = if config.reserved.is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .reserved
+                .iter()
+                .map(|rws| {
+                    let words = rws
+                        .words
+                        .iter()
+                        .map(|&id| {
+                            let rid = eval.lower_to_rule(id)?;
+                            Ok(eval.build_rule(rid))
+                        })
+                        .collect::<Result<_, LowerError>>()?;
+                    Ok(ReservedWordContext {
+                        name: ast.text(rws.name).to_string(),
+                        reserved_words: words,
+                    })
+                })
+                .collect::<Result<Vec<_>, LowerError>>()?,
+        )
+    };
+    let eval_conflicts: Option<Vec<Vec<String>>> = if config.conflicts.is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .conflicts
+                .iter()
+                .map(|g| g.iter().map(|s| ast.text(*s).to_string()).collect())
+                .collect(),
+        )
+    };
+    let eval_precedences: Option<Vec<Vec<PrecedenceEntry>>> = if config.precedences.is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .precedences
+                .iter()
+                .map(|g| {
+                    g.iter()
+                        .map(|e| match e {
+                            PrecEntry::Name(s) => PrecedenceEntry::Name(s.clone()),
+                            PrecEntry::Symbol(s) => {
+                                PrecedenceEntry::Symbol(ast.text(*s).to_string())
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+        )
+    };
+    // eval is no longer used - base_grammar borrow released
+    drop(eval);
+
+    // Take ownership of base grammar - move fields instead of cloning
+    let (base_variables, base_config) = match base_grammar {
+        Some(base) => (
+            Some(base.variables),
+            Some((
+                base.extra_symbols,
+                base.external_tokens,
+                base.variables_to_inline,
+                base.supertype_symbols,
+                base.word_token,
+                base.expected_conflicts,
+                base.precedence_orderings,
+                base.reserved_words,
+            )),
+        ),
+        None => (None, None),
+    };
+
+    let variables = if let Some(mut vars) = base_variables {
+        if !built_overrides.is_empty() && vars.is_empty() {
             return Err(LowerError::new(
-                LowerErrorKind::OverrideRuleNotFound(override_entries[0].0.to_string()),
-                override_entries[0].2,
+                LowerErrorKind::OverrideRuleNotFound(built_overrides[0].0.to_string()),
+                built_overrides[0].2,
             ));
         }
-        let mut vars: Vec<Variable> = base.variables.clone();
-        for (name, rid, span) in &override_entries {
-            if let Some(var) = vars.iter_mut().find(|v| v.name == *name) {
-                var.rule = eval.build_rule(*rid);
+        for (name, rule, span) in built_overrides {
+            if let Some(var) = vars.iter_mut().find(|v| v.name == name) {
+                var.rule = rule;
             } else {
                 return Err(LowerError::new(
                     LowerErrorKind::OverrideRuleNotFound(name.to_string()),
-                    *span,
+                    span,
                 ));
             }
         }
-        for (name, rid) in &rule_entries {
+        for (name, rule) in built_rules {
             vars.push(Variable {
                 name: name.to_string(),
                 kind: VariableType::Named,
-                rule: eval.build_rule(*rid),
+                rule,
             });
         }
         vars
     } else {
-        if !override_entries.is_empty() {
+        if !built_overrides.is_empty() {
             return Err(LowerError::new(
                 LowerErrorKind::OverrideWithoutInherit,
-                override_entries[0].2,
+                built_overrides[0].2,
             ));
         }
-        rule_entries
+        built_rules
             .into_iter()
-            .map(|(name, rid)| Variable {
+            .map(|(name, rule)| Variable {
                 name: name.to_string(),
                 kind: VariableType::Named,
-                rule: eval.build_rule(rid),
+                rule,
             })
             .collect()
     };
 
-    let extra_symbols = match config.extras {
-        Some(id) => eval.eval_rule_list(id)?,
-        None => base_grammar.map_or_else(Vec::new, |b| b.extra_symbols.clone()),
-    };
-    let external_tokens = match config.externals {
-        Some(id) => eval.eval_rule_list(id)?,
-        None => base_grammar.map_or_else(Vec::new, |b| b.external_tokens.clone()),
-    };
-    let variables_to_inline = match config.inline {
-        Some(id) => eval.eval_name_list(id)?,
-        None => base_grammar.map_or_else(Vec::new, |b| b.variables_to_inline.clone()),
-    };
-    let supertype_symbols = match config.supertypes {
-        Some(id) => eval.eval_name_list(id)?,
-        None => base_grammar.map_or_else(Vec::new, |b| b.supertype_symbols.clone()),
-    };
-    let word_token = match config.word {
-        Some(id) => Some(eval.eval_rule_name(id)?),
-        None => base_grammar.and_then(|b| b.word_token.clone()),
-    };
-    let expected_conflicts = if config.conflicts.is_empty() {
-        base_grammar.map_or_else(Vec::new, |b| b.expected_conflicts.clone())
+    #[allow(clippy::type_complexity)]
+    let (
+        extra_symbols,
+        external_tokens,
+        variables_to_inline,
+        supertype_symbols,
+        word_token,
+        expected_conflicts,
+        precedence_orderings,
+        reserved_words,
+    ) = if let Some((
+        b_extras,
+        b_externals,
+        b_inline,
+        b_supertypes,
+        b_word,
+        b_conflicts,
+        b_precs,
+        b_reserved,
+    )) = base_config
+    {
+        (
+            eval_extras.unwrap_or(b_extras),
+            eval_externals.unwrap_or(b_externals),
+            eval_inline.unwrap_or(b_inline),
+            eval_supertypes.unwrap_or(b_supertypes),
+            eval_word.or(b_word),
+            eval_conflicts.unwrap_or(b_conflicts),
+            eval_precedences.unwrap_or(b_precs),
+            eval_reserved.unwrap_or(b_reserved),
+        )
     } else {
-        config
-            .conflicts
-            .iter()
-            .map(|g| g.iter().map(|s| ast.text(*s).to_string()).collect())
-            .collect()
-    };
-    let precedence_orderings = if config.precedences.is_empty() {
-        base_grammar.map_or_else(Vec::new, |b| b.precedence_orderings.clone())
-    } else {
-        config
-            .precedences
-            .iter()
-            .map(|g| {
-                g.iter()
-                    .map(|e| match e {
-                        PrecEntry::Name(s) => PrecedenceEntry::Name(s.clone()),
-                        PrecEntry::Symbol(s) => PrecedenceEntry::Symbol(ast.text(*s).to_string()),
-                    })
-                    .collect()
-            })
-            .collect()
-    };
-    let reserved_words = if config.reserved.is_empty() {
-        base_grammar.map_or_else(Vec::new, |b| b.reserved_words.clone())
-    } else {
-        config
-            .reserved
-            .iter()
-            .map(|rws| {
-                let words = rws
-                    .words
-                    .iter()
-                    .map(|&id| {
-                        let rid = eval.lower_to_rule(id)?;
-                        Ok(eval.build_rule(rid))
-                    })
-                    .collect::<Result<_, LowerError>>()?;
-                Ok(ReservedWordContext {
-                    name: ast.text(rws.name).to_string(),
-                    reserved_words: words,
-                })
-            })
-            .collect::<Result<_, LowerError>>()?
+        (
+            eval_extras.unwrap_or_default(),
+            eval_externals.unwrap_or_default(),
+            eval_inline.unwrap_or_default(),
+            eval_supertypes.unwrap_or_default(),
+            eval_word,
+            eval_conflicts.unwrap_or_default(),
+            eval_precedences.unwrap_or_default(),
+            eval_reserved.unwrap_or_default(),
+        )
     };
 
     Ok(InputGrammar {
