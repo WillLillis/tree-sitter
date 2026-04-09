@@ -130,6 +130,37 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// After parsing the expected number of args, check that the next token
+    /// is `)` and not `,` (which would indicate extra arguments).
+    /// `call_start` is the span of the function keyword for error reporting.
+    fn expect_close_args(
+        &mut self,
+        name: &'static str,
+        expected: u8,
+        call_start: Span,
+    ) -> Result<(), ParseError> {
+        if self.at(TokenKind::Comma) {
+            let mut got = expected;
+            while self.eat(TokenKind::Comma).is_some() {
+                if self.at(TokenKind::RParen) {
+                    break;
+                }
+                self.parse_expr()?;
+                got += 1;
+            }
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name,
+                    expected,
+                    got,
+                },
+                span: call_start.merge(self.span()),
+                note: None,
+            });
+        }
+        Ok(())
+    }
+
     // -- Top-level items --
 
     fn parse_item(&mut self) -> Result<NodeId, ParseError> {
@@ -368,19 +399,40 @@ impl<'src> Parser<'src> {
         match &self.tokens[self.pos].kind {
             TokenKind::KwSeq => self.parse_variadic(start, "seq"),
             TokenKind::KwChoice => self.parse_variadic(start, "choice"),
-            TokenKind::KwRepeat => self.parse_unary(start, Node::Repeat),
-            TokenKind::KwRepeat1 => self.parse_unary(start, Node::Repeat1),
-            TokenKind::KwOptional => self.parse_unary(start, Node::Optional),
+            TokenKind::KwRepeat => self.parse_unary(start, "repeat", Node::Repeat),
+            TokenKind::KwRepeat1 => self.parse_unary(start, "repeat1", Node::Repeat1),
+            TokenKind::KwOptional => self.parse_unary(start, "optional", Node::Optional),
             TokenKind::KwBlank => {
                 self.pos += 1;
                 self.expect(TokenKind::LParen)?;
+                if !self.at(TokenKind::RParen) {
+                    let mut got = 0u8;
+                    loop {
+                        self.parse_expr()?;
+                        got += 1;
+                        if self.eat(TokenKind::Comma).is_none() {
+                            break;
+                        }
+                    }
+                    return Err(ParseError {
+                        kind: ParseErrorKind::WrongArgumentCount {
+                            name: "blank",
+                            expected: 0,
+                            got,
+                        },
+                        span: start.merge(self.span()),
+                        note: None,
+                    });
+                }
                 let end = self.expect(TokenKind::RParen)?;
                 Ok(self.ast.push(Node::Blank, start.merge(end)))
             }
             TokenKind::KwField => self.parse_field(start),
             TokenKind::KwAlias => self.parse_alias(start),
-            TokenKind::KwToken => self.parse_unary(start, Node::Token),
-            TokenKind::KwTokenImmediate => self.parse_unary(start, Node::TokenImmediate),
+            TokenKind::KwToken => self.parse_unary(start, "token", Node::Token),
+            TokenKind::KwTokenImmediate => {
+                self.parse_unary(start, "token_immediate", Node::TokenImmediate)
+            }
             TokenKind::KwPrec => self.parse_prec(start, PrecVariant::Default),
             TokenKind::KwPrecLeft => self.parse_prec(start, PrecVariant::Left),
             TokenKind::KwPrecRight => self.parse_prec(start, PrecVariant::Right),
@@ -434,10 +486,27 @@ impl<'src> Parser<'src> {
         Ok(self.ast.push(node, start.merge(end)))
     }
 
-    fn parse_unary(&mut self, start: Span, make: fn(NodeId) -> Node) -> Result<NodeId, ParseError> {
+    fn parse_unary(
+        &mut self,
+        start: Span,
+        name: &'static str,
+        make: fn(NodeId) -> Node,
+    ) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name,
+                    expected: 1,
+                    got: 0,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         let inner = self.parse_expr()?;
+        self.expect_close_args(name, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.ast.push(make(inner), start.merge(end)))
     }
@@ -447,8 +516,20 @@ impl<'src> Parser<'src> {
         self.expect(TokenKind::LParen)?;
         let name_span = self.expect_name()?;
         let name = self.ast.push(Node::Ident, name_span);
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name: "field",
+                    expected: 2,
+                    got: 1,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         self.expect(TokenKind::Comma)?;
         let content = self.parse_expr()?;
+        self.expect_close_args("field", 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
             .ast
@@ -459,8 +540,20 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         let content = self.parse_expr()?;
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name: "alias",
+                    expected: 2,
+                    got: 1,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         self.expect(TokenKind::Comma)?;
         let target = self.parse_expr()?;
+        self.expect_close_args("alias", 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
             .ast
@@ -468,11 +561,40 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_prec(&mut self, start: Span, variant: PrecVariant) -> Result<NodeId, ParseError> {
+        let name = match variant {
+            PrecVariant::Default => "prec",
+            PrecVariant::Left => "prec_left",
+            PrecVariant::Right => "prec_right",
+            PrecVariant::Dynamic => "prec_dynamic",
+        };
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name,
+                    expected: 2,
+                    got: 0,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         let value = self.parse_expr()?;
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name,
+                    expected: 2,
+                    got: 1,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         self.expect(TokenKind::Comma)?;
         let content = self.parse_expr()?;
+        self.expect_close_args(name, 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         let node = match variant {
             PrecVariant::Default => Node::Prec { value, content },
@@ -490,8 +612,20 @@ impl<'src> Parser<'src> {
         let context = self
             .ast
             .push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1));
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name: "reserved",
+                    expected: 2,
+                    got: 1,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         self.expect(TokenKind::Comma)?;
         let content = self.parse_expr()?;
+        self.expect_close_args("reserved", 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
             .ast
@@ -516,8 +650,20 @@ impl<'src> Parser<'src> {
     fn parse_inherit(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name: "inherit",
+                    expected: 1,
+                    got: 0,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         let path_span = self.expect_string()?;
         let path = self.ast.push(Node::StringLit, path_span);
+        self.expect_close_args("inherit", 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.ast.push(Node::Inherit { path }, start.merge(end)))
     }
@@ -526,8 +672,20 @@ impl<'src> Parser<'src> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         let left = self.parse_expr()?;
+        if self.at(TokenKind::RParen) {
+            return Err(ParseError {
+                kind: ParseErrorKind::WrongArgumentCount {
+                    name: "append",
+                    expected: 2,
+                    got: 1,
+                },
+                span: start.merge(self.span()),
+                note: None,
+            });
+        }
         self.expect(TokenKind::Comma)?;
         let right = self.parse_expr()?;
+        self.expect_close_args("append", 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
             .ast
@@ -696,7 +854,10 @@ pub struct ParseError {
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum ParseErrorKind {
-    ExpectedToken { expected: TokenKind, got: TokenKind },
+    ExpectedToken {
+        expected: TokenKind,
+        got: TokenKind,
+    },
     ExpectedIdent,
     ExpectedString,
     ExpectedName,
@@ -710,6 +871,11 @@ pub enum ParseErrorKind {
     ExpectedStringOrIdent,
     DuplicateGrammarBlock,
     TooManyChildren,
+    WrongArgumentCount {
+        name: &'static str,
+        expected: u8,
+        got: u8,
+    },
 }
 
 impl std::fmt::Display for ParseError {
@@ -737,6 +903,15 @@ impl std::fmt::Display for ParseError {
             ParseErrorKind::TooManyChildren => {
                 write!(f, "too many elements (maximum {})", u16::MAX)
             }
+            ParseErrorKind::WrongArgumentCount {
+                name,
+                expected,
+                got,
+            } => match expected {
+                0 => write!(f, "'{name}' takes no arguments, got {got}"),
+                1 => write!(f, "'{name}' takes 1 argument, got {got}"),
+                _ => write!(f, "'{name}' takes {expected} arguments, got {got}"),
+            },
         }
     }
 }
