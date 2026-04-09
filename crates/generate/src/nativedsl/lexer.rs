@@ -199,7 +199,6 @@ impl<'src> Lexer<'src> {
                 && self.source[self.pos + 1] == b'/'
             {
                 self.pos += 2;
-                // Use memchr to find end of line
                 match memchr(b'\n', &self.source[self.pos..]) {
                     Some(offset) => self.pos += offset,
                     None => self.pos = self.source.len(),

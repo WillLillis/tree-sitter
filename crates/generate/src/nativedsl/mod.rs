@@ -86,7 +86,7 @@ fn parse_native_dsl_inner(
     let mut ast = ast;
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
     typecheck::check(&ast)?;
-    Ok(lower::lower_with_base(&ast, base.as_ref())?)
+    Ok(lower::lower_with_base(&ast, base)?)
 }
 
 /// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
