@@ -1703,6 +1703,92 @@ fn error_missing_return_type() {
 }
 
 #[test]
+fn error_builtin_arg_count_messages() {
+    macro_rules! g {
+        ($expr:expr) => {
+            concat!(r#"grammar { language: "test" } rule foo { "#, $expr, " }")
+        };
+    }
+    let cases: &[(&str, &str, u8, u8)] = &[
+        // 0-arg: blank
+        (g!("blank(\"a\")"), "blank", 0, 1),
+        (g!("blank(\"a\", \"b\")"), "blank", 0, 2),
+        // 1-arg: too few
+        (g!("repeat()"), "repeat", 1, 0),
+        (g!("repeat1()"), "repeat1", 1, 0),
+        (g!("optional()"), "optional", 1, 0),
+        (g!("token()"), "token", 1, 0),
+        (g!("token_immediate()"), "token_immediate", 1, 0),
+        (g!("inherit()"), "inherit", 1, 0),
+        // 1-arg: too many
+        (g!(r#"repeat("a", "b")"#), "repeat", 1, 2),
+        (g!(r#"repeat1("a", "b")"#), "repeat1", 1, 2),
+        (g!(r#"optional("a", "b")"#), "optional", 1, 2),
+        (g!(r#"token("a", "b")"#), "token", 1, 2),
+        (g!(r#"token_immediate("a", "b")"#), "token_immediate", 1, 2),
+        (g!(r#"inherit("a", "b")"#), "inherit", 1, 2),
+        // 2-arg: too few
+        (g!("prec()"), "prec", 2, 0),
+        (g!("prec(1)"), "prec", 2, 1),
+        (g!("prec_left()"), "prec_left", 2, 0),
+        (g!("prec_left(1)"), "prec_left", 2, 1),
+        (g!("prec_right()"), "prec_right", 2, 0),
+        (g!("prec_right(1)"), "prec_right", 2, 1),
+        (g!("prec_dynamic()"), "prec_dynamic", 2, 0),
+        (g!("prec_dynamic(1)"), "prec_dynamic", 2, 1),
+        (g!("field(name)"), "field", 2, 1),
+        (g!(r#"alias("a")"#), "alias", 2, 1),
+        (g!(r#"append("a")"#), "append", 2, 1),
+        (g!(r#"reserved("ctx")"#), "reserved", 2, 1),
+        // 2-arg: too many
+        (g!(r#"prec(1, "a", "b")"#), "prec", 2, 3),
+        (g!(r#"prec_left(1, "a", "b")"#), "prec_left", 2, 3),
+        (g!(r#"prec_right(1, "a", "b")"#), "prec_right", 2, 3),
+        (g!(r#"prec_dynamic(1, "a", "b")"#), "prec_dynamic", 2, 3),
+        (g!(r#"field(name, "a", "b")"#), "field", 2, 3),
+        (g!(r#"alias("a", "b", "c")"#), "alias", 2, 3),
+        (g!(r#"append([1], [2], [3])"#), "append", 2, 3),
+        (g!(r#"reserved("ctx", "a", "b")"#), "reserved", 2, 3),
+    ];
+    for &(src, name, expected, got) in cases {
+        let err = dsl_err(src);
+        let e = assert_err!(err, Parse);
+        assert_eq!(
+            e.kind,
+            ParseErrorKind::WrongArgumentCount {
+                name,
+                expected,
+                got
+            },
+            "wrong error for: {src}"
+        );
+    }
+}
+
+#[test]
+fn error_builtin_arg_count_display() {
+    let cases = [
+        (
+            r#"grammar { language: "test" } rule foo { prec(1) }"#,
+            "'prec' takes 2 arguments, got 1",
+        ),
+        (
+            r#"grammar { language: "test" } rule foo { repeat() }"#,
+            "'repeat' takes 1 argument, got 0",
+        ),
+        (
+            r#"grammar { language: "test" } rule foo { blank("x") }"#,
+            "'blank' takes no arguments, got 1",
+        ),
+    ];
+    for (src, expected_msg) in cases {
+        let err = dsl_err(src);
+        let e = assert_err!(err, Parse);
+        assert_eq!(e.to_string(), expected_msg, "wrong message for: {src}");
+    }
+}
+
+#[test]
 fn error_expected_function_name() {
     let err = dsl_err(
         r#"
