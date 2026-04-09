@@ -451,8 +451,8 @@ rule _class_declaration_item {
 }
 
 rule class_specifier { seq("class", _class_declaration) }
-rule union_specifier { seq("union", _class_declaration) }
-rule struct_specifier { seq("struct", _class_declaration) }
+override rule union_specifier { seq("union", _class_declaration) }
+override rule struct_specifier { seq("struct", _class_declaration) }
 
 rule _class_name {
     prec_right(0, choice(
@@ -481,7 +481,7 @@ rule base_class_clause {
     )))
 }
 
-rule enum_specifier {
+override rule enum_specifier {
     prec_right(0, seq("enum", optional(choice("class", "struct")),
         choice(
             seq(field(name, _class_name), optional(_enum_base_clause),
@@ -722,15 +722,15 @@ rule _function_postfix {
     prec_right(0, choice(repeat1(virtual_specifier), requires_clause))
 }
 
-rule function_declarator {
+override rule function_declarator {
     prec_dynamic(1, seq(field(declarator, _declarator), _function_declarator_seq))
 }
 
-rule function_field_declarator {
+override rule function_field_declarator {
     prec_dynamic(1, seq(field(declarator, _field_declarator), _function_declarator_seq))
 }
 
-rule abstract_function_declarator {
+override rule abstract_function_declarator {
     seq(field(declarator, optional(_abstract_declarator)), _function_declarator_seq)
 }
 
@@ -848,7 +848,7 @@ rule catch_clause {
 
 // Expressions
 
-rule _string { choice(string_literal, raw_string_literal, concatenated_string) }
+override rule _string { choice(string_literal, raw_string_literal, concatenated_string) }
 
 rule raw_string_literal {
     seq(choice(r#"R""#, r#"LR""#, r#"uR""#, r#"UR""#, r#"u8R""#),
@@ -1090,7 +1090,7 @@ rule operator_name {
 
 rule this { "this" }
 
-rule concatenated_string {
+override rule concatenated_string {
     prec_right(0, seq(
         choice(identifier, string_literal, raw_string_literal),
         choice(string_literal, raw_string_literal),
