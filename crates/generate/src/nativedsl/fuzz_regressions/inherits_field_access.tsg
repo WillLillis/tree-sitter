@@ -1,0 +1,4 @@
+let base = inherit("./base_with_config.tsg")
+grammar { language: "derived", inherits: base.inline }
+override rule program { seq(base::expression, "!") }
+rule extra_rule { "extra" }
