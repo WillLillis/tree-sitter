@@ -1,0 +1,9 @@
+let base = inherit("INHERIT_BASE")
+grammar {
+    language: "derived",
+    inherits: base,
+    extras: base.extras,
+    inline: base.inline,
+}
+override rule program { seq(base::expression, "!") }
+rule extra_rule { "extra" }

@@ -568,6 +568,120 @@ fn inheritance_invalid(rng: &mut SmallRng, base_path: &Path, buf: &mut String) {
     }
 }
 
+/// Swap bodies of two rules in a multi-rule corpus grammar
+fn swap_rule_bodies(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
+    let base = pick(rng, corpus);
+    buf.push_str(base);
+    // Find "rule NAME { ... }" blocks by searching for "rule " followed by "{"
+    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
+    if rule_starts.len() >= 2 {
+        // Find the bodies (between first { and matching })
+        let a = rule_starts[rng.random_range(0..rule_starts.len())];
+        let b = rule_starts[rng.random_range(0..rule_starts.len())];
+        if a != b {
+            if let (Some(a_open), Some(b_open)) = (buf[a..].find('{'), buf[b..].find('{')) {
+                if let (Some(a_close), Some(b_close)) =
+                    (buf[a + a_open..].find('}'), buf[b + b_open..].find('}'))
+                {
+                    let body_a = buf[a + a_open + 1..a + a_open + a_close].to_string();
+                    let body_b = buf[b + b_open + 1..b + b_open + b_close].to_string();
+                    // Only swap if ranges don't overlap
+                    let range_a = a + a_open + 1..a + a_open + a_close;
+                    let range_b = b + b_open + 1..b + b_open + b_close;
+                    if range_a.end <= range_b.start || range_b.end <= range_a.start {
+                        // Replace the later range first to preserve offsets
+                        if range_a.start > range_b.start {
+                            buf.replace_range(range_a, &body_b);
+                            buf.replace_range(range_b, &body_a);
+                        } else {
+                            buf.replace_range(range_b, &body_a);
+                            buf.replace_range(range_a, &body_b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Delete a random rule from a multi-rule corpus grammar
+fn delete_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
+    let base = pick(rng, corpus);
+    buf.push_str(base);
+    // Find rule boundaries and delete one
+    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
+    if rule_starts.len() >= 2 {
+        let idx = rng.random_range(0..rule_starts.len());
+        let start = rule_starts[idx];
+        // Find closing brace
+        if let Some(open) = buf[start..].find('{') {
+            if let Some(close) = buf[start + open..].find('}') {
+                let end = start + open + close + 1;
+                buf.replace_range(start..end, "");
+            }
+        }
+    }
+}
+
+/// Duplicate a rule with the same name
+fn duplicate_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
+    let base = pick(rng, corpus);
+    buf.push_str(base);
+    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
+    if !rule_starts.is_empty() {
+        let idx = rng.random_range(0..rule_starts.len());
+        let start = rule_starts[idx];
+        if let Some(open) = buf[start..].find('{') {
+            if let Some(close) = buf[start + open..].find('}') {
+                let end = start + open + close + 1;
+                let dup = buf[start..end].to_string();
+                buf.push(' ');
+                buf.push_str(&dup);
+            }
+        }
+    }
+}
+
+/// Wrap a rule body in a random combinator
+fn wrap_in_combinator(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
+    let base = pick(rng, corpus);
+    buf.push_str(base);
+    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
+    if !rule_starts.is_empty() {
+        let idx = rng.random_range(0..rule_starts.len());
+        let start = rule_starts[idx];
+        if let Some(open) = buf[start..].find('{') {
+            if let Some(close) = buf[start + open..].find('}') {
+                let body_start = start + open + 1;
+                let body_end = start + open + close;
+                let body = buf[body_start..body_end].to_string();
+                let combinator = pick(rng, UNARY_COMBINATORS);
+                let wrapped = format!(" {combinator}({body}) ");
+                buf.replace_range(body_start..body_end, &wrapped);
+            }
+        }
+    }
+}
+
+/// Take an expression from one corpus grammar and transplant it into another
+fn expression_transplant(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
+    let donor = pick(rng, corpus);
+    let recipient = pick(rng, corpus);
+    // Find a rule body in the donor
+    if let Some(d_open) = donor.find('{') {
+        if let Some(d_close) = donor[d_open..].find('}') {
+            let expr = &donor[d_open + 1..d_open + d_close];
+            // Find a rule body in the recipient and replace it
+            buf.push_str(recipient);
+            if let Some(r_open) = buf.find('{') {
+                if let Some(r_close) = buf[r_open..].find('}') {
+                    buf.replace_range(r_open + 1..r_open + r_close, expr);
+                }
+            }
+        }
+    }
+}
+
 /// Set up base grammars in a temp directory for inheritance testing
 fn setup_inherit_dir() -> Result<PathBuf> {
     let dir = std::env::temp_dir().join("fuzz_dsl_inherit");
@@ -606,16 +720,22 @@ rule _inner { "y" }
 
 pub fn run(options: &super::FuzzDsl) -> Result<()> {
     let root = super::root_dir();
-    let corpus = load_dir(&root.join(CORPUS_DIR).join("inputs"))?;
-    if corpus.is_empty() {
-        Err(anyhow!("no .tsg files found in {CORPUS_DIR}/inputs"))?;
-    }
-
     let inherit_dir = setup_inherit_dir()?;
     let base_paths = [
         inherit_dir.join("base.tsg"),
         inherit_dir.join("base_with_config.tsg"),
     ];
+
+    let mut corpus = load_dir(&root.join(CORPUS_DIR).join("inputs"))?;
+    if corpus.is_empty() {
+        Err(anyhow!("no .tsg files found in {CORPUS_DIR}/inputs"))?;
+    }
+    // Replace INHERIT_BASE placeholder in corpus entries with actual path
+    for entry in &mut corpus {
+        if entry.contains("INHERIT_BASE") {
+            *entry = entry.replace("INHERIT_BASE", &base_paths[0].to_string_lossy());
+        }
+    }
 
     let dummy_path = PathBuf::from("grammar.tsg");
     let seed = options.seed.unwrap_or_else(|| {
@@ -654,7 +774,7 @@ pub fn run(options: &super::FuzzDsl) -> Result<()> {
 
         input.clear();
 
-        match rng.random_range(0..16) {
+        match rng.random_range(0..21) {
             0 => random_ascii(&mut rng, 512, &mut input),
             1 => truncate_grammar(&mut rng, &corpus, &mut input),
             2 => mutate_bytes(&mut rng, &corpus, &mut input),
@@ -677,6 +797,11 @@ pub fn run(options: &super::FuzzDsl) -> Result<()> {
                 let base = &base_paths[rng.random_range(0..base_paths.len())];
                 inheritance_invalid(&mut rng, base, &mut input);
             }
+            16 => swap_rule_bodies(&mut rng, &corpus, &mut input),
+            17 => delete_rule(&mut rng, &corpus, &mut input),
+            18 => duplicate_rule(&mut rng, &corpus, &mut input),
+            19 => wrap_in_combinator(&mut rng, &corpus, &mut input),
+            20 => expression_transplant(&mut rng, &corpus, &mut input),
             _ => match iterations % 3 {
                 0 => repeat_fragment(&mut rng, &corpus, &mut input),
                 1 => unicode_input(&mut rng, &corpus, &mut input),

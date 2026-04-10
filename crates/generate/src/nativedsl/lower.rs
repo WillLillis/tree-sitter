@@ -190,6 +190,8 @@ impl<'src> Evaluator<'src> {
     fn get_str_val(&self, id: ValueId) -> Str {
         match self.get_val(id) {
             Value::Str(s) => *s,
+            // Guarded by super::typecheck::type_of (Node::Concat, Node::DynRegex) -
+            // ensures arguments are str type
             _ => unreachable!(),
         }
     }
@@ -241,6 +243,7 @@ impl<'src> Evaluator<'src> {
 
     fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
         let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_rule_list - ensures list type
         let Value::List(items) = self.get_val(vid) else {
             unreachable!()
         };
@@ -249,6 +252,7 @@ impl<'src> Evaluator<'src> {
             .map(|&v| match self.get_val(v) {
                 Value::Rule(rid) => Ok(self.build_rule(*rid)),
                 Value::Str(sid) => Ok(Rule::String(self.strings.to_string(*sid))),
+                // Guarded by super::typecheck::expect_rule_list - checks elements are rule-like
                 _ => unreachable!(),
             })
             .collect()
@@ -256,17 +260,20 @@ impl<'src> Evaluator<'src> {
 
     fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
         let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_name_list - ensures list type
         let Value::List(items) = self.get_val(vid) else {
             unreachable!()
         };
         items
             .iter()
             .map(|&v| {
+                // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
                 let Value::Rule(rid) = *self.get_val(v) else {
                     unreachable!()
                 };
                 match &self.rules[rid.0 as usize] {
                     ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
+                    // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
                     _ => unreachable!(),
                 }
             })
@@ -290,6 +297,8 @@ impl<'src> Evaluator<'src> {
 
     /// Import a config field from the base grammar as a DSL value.
     fn import_config_field(&mut self, field: &str) -> ValueId {
+        // Guarded by super::typecheck::type_of (Node::FieldAccess) - only reachable
+        // via field access on a Grammar value, which requires an inherit() binding.
         let grammar = self.base_grammar.unwrap();
         match field {
             "extras" => self.import_rules_as_list(&grammar.extra_symbols),
@@ -314,6 +323,8 @@ impl<'src> Evaluator<'src> {
                     self.alloc_val(Value::Rule(rid))
                 }
             }
+            // Guarded by super::typecheck::type_of (Node::FieldAccess) - rejects
+            // unknown config field names on Grammar values
             _ => unreachable!(),
         }
     }
@@ -654,23 +665,27 @@ impl<'src> Evaluator<'src> {
             }
             Node::Neg(inner) => {
                 let vid = self.eval_expr(*inner)?;
+                // Guarded by super::typecheck::type_of (Node::Neg) - ensures inner is int
                 let Value::Int(n) = self.get_val(vid) else {
                     unreachable!()
                 };
                 Ok(self.alloc_val(Value::Int(-*n)))
             }
+            // Guarded by super::resolve - all Idents replaced with RuleRef/VarRef
             Node::Ident => unreachable!(),
             Node::RuleRef => {
                 let sid = self.strings.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
+            // Guarded by super::resolve::resolve - all variable names validated
             Node::VarRef => Ok(self.lookup(ast.text(span)).unwrap()),
             Node::Inherit { .. } => Ok(self.alloc_val(Value::Grammar)),
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
                 let lv = self.eval_expr(left)?;
                 let rv = self.eval_expr(right)?;
+                // Guarded by super::typecheck::type_of (Node::Append) - ensures both are lists
                 let Value::List(li) = self.get_val(lv) else {
                     unreachable!()
                 };
@@ -686,9 +701,8 @@ impl<'src> Evaluator<'src> {
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = ast.node_text(field);
                 match self.get_val(obj_val) {
-                    // Typecheck validates all field accesses: Object fields are
-                    // checked against the known field list, Grammar fields against
-                    // the known config names. No unknown field reaches lowering.
+                    // Guarded by super::typecheck::type_of (Node::FieldAccess) -
+                    // validates field exists on object/grammar
                     Value::Object(map) => Ok(*map.get(field_name).unwrap()),
                     Value::Grammar => Ok(self.import_config_field(field_name)),
                     _ => unreachable!(),
@@ -698,6 +712,8 @@ impl<'src> Evaluator<'src> {
                 let (obj, rule) = (*obj, *rule);
                 self.eval_expr(obj)?;
                 let rule_name = ast.node_text(rule);
+                // Guarded by super::typecheck::type_of (Node::RuleInline) - only
+                // reachable on Grammar values, which require an inherit() binding
                 let grammar = self.base_grammar.unwrap();
                 match grammar.variables.iter().find(|v| v.name == rule_name) {
                     Some(var) => {
@@ -816,6 +832,7 @@ impl<'src> Evaluator<'src> {
                 let s = *s;
                 self.alloc_rule(ARule::String(s))
             }
+            // Guarded by super::typecheck::expect_rule - only rule-like values reach here
             _ => unreachable!(),
         }
     }
@@ -824,6 +841,7 @@ impl<'src> Evaluator<'src> {
         match self.get_val(id) {
             Value::Int(n) => APrec::Integer(*n),
             Value::Str(s) => APrec::Name(*s),
+            // Guarded by super::typecheck::type_of (Node::Prec) - ensures value is int or str
             _ => unreachable!(),
         }
     }
@@ -890,11 +908,15 @@ impl<'src> Evaluator<'src> {
                         match self.get_val(vid) {
                             Value::Str(s) => Ok(self.alloc_rule(ARule::Alias(*s, false, inner))),
                             Value::Rule(rid) => {
+                                // Guarded by super::typecheck::type_of (Node::Alias) -
+                                // InvalidAliasTarget rejects non-name/non-str targets
                                 let ARule::NamedSymbol(s) = &self.rules[rid.0 as usize] else {
                                     unreachable!()
                                 };
                                 Ok(self.alloc_rule(ARule::Alias(*s, true, inner)))
                             }
+                            // Guarded by super::typecheck::type_of (Node::Alias) -
+                            // only str or rule-name targets pass
                             _ => unreachable!(),
                         }
                     }
@@ -924,6 +946,7 @@ impl<'src> Evaluator<'src> {
             }
             Node::PrecDynamic { value, content } => {
                 let vid = self.eval_expr(*value)?;
+                // Guarded by super::typecheck::type_of (Node::PrecDynamic) - ensures int
                 let Value::Int(n) = self.get_val(vid) else {
                     unreachable!()
                 };
@@ -936,6 +959,7 @@ impl<'src> Evaluator<'src> {
                 let sid = self.strings.intern_span(ast.span(*context));
                 Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
+            // Guarded by lower_to_rule - only combinator nodes are dispatched here
             _ => unreachable!(),
         }
     }
@@ -958,6 +982,7 @@ impl<'src> Evaluator<'src> {
                 call_span,
             ));
         }
+        // Guarded by super::typecheck::check_call_args - validates function exists
         let &fn_id = self.fns.get(name).unwrap();
         let config = self.get_fn_config(fn_id);
         let body = config.body;
@@ -974,6 +999,7 @@ impl<'src> Evaluator<'src> {
 
     fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
         let iter_vid = self.eval_expr(config.iterable)?;
+        // Guarded by super::typecheck::check_for_expr - ensures iterable is a list
         let n_items = match self.get_val(iter_vid) {
             Value::List(items) => items.len(),
             _ => unreachable!(),
@@ -1178,6 +1204,9 @@ pub enum LowerErrorKind {
     InheritRuleNotFound(String),
     ExpectedRuleName,
     ConfigFieldUnset,
+    MultipleInherits,
+    InheritWithoutConfig,
+    InheritsWithoutInherit,
     TooManyChildren,
     CallDepthExceeded(Vec<(String, Span)>),
 }
@@ -1217,6 +1246,18 @@ impl std::fmt::Display for LowerError {
             }
             LowerErrorKind::ConfigFieldUnset => {
                 write!(f, "config field is not set in the inherited grammar")
+            }
+            LowerErrorKind::MultipleInherits => {
+                write!(f, "only one inherit() call is allowed per grammar")
+            }
+            LowerErrorKind::InheritWithoutConfig => {
+                write!(
+                    f,
+                    "inherit() requires 'inherits' to be set in the grammar config"
+                )
+            }
+            LowerErrorKind::InheritsWithoutInherit => {
+                write!(f, "'inherits' must reference a variable bound to inherit()")
             }
             LowerErrorKind::TooManyChildren => {
                 write!(f, "too many elements (maximum {})", u16::MAX)
