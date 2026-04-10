@@ -118,331 +118,6 @@ struct Evaluator<'src> {
     call_stack: Vec<(&'src str, Span)>,
 }
 
-impl<'src> Evaluator<'src> {
-    fn new(ast: &'src Ast<'src>, base_grammar: Option<&'src InputGrammar>) -> Self {
-        let cap = ast.nodes.len();
-        Self {
-            ast,
-            values: Vec::with_capacity(cap),
-            scopes: vec![FxHashMap::default()],
-            fns: FxHashMap::default(),
-            rules: Vec::with_capacity(cap),
-            rule_children: Vec::with_capacity(cap),
-            strings: StringPool::new(ast.source()),
-            base_grammar,
-            call_stack: Vec::new(),
-        }
-    }
-
-    fn alloc_val(&mut self, val: Value<'src>) -> ValueId {
-        let id = ValueId(self.values.len() as u32);
-        self.values.push(val);
-        id
-    }
-
-    fn get_val(&self, id: ValueId) -> &Value<'src> {
-        &self.values[id.0 as usize]
-    }
-
-    fn push_scope(&mut self) {
-        self.scopes.push(FxHashMap::default());
-    }
-
-    fn pop_scope(&mut self) {
-        self.scopes.pop();
-    }
-
-    fn bind(&mut self, name: &'src str, val: ValueId) {
-        self.scopes.last_mut().unwrap().insert(name, val);
-    }
-
-    fn lookup(&self, name: &str) -> Option<ValueId> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
-    }
-
-    fn alloc_rule(&mut self, rule: ARule) -> RuleId {
-        let id = RuleId(self.rules.len() as u32);
-        self.rules.push(rule);
-        id
-    }
-
-    const fn children_start(&self) -> u32 {
-        self.rule_children.len() as u32
-    }
-
-    fn children_range(&self, start: u32, span: Span) -> Result<(u32, u16), LowerError> {
-        let count = self.rule_children.len() as u32 - start;
-        u16::try_from(count)
-            .map(|len| (start, len))
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
-    }
-
-    fn get_fn_config(&self, fn_id: NodeId) -> &'src FnConfig {
-        match self.ast.node(fn_id) {
-            Node::Fn(fn_idx) => self.ast.get_fn(*fn_idx),
-            _ => unreachable!(),
-        }
-    }
-
-    fn get_str_val(&self, id: ValueId) -> Str {
-        match self.get_val(id) {
-            Value::Str(s) => *s,
-            // Guarded by super::typecheck::type_of (Node::Concat, Node::DynRegex) -
-            // ensures arguments are str type
-            _ => unreachable!(),
-        }
-    }
-
-    fn build_rule(&self, id: RuleId) -> Rule {
-        let s = &self.strings;
-        match &self.rules[id.0 as usize] {
-            ARule::Blank => Rule::Blank,
-            ARule::String(sid) => Rule::String(s.to_string(*sid)),
-            ARule::Pattern(p, f) => Rule::Pattern(
-                s.to_string(*p),
-                f.map_or_else(String::new, |f| s.to_string(f)),
-            ),
-            ARule::NamedSymbol(sid) => Rule::NamedSymbol(s.to_string(*sid)),
-            ARule::Seq(start, len) | ARule::Choice(start, len) => {
-                let children: Vec<Rule> = self.rule_children
-                    [*start as usize..*start as usize + *len as usize]
-                    .iter()
-                    .map(|&id| self.build_rule(id))
-                    .collect();
-                if matches!(&self.rules[id.0 as usize], ARule::Seq(..)) {
-                    Rule::seq(children)
-                } else {
-                    Rule::choice(children)
-                }
-            }
-            ARule::Repeat(inner) => Rule::repeat(self.build_rule(*inner)),
-            ARule::Prec(p, r) => Rule::prec(self.build_prec(*p), self.build_rule(*r)),
-            ARule::PrecLeft(p, r) => Rule::prec_left(self.build_prec(*p), self.build_rule(*r)),
-            ARule::PrecRight(p, r) => Rule::prec_right(self.build_prec(*p), self.build_rule(*r)),
-            ARule::PrecDynamic(v, r) => Rule::prec_dynamic(*v, self.build_rule(*r)),
-            ARule::Field(n, r) => Rule::field(s.to_string(*n), self.build_rule(*r)),
-            ARule::Alias(v, named, r) => Rule::alias(self.build_rule(*r), s.to_string(*v), *named),
-            ARule::Token(r) => Rule::token(self.build_rule(*r)),
-            ARule::ImmediateToken(r) => Rule::immediate_token(self.build_rule(*r)),
-            ARule::Reserved(ctx, r) => Rule::Reserved {
-                rule: Box::new(self.build_rule(*r)),
-                context_name: s.to_string(*ctx),
-            },
-        }
-    }
-
-    fn build_prec(&self, prec: APrec) -> Precedence {
-        match prec {
-            APrec::Integer(n) => Precedence::Integer(n),
-            APrec::Name(sid) => Precedence::Name(self.strings.to_string(sid)),
-        }
-    }
-
-    fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
-        let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_rule_list - ensures list type
-        let Value::List(items) = self.get_val(vid) else {
-            unreachable!()
-        };
-        items
-            .iter()
-            .map(|&v| match self.get_val(v) {
-                Value::Rule(rid) => Ok(self.build_rule(*rid)),
-                Value::Str(sid) => Ok(Rule::String(self.strings.to_string(*sid))),
-                // Guarded by super::typecheck::expect_rule_list - checks elements are rule-like
-                _ => unreachable!(),
-            })
-            .collect()
-    }
-
-    fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
-        let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_name_list - ensures list type
-        let Value::List(items) = self.get_val(vid) else {
-            unreachable!()
-        };
-        items
-            .iter()
-            .map(|&v| {
-                // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
-                let Value::Rule(rid) = *self.get_val(v) else {
-                    unreachable!()
-                };
-                match &self.rules[rid.0 as usize] {
-                    ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-                    // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
-                    _ => unreachable!(),
-                }
-            })
-            .collect()
-    }
-
-    fn eval_rule_name(&mut self, id: NodeId) -> Result<String, LowerError> {
-        let rid = self.lower_to_rule(id)?;
-        match &self.rules[rid.0 as usize] {
-            ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-            ARule::Blank => Err(LowerError::new(
-                LowerErrorKind::ConfigFieldUnset,
-                self.ast.span(id),
-            )),
-            _ => Err(LowerError::new(
-                LowerErrorKind::ExpectedRuleName,
-                self.ast.span(id),
-            )),
-        }
-    }
-
-    /// Import a config field from the base grammar as a DSL value.
-    fn import_config_field(&mut self, field: &str) -> ValueId {
-        // Guarded by super::typecheck::type_of (Node::FieldAccess) - only reachable
-        // via field access on a Grammar value, which requires an inherit() binding.
-        let grammar = self.base_grammar.unwrap();
-        match field {
-            "extras" => self.import_rules_as_list(&grammar.extra_symbols),
-            "externals" => self.import_rules_as_list(&grammar.external_tokens),
-            "inline" => self.import_names_as_list(&grammar.variables_to_inline),
-            "supertypes" => self.import_names_as_list(&grammar.supertype_symbols),
-            "conflicts" => {
-                let vals: Vec<ValueId> = grammar
-                    .expected_conflicts
-                    .iter()
-                    .map(|g| self.import_names_as_list(g))
-                    .collect();
-                self.alloc_val(Value::List(vals))
-            }
-            "word" => {
-                if let Some(name) = &grammar.word_token {
-                    let sid = self.strings.intern_owned(name.clone());
-                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                    self.alloc_val(Value::Rule(rid))
-                } else {
-                    let rid = self.alloc_rule(ARule::Blank);
-                    self.alloc_val(Value::Rule(rid))
-                }
-            }
-            // Guarded by super::typecheck::type_of (Node::FieldAccess) - rejects
-            // unknown config field names on Grammar values
-            _ => unreachable!(),
-        }
-    }
-
-    fn import_rules_as_list(&mut self, rules_data: &[Rule]) -> ValueId {
-        let vals: Vec<ValueId> = rules_data
-            .iter()
-            .map(|r| {
-                let rid = self.import_rule(r);
-                self.alloc_val(Value::Rule(rid))
-            })
-            .collect();
-        self.alloc_val(Value::List(vals))
-    }
-
-    fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
-        let vals: Vec<ValueId> = names
-            .iter()
-            .map(|name| {
-                let sid = self.strings.intern_owned(name.clone());
-                let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                self.alloc_val(Value::Rule(rid))
-            })
-            .collect();
-        self.alloc_val(Value::List(vals))
-    }
-
-    fn import_rule(&mut self, rule: &Rule) -> RuleId {
-        match rule {
-            Rule::Blank => self.alloc_rule(ARule::Blank),
-            Rule::String(s) => {
-                let sid = self.strings.intern_owned(s.clone());
-                self.alloc_rule(ARule::String(sid))
-            }
-            Rule::Pattern(p, f) => {
-                let pid = self.strings.intern_owned(p.clone());
-                let fid = (!f.is_empty()).then(|| self.strings.intern_owned(f.clone()));
-                self.alloc_rule(ARule::Pattern(pid, fid))
-            }
-            Rule::NamedSymbol(name) => {
-                let sid = self.strings.intern_owned(name.clone());
-                self.alloc_rule(ARule::NamedSymbol(sid))
-            }
-            Rule::Choice(members) | Rule::Seq(members) => {
-                let imported: Vec<RuleId> = members.iter().map(|m| self.import_rule(m)).collect();
-                let start = self.rule_children.len() as u32;
-                self.rule_children.extend_from_slice(&imported);
-                let len = imported.len() as u16;
-                if matches!(rule, Rule::Choice(_)) {
-                    self.alloc_rule(ARule::Choice(start, len))
-                } else {
-                    self.alloc_rule(ARule::Seq(start, len))
-                }
-            }
-            Rule::Repeat(inner) => {
-                let inner = self.import_rule(inner);
-                self.alloc_rule(ARule::Repeat(inner))
-            }
-            Rule::Metadata {
-                params,
-                rule: inner,
-            } => {
-                let mut rid = self.import_rule(inner);
-                if params.dynamic_precedence != 0 {
-                    rid = self.alloc_rule(ARule::PrecDynamic(params.dynamic_precedence, rid));
-                }
-                if let Precedence::Integer(n) = &params.precedence {
-                    let aprec = APrec::Integer(*n);
-                    rid = self.import_prec_rule(aprec, rid, params.associativity);
-                } else if let Precedence::Name(s) = &params.precedence {
-                    let aprec = APrec::Name(self.strings.intern_owned(s.clone()));
-                    rid = self.import_prec_rule(aprec, rid, params.associativity);
-                }
-                if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
-                    let sid = self.strings.intern_owned(value.clone());
-                    rid = self.alloc_rule(ARule::Alias(sid, *is_named, rid));
-                }
-                if let Some(field_name) = &params.field_name {
-                    let sid = self.strings.intern_owned(field_name.clone());
-                    rid = self.alloc_rule(ARule::Field(sid, rid));
-                }
-                if params.is_token && params.is_main_token {
-                    rid = self.alloc_rule(ARule::ImmediateToken(rid));
-                } else if params.is_token {
-                    rid = self.alloc_rule(ARule::Token(rid));
-                }
-                rid
-            }
-            Rule::Reserved {
-                rule: inner,
-                context_name,
-            } => {
-                let inner = self.import_rule(inner);
-                let sid = self.strings.intern_owned(context_name.clone());
-                self.alloc_rule(ARule::Reserved(sid, inner))
-            }
-            Rule::Symbol(_) => unreachable!(),
-        }
-    }
-
-    fn import_prec_rule(
-        &mut self,
-        prec: APrec,
-        inner: RuleId,
-        assoc: Option<crate::rules::Associativity>,
-    ) -> RuleId {
-        match assoc {
-            Some(crate::rules::Associativity::Left) => {
-                self.alloc_rule(ARule::PrecLeft(prec, inner))
-            }
-            Some(crate::rules::Associativity::Right) => {
-                self.alloc_rule(ARule::PrecRight(prec, inner))
-            }
-            None => self.alloc_rule(ARule::Prec(prec, inner)),
-        }
-    }
-}
-
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(
     ast: &Ast<'_>,
@@ -640,26 +315,360 @@ pub fn lower_with_base(
 }
 
 impl<'src> Evaluator<'src> {
+    fn new(ast: &'src Ast<'src>, base_grammar: Option<&'src InputGrammar>) -> Self {
+        let cap = ast.nodes.len();
+        Self {
+            ast,
+            values: Vec::with_capacity(cap),
+            scopes: vec![FxHashMap::default()],
+            fns: FxHashMap::default(),
+            rules: Vec::with_capacity(cap),
+            rule_children: Vec::with_capacity(cap),
+            strings: StringPool::new(ast.source()),
+            base_grammar,
+            call_stack: Vec::new(),
+        }
+    }
+
+    fn alloc_val(&mut self, val: Value<'src>) -> ValueId {
+        let id = ValueId(self.values.len() as u32);
+        self.values.push(val);
+        id
+    }
+
+    fn get_val(&self, id: ValueId) -> &Value<'src> {
+        &self.values[id.0 as usize]
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(FxHashMap::default());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn bind(&mut self, name: &'src str, val: ValueId) {
+        self.scopes.last_mut().unwrap().insert(name, val);
+    }
+
+    fn lookup(&self, name: &str) -> Option<ValueId> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+    }
+
+    fn alloc_rule(&mut self, rule: ARule) -> RuleId {
+        let id = RuleId(self.rules.len() as u32);
+        self.rules.push(rule);
+        id
+    }
+
+    const fn children_start(&self) -> u32 {
+        self.rule_children.len() as u32
+    }
+
+    fn children_range(&self, start: u32, span: Span) -> Result<(u32, u16), LowerError> {
+        let count = self.rule_children.len() as u32 - start;
+        u16::try_from(count)
+            .map(|len| (start, len))
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
+    }
+
+    fn get_fn_config(&self, fn_id: NodeId) -> &'src FnConfig {
+        match self.ast.node(fn_id) {
+            Node::Fn(fn_idx) => self.ast.get_fn(*fn_idx),
+            _ => unreachable!(),
+        }
+    }
+
+    fn intern_string_lit(&mut self, span: Span) -> Str {
+        let raw = self.ast.text(span);
+        if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
+            self.strings.intern_owned(unescape_string(raw))
+        } else {
+            self.strings.intern_span(span)
+        }
+    }
+
+    fn intern_raw_string_lit(&mut self, span: Span, hash_count: u8) -> Str {
+        let prefix = 2 + u32::from(hash_count);
+        let suffix = 1 + u32::from(hash_count);
+        self.strings
+            .intern_span(Span::new(span.start + prefix, span.end - suffix))
+    }
+
+    fn get_str_val(&self, id: ValueId) -> Str {
+        match self.get_val(id) {
+            Value::Str(s) => *s,
+            // Guarded by super::typecheck::type_of (Node::Concat, Node::DynRegex) -
+            // ensures arguments are str type
+            _ => unreachable!(),
+        }
+    }
+
+    fn build_rule(&self, id: RuleId) -> Rule {
+        let s = &self.strings;
+        match &self.rules[id.0 as usize] {
+            ARule::Blank => Rule::Blank,
+            ARule::String(sid) => Rule::String(s.to_string(*sid)),
+            ARule::Pattern(p, f) => Rule::Pattern(
+                s.to_string(*p),
+                f.map_or_else(String::new, |f| s.to_string(f)),
+            ),
+            ARule::NamedSymbol(sid) => Rule::NamedSymbol(s.to_string(*sid)),
+            ARule::Seq(start, len) | ARule::Choice(start, len) => {
+                let is_seq = matches!(&self.rules[id.0 as usize], ARule::Seq(..));
+                let children: Vec<Rule> = self.rule_children
+                    [*start as usize..*start as usize + *len as usize]
+                    .iter()
+                    .map(|&id| self.build_rule(id))
+                    .collect();
+                if is_seq {
+                    Rule::seq(children)
+                } else {
+                    Rule::choice(children)
+                }
+            }
+            ARule::Repeat(inner) => Rule::repeat(self.build_rule(*inner)),
+            ARule::Prec(p, r) => Rule::prec(self.build_prec(*p), self.build_rule(*r)),
+            ARule::PrecLeft(p, r) => Rule::prec_left(self.build_prec(*p), self.build_rule(*r)),
+            ARule::PrecRight(p, r) => Rule::prec_right(self.build_prec(*p), self.build_rule(*r)),
+            ARule::PrecDynamic(v, r) => Rule::prec_dynamic(*v, self.build_rule(*r)),
+            ARule::Field(n, r) => Rule::field(s.to_string(*n), self.build_rule(*r)),
+            ARule::Alias(v, named, r) => Rule::alias(self.build_rule(*r), s.to_string(*v), *named),
+            ARule::Token(r) => Rule::token(self.build_rule(*r)),
+            ARule::ImmediateToken(r) => Rule::immediate_token(self.build_rule(*r)),
+            ARule::Reserved(ctx, r) => Rule::Reserved {
+                rule: Box::new(self.build_rule(*r)),
+                context_name: s.to_string(*ctx),
+            },
+        }
+    }
+
+    fn build_prec(&self, prec: APrec) -> Precedence {
+        match prec {
+            APrec::Integer(n) => Precedence::Integer(n),
+            APrec::Name(sid) => Precedence::Name(self.strings.to_string(sid)),
+        }
+    }
+
+    fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
+        let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_rule_list - ensures list type
+        let Value::List(items) = self.get_val(vid) else {
+            unreachable!()
+        };
+        items
+            .iter()
+            .map(|&v| match self.get_val(v) {
+                Value::Rule(rid) => Ok(self.build_rule(*rid)),
+                Value::Str(sid) => Ok(Rule::String(self.strings.to_string(*sid))),
+                // Guarded by super::typecheck::expect_rule_list - checks elements are rule-like
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
+        let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_name_list - ensures list type
+        let Value::List(items) = self.get_val(vid) else {
+            unreachable!()
+        };
+        items
+            .iter()
+            .map(|&v| {
+                // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
+                let Value::Rule(rid) = *self.get_val(v) else {
+                    unreachable!()
+                };
+                match &self.rules[rid.0 as usize] {
+                    ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
+                    // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
+                    _ => unreachable!(),
+                }
+            })
+            .collect()
+    }
+
+    fn eval_rule_name(&mut self, id: NodeId) -> Result<String, LowerError> {
+        let rid = self.lower_to_rule(id)?;
+        match &self.rules[rid.0 as usize] {
+            ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
+            ARule::Blank => Err(LowerError::new(
+                LowerErrorKind::ConfigFieldUnset,
+                self.ast.span(id),
+            )),
+            _ => Err(LowerError::new(
+                LowerErrorKind::ExpectedRuleName,
+                self.ast.span(id),
+            )),
+        }
+    }
+
+    /// Import a config field from the base grammar as a DSL value.
+    fn import_config_field(&mut self, field: &str) -> ValueId {
+        // Guarded by super::typecheck::type_of (Node::FieldAccess) - only reachable
+        // via field access on a Grammar value, which requires an inherit() binding.
+        let grammar = self.base_grammar.unwrap();
+        match field {
+            "extras" => self.import_rules_as_list(&grammar.extra_symbols),
+            "externals" => self.import_rules_as_list(&grammar.external_tokens),
+            "inline" => self.import_names_as_list(&grammar.variables_to_inline),
+            "supertypes" => self.import_names_as_list(&grammar.supertype_symbols),
+            "conflicts" => {
+                let vals: Vec<ValueId> = grammar
+                    .expected_conflicts
+                    .iter()
+                    .map(|g| self.import_names_as_list(g))
+                    .collect();
+                self.alloc_val(Value::List(vals))
+            }
+            "word" => {
+                if let Some(name) = &grammar.word_token {
+                    let sid = self.strings.intern_owned(name.clone());
+                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
+                    self.alloc_val(Value::Rule(rid))
+                } else {
+                    let rid = self.alloc_rule(ARule::Blank);
+                    self.alloc_val(Value::Rule(rid))
+                }
+            }
+            // Guarded by super::typecheck::type_of (Node::FieldAccess) - rejects
+            // unknown config field names on Grammar values
+            _ => unreachable!(),
+        }
+    }
+
+    fn import_rules_as_list(&mut self, rules_data: &[Rule]) -> ValueId {
+        let vals: Vec<ValueId> = rules_data
+            .iter()
+            .map(|r| {
+                let rid = self.import_rule(r);
+                self.alloc_val(Value::Rule(rid))
+            })
+            .collect();
+        self.alloc_val(Value::List(vals))
+    }
+
+    fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
+        let vals: Vec<ValueId> = names
+            .iter()
+            .map(|name| {
+                let sid = self.strings.intern_owned(name.clone());
+                let rid = self.alloc_rule(ARule::NamedSymbol(sid));
+                self.alloc_val(Value::Rule(rid))
+            })
+            .collect();
+        self.alloc_val(Value::List(vals))
+    }
+
+    fn import_rule(&mut self, rule: &Rule) -> RuleId {
+        match rule {
+            Rule::Blank => self.alloc_rule(ARule::Blank),
+            Rule::String(s) => {
+                let sid = self.strings.intern_owned(s.clone());
+                self.alloc_rule(ARule::String(sid))
+            }
+            Rule::Pattern(p, f) => {
+                let pid = self.strings.intern_owned(p.clone());
+                let fid = (!f.is_empty()).then(|| self.strings.intern_owned(f.clone()));
+                self.alloc_rule(ARule::Pattern(pid, fid))
+            }
+            Rule::NamedSymbol(name) => {
+                let sid = self.strings.intern_owned(name.clone());
+                self.alloc_rule(ARule::NamedSymbol(sid))
+            }
+            Rule::Choice(members) | Rule::Seq(members) => {
+                let is_choice = matches!(rule, Rule::Choice(_));
+                let imported: Vec<RuleId> = members.iter().map(|m| self.import_rule(m)).collect();
+                let start = self.rule_children.len() as u32;
+                self.rule_children.extend_from_slice(&imported);
+                let len = imported.len() as u16;
+                if is_choice {
+                    self.alloc_rule(ARule::Choice(start, len))
+                } else {
+                    self.alloc_rule(ARule::Seq(start, len))
+                }
+            }
+            Rule::Repeat(inner) => {
+                let inner = self.import_rule(inner);
+                self.alloc_rule(ARule::Repeat(inner))
+            }
+            Rule::Metadata {
+                params,
+                rule: inner,
+            } => {
+                let mut rid = self.import_rule(inner);
+                if params.dynamic_precedence != 0 {
+                    rid = self.alloc_rule(ARule::PrecDynamic(params.dynamic_precedence, rid));
+                }
+                if let Precedence::Integer(n) = &params.precedence {
+                    let aprec = APrec::Integer(*n);
+                    rid = self.import_prec_rule(aprec, rid, params.associativity);
+                } else if let Precedence::Name(s) = &params.precedence {
+                    let aprec = APrec::Name(self.strings.intern_owned(s.clone()));
+                    rid = self.import_prec_rule(aprec, rid, params.associativity);
+                }
+                if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
+                    let sid = self.strings.intern_owned(value.clone());
+                    rid = self.alloc_rule(ARule::Alias(sid, *is_named, rid));
+                }
+                if let Some(field_name) = &params.field_name {
+                    let sid = self.strings.intern_owned(field_name.clone());
+                    rid = self.alloc_rule(ARule::Field(sid, rid));
+                }
+                if params.is_token && params.is_main_token {
+                    rid = self.alloc_rule(ARule::ImmediateToken(rid));
+                } else if params.is_token {
+                    rid = self.alloc_rule(ARule::Token(rid));
+                }
+                rid
+            }
+            Rule::Reserved {
+                rule: inner,
+                context_name,
+            } => {
+                let inner = self.import_rule(inner);
+                let sid = self.strings.intern_owned(context_name.clone());
+                self.alloc_rule(ARule::Reserved(sid, inner))
+            }
+            Rule::Symbol(_) => unreachable!(),
+        }
+    }
+
+    fn import_prec_rule(
+        &mut self,
+        prec: APrec,
+        inner: RuleId,
+        assoc: Option<crate::rules::Associativity>,
+    ) -> RuleId {
+        match assoc {
+            Some(crate::rules::Associativity::Left) => {
+                self.alloc_rule(ARule::PrecLeft(prec, inner))
+            }
+            Some(crate::rules::Associativity::Right) => {
+                self.alloc_rule(ARule::PrecRight(prec, inner))
+            }
+            None => self.alloc_rule(ARule::Prec(prec, inner)),
+        }
+    }
+}
+
+impl<'src> Evaluator<'src> {
     fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
         let ast = self.ast;
         let span = ast.span(id);
         match ast.node(id) {
             Node::IntLit(n) => Ok(self.alloc_val(Value::Int(*n))),
             Node::StringLit => {
-                let raw = ast.text(span);
-                let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-                    self.strings.intern_owned(unescape_string(raw))
-                } else {
-                    self.strings.intern_span(span)
-                };
+                let sid = self.intern_string_lit(span);
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             Node::RawStringLit { hash_count } => {
-                let prefix = 2 + u32::from(*hash_count);
-                let suffix = 1 + u32::from(*hash_count);
-                let sid = self
-                    .strings
-                    .intern_span(Span::new(span.start + prefix, span.end - suffix));
+                let sid = self.intern_raw_string_lit(span, *hash_count);
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             Node::Neg(inner) => {
@@ -792,22 +801,11 @@ impl<'src> Evaluator<'src> {
                 Ok(self.alloc_rule(ARule::NamedSymbol(sid)))
             }
             Node::StringLit => {
-                let span = ast.span(id);
-                let raw = ast.text(span);
-                let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-                    self.strings.intern_owned(unescape_string(raw))
-                } else {
-                    self.strings.intern_span(span)
-                };
+                let sid = self.intern_string_lit(ast.span(id));
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             Node::RawStringLit { hash_count } => {
-                let span = ast.span(id);
-                let prefix = 2 + u32::from(*hash_count);
-                let suffix = 1 + u32::from(*hash_count);
-                let sid = self
-                    .strings
-                    .intern_span(Span::new(span.start + prefix, span.end - suffix));
+                let sid = self.intern_raw_string_lit(ast.span(id), *hash_count);
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             #[rustfmt::skip]
