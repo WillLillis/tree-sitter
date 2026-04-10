@@ -1,0 +1,2 @@
+grammar { language: "test", externals: [_eof] }
+rule program { "x" }

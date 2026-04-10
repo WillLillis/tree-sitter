@@ -19,13 +19,16 @@ anstyle.workspace     = true
 anyhow.workspace      = true
 bindgen               = { version = "0.72.1" }
 clap.workspace        = true
+ctrlc.workspace       = true
 etcetera.workspace    = true
 indoc.workspace       = true
 notify                = "8.2.0"
+rand.workspace        = true
 notify-debouncer-full = "0.7.0"
 regex.workspace       = true
 schemars.workspace    = true
 semver.workspace      = true
 serde_json.workspace  = true
 tree-sitter-cli       = { path = "../cli/" }
+tree-sitter-generate  = { path = "../generate/", features = ["nativedsl"], default-features = false }
 tree-sitter-loader    = { path = "../loader/" }

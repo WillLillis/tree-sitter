@@ -1,0 +1,1 @@
+grammar { language: "test" } rule program { seq(repeat1("a"), optional("b"), blank()) }

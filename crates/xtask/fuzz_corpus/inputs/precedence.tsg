@@ -1,0 +1,6 @@
+grammar { language: "test" }
+rule program { prec(1, seq("a", "b")) }
+rule other { prec_left(1, seq("a", "b")) }
+rule third { prec_right(1, seq("a", "b")) }
+rule fourth { prec_dynamic(1, "x") }
+rule fifth { prec(-1, "x") }
