@@ -212,6 +212,17 @@ impl DslError {
     }
 
     #[must_use]
+    pub fn call_trace(&self) -> Option<&[(String, Span)]> {
+        if let Self::Lower(e) = self
+            && let lower::LowerErrorKind::CallDepthExceeded(trace) = &e.kind
+        {
+            Some(trace)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
     pub fn note(&self) -> Option<&Note> {
         match self {
             Self::Parse(e) => e.note.as_ref(),
@@ -352,6 +363,54 @@ fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String
     // Render note if present (uses note's own source/path for cross-file notes)
     if let Some(note) = error.note() {
         render_note_snippet(&mut out, note.span, &note.source, &note.path, &note.message);
+    }
+
+    // Render call trace for CallDepthExceeded
+    if let Some(trace) = error.call_trace() {
+        let show = 3;
+        let frames: Vec<&(String, Span)> = if trace.len() <= show * 2 {
+            trace.iter().collect()
+        } else {
+            let mut v: Vec<_> = trace[..show].iter().collect();
+            v.extend(&trace[trace.len() - show..]);
+            v
+        };
+        let elided = trace.len().saturating_sub(show * 2);
+
+        writeln!(out).unwrap();
+        writeln!(out, " {} call trace:", paint(AnsiColor::Cyan, "=")).unwrap();
+        for (name, span) in &frames[..frames.len().min(show)] {
+            let fctx = span_context(*span, source_text);
+            writeln!(
+                out,
+                "   {} {path_display}:{}:{} in {name}()",
+                paint(AnsiColor::Cyan, "-->"),
+                fctx.line_num,
+                fctx.col,
+            )
+            .unwrap();
+        }
+        if elided > 0 {
+            writeln!(
+                out,
+                "   {} ... {elided} more frames ...",
+                paint(AnsiColor::Cyan, "..."),
+            )
+            .unwrap();
+        }
+        if trace.len() > show * 2 {
+            for (name, span) in &frames[show..] {
+                let fctx = span_context(*span, source_text);
+                writeln!(
+                    out,
+                    "   {} {path_display}:{}:{} in {name}()",
+                    paint(AnsiColor::Cyan, "-->"),
+                    fctx.line_num,
+                    fctx.col,
+                )
+                .unwrap();
+            }
+        }
     }
 
     out
