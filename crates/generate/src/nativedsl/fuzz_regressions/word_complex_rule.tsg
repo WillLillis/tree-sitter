@@ -1,0 +1,1 @@
+grammar { language: "test", word: regexp("[a-z]+") }

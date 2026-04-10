@@ -1,0 +1,6 @@
+grammar { language: "test" }
+let x = "hello"
+let PREC = { add: 1, mul: 2 }
+let a = 1
+let b = -2
+rule program { prec(PREC.add, x) }

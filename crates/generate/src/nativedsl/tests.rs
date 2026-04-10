@@ -1749,6 +1749,9 @@ fn error_builtin_arg_count_messages() {
         (g!(r#"alias("a", "b", "c")"#), "alias", 2, 3),
         (g!(r#"append([1], [2], [3])"#), "append", 2, 3),
         (g!(r#"reserved("ctx", "a", "b")"#), "reserved", 2, 3),
+        // regexp (1-2 args)
+        (g!("regexp()"), "regexp", 1, 0),
+        (g!(r#"regexp("a", "b", "c")"#), "regexp", 2, 3),
     ];
     for &(src, name, expected, got) in cases {
         let err = dsl_err(src);
@@ -1785,6 +1788,52 @@ fn error_builtin_arg_count_display() {
         let err = dsl_err(src);
         let e = assert_err!(err, Parse);
         assert_eq!(e.to_string(), expected_msg, "wrong message for: {src}");
+    }
+}
+
+#[test]
+fn error_keyword_as_ident() {
+    for src in [
+        r#"grammar { language: "test" } rule seq { "x" }"#,
+        r#"grammar { language: "test" } let token = "x" rule foo { "x" }"#,
+        r#"grammar { language: "test" } fn repeat(x: rule) -> rule { x } rule foo { "x" }"#,
+    ] {
+        let err = dsl_err(src);
+        let e = assert_err!(err, Parse);
+        assert_eq!(
+            e.kind,
+            ParseErrorKind::KeywordAsIdent,
+            "wrong error for: {src}"
+        );
+    }
+}
+
+/// Iterate over all `.tsg` files in `fuzz_regressions/` and verify none panic.
+/// To add a new regression, just drop a `.tsg` file in that directory.
+#[test]
+fn fuzz_regressions() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nativedsl/fuzz_regressions");
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            (path.extension()?.to_str()? == "tsg").then_some(path)
+        })
+        .collect();
+    entries.sort();
+    assert!(!entries.is_empty(), "no .tsg files in {}", dir.display());
+    let dummy_path = dir.join("grammar.tsg");
+    for path in &entries {
+        let input = std::fs::read_to_string(path).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let _ = parse_native_dsl(&input, &dummy_path);
+        });
+        assert!(
+            result.is_ok(),
+            "panic on regression file: {}",
+            path.display()
+        );
     }
 }
 
