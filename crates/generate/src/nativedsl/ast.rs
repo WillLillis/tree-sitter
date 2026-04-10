@@ -105,10 +105,12 @@ impl Span {
         }
     }
 
-    /// Resolve to a `&str` slice. Span boundaries are at ASCII byte positions
-    /// (all token delimiters are ASCII), which are always valid UTF-8.
+    /// Resolve to a `&str` slice.
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
+        // SAFETY: span boundaries are at ASCII byte positions (all token
+        // delimiters are ASCII), which are always valid UTF-8 boundaries.
+        // The input length is checked against u32::MAX before lexing.
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
     }
 }

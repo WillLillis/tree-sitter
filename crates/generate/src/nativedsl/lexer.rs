@@ -374,7 +374,7 @@ impl<'src> Lexer<'src> {
         while let Some(b'0'..=b'9') = self.peek() {
             self.advance();
         }
-        // Safe: digits are ASCII
+        // SAFETY: the slice contains only ASCII digits (b'0'..=b'9'), which are valid UTF-8.
         let text = unsafe { std::str::from_utf8_unchecked(&self.source[int_start..self.pos]) };
         let value: i32 = text.parse().map_err(|_| LexError {
             kind: LexErrorKind::IntegerOverflow,
@@ -388,7 +388,7 @@ impl<'src> Lexer<'src> {
         while let Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') = self.peek() {
             self.advance();
         }
-        // Check for raw string: r"..." or r#"..."#
+        // SAFETY: the slice contains only ASCII ident chars (a-z, A-Z, 0-9, _), which are valid UTF-8.
         let text = unsafe { std::str::from_utf8_unchecked(&self.source[ident_start..self.pos]) };
         if text == "r" && matches!(self.peek(), Some(b'"' | b'#')) {
             return self.lex_raw_string(start);

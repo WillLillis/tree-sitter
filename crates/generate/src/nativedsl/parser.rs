@@ -422,7 +422,7 @@ impl<'src> Parser<'src> {
             TokenKind::KwPrecDynamic => self.parse_prec(start, PrecVariant::Dynamic),
             TokenKind::KwReserved => self.parse_reserved_expr(start),
             TokenKind::KwConcat => self.parse_variadic(start, "concat"),
-            TokenKind::KwRegexp => self.parse_dyn_regex(start),
+            TokenKind::KwRegexp => self.parse_regexp(start),
             TokenKind::KwInherit => self.parse_inherit(start),
             TokenKind::KwAppend => self.parse_append(start),
             TokenKind::KwFor => self.parse_for(start),
@@ -569,7 +569,7 @@ impl<'src> Parser<'src> {
             .push(Node::Reserved { context, content }, start.merge(end)))
     }
 
-    fn parse_dyn_regex(&mut self, start: Span) -> Result<NodeId, ParseError> {
+    fn parse_regexp(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
