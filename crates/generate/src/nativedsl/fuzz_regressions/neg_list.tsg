@@ -1,0 +1,1 @@
+grammar { language: "Utest", extras: -[" "] } rule program { repeat(choice("a", "b")) }

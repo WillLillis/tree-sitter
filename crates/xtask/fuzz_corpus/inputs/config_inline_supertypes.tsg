@@ -1,0 +1,4 @@
+grammar { language: "test", inline: [_inner], supertypes: [expr] }
+rule program { expr }
+rule expr { _inner }
+rule _inner { "x" }

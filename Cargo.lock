@@ -2795,15 +2795,18 @@ dependencies = [
  "anyhow",
  "bindgen",
  "clap",
+ "ctrlc",
  "etcetera",
  "indoc",
  "notify",
  "notify-debouncer-full",
+ "rand",
  "regex",
  "schemars",
  "semver",
  "serde_json",
  "tree-sitter-cli",
+ "tree-sitter-generate",
  "tree-sitter-loader",
 ]
 
