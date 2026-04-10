@@ -113,7 +113,7 @@ fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
     if total_inherits > 1 {
         return Err(LowerError::new(
             LowerErrorKind::MultipleInherits,
-            inherit_lets.first().copied().unwrap_or(Span::new(0, 0)),
+            inherit_lets.first().copied().unwrap(),
         )
         .into());
     }
