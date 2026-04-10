@@ -222,7 +222,7 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
     match ast.node(item_id) {
         Node::Grammar => {
             let ctx = &ast.context;
-            // SAFETY: Earlier pass has already verified this is `Some`
+            // INVARIANT: set during grammar block parsing, always present here
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
             let nodes = &mut ast.nodes;
             for id in [
