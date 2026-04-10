@@ -6,6 +6,7 @@ mod check_wasm_exports;
 mod clippy;
 mod embed_sources;
 mod fetch;
+mod fuzz_dsl;
 mod generate;
 mod test;
 mod test_schema;
@@ -48,6 +49,8 @@ enum Commands {
     GenerateTestSchema,
     /// Generate the list of exports from Tree-sitter Wasm files.
     GenerateWasmExports,
+    /// Fuzz the native DSL parser to find panics.
+    FuzzDsl(FuzzDsl),
     /// Run the test suite
     Test(Test),
     /// Run the Wasm test suite
@@ -172,6 +175,16 @@ struct Test {
 }
 
 #[derive(Args)]
+struct FuzzDsl {
+    /// Stop after this many iterations (default: run forever).
+    #[arg(long, short = 'n')]
+    iterations: Option<u64>,
+    /// PRNG seed (default: current time).
+    #[arg(long, short)]
+    seed: Option<u64>,
+}
+
+#[derive(Args)]
 struct UpgradeWasmtime {
     /// The version to upgrade to.
     #[arg(long, short)]
@@ -235,6 +248,7 @@ fn run() -> Result<()> {
         Commands::CheckRegexErrorKinds => check_regex_error_kinds::run()?,
         Commands::CheckWasmExports(check_options) => check_wasm_exports::run(&check_options)?,
         Commands::Clippy(clippy_options) => clippy::run(&clippy_options)?,
+        Commands::FuzzDsl(fuzz_options) => fuzz_dsl::run(&fuzz_options)?,
         Commands::FetchEmscripten => fetch::run_emscripten()?,
         Commands::FetchFixtures => {
             fetch::run_fixtures()?;

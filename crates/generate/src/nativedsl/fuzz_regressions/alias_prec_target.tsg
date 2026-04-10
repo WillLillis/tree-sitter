@@ -1,0 +1,1 @@
+grammar { language: "test" } let P = { a: 1, b: 2, c: 3 } rule program { prec(P.a, alias(prec(P.b, "x"), prec(P.c, "y"))) }

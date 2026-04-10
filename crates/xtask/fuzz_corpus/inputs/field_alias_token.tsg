@@ -1,0 +1,5 @@
+grammar { language: "test" }
+rule program { field(name, "x") }
+rule other { alias("x", "y") }
+rule third { token(seq("a", "b")) }
+rule fourth { token_immediate(seq("a", "b")) }

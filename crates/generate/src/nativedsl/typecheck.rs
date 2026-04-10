@@ -17,6 +17,7 @@ pub enum Ty {
     Str,
     Rule,
     Grammar,
+    Spread,
     List(Box<Self>),
     Tuple(Vec<Self>),
     Object(Vec<(String, Self)>),
@@ -28,6 +29,7 @@ impl std::fmt::Display for Ty {
             Self::Int => write!(f, "int"),
             Self::Str => write!(f, "str"),
             Self::Rule => write!(f, "rule"),
+            Self::Spread => write!(f, "for-loop expansion"),
             Self::Grammar => write!(f, "grammar"),
             Self::List(inner) => write!(f, "list<{inner}>"),
             Self::Tuple(elems) => {
@@ -62,6 +64,7 @@ impl TyId {
     const STR: Self = Self(1);
     const RULE: Self = Self(2);
     const GRAMMAR: Self = Self(3);
+    const SPREAD: Self = Self(4);
 }
 
 enum TyEntry {
@@ -69,6 +72,7 @@ enum TyEntry {
     Str,
     Rule,
     Grammar,
+    Spread,
     List(TyId),
     Tuple { start: u32, len: u16 },
     Object { start: u32, len: u16 },
@@ -83,7 +87,13 @@ struct TyPool<'src> {
 impl<'src> TyPool<'src> {
     fn new() -> Self {
         Self {
-            entries: vec![TyEntry::Int, TyEntry::Str, TyEntry::Rule, TyEntry::Grammar],
+            entries: vec![
+                TyEntry::Int,
+                TyEntry::Str,
+                TyEntry::Rule,
+                TyEntry::Grammar,
+                TyEntry::Spread,
+            ],
             tuple_elems: Vec::new(),
             object_fields: Vec::new(),
         }
@@ -187,6 +197,7 @@ impl<'src> TyPool<'src> {
             TyEntry::Str => Ty::Str,
             TyEntry::Rule => Ty::Rule,
             TyEntry::Grammar => Ty::Grammar,
+            TyEntry::Spread => Ty::Spread,
             TyEntry::List(inner) => Ty::List(Box::new(self.to_ty(*inner))),
             TyEntry::Tuple { start: s, len: l } => Ty::Tuple(
                 self.tuple_elems[*s as usize..*s as usize + *l as usize]
@@ -332,7 +343,26 @@ fn check_item<'src>(
     pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
     match ast.node(id) {
-        Node::Grammar => Ok(()),
+        Node::Grammar => {
+            let config = ast.context.grammar_config.as_ref().unwrap();
+            // extras/externals accept any rule expression (regexp, strings, etc.)
+            for id in [config.extras, config.externals].into_iter().flatten() {
+                expect_rule_list(ast, id, env, pool)?;
+            }
+            // inline/supertypes/word only accept rule name references
+            for id in [config.inline, config.supertypes].into_iter().flatten() {
+                expect_name_list(ast, id, env, pool)?;
+            }
+            if let Some(id) = config.word {
+                expect_name_ref(ast, id, env, pool)?;
+            }
+            for rws in &config.reserved {
+                for &word_id in &rws.words {
+                    expect_rule(ast, word_id, env, pool)?;
+                }
+            }
+            Ok(())
+        }
         Node::Let { name, ty, value } => {
             let inferred = type_of(ast, *value, env, pool)?;
             if let Some(ty_id) = ty {
@@ -372,6 +402,82 @@ fn check_item<'src>(
             span: ast.span(id),
         }),
     }
+}
+
+/// Check that an expression evaluates to a list where each element is rule-like.
+/// For literal lists, checks each element individually to permit mixed rule/str
+/// (e.g. `[regexp("\\s"), " "]` in extras).
+fn expect_rule_list<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    pool: &mut TyPool<'src>,
+) -> Result<(), TypeError> {
+    // Literal lists: check each element (allows mixed rule/str)
+    if let Node::List(range) = ast.node(id) {
+        for &child in ast.child_slice(*range) {
+            expect_rule(ast, child, env, pool)?;
+        }
+        return Ok(());
+    }
+    // Non-literal: check overall type is list<rule> or list<str>
+    let ty = type_of(ast, id, env, pool)?;
+    let rule_list = pool.list(TyId::RULE);
+    if pool.is_compatible(ty, rule_list) {
+        return Ok(());
+    }
+    let str_list = pool.list(TyId::STR);
+    if pool.is_compatible(ty, str_list) {
+        return Ok(());
+    }
+    Err(pool.mismatch(rule_list, ty, ast.span(id)))
+}
+
+/// Check that an expression is a rule name reference (`RuleRef`, `VarRef`,
+/// or field access like `base.word`). Rejects complex rule expressions
+/// like `regexp(...)` or `prec(...)` that have type `rule` but aren't names.
+fn expect_name_ref<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    pool: &mut TyPool<'src>,
+) -> Result<(), TypeError> {
+    match ast.node(id) {
+        Node::RuleRef | Node::VarRef => Ok(()),
+        Node::FieldAccess { .. } => {
+            let ty = type_of(ast, id, env, pool)?;
+            if ty != TyId::RULE {
+                return Err(pool.mismatch(TyId::RULE, ty, ast.span(id)));
+            }
+            Ok(())
+        }
+        _ => Err(TypeError {
+            kind: TypeErrorKind::ExpectedRuleName,
+            span: ast.span(id),
+        }),
+    }
+}
+
+/// Check that an expression is a list of rule name references.
+fn expect_name_list<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    pool: &mut TyPool<'src>,
+) -> Result<(), TypeError> {
+    if let Node::List(range) = ast.node(id) {
+        for &child in ast.child_slice(*range) {
+            expect_name_ref(ast, child, env, pool)?;
+        }
+        return Ok(());
+    }
+    // Non-literal: allow list<rule> variables (e.g. c.inline)
+    let ty = type_of(ast, id, env, pool)?;
+    let rule_list = pool.list(TyId::RULE);
+    if pool.is_compatible(ty, rule_list) {
+        return Ok(());
+    }
+    Err(pool.mismatch(rule_list, ty, ast.span(id)))
 }
 
 fn expect_rule<'src>(
@@ -560,10 +666,9 @@ fn type_of<'src>(
         }
         Node::Seq(range) | Node::Choice(range) => {
             for &member in ast.child_slice(*range) {
-                if matches!(ast.node(member), Node::For(_)) {
-                    check_for_expr(ast, member, env, pool)?;
-                } else {
-                    expect_rule(ast, member, env, pool)?;
+                let ty = type_of(ast, member, env, pool)?;
+                if ty != TyId::SPREAD && !is_rule_like(ty) {
+                    return Err(pool.mismatch(TyId::RULE, ty, ast.span(member)));
                 }
             }
             Ok(TyId::RULE)
@@ -583,10 +688,14 @@ fn type_of<'src>(
         Node::Alias { content, target } => {
             expect_rule(ast, *content, env, pool)?;
             let target_ty = type_of(ast, *target, env, pool)?;
-            if !matches!(ast.node(*target), Node::RuleRef | Node::VarRef)
-                && !is_rule_like(target_ty)
-            {
-                return Err(pool.mismatch(TyId::RULE, target_ty, ast.span(*target)));
+            // Alias target must be a named symbol or a string literal
+            let is_valid_target =
+                matches!(ast.node(*target), Node::RuleRef | Node::VarRef) || target_ty == TyId::STR;
+            if !is_valid_target {
+                return Err(TypeError {
+                    kind: TypeErrorKind::InvalidAliasTarget(pool.to_ty(target_ty)),
+                    span: ast.span(*target),
+                });
             }
             Ok(TyId::RULE)
         }
@@ -610,7 +719,7 @@ fn type_of<'src>(
         }
         Node::For(_) => {
             check_for_expr(ast, id, env, pool)?;
-            Ok(TyId::RULE)
+            Ok(TyId::SPREAD)
         }
         Node::Call { name, args } => {
             let fn_name = ast.node_text(*name);
@@ -743,6 +852,8 @@ pub enum TypeErrorKind {
     AppendRequiresList(Ty),
     ConfigAccessOnNonGrammar(Ty),
     UnknownConfigField(String),
+    InvalidAliasTarget(Ty),
+    ExpectedRuleName,
     UnexpectedTopLevel,
     CannotInferType,
 }
@@ -793,6 +904,12 @@ impl std::fmt::Display for TypeError {
                 write!(f, "'::' requires a grammar value, got {ty}")
             }
             TypeErrorKind::UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
+            TypeErrorKind::InvalidAliasTarget(got) => {
+                write!(f, "alias target must be a name or string, got {got}")
+            }
+            TypeErrorKind::ExpectedRuleName => {
+                write!(f, "expected a rule name")
+            }
             TypeErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
             TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
         }

@@ -78,6 +78,20 @@ pub enum TokenKind {
     Eof,
 }
 
+impl TokenKind {
+    #[rustfmt::skip]
+    pub const fn is_keyword(self) -> bool {
+        matches!(self,
+            Self::KwGrammar | Self::KwRule | Self::KwLet | Self::KwFn | Self::KwFor | Self::KwIn
+            | Self::KwSeq | Self::KwChoice | Self::KwRepeat | Self::KwRepeat1 | Self::KwOptional
+            | Self::KwBlank | Self::KwField | Self::KwAlias | Self::KwToken | Self::KwPrec
+            | Self::KwPrecLeft | Self::KwPrecRight | Self::KwPrecDynamic | Self::KwReserved
+            | Self::KwTokenImmediate | Self::KwConcat | Self::KwRegexp | Self::KwInherit
+            | Self::KwOverride | Self::KwAppend
+        )
+    }
+}
+
 impl std::fmt::Display for TokenKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

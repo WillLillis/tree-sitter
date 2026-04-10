@@ -84,15 +84,24 @@ impl<'src> Parser<'src> {
     }
 
     fn expect_ident_node(&mut self) -> Result<NodeId, ParseError> {
-        let span = self
-            .eat_kind(TokenKind::Ident)
-            .ok_or_else(|| self.error(ParseErrorKind::ExpectedIdent))?;
+        let span = self.eat_kind(TokenKind::Ident).ok_or_else(|| {
+            if self.tokens[self.pos].kind.is_keyword() {
+                self.error(ParseErrorKind::KeywordAsIdent)
+            } else {
+                self.error(ParseErrorKind::ExpectedIdent)
+            }
+        })?;
         Ok(self.ast.push(Node::Ident, span))
     }
 
     fn expect_ident(&mut self) -> Result<Span, ParseError> {
-        self.eat_kind(TokenKind::Ident)
-            .ok_or_else(|| self.error(ParseErrorKind::ExpectedIdent))
+        self.eat_kind(TokenKind::Ident).ok_or_else(|| {
+            if self.tokens[self.pos].kind.is_keyword() {
+                self.error(ParseErrorKind::KeywordAsIdent)
+            } else {
+                self.error(ParseErrorKind::ExpectedIdent)
+            }
+        })
     }
 
     fn expect_string(&mut self) -> Result<Span, ParseError> {
@@ -102,19 +111,8 @@ impl<'src> Parser<'src> {
 
     fn expect_name(&mut self) -> Result<Span, ParseError> {
         let span = self.span();
-        // Any keyword or identifier can appear as a name (for config keys, field names, etc.)
-        #[rustfmt::skip]
-        let is_name = matches!(self.tokens[self.pos].kind,
-            TokenKind::Ident | TokenKind::KwField | TokenKind::KwToken | TokenKind::KwChoice
-            | TokenKind::KwAlias | TokenKind::KwRule | TokenKind::KwSeq | TokenKind::KwRepeat
-            | TokenKind::KwRepeat1 | TokenKind::KwOptional | TokenKind::KwBlank | TokenKind::KwPrec
-            | TokenKind::KwPrecLeft | TokenKind::KwPrecRight | TokenKind::KwPrecDynamic
-            | TokenKind::KwReserved | TokenKind::KwTokenImmediate | TokenKind::KwConcat
-            | TokenKind::KwRegexp | TokenKind::KwLet | TokenKind::KwFn | TokenKind::KwFor
-            | TokenKind::KwIn | TokenKind::KwGrammar | TokenKind::KwInherit | TokenKind::KwOverride
-            | TokenKind::KwAppend
-        );
-        if is_name {
+        let kind = self.tokens[self.pos].kind;
+        if kind == TokenKind::Ident || kind.is_keyword() {
             self.pos += 1;
             Ok(span)
         } else {
@@ -582,12 +580,16 @@ impl<'src> Parser<'src> {
     fn parse_dyn_regex(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count("regexp", 1, 0, start));
+        }
         let pattern = self.parse_expr()?;
         let flags = if self.eat(TokenKind::Comma).is_some() {
             Some(self.parse_expr()?)
         } else {
             None
         };
+        self.expect_close_args("regexp", if flags.is_some() { 2 } else { 1 }, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
             .ast
@@ -800,6 +802,7 @@ pub enum ParseErrorKind {
     MissingReturnType,
     ExpectedFunctionName,
     ExpectedStringOrIdent,
+    KeywordAsIdent,
     DuplicateGrammarBlock,
     TooManyChildren,
     WrongArgumentCount {
@@ -830,6 +833,9 @@ impl std::fmt::Display for ParseError {
                 write!(f, "only identifiers can be used as function names")
             }
             ParseErrorKind::ExpectedStringOrIdent => write!(f, "expected string or identifier"),
+            ParseErrorKind::KeywordAsIdent => {
+                write!(f, "keywords cannot be used as identifiers")
+            }
             ParseErrorKind::DuplicateGrammarBlock => write!(f, "only one grammar block is allowed"),
             ParseErrorKind::TooManyChildren => {
                 write!(f, "too many elements (maximum {})", u16::MAX)
