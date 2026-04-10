@@ -1,0 +1,2 @@
+grammar { language: "test", reserved: { default: ["if", "else", "for"] } }
+rule program { reserved("default", regexp("[a-z]+")) }

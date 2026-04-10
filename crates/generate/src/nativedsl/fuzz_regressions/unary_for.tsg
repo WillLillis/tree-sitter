@@ -1,0 +1,1 @@
+grammar { language: "test" } let ops: list<str> = ["+", "-", "*"] rule program { repeat(for (op: str) in ops { op }) }
