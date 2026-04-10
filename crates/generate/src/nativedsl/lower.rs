@@ -646,12 +646,11 @@ impl<'src> Evaluator<'src> {
         match ast.node(id) {
             Node::IntLit(n) => Ok(self.alloc_val(Value::Int(*n))),
             Node::StringLit => {
-                let content = Span::new(span.start + 1, span.end - 1);
-                let raw = ast.text(content);
+                let raw = ast.text(span);
                 let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
                     self.strings.intern_owned(unescape_string(raw))
                 } else {
-                    self.strings.intern_span(content)
+                    self.strings.intern_span(span)
                 };
                 Ok(self.alloc_val(Value::Str(sid)))
             }
@@ -794,12 +793,11 @@ impl<'src> Evaluator<'src> {
             }
             Node::StringLit => {
                 let span = ast.span(id);
-                let content = Span::new(span.start + 1, span.end - 1);
-                let raw = ast.text(content);
+                let raw = ast.text(span);
                 let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
                     self.strings.intern_owned(unescape_string(raw))
                 } else {
-                    self.strings.intern_span(content)
+                    self.strings.intern_span(span)
                 };
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
@@ -1155,20 +1153,21 @@ fn rule_to_json(rule: &Rule) -> serde_json::Value {
 
 fn unescape_string(raw: &str) -> String {
     let mut result = String::with_capacity(raw.len());
-    let mut chars = raw.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'\\' {
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
             match chars.next() {
-                Some(b'"') => result.push('"'),
-                Some(b'\\') => result.push('\\'),
-                Some(b'n') => result.push('\n'),
-                Some(b't') => result.push('\t'),
-                Some(b'r') => result.push('\r'),
-                Some(b'0') => result.push('\0'),
+                Some('"') => result.push('"'),
+                Some('\\') => result.push('\\'),
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('0') => result.push('\0'),
+                // Guarded by lexer escape validation
                 _ => unreachable!(),
             }
         } else {
-            result.push(b as char);
+            result.push(c);
         }
     }
     result

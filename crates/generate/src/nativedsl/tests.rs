@@ -1203,10 +1203,10 @@ rule extra { "hello" }
     // InheritedError carries the base file's context
     assert_eq!(inherited.path, base_path);
     assert!(inherited.source_text.contains("bogus_ref"));
-    // inherit_span points to the "base.tsg" string in the parent
+    // inherit_span points to the base.tsg path in the parent (quotes stripped)
     assert_eq!(
         &parent_src[inherited.inherit_span.start as usize..inherited.inherit_span.end as usize],
-        r#""base.tsg""#
+        "base.tsg"
     );
 }
 

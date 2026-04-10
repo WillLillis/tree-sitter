@@ -772,7 +772,7 @@ pub fn run(options: &super::FuzzDsl) -> Result<()> {
 
         input.clear();
 
-        match rng.random_range(0..21) {
+        match rng.random_range(0..24) {
             0 => random_ascii(&mut rng, 512, &mut input),
             1 => truncate_grammar(&mut rng, &corpus, &mut input),
             2 => mutate_bytes(&mut rng, &corpus, &mut input),
@@ -800,11 +800,9 @@ pub fn run(options: &super::FuzzDsl) -> Result<()> {
             18 => duplicate_rule(&mut rng, &corpus, &mut input),
             19 => wrap_in_combinator(&mut rng, &corpus, &mut input),
             20 => expression_transplant(&mut rng, &corpus, &mut input),
-            _ => match iterations % 3 {
-                0 => repeat_fragment(&mut rng, &corpus, &mut input),
-                1 => unicode_input(&mut rng, &corpus, &mut input),
-                _ => random_ascii(&mut rng, 4096, &mut input),
-            },
+            21 => repeat_fragment(&mut rng, &corpus, &mut input),
+            22 => unicode_input(&mut rng, &corpus, &mut input),
+            _ => random_ascii(&mut rng, 4096, &mut input),
         }
 
         let input_ref = input.as_str();

@@ -439,7 +439,9 @@ impl<'src> Parser<'src> {
             TokenKind::Ident => self.parse_ident_expr(start),
             TokenKind::StringLit => {
                 self.pos += 1;
-                Ok(self.ast.push(Node::StringLit, start))
+                Ok(self
+                    .ast
+                    .push(Node::StringLit, Span::new(start.start + 1, start.end - 1)))
             }
             TokenKind::IntLit(n) => {
                 let n = *n;
@@ -603,7 +605,10 @@ impl<'src> Parser<'src> {
             return Err(self.err_arg_count("inherit", 1, 0, start));
         }
         let path_span = self.expect_string()?;
-        let path = self.ast.push(Node::StringLit, path_span);
+        let path = self.ast.push(
+            Node::StringLit,
+            Span::new(path_span.start + 1, path_span.end - 1),
+        );
         self.expect_close_args("inherit", 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.ast.push(Node::Inherit { path }, start.merge(end)))
