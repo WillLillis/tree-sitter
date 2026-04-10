@@ -73,18 +73,8 @@ impl<'src> Parser<'src> {
         })
     }
 
-    fn eat_kind(&mut self, kind: TokenKind) -> Option<Span> {
-        if self.tokens[self.pos].kind == kind {
-            let s = self.span();
-            self.pos += 1;
-            Some(s)
-        } else {
-            None
-        }
-    }
-
     fn expect_ident_node(&mut self) -> Result<NodeId, ParseError> {
-        let span = self.eat_kind(TokenKind::Ident).ok_or_else(|| {
+        let span = self.eat(TokenKind::Ident).ok_or_else(|| {
             if self.tokens[self.pos].kind.is_keyword() {
                 self.error(ParseErrorKind::KeywordAsIdent)
             } else {
@@ -95,7 +85,7 @@ impl<'src> Parser<'src> {
     }
 
     fn expect_ident(&mut self) -> Result<Span, ParseError> {
-        self.eat_kind(TokenKind::Ident).ok_or_else(|| {
+        self.eat(TokenKind::Ident).ok_or_else(|| {
             if self.tokens[self.pos].kind.is_keyword() {
                 self.error(ParseErrorKind::KeywordAsIdent)
             } else {
@@ -105,7 +95,7 @@ impl<'src> Parser<'src> {
     }
 
     fn expect_string(&mut self) -> Result<Span, ParseError> {
-        self.eat_kind(TokenKind::StringLit)
+        self.eat(TokenKind::StringLit)
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedString))
     }
 
@@ -260,10 +250,10 @@ impl<'src> Parser<'src> {
         let items = self.comma_sep(TokenKind::RBracket, |this| {
             this.expect(TokenKind::LBracket)?;
             let group = this.comma_sep(TokenKind::RBracket, |this| {
-                if let Some(span) = this.eat_kind(TokenKind::StringLit) {
+                if let Some(span) = this.eat(TokenKind::StringLit) {
                     let inner = Span::new(span.start + 1, span.end - 1);
                     Ok(PrecEntry::Name(this.ast.text(inner).to_string()))
-                } else if let Some(span) = this.eat_kind(TokenKind::Ident) {
+                } else if let Some(span) = this.eat(TokenKind::Ident) {
                     Ok(PrecEntry::Symbol(span))
                 } else {
                     Err(this.error(ParseErrorKind::ExpectedStringOrIdent))
@@ -360,7 +350,7 @@ impl<'src> Parser<'src> {
 
     fn parse_type(&mut self) -> Result<NodeId, ParseError> {
         let start = self.span();
-        if let Some(id_span) = self.eat_kind(TokenKind::Ident) {
+        if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ast.text(id_span) {
                 "rule" => Ok(self.ast.push(Node::TypeRule, id_span)),
                 "str" => Ok(self.ast.push(Node::TypeStr, id_span)),
