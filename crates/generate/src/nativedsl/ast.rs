@@ -274,16 +274,6 @@ impl<'src> Ast<'src> {
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         self.context.child_slice(range)
     }
-
-    #[must_use]
-    pub fn string_lit_content(&self, id: NodeId) -> &str {
-        let span = self.span(id);
-        unsafe {
-            self.context
-                .source
-                .get_unchecked((span.start + 1) as usize..(span.end - 1) as usize)
-        }
-    }
 }
 
 pub type NodeList = Vec<NodeId>;
