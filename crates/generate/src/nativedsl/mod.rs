@@ -83,10 +83,10 @@ fn parse_native_dsl_inner(
     Ok(lower::lower_with_base(&ast, base)?)
 }
 
-/// Validate that inherit() usage is consistent:
-/// - At most one inherit() call
-/// - If inherit() exists, `inherits` must be set in grammar config
-/// - If `inherits` is set, it must trace to an inherit() call
+/// Validate that `inherit()` usage is consistent:
+/// - At most one `inherit()` call
+/// - If `inherit()` exists, `inherits` must be set in grammar config
+/// - If `inherits` is set, it must trace to an `inherit()` call
 fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
@@ -130,15 +130,14 @@ fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
         return Err(LowerError::new(LowerErrorKind::InheritWithoutConfig, span).into());
     }
 
-    // `inherits` in config but no inherit() call found
-    if config_has_inherits && total_inherits == 0 {
+    // `inherits` in config must resolve to an inherit() call
+    if config_has_inherits && find_inherit_node(ast).is_none() {
         let span = ast
             .context
             .grammar_config
             .as_ref()
             .and_then(|c| c.inherits)
-            .map(|id| ast.span(id))
-            .unwrap_or(Span::new(0, 0));
+            .map_or(Span::new(0, 0), |id| ast.span(id));
         return Err(LowerError::new(LowerErrorKind::InheritsWithoutInherit, span).into());
     }
 
