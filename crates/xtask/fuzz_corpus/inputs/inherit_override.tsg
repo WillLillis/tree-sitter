@@ -1,0 +1,4 @@
+let base = inherit("INHERIT_BASE")
+grammar { language: "derived", inherits: base }
+override rule program { "overridden" }
+rule new_thing { "new" }

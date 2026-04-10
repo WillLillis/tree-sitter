@@ -64,7 +64,10 @@ fn parse_native_dsl_inner(
     let grammar_dir = grammar_path.parent().unwrap();
 
     let tokens = lexer::Lexer::new(input).tokenize()?;
-    let ast = parser::Parser::new(tokens, input, grammar_path.to_path_buf()).parse()?;
+    let mut ast = parser::Parser::new(tokens, input, grammar_path.to_path_buf()).parse()?;
+
+    // Validate inherit() usage before loading
+    validate_inherit(&ast)?;
 
     // Load base grammar before resolve so we can register its rule names
     let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?;
@@ -73,23 +76,108 @@ fn parse_native_dsl_inner(
         .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
         .unwrap_or_default();
 
-    // Find the inherit statement span for "first defined here" notes
-    let inherit_span = ast.root_items.iter().find_map(|&id| {
-        if let ast::Node::Let { value, .. } = ast.node(id)
-            && matches!(ast.node(*value), ast::Node::Inherit { .. })
-        {
-            return Some(ast.span(id));
-        }
-        None
-    });
+    let inherit_span = find_inherit_node(&ast).map(|id| ast.span(id));
 
-    let mut ast = ast;
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
     typecheck::check(&ast)?;
     Ok(lower::lower_with_base(&ast, base)?)
 }
 
-/// Scan root items for `let _ = inherit("path")`, load the base grammar if found.
+/// Validate that inherit() usage is consistent:
+/// - At most one inherit() call
+/// - If inherit() exists, `inherits` must be set in grammar config
+/// - If `inherits` is set, it must trace to an inherit() call
+fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
+    use lower::{LowerError, LowerErrorKind};
+
+    // Count inherit() calls in let bindings
+    let mut inherit_lets: Vec<Span> = Vec::new();
+    for &item_id in &ast.root_items {
+        if let ast::Node::Let { value, .. } = ast.node(item_id)
+            && matches!(ast.node(*value), ast::Node::Inherit { .. })
+        {
+            inherit_lets.push(ast.span(item_id));
+        }
+    }
+
+    // Check for inherit() directly in config
+    let config_has_direct_inherit = ast
+        .context
+        .grammar_config
+        .as_ref()
+        .and_then(|c| c.inherits)
+        .is_some_and(|id| matches!(ast.node(id), ast::Node::Inherit { .. }));
+
+    let total_inherits = inherit_lets.len() + usize::from(config_has_direct_inherit);
+
+    if total_inherits > 1 {
+        return Err(LowerError::new(
+            LowerErrorKind::MultipleInherits,
+            inherit_lets.first().copied().unwrap_or(Span::new(0, 0)),
+        )
+        .into());
+    }
+
+    let config_has_inherits = ast
+        .context
+        .grammar_config
+        .as_ref()
+        .is_some_and(|c| c.inherits.is_some());
+
+    // inherit() without `inherits` in config
+    if total_inherits == 1 && !config_has_inherits {
+        let span = inherit_lets.first().copied().unwrap_or(Span::new(0, 0));
+        return Err(LowerError::new(LowerErrorKind::InheritWithoutConfig, span).into());
+    }
+
+    // `inherits` in config but no inherit() call found
+    if config_has_inherits && total_inherits == 0 {
+        let span = ast
+            .context
+            .grammar_config
+            .as_ref()
+            .and_then(|c| c.inherits)
+            .map(|id| ast.span(id))
+            .unwrap_or(Span::new(0, 0));
+        return Err(LowerError::new(LowerErrorKind::InheritsWithoutInherit, span).into());
+    }
+
+    Ok(())
+}
+
+/// Find the `Inherit` node. Checks the grammar config's `inherits` field
+/// first, then falls back to scanning root-level let bindings.
+fn find_inherit_node(ast: &ast::Ast<'_>) -> Option<ast::NodeId> {
+    // Check config: `inherits: inherit("path")` or `inherits: varname`
+    if let Some(config) = ast.context.grammar_config.as_ref()
+        && let Some(inherits_id) = config.inherits
+    {
+        return match ast.node(inherits_id) {
+            ast::Node::Inherit { .. } => Some(inherits_id),
+            ast::Node::Ident => {
+                let name = ast.text(ast.span(inherits_id));
+                find_inherit_let(ast, name)
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
+fn find_inherit_let(ast: &ast::Ast<'_>, name: &str) -> Option<ast::NodeId> {
+    ast.root_items.iter().find_map(|&item_id| {
+        if let ast::Node::Let { name: n, value, .. } = ast.node(item_id)
+            && ast.text(ast.span(*n)) == name
+            && matches!(ast.node(*value), ast::Node::Inherit { .. })
+        {
+            Some(*value)
+        } else {
+            None
+        }
+    })
+}
+
+/// Load the base grammar from an `inherit("path")` node if found.
 fn load_base_grammar(
     ast: &ast::Ast<'_>,
     grammar_dir: &Path,
@@ -97,74 +185,72 @@ fn load_base_grammar(
 ) -> Result<Option<InputGrammar>, DslError> {
     use lower::{LowerError, LowerErrorKind};
 
-    for &item_id in &ast.root_items {
-        if let ast::Node::Let { value, .. } = ast.node(item_id)
-            && let ast::Node::Inherit { path } = ast.node(*value)
-        {
-            let path_str = ast.string_lit_content(*path);
-            let span = ast.span(*path);
-            let full_path = grammar_dir.join(path_str);
-            let canonical = dunce::canonicalize(&full_path).map_err(|e| {
-                LowerError::new(
-                    LowerErrorKind::InheritLoadError(format!(
-                        "failed to resolve '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                )
-            })?;
+    if let Some(inherit_id) = find_inherit_node(ast)
+        && let ast::Node::Inherit { path } = ast.node(inherit_id)
+    {
+        let path_str = ast.string_lit_content(*path);
+        let span = ast.span(*path);
+        let full_path = grammar_dir.join(path_str);
+        let canonical = dunce::canonicalize(&full_path).map_err(|e| {
+            LowerError::new(
+                LowerErrorKind::InheritLoadError(format!(
+                    "failed to resolve '{}': {e}",
+                    full_path.display()
+                )),
+                span,
+            )
+        })?;
 
-            // Cycle detection
-            if ancestor_paths.iter().any(|p| p == &canonical) {
-                let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
-                chain.push(canonical);
-                return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span).into());
-            }
+        // Cycle detection
+        if ancestor_paths.iter().any(|p| p == &canonical) {
+            let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
+            chain.push(canonical);
+            return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span).into());
+        }
 
-            let content = std::fs::read_to_string(&full_path).map_err(|e| {
-                LowerError::new(
-                    LowerErrorKind::InheritLoadError(format!(
-                        "failed to read '{}': {e}",
-                        full_path.display()
-                    )),
-                    span,
-                )
-            })?;
+        let content = std::fs::read_to_string(&full_path).map_err(|e| {
+            LowerError::new(
+                LowerErrorKind::InheritLoadError(format!(
+                    "failed to read '{}': {e}",
+                    full_path.display()
+                )),
+                span,
+            )
+        })?;
 
-            let mut child_ancestors = ancestor_paths.to_vec();
-            child_ancestors.push(canonical.clone());
+        let mut child_ancestors = ancestor_paths.to_vec();
+        child_ancestors.push(canonical.clone());
 
-            let ext = full_path.extension().and_then(|e| e.to_str());
-            let grammar = match ext {
-                Some("tsg") => parse_native_dsl_inner(&content, &canonical, &child_ancestors)
-                    .map_err(|inner| InheritedError {
+        let ext = full_path.extension().and_then(|e| e.to_str());
+        let grammar = match ext {
+            Some("tsg") => {
+                parse_native_dsl_inner(&content, &canonical, &child_ancestors).map_err(|inner| {
+                    InheritedError {
                         inner: Box::new(inner),
                         source_text: content.clone(),
                         path: canonical.clone(),
                         inherit_span: span,
-                    })?,
-                Some("json") => crate::parse_grammar::parse_grammar(&content).map_err(|e| {
-                    LowerError::new(
-                        LowerErrorKind::InheritLoadError(format!(
-                            "in '{}': {e}",
-                            full_path.display()
-                        )),
-                        span,
-                    )
-                })?,
-                _ => {
-                    return Err(LowerError::new(
-                        LowerErrorKind::InheritLoadError(
-                            "unsupported file extension, expected .tsg or .json".to_string(),
-                        ),
-                        span,
-                    )
-                    .into());
-                }
-            };
+                    }
+                })?
+            }
+            Some("json") => crate::parse_grammar::parse_grammar(&content).map_err(|e| {
+                LowerError::new(
+                    LowerErrorKind::InheritLoadError(format!("in '{}': {e}", full_path.display())),
+                    span,
+                )
+            })?,
+            _ => {
+                return Err(LowerError::new(
+                    LowerErrorKind::InheritLoadError(
+                        "unsupported file extension, expected .tsg or .json".to_string(),
+                    ),
+                    span,
+                )
+                .into());
+            }
+        };
 
-            return Ok(Some(grammar));
-        }
+        return Ok(Some(grammar));
     }
     Ok(None)
 }
