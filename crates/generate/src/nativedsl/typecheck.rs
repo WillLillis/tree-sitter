@@ -376,16 +376,16 @@ fn check_item<'src>(
         }
         Node::Fn(fn_idx) => {
             let config = ast.get_fn(*fn_idx);
-            let params = parse_fn_params(ast, config, pool)?;
-            let return_ty = ast_type_to_ty(ast, config.return_ty, pool)?;
-            env.fns
-                .insert(ast.node_text(config.name), FnSig { params, return_ty });
+            let fn_name = ast.node_text(config.name);
+            // Registered in the first pass of `check()`
+            let sig = &env.fns[fn_name];
+            let return_ty = sig.return_ty;
+            let n_params = sig.params.len();
             env.push_scope();
-            for param in &config.params {
-                env.insert_var(
-                    ast.node_text(param.name),
-                    ast_type_to_ty(ast, param.ty, pool)?,
-                );
+            for i in 0..n_params {
+                // Re-index each iteration so the borrow is temporary
+                let ty = env.fns[fn_name].params[i].1;
+                env.insert_var(ast.node_text(config.params[i].name), ty);
             }
             let body_ty = type_of(ast, config.body, env, pool)?;
             env.pop_scope();
