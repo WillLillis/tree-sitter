@@ -187,7 +187,7 @@ fn load_base_grammar(
     if let Some(inherit_id) = find_inherit_node(ast)
         && let ast::Node::Inherit { path } = ast.node(inherit_id)
     {
-        let path_str = ast.string_lit_content(*path);
+        let path_str = ast.node_text(*path);
         let span = ast.span(*path);
         let full_path = grammar_dir.join(path_str);
         let canonical = dunce::canonicalize(&full_path).map_err(|e| {
