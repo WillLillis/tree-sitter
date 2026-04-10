@@ -578,26 +578,24 @@ fn swap_rule_bodies(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
         // Find the bodies (between first { and matching })
         let a = rule_starts[rng.random_range(0..rule_starts.len())];
         let b = rule_starts[rng.random_range(0..rule_starts.len())];
-        if a != b {
-            if let (Some(a_open), Some(b_open)) = (buf[a..].find('{'), buf[b..].find('{')) {
-                if let (Some(a_close), Some(b_close)) =
-                    (buf[a + a_open..].find('}'), buf[b + b_open..].find('}'))
-                {
-                    let body_a = buf[a + a_open + 1..a + a_open + a_close].to_string();
-                    let body_b = buf[b + b_open + 1..b + b_open + b_close].to_string();
-                    // Only swap if ranges don't overlap
-                    let range_a = a + a_open + 1..a + a_open + a_close;
-                    let range_b = b + b_open + 1..b + b_open + b_close;
-                    if range_a.end <= range_b.start || range_b.end <= range_a.start {
-                        // Replace the later range first to preserve offsets
-                        if range_a.start > range_b.start {
-                            buf.replace_range(range_a, &body_b);
-                            buf.replace_range(range_b, &body_a);
-                        } else {
-                            buf.replace_range(range_b, &body_a);
-                            buf.replace_range(range_a, &body_b);
-                        }
-                    }
+        if a != b
+            && let (Some(a_open), Some(b_open)) = (buf[a..].find('{'), buf[b..].find('{'))
+            && let (Some(a_close), Some(b_close)) =
+                (buf[a + a_open..].find('}'), buf[b + b_open..].find('}'))
+        {
+            let body_a = buf[a + a_open + 1..a + a_open + a_close].to_string();
+            let body_b = buf[b + b_open + 1..b + b_open + b_close].to_string();
+            // Only swap if ranges don't overlap
+            let range_a = a + a_open + 1..a + a_open + a_close;
+            let range_b = b + b_open + 1..b + b_open + b_close;
+            if range_a.end <= range_b.start || range_b.end <= range_a.start {
+                // Replace the later range first to preserve offsets
+                if range_a.start > range_b.start {
+                    buf.replace_range(range_a, &body_b);
+                    buf.replace_range(range_b, &body_a);
+                } else {
+                    buf.replace_range(range_b, &body_a);
+                    buf.replace_range(range_a, &body_b);
                 }
             }
         }
@@ -614,11 +612,11 @@ fn delete_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
         let idx = rng.random_range(0..rule_starts.len());
         let start = rule_starts[idx];
         // Find closing brace
-        if let Some(open) = buf[start..].find('{') {
-            if let Some(close) = buf[start + open..].find('}') {
-                let end = start + open + close + 1;
-                buf.replace_range(start..end, "");
-            }
+        if let Some(open) = buf[start..].find('{')
+            && let Some(close) = buf[start + open..].find('}')
+        {
+            let end = start + open + close + 1;
+            buf.replace_range(start..end, "");
         }
     }
 }
@@ -631,13 +629,13 @@ fn duplicate_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
     if !rule_starts.is_empty() {
         let idx = rng.random_range(0..rule_starts.len());
         let start = rule_starts[idx];
-        if let Some(open) = buf[start..].find('{') {
-            if let Some(close) = buf[start + open..].find('}') {
-                let end = start + open + close + 1;
-                let dup = buf[start..end].to_string();
-                buf.push(' ');
-                buf.push_str(&dup);
-            }
+        if let Some(open) = buf[start..].find('{')
+            && let Some(close) = buf[start + open..].find('}')
+        {
+            let end = start + open + close + 1;
+            let dup = buf[start..end].to_string();
+            buf.push(' ');
+            buf.push_str(&dup);
         }
     }
 }
@@ -650,15 +648,15 @@ fn wrap_in_combinator(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
     if !rule_starts.is_empty() {
         let idx = rng.random_range(0..rule_starts.len());
         let start = rule_starts[idx];
-        if let Some(open) = buf[start..].find('{') {
-            if let Some(close) = buf[start + open..].find('}') {
-                let body_start = start + open + 1;
-                let body_end = start + open + close;
-                let body = buf[body_start..body_end].to_string();
-                let combinator = pick(rng, UNARY_COMBINATORS);
-                let wrapped = format!(" {combinator}({body}) ");
-                buf.replace_range(body_start..body_end, &wrapped);
-            }
+        if let Some(open) = buf[start..].find('{')
+            && let Some(close) = buf[start + open..].find('}')
+        {
+            let body_start = start + open + 1;
+            let body_end = start + open + close;
+            let body = buf[body_start..body_end].to_string();
+            let combinator = pick(rng, UNARY_COMBINATORS);
+            let wrapped = format!(" {combinator}({body}) ");
+            buf.replace_range(body_start..body_end, &wrapped);
         }
     }
 }
@@ -668,16 +666,16 @@ fn expression_transplant(rng: &mut SmallRng, corpus: &[String], buf: &mut String
     let donor = pick(rng, corpus);
     let recipient = pick(rng, corpus);
     // Find a rule body in the donor
-    if let Some(d_open) = donor.find('{') {
-        if let Some(d_close) = donor[d_open..].find('}') {
-            let expr = &donor[d_open + 1..d_open + d_close];
-            // Find a rule body in the recipient and replace it
-            buf.push_str(recipient);
-            if let Some(r_open) = buf.find('{') {
-                if let Some(r_close) = buf[r_open..].find('}') {
-                    buf.replace_range(r_open + 1..r_open + r_close, expr);
-                }
-            }
+    if let Some(d_open) = donor.find('{')
+        && let Some(d_close) = donor[d_open..].find('}')
+    {
+        let expr = &donor[d_open + 1..d_open + d_close];
+        // Find a rule body in the recipient and replace it
+        buf.push_str(recipient);
+        if let Some(r_open) = buf.find('{')
+            && let Some(r_close) = buf[r_open..].find('}')
+        {
+            buf.replace_range(r_open + 1..r_open + r_close, expr);
         }
     }
 }
