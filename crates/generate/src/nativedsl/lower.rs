@@ -104,6 +104,8 @@ enum Value<'src> {
     Grammar,
 }
 
+const MAX_CALL_DEPTH: u16 = 128;
+
 struct Evaluator<'src> {
     ast: &'src Ast<'src>,
     values: Vec<Value<'src>>,
@@ -113,6 +115,7 @@ struct Evaluator<'src> {
     rule_children: Vec<RuleId>,
     strings: StringPool<'src>,
     base_grammar: Option<&'src InputGrammar>,
+    call_stack: Vec<(&'src str, Span)>,
 }
 
 impl<'src> Evaluator<'src> {
@@ -127,6 +130,7 @@ impl<'src> Evaluator<'src> {
             rule_children: Vec::with_capacity(cap),
             strings: StringPool::new(ast.source()),
             base_grammar,
+            call_stack: Vec::new(),
         }
     }
 
@@ -273,7 +277,14 @@ impl<'src> Evaluator<'src> {
         let rid = self.lower_to_rule(id)?;
         match &self.rules[rid.0 as usize] {
             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-            _ => unreachable!(),
+            ARule::Blank => Err(LowerError::new(
+                LowerErrorKind::ConfigFieldUnset,
+                self.ast.span(id),
+            )),
+            _ => Err(LowerError::new(
+                LowerErrorKind::ExpectedRuleName,
+                self.ast.span(id),
+            )),
         }
     }
 
@@ -617,7 +628,7 @@ pub fn lower_with_base(
     Ok(out)
 }
 
-impl Evaluator<'_> {
+impl<'src> Evaluator<'src> {
     fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
         let ast = self.ast;
         let span = ast.span(id);
@@ -749,7 +760,7 @@ impl Evaluator<'_> {
                 for &arg_id in ast.child_slice(args) {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
-                self.eval_fn_call(ast.node_text(name), &arg_vals)
+                self.eval_fn_call(ast.node_text(name), &arg_vals, span)
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -929,7 +940,24 @@ impl Evaluator<'_> {
         }
     }
 
-    fn eval_fn_call(&mut self, name: &str, arg_vals: &[ValueId]) -> Result<ValueId, LowerError> {
+    fn eval_fn_call(
+        &mut self,
+        name: &'src str,
+        arg_vals: &[ValueId],
+        call_span: Span,
+    ) -> Result<ValueId, LowerError> {
+        self.call_stack.push((name, call_span));
+        if self.call_stack.len() > MAX_CALL_DEPTH as usize {
+            let trace = self
+                .call_stack
+                .iter()
+                .map(|(name, span)| (name.to_string(), *span))
+                .collect();
+            return Err(LowerError::new(
+                LowerErrorKind::CallDepthExceeded(trace),
+                call_span,
+            ));
+        }
         let &fn_id = self.fns.get(name).unwrap();
         let config = self.get_fn_config(fn_id);
         let body = config.body;
@@ -940,6 +968,7 @@ impl Evaluator<'_> {
         }
         let result = self.eval_expr(body);
         self.pop_scope();
+        self.call_stack.pop();
         result
     }
 
@@ -1147,7 +1176,10 @@ pub enum LowerErrorKind {
     InheritLoadError(String),
     InheritCycle(Vec<std::path::PathBuf>),
     InheritRuleNotFound(String),
+    ExpectedRuleName,
+    ConfigFieldUnset,
     TooManyChildren,
+    CallDepthExceeded(Vec<(String, Span)>),
 }
 
 impl std::fmt::Display for LowerError {
@@ -1180,8 +1212,17 @@ impl std::fmt::Display for LowerError {
                 f,
                 "rule '{n}' not found in base grammar (use '.' for config fields)"
             ),
+            LowerErrorKind::ExpectedRuleName => {
+                write!(f, "expected a rule name reference")
+            }
+            LowerErrorKind::ConfigFieldUnset => {
+                write!(f, "config field is not set in the inherited grammar")
+            }
             LowerErrorKind::TooManyChildren => {
                 write!(f, "too many elements (maximum {})", u16::MAX)
+            }
+            LowerErrorKind::CallDepthExceeded(_) => {
+                write!(f, "maximum function call depth ({MAX_CALL_DEPTH}) exceeded")
             }
         }
     }
