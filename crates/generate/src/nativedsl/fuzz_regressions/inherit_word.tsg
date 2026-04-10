@@ -1,0 +1,4 @@
+let base = inherit("./base_with_config.tsg")
+grammar { language: "derived", inherits: base, word: base.word }
+override rule program { "program_v2" }
+rule new_rule_0 { "new_0" }

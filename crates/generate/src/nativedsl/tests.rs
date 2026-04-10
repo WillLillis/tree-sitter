@@ -1808,6 +1808,15 @@ fn error_keyword_as_ident() {
     }
 }
 
+#[test]
+fn recursive_fn_depth_limit() {
+    let err = dsl_err(
+        r#"grammar { language: "test" } fn f(x: rule) -> rule { f(x) } rule program { f("x") }"#,
+    );
+    let e = assert_err!(err, Lower);
+    assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
+}
+
 /// Iterate over all `.tsg` files in `fuzz_regressions/` and verify none panic.
 /// To add a new regression, just drop a `.tsg` file in that directory.
 #[test]
