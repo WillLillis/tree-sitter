@@ -54,11 +54,10 @@ fn parse_native_dsl_inner(
     ancestor_paths: &[PathBuf],
 ) -> Result<InputGrammar, DslError> {
     if input.len() >= u32::MAX as usize {
-        return Err(LexError {
+        Err(LexError {
             kind: LexErrorKind::InputTooLarge,
             span: Span::new(0, 0),
-        }
-        .into());
+        })?;
     }
 
     let grammar_dir = grammar_path.parent().unwrap();
@@ -90,62 +89,49 @@ fn parse_native_dsl_inner(
 fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
-    // Count inherit() calls in let bindings
-    let mut inherit_lets: Vec<Span> = Vec::new();
+    let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
+
+    let direct_in_config =
+        config_inherits.is_some_and(|id| matches!(ast.node(id), ast::Node::Inherit { .. }));
+
+    // Find all inherit() calls in let bindings, error if more than one
+    let mut inherit_let: Option<Span> = None;
     for &item_id in &ast.root_items {
         if let ast::Node::Let { value, .. } = ast.node(item_id)
             && matches!(ast.node(*value), ast::Node::Inherit { .. })
         {
-            inherit_lets.push(ast.span(item_id));
+            if inherit_let.is_some() || direct_in_config {
+                Err(LowerError::new(
+                    LowerErrorKind::MultipleInherits,
+                    ast.span(item_id),
+                ))?;
+            }
+            inherit_let = Some(ast.span(item_id));
         }
     }
 
-    // Check for inherit() directly in config
-    let config_has_direct_inherit = ast
-        .context
-        .grammar_config
-        .as_ref()
-        .and_then(|c| c.inherits)
-        .is_some_and(|id| matches!(ast.node(id), ast::Node::Inherit { .. }));
-
-    let total_inherits = inherit_lets.len() + usize::from(config_has_direct_inherit);
-
-    if total_inherits > 1 {
-        return Err(LowerError::new(
-            LowerErrorKind::MultipleInherits,
-            inherit_lets.first().copied().unwrap(),
-        )
-        .into());
+    // inherit() in a let binding but no `inherits` in grammar config
+    if let Some(span) = inherit_let
+        && config_inherits.is_none()
+    {
+        Err(LowerError::new(LowerErrorKind::InheritWithoutConfig, span))?;
     }
 
-    let config_has_inherits = ast
-        .context
-        .grammar_config
-        .as_ref()
-        .is_some_and(|c| c.inherits.is_some());
-
-    // inherit() without `inherits` in config
-    if total_inherits == 1 && !config_has_inherits {
-        let span = inherit_lets.first().copied().unwrap_or(Span::new(0, 0));
-        return Err(LowerError::new(LowerErrorKind::InheritWithoutConfig, span).into());
-    }
-
-    // `inherits` in config must resolve to an inherit() call
-    if config_has_inherits && find_inherit_node(ast).is_none() {
-        let span = ast
-            .context
-            .grammar_config
-            .as_ref()
-            .and_then(|c| c.inherits)
-            .map_or(Span::new(0, 0), |id| ast.span(id));
-        return Err(LowerError::new(LowerErrorKind::InheritsWithoutInherit, span).into());
+    // `inherits` in config but doesn't resolve to an inherit() call
+    if let Some(id) = config_inherits
+        && find_inherit_node(ast).is_none()
+    {
+        Err(LowerError::new(
+            LowerErrorKind::InheritsWithoutInherit,
+            ast.span(id),
+        ))?;
     }
 
     Ok(())
 }
 
-/// Find the `Inherit` node. Checks the grammar config's `inherits` field
-/// first, then falls back to scanning root-level let bindings.
+/// Resolve the `Inherit` node from the grammar config's `inherits` field,
+/// following variable references to let bindings if needed.
 fn find_inherit_node(ast: &ast::Ast<'_>) -> Option<ast::NodeId> {
     // Check config: `inherits: inherit("path")` or `inherits: varname`
     if let Some(config) = ast.context.grammar_config.as_ref()
@@ -204,7 +190,11 @@ fn load_base_grammar(
         if ancestor_paths.iter().any(|p| p == &canonical) {
             let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
             chain.push(canonical);
-            return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span).into());
+            #[expect(
+                clippy::needless_return_with_question_mark,
+                reason = "`canonical` is moved"
+            )]
+            return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span))?;
         }
 
         let content = std::fs::read_to_string(&full_path).map_err(|e| {
@@ -244,8 +234,7 @@ fn load_base_grammar(
                         "unsupported file extension, expected .tsg or .json".to_string(),
                     ),
                     span,
-                )
-                .into());
+                ))?;
             }
         };
 
@@ -547,8 +536,5 @@ fn render_note_snippet(
 }
 
 fn digit_count(n: usize) -> usize {
-    if n == 0 {
-        return 1;
-    }
-    ((n as f64).log10().floor() as usize) + 1
+    n.checked_ilog10().map_or(1, |d| d as usize + 1)
 }
