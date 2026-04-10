@@ -1601,17 +1601,17 @@ fn error_multiple_grammar_blocks() {
 }
 
 #[test]
-fn multiple_inherit_bindings_only_first_used() {
-    // Only the first inherit() is used as the base grammar.
-    // Additional inherit() calls create Grammar values but don't affect inheritance.
-    let g = dsl(r#"
+fn multiple_inherit_bindings_rejected() {
+    let err = dsl_err(
+        r#"
         let a = inherit("inherit_base/grammar.tsg")
         let b = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: a }
         rule extra { "x" }
-    "#);
-    assert_eq!(g.name, "derived");
-    assert_eq!(g.variables.last().unwrap().name, "extra");
+    "#,
+    );
+    let e = assert_err!(err, Lower);
+    assert!(matches!(e.kind, LowerErrorKind::MultipleInherits));
 }
 
 // ===== Lexer error tests =====
