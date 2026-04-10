@@ -1,0 +1,11 @@
+grammar {
+    language: "configured",
+    extras: [regexp("\\s"), "\n"],
+    inline: [_inner],
+    conflicts: [[expr, stmt]],
+    precedences: [["*", "+"]],
+}
+rule program { repeat(stmt) }
+rule stmt { choice(expr, ";") }
+rule expr { choice(_inner, "x") }
+rule _inner { "y" }
