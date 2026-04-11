@@ -370,12 +370,11 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_int(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let int_start = self.pos - 1;
         while let Some(b'0'..=b'9') = self.peek() {
             self.advance();
         }
         // SAFETY: the slice contains only ASCII digits (b'0'..=b'9'), which are valid UTF-8.
-        let text = unsafe { std::str::from_utf8_unchecked(&self.source[int_start..self.pos]) };
+        let text = unsafe { std::str::from_utf8_unchecked(&self.source[start..self.pos]) };
         let value: i32 = text.parse().map_err(|_| LexError {
             kind: LexErrorKind::IntegerOverflow,
             span: Span::from_usize(start, self.pos),
@@ -384,12 +383,11 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_ident(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        let ident_start = self.pos - 1;
         while let Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') = self.peek() {
             self.advance();
         }
         // SAFETY: the slice contains only ASCII ident chars (a-z, A-Z, 0-9, _), which are valid UTF-8.
-        let text = unsafe { std::str::from_utf8_unchecked(&self.source[ident_start..self.pos]) };
+        let text = unsafe { std::str::from_utf8_unchecked(&self.source[start..self.pos]) };
         if text == "r" && matches!(self.peek(), Some(b'"' | b'#')) {
             return self.lex_raw_string(start);
         }
@@ -433,7 +431,7 @@ pub struct LexError {
 }
 
 /// The specific kind of lexer error.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum LexErrorKind {
     UnterminatedString,
     UnterminatedRawString,
