@@ -224,20 +224,9 @@ pub fn lower_with_base(
     };
     drop(eval);
 
-    // Build the output grammar. Start from the base (moved, not cloned) and
-    // overwrite fields that the derived grammar specifies.
-    let mut out = base_grammar.unwrap_or_else(|| InputGrammar {
-        name: String::new(),
-        variables: Vec::new(),
-        extra_symbols: Vec::new(),
-        expected_conflicts: Vec::new(),
-        precedence_orderings: Vec::new(),
-        external_tokens: Vec::new(),
-        variables_to_inline: Vec::new(),
-        supertype_symbols: Vec::new(),
-        word_token: None,
-        reserved_words: Vec::new(),
-    });
+    // Build the output grammar. Start from the base and overwrite fields
+    // that the derived grammar specifies.
+    let mut out = base_grammar.unwrap_or_default();
     out.name.clone_from(language);
 
     // Merge rules: apply overrides to base, then append new rules
@@ -399,16 +388,15 @@ impl<'src> Evaluator<'src> {
             ),
             ARule::NamedSymbol(sid) => Rule::NamedSymbol(s.to_string(*sid)),
             ARule::Seq(start, len) | ARule::Choice(start, len) => {
-                let is_seq = matches!(&self.rules[id.0 as usize], ARule::Seq(..));
                 let children: Vec<Rule> = self.rule_children
                     [*start as usize..*start as usize + *len as usize]
                     .iter()
                     .map(|&id| self.build_rule(id))
                     .collect();
-                if is_seq {
-                    Rule::seq(children)
-                } else {
-                    Rule::choice(children)
+                match &self.rules[id.0 as usize] {
+                    ARule::Seq(..) => Rule::seq(children),
+                    ARule::Choice(..) => Rule::choice(children),
+                    _ => unreachable!(),
                 }
             }
             ARule::Repeat(inner) => Rule::repeat(self.build_rule(*inner)),
@@ -434,6 +422,15 @@ impl<'src> Evaluator<'src> {
         }
     }
 
+    fn value_to_owned_rule(&self, id: ValueId) -> Rule {
+        match self.get_val(id) {
+            Value::Rule(rid) => self.build_rule(*rid),
+            Value::Str(sid) => Rule::String(self.strings.to_string(*sid)),
+            // Guarded by super::typecheck - only rule-like values reach here
+            _ => unreachable!(),
+        }
+    }
+
     fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
         let vid = self.eval_expr(id)?;
         // Guarded by super::typecheck::expect_rule_list - ensures list type
@@ -442,12 +439,7 @@ impl<'src> Evaluator<'src> {
         };
         items
             .iter()
-            .map(|&v| match self.get_val(v) {
-                Value::Rule(rid) => Ok(self.build_rule(*rid)),
-                Value::Str(sid) => Ok(Rule::String(self.strings.to_string(*sid))),
-                // Guarded by super::typecheck::expect_rule_list - checks elements are rule-like
-                _ => unreachable!(),
-            })
+            .map(|&v| Ok(self.value_to_owned_rule(v)))
             .collect()
     }
 
@@ -530,11 +522,7 @@ impl<'src> Evaluator<'src> {
                 };
                 let words = word_vals
                     .iter()
-                    .map(|&wv| match self.get_val(wv) {
-                        Value::Rule(rid) => self.build_rule(*rid),
-                        Value::Str(sid) => Rule::String(self.strings.to_string(*sid)),
-                        _ => unreachable!(),
-                    })
+                    .map(|&wv| self.value_to_owned_rule(wv))
                     .collect();
                 Ok(ReservedWordContext {
                     name,
@@ -634,15 +622,14 @@ impl<'src> Evaluator<'src> {
                 self.alloc_rule(ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) | Rule::Seq(members) => {
-                let is_choice = matches!(rule, Rule::Choice(_));
                 let imported: Vec<RuleId> = members.iter().map(|m| self.import_rule(m)).collect();
                 let start = self.rule_children.len() as u32;
                 self.rule_children.extend_from_slice(&imported);
                 let len = imported.len() as u16;
-                if is_choice {
-                    self.alloc_rule(ARule::Choice(start, len))
-                } else {
-                    self.alloc_rule(ARule::Seq(start, len))
+                match rule {
+                    Rule::Seq(_) => self.alloc_rule(ARule::Seq(start, len)),
+                    Rule::Choice(_) => self.alloc_rule(ARule::Choice(start, len)),
+                    _ => unreachable!(),
                 }
             }
             Rule::Repeat(inner) => {
