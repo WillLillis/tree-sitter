@@ -179,6 +179,18 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
         }
     }
 
+    // Collect let binding names (not yet registered - they're added in pass 2
+    // to prevent forward references). We need them here to avoid pre-registering
+    // config identifiers that shadow let bindings.
+    let let_names: rustc_hash::FxHashSet<&str> = ast
+        .root_items
+        .iter()
+        .filter_map(|&id| match ast.node(id) {
+            Node::Let { name, .. } => Some(ast.node_text(*name)),
+            _ => None,
+        })
+        .collect();
+
     // Register identifiers from config fields that aren't already declared.
     // In grammar.js, externals/inline/supertypes/word can reference names
     // not declared as rules. We mirror that by pre-registering them.
@@ -191,7 +203,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
                 for &child in ast.child_slice(*range) {
                     if matches!(ast.node(child), Node::Ident) {
                         let name = ast.text(ast.span(child));
-                        if names.get(name).is_none() {
+                        if names.get(name).is_none() && !let_names.contains(name) {
                             names.insert(
                                 name,
                                 Decl::Rule,
@@ -208,7 +220,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
             && matches!(ast.node(word_id), Node::Ident)
         {
             let name = ast.text(ast.span(word_id));
-            if names.get(name).is_none() {
+            if names.get(name).is_none() && !let_names.contains(name) {
                 names.insert(name, Decl::Rule, ast.span(word_id), grammar_path, source)?;
             }
         }
@@ -232,16 +244,12 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
                 grammar_config.inline,
                 grammar_config.supertypes,
                 grammar_config.word,
+                grammar_config.reserved,
             ]
             .into_iter()
             .flatten()
             {
                 resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
-            }
-            for rws in &grammar_config.reserved {
-                for &id in &rws.words {
-                    resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
-                }
             }
             Ok(())
         }

@@ -614,6 +614,57 @@ fn reserved_combinator() {
 }
 
 #[test]
+fn reserved_multiple_sets() {
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            reserved: {
+                global: ["if", "else", "for"],
+                properties: ["get", "set"],
+            },
+        }
+        rule program { reserved("global", regexp("[a-z]+")) }
+    "#);
+    assert_eq!(g.reserved_words.len(), 2);
+    assert_eq!(g.reserved_words[0].name, "global");
+    assert_eq!(g.reserved_words[0].reserved_words.len(), 3);
+    assert_eq!(g.reserved_words[1].name, "properties");
+    assert_eq!(g.reserved_words[1].reserved_words.len(), 2);
+}
+
+#[test]
+fn reserved_inherited() {
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar_with_reserved.tsg")
+        grammar { language: "derived", inherits: base, reserved: base.reserved }
+    "#);
+    assert_eq!(g.reserved_words.len(), 2);
+    assert_eq!(g.reserved_words[0].name, "global");
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![
+            Rule::String("if".into()),
+            Rule::String("else".into()),
+            Rule::String("for".into()),
+        ]
+    );
+    assert_eq!(g.reserved_words[1].name, "properties");
+    assert_eq!(
+        g.reserved_words[1].reserved_words,
+        vec![Rule::String("get".into()), Rule::String("set".into()),]
+    );
+}
+
+#[test]
+fn reserved_empty_inherited() {
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, reserved: base.reserved }
+    "#);
+    assert!(g.reserved_words.is_empty());
+}
+
+#[test]
 fn for_inline_in_seq() {
     let g = dsl(r#"
         grammar { language: "test" }
@@ -1459,6 +1510,25 @@ fn error_field_not_found() {
 }
 
 #[test]
+fn error_word_non_rule_var() {
+    let err = dsl_err(
+        r#"
+        let my_word = 42
+        grammar { language: "test", word: my_word }
+        rule program { "y" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::Rule,
+            got: Ty::Int,
+        }
+    );
+}
+
+#[test]
 fn error_config_access_unknown_field() {
     let err = dsl_err(
         r#"
@@ -1736,9 +1806,13 @@ fn error_builtin_arg_count_messages() {
         (g!("prec_right(1)"), "prec_right", 2, 1),
         (g!("prec_dynamic()"), "prec_dynamic", 2, 0),
         (g!("prec_dynamic(1)"), "prec_dynamic", 2, 1),
+        (g!("field()"), "field", 2, 0),
         (g!("field(name)"), "field", 2, 1),
+        (g!("alias()"), "alias", 2, 0),
         (g!(r#"alias("a")"#), "alias", 2, 1),
+        (g!("append()"), "append", 2, 0),
         (g!(r#"append("a")"#), "append", 2, 1),
+        (g!("reserved()"), "reserved", 2, 0),
         (g!(r#"reserved("ctx")"#), "reserved", 2, 1),
         // 2-arg: too many
         (g!(r#"prec(1, "a", "b")"#), "prec", 2, 3),
@@ -1898,67 +1972,56 @@ fn error_inherit_rule_not_found() {
 
 // ===== Benchmarks =====
 
-#[test]
-#[ignore = "benchmark"]
-fn bench_native_dsl_c() {
-    let dir = native_grammar_path("c_native");
-    let source = read_native_grammar("c_native");
+fn run_bench(label: &str, f: impl Fn()) {
     for _ in 0..10 {
-        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+        #[expect(clippy::unit_arg, reason = "bench")]
+        std::hint::black_box(f());
     }
     let n = 1000;
     let start = std::time::Instant::now();
     for _ in 0..n {
-        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
+        #[expect(clippy::unit_arg, reason = "bench")]
+        std::hint::black_box(f());
     }
-    eprintln!("Native DSL C: {:?}/iter", start.elapsed() / n);
+    eprintln!("{label}: {:?}/iter", start.elapsed() / n);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_native_dsl_c() {
+    let path = native_grammar_path("c_native");
+    let source = read_native_grammar("c_native");
+    run_bench("Native DSL C", || {
+        parse_native_dsl(&source, &path).unwrap();
+    });
 }
 
 #[test]
 #[ignore = "benchmark"]
 fn bench_native_dsl_javascript() {
-    let dir = native_grammar_path("javascript_native");
+    let path = native_grammar_path("javascript_native");
     let source = read_native_grammar("javascript_native");
-    for _ in 0..10 {
-        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
-    }
-    let n = 1000;
-    let start = std::time::Instant::now();
-    for _ in 0..n {
-        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
-    }
-    eprintln!("Native DSL JavaScript: {:?}/iter", start.elapsed() / n);
+    run_bench("Native DSL JavaScript", || {
+        parse_native_dsl(&source, &path).unwrap();
+    });
 }
 
 #[test]
 #[ignore = "benchmark"]
 fn bench_native_dsl_cpp() {
-    let dir = native_grammar_path("cpp_native");
+    let path = native_grammar_path("cpp_native");
     let source = read_native_grammar("cpp_native");
-    for _ in 0..10 {
-        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
-    }
-    let n = 1000;
-    let start = std::time::Instant::now();
-    for _ in 0..n {
-        std::hint::black_box(parse_native_dsl(&source, &dir).unwrap());
-    }
-    eprintln!("Native DSL C++: {:?}/iter", start.elapsed() / n);
+    run_bench("Native DSL C++", || {
+        parse_native_dsl(&source, &path).unwrap();
+    });
 }
 
 #[test]
 #[ignore = "benchmark"]
 fn bench_json_parse_c() {
-    let js_json =
-        std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
-            .unwrap();
-    for _ in 0..10 {
-        std::hint::black_box(crate::parse_grammar::parse_grammar(&js_json).unwrap());
-    }
-    let n = 1000;
-    let start = std::time::Instant::now();
-    for _ in 0..n {
-        std::hint::black_box(crate::parse_grammar::parse_grammar(&js_json).unwrap());
-    }
-    eprintln!("JSON parse_grammar C: {:?}/iter", start.elapsed() / n);
+    let json = std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
+        .unwrap();
+    run_bench("JSON parse_grammar C", || {
+        crate::parse_grammar::parse_grammar(&json).unwrap();
+    });
 }

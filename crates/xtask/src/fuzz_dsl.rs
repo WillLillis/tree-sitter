@@ -139,7 +139,7 @@ fn token_soup(rng: &mut SmallRng, buf: &mut String) {
         if i > 0 && rng.random_bool(0.5) {
             buf.push(' ');
         }
-        buf.push_str(TOKENS[rng.random_range(0..TOKENS.len())]);
+        buf.push_str(pick(rng, TOKENS));
     }
 }
 
@@ -568,35 +568,41 @@ fn inheritance_invalid(rng: &mut SmallRng, base_path: &Path, buf: &mut String) {
     }
 }
 
+/// Find a `rule NAME { BODY }` block in `buf` starting from offset `start`.
+/// Returns `(body_start, body_end, block_end)` or `None`.
+fn find_rule_body(buf: &str, start: usize) -> Option<(usize, usize, usize)> {
+    let open = buf[start..].find('{')?;
+    let close = buf[start + open..].find('}')?;
+    let body_start = start + open + 1;
+    let body_end = start + open + close;
+    let block_end = body_end + 1;
+    Some((body_start, body_end, block_end))
+}
+
+fn rule_starts(buf: &str) -> Vec<usize> {
+    buf.match_indices("rule ").map(|(i, _)| i).collect()
+}
+
 /// Swap bodies of two rules in a multi-rule corpus grammar
 fn swap_rule_bodies(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
-    let base = pick(rng, corpus);
-    buf.push_str(base);
-    // Find "rule NAME { ... }" blocks by searching for "rule " followed by "{"
-    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
-    if rule_starts.len() >= 2 {
-        // Find the bodies (between first { and matching })
-        let a = rule_starts[rng.random_range(0..rule_starts.len())];
-        let b = rule_starts[rng.random_range(0..rule_starts.len())];
+    buf.push_str(pick(rng, corpus));
+    let starts = rule_starts(buf);
+    if starts.len() >= 2 {
+        let a = starts[rng.random_range(0..starts.len())];
+        let b = starts[rng.random_range(0..starts.len())];
         if a != b
-            && let (Some(a_open), Some(b_open)) = (buf[a..].find('{'), buf[b..].find('{'))
-            && let (Some(a_close), Some(b_close)) =
-                (buf[a + a_open..].find('}'), buf[b + b_open..].find('}'))
+            && let Some((a_bs, a_be, _)) = find_rule_body(buf, a)
+            && let Some((b_bs, b_be, _)) = find_rule_body(buf, b)
+            && (a_be <= b_bs || b_be <= a_bs)
         {
-            let body_a = buf[a + a_open + 1..a + a_open + a_close].to_string();
-            let body_b = buf[b + b_open + 1..b + b_open + b_close].to_string();
-            // Only swap if ranges don't overlap
-            let range_a = a + a_open + 1..a + a_open + a_close;
-            let range_b = b + b_open + 1..b + b_open + b_close;
-            if range_a.end <= range_b.start || range_b.end <= range_a.start {
-                // Replace the later range first to preserve offsets
-                if range_a.start > range_b.start {
-                    buf.replace_range(range_a, &body_b);
-                    buf.replace_range(range_b, &body_a);
-                } else {
-                    buf.replace_range(range_b, &body_a);
-                    buf.replace_range(range_a, &body_b);
-                }
+            let body_a = buf[a_bs..a_be].to_string();
+            let body_b = buf[b_bs..b_be].to_string();
+            if a_bs > b_bs {
+                buf.replace_range(a_bs..a_be, &body_b);
+                buf.replace_range(b_bs..b_be, &body_a);
+            } else {
+                buf.replace_range(b_bs..b_be, &body_a);
+                buf.replace_range(a_bs..a_be, &body_b);
             }
         }
     }
@@ -604,18 +610,11 @@ fn swap_rule_bodies(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
 
 /// Delete a random rule from a multi-rule corpus grammar
 fn delete_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
-    let base = pick(rng, corpus);
-    buf.push_str(base);
-    // Find rule boundaries and delete one
-    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
-    if rule_starts.len() >= 2 {
-        let idx = rng.random_range(0..rule_starts.len());
-        let start = rule_starts[idx];
-        // Find closing brace
-        if let Some(open) = buf[start..].find('{')
-            && let Some(close) = buf[start + open..].find('}')
-        {
-            let end = start + open + close + 1;
+    buf.push_str(pick(rng, corpus));
+    let starts = rule_starts(buf);
+    if starts.len() >= 2 {
+        let start = starts[rng.random_range(0..starts.len())];
+        if let Some((_, _, end)) = find_rule_body(buf, start) {
             buf.replace_range(start..end, "");
         }
     }
@@ -623,16 +622,11 @@ fn delete_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
 
 /// Duplicate a rule with the same name
 fn duplicate_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
-    let base = pick(rng, corpus);
-    buf.push_str(base);
-    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
-    if !rule_starts.is_empty() {
-        let idx = rng.random_range(0..rule_starts.len());
-        let start = rule_starts[idx];
-        if let Some(open) = buf[start..].find('{')
-            && let Some(close) = buf[start + open..].find('}')
-        {
-            let end = start + open + close + 1;
+    buf.push_str(pick(rng, corpus));
+    let starts = rule_starts(buf);
+    if !starts.is_empty() {
+        let start = starts[rng.random_range(0..starts.len())];
+        if let Some((_, _, end)) = find_rule_body(buf, start) {
             let dup = buf[start..end].to_string();
             buf.push(' ');
             buf.push_str(&dup);
@@ -642,17 +636,11 @@ fn duplicate_rule(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
 
 /// Wrap a rule body in a random combinator
 fn wrap_in_combinator(rng: &mut SmallRng, corpus: &[String], buf: &mut String) {
-    let base = pick(rng, corpus);
-    buf.push_str(base);
-    let rule_starts: Vec<usize> = buf.match_indices("rule ").map(|(i, _)| i).collect();
-    if !rule_starts.is_empty() {
-        let idx = rng.random_range(0..rule_starts.len());
-        let start = rule_starts[idx];
-        if let Some(open) = buf[start..].find('{')
-            && let Some(close) = buf[start + open..].find('}')
-        {
-            let body_start = start + open + 1;
-            let body_end = start + open + close;
+    buf.push_str(pick(rng, corpus));
+    let starts = rule_starts(buf);
+    if !starts.is_empty() {
+        let start = starts[rng.random_range(0..starts.len())];
+        if let Some((body_start, body_end, _)) = find_rule_body(buf, start) {
             let body = buf[body_start..body_end].to_string();
             let combinator = pick(rng, UNARY_COMBINATORS);
             let wrapped = format!(" {combinator}({body}) ");
