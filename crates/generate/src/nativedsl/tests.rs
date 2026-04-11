@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::grammars::{InputGrammar, VariableType};
+use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
 use super::{
@@ -346,7 +347,7 @@ fn let_binding_int() {
 fn let_binding_object_field_access() {
     let g = dsl(r#"
         grammar { language: "test" }
-        let PREC: int = { ADD: 1, MUL: 2 }
+        let PREC = { ADD: 1, MUL: 2 }
         rule add { prec_left(PREC.ADD, seq(expr, "+", expr)) }
         rule mul { prec_left(PREC.MUL, seq(expr, "*", expr)) }
         rule expr { choice(add, mul) }
@@ -1153,10 +1154,16 @@ fn rule_inline_expands_base_rule_body() {
 fn config_access_extras() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base }
-        let base_extras = base.extras
+        grammar { language: "derived", inherits: base, extras: base.extras }
+        override rule program { "x" }
     "#);
     assert_eq!(g.name, "derived");
+    // base has extras: [regexp("\\s")], verify it was inherited
+    assert_eq!(g.extra_symbols.len(), 1);
+    assert_eq!(
+        g.extra_symbols[0],
+        Rule::Pattern("\\s".into(), String::new())
+    );
 }
 
 #[test]
@@ -1434,10 +1441,10 @@ fn error_undefined_function() {
         rule identifier { "x" }
     "#,
     );
-    let e = assert_err!(err, Type);
+    let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
-        TypeErrorKind::UndefinedFunction("nonexistent_fn".into())
+        ResolveErrorKind::UnknownIdentifier("nonexistent_fn".into())
     );
 }
 
@@ -1681,7 +1688,7 @@ fn multiple_inherit_bindings_rejected() {
     "#,
     );
     let e = assert_err!(err, Lower);
-    assert!(matches!(e.kind, LowerErrorKind::MultipleInherits));
+    assert_eq!(e.kind, LowerErrorKind::MultipleInherits);
 }
 
 // ===== Lexer error tests =====
@@ -1690,49 +1697,49 @@ fn multiple_inherit_bindings_rejected() {
 fn error_unterminated_string() {
     let err = dsl_err(r#"grammar { language: "test }rule program { "x" }"#);
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::UnterminatedString));
+    assert_eq!(e.kind, LexErrorKind::UnterminatedString);
 }
 
 #[test]
 fn error_newline_in_string() {
     let err = dsl_err("grammar { language: \"test\n\" }");
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::NewlineInString));
+    assert_eq!(e.kind, LexErrorKind::NewlineInString);
 }
 
 #[test]
 fn error_invalid_escape() {
     let err = dsl_err(r#"grammar { language: "te\qst" } rule program { "x" }"#);
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::InvalidEscape('q')));
+    assert_eq!(e.kind, LexErrorKind::InvalidEscape('q'));
 }
 
 #[test]
 fn error_unterminated_escape() {
     let err = dsl_err(r#"grammar { language: "test\"#);
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::UnterminatedEscape));
+    assert_eq!(e.kind, LexErrorKind::UnterminatedEscape);
 }
 
 #[test]
 fn error_unterminated_raw_string() {
     let err = dsl_err(r#"grammar { language: r#"test } rule program { "x" }"#);
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::UnterminatedRawString));
+    assert_eq!(e.kind, LexErrorKind::UnterminatedRawString);
 }
 
 #[test]
 fn error_expected_raw_string_quote() {
     let err = dsl_err(r#"grammar { language: r## } rule program { "x" }"#);
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::ExpectedRawStringQuote));
+    assert_eq!(e.kind, LexErrorKind::ExpectedRawStringQuote);
 }
 
 #[test]
 fn error_integer_overflow() {
     let err = dsl_err(r#"grammar { language: "test" } rule program { prec(99999999999, "x") }"#);
     let e = assert_err!(err, Lex);
-    assert!(matches!(e.kind, LexErrorKind::IntegerOverflow));
+    assert_eq!(e.kind, LexErrorKind::IntegerOverflow);
 }
 
 // ===== Parser error tests =====
@@ -1741,21 +1748,27 @@ fn error_integer_overflow() {
 fn error_expected_token() {
     let err = dsl_err(r#"grammar { language: "test" } rule program { seq("a" "b") }"#);
     let e = assert_err!(err, Parse);
-    assert!(matches!(e.kind, ParseErrorKind::ExpectedToken { .. }));
+    assert_eq!(
+        e.kind,
+        ParseErrorKind::ExpectedToken {
+            expected: TokenKind::RParen,
+            got: TokenKind::StringLit
+        }
+    );
 }
 
 #[test]
 fn error_expected_expression() {
     let err = dsl_err(r#"grammar { language: "test" } rule program { seq(,) }"#);
     let e = assert_err!(err, Parse);
-    assert!(matches!(e.kind, ParseErrorKind::ExpectedExpression));
+    assert_eq!(e.kind, ParseErrorKind::ExpectedExpression);
 }
 
 #[test]
 fn error_expected_item() {
     let err = dsl_err(r#"grammar { language: "test" } "stray_string""#);
     let e = assert_err!(err, Parse);
-    assert!(matches!(e.kind, ParseErrorKind::ExpectedItem));
+    assert_eq!(e.kind, ParseErrorKind::ExpectedItem);
 }
 
 #[test]
@@ -1769,7 +1782,7 @@ fn error_unknown_type() {
 fn error_missing_return_type() {
     let err = dsl_err(r#"grammar { language: "test" } fn f(x: rule) { x } rule program { "x" }"#);
     let e = assert_err!(err, Parse);
-    assert!(matches!(e.kind, ParseErrorKind::MissingReturnType));
+    assert_eq!(e.kind, ParseErrorKind::MissingReturnType);
 }
 
 #[test]
@@ -1866,6 +1879,40 @@ fn error_builtin_arg_count_display() {
 }
 
 #[test]
+fn trailing_comma_in_builtins() {
+    macro_rules! g {
+        ($expr:expr) => {
+            concat!(r#"grammar { language: "test" } rule foo { "#, $expr, " }")
+        };
+    }
+    // All of these have a trailing comma after the correct number of args.
+    // They should parse successfully, not produce WrongArgumentCount.
+    for src in [
+        // 1-arg
+        g!(r#"repeat("x",)"#),
+        g!(r#"repeat1("x",)"#),
+        g!(r#"optional("x",)"#),
+        g!(r#"token("x",)"#),
+        g!(r#"token_immediate("x",)"#),
+        // 2-arg
+        g!(r#"prec(1, "x",)"#),
+        g!(r#"prec_left(1, "x",)"#),
+        g!(r#"prec_right(1, "x",)"#),
+        g!(r#"prec_dynamic(1, "x",)"#),
+        g!(r#"field(name, "x",)"#),
+        g!(r#"alias("x", foo,)"#),
+        g!(r#"reserved("ctx", "x",)"#),
+        // regexp (1 and 2 arg)
+        g!(r#"regexp("pat",)"#),
+        g!(r#"regexp("pat", "flags",)"#),
+    ] {
+        dsl(src);
+    }
+    // append needs a list context
+    dsl(r#"grammar { language: "test", extras: append(["x"], ["y"],) } rule foo { "x" }"#);
+}
+
+#[test]
 fn error_keyword_as_ident() {
     for src in [
         r#"grammar { language: "test" } rule seq { "x" }"#,
@@ -1880,6 +1927,71 @@ fn error_keyword_as_ident() {
             "wrong error for: {src}"
         );
     }
+}
+
+#[test]
+fn error_inherit_without_config() {
+    let err = dsl_err(
+        r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "test" }
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::InheritWithoutConfig);
+}
+
+#[test]
+fn error_inherits_without_inherit() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test", inherits: "not_inherit" }
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::InheritsWithoutInherit);
+}
+
+#[test]
+fn error_config_field_unset() {
+    // inherit_base_no_word has no word set, so base.word produces ConfigFieldUnset
+    let err = dsl_err(
+        r#"
+        let base = inherit("inherit_base_no_word/grammar.tsg")
+        grammar { language: "test", inherits: base, word: base.word }
+        override rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::ConfigFieldUnset);
+}
+
+#[test]
+fn error_expected_rule_name_in_word() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test", word: "not_a_name" }
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::ExpectedRuleName);
+}
+
+#[test]
+fn error_duplicate_grammar_field() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test", word: foo, word: bar }
+        rule foo { "x" }
+        rule bar { "y" }
+    "#,
+    );
+    let e = assert_err!(err, Parse);
+    assert_eq!(e.kind, ParseErrorKind::DuplicateGrammarField("word".into()));
+    assert!(e.note.is_some());
 }
 
 #[test]
@@ -1930,7 +2042,7 @@ fn error_expected_function_name() {
     "#,
     );
     let e = assert_err!(err, Parse);
-    assert!(matches!(e.kind, ParseErrorKind::ExpectedFunctionName));
+    assert_eq!(e.kind, ParseErrorKind::ExpectedFunctionName);
 }
 
 // ===== Typecheck error tests =====
@@ -1946,10 +2058,10 @@ fn error_for_bindings_not_tuple() {
     "#,
     );
     let e = assert_err!(err, Type);
-    assert!(matches!(
+    matches!(
         e.kind,
         TypeErrorKind::ForBindingsNotTuple { bindings: 2, .. }
-    ));
+    );
 }
 
 // ===== Lower error tests =====
