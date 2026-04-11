@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use super::{
     ast::{
-        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, NodeList, Note,
-        NoteMessage, Param, PrecEntry, ReservedWordSet, Span,
+        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Note, NoteMessage,
+        Param, PrecEntry, Span,
     },
     lexer::{Token, TokenKind},
 };
@@ -99,6 +99,7 @@ impl<'src> Parser<'src> {
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedString))
     }
 
+    /// Like `expect_ident`, but also accepts keywords (for field names, config keys).
     fn expect_name(&mut self) -> Result<Span, ParseError> {
         let span = self.span();
         let kind = self.tokens[self.pos].kind;
@@ -209,7 +210,7 @@ impl<'src> Parser<'src> {
                 "word" => config.word = Some(self.parse_expr()?),
                 "conflicts" => config.conflicts = self.parse_conflicts()?,
                 "precedences" => config.precedences = self.parse_precedences()?,
-                "reserved" => config.reserved = self.parse_reserved()?,
+                "reserved" => config.reserved = Some(self.parse_expr()?),
                 _ => {
                     return Err(ParseError {
                         kind: ParseErrorKind::UnknownGrammarField(
@@ -224,13 +225,6 @@ impl<'src> Parser<'src> {
                 self.expect(TokenKind::Comma)?;
             }
         }
-    }
-
-    fn parse_expr_array(&mut self) -> Result<NodeList, ParseError> {
-        self.expect(TokenKind::LBracket)?;
-        let items = self.comma_sep(TokenKind::RBracket, Self::parse_expr)?;
-        self.expect(TokenKind::RBracket)?;
-        Ok(items)
     }
 
     fn parse_conflicts(&mut self) -> Result<Vec<Vec<Span>>, ParseError> {
@@ -263,20 +257,6 @@ impl<'src> Parser<'src> {
             Ok(group)
         })?;
         self.expect(TokenKind::RBracket)?;
-        Ok(items)
-    }
-
-    fn parse_reserved(&mut self) -> Result<Vec<ReservedWordSet>, ParseError> {
-        self.expect(TokenKind::LBrace)?;
-        let items = self.comma_sep(TokenKind::RBrace, |this| {
-            let name = this.expect_ident()?;
-            this.expect(TokenKind::Colon)?;
-            Ok(ReservedWordSet {
-                name,
-                words: this.parse_expr_array()?,
-            })
-        })?;
-        self.expect(TokenKind::RBrace)?;
         Ok(items)
     }
 
@@ -491,6 +471,9 @@ impl<'src> Parser<'src> {
     fn parse_field(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count("field", 2, 0, start));
+        }
         let name_span = self.expect_name()?;
         let name = self.ast.push(Node::Ident, name_span);
         if self.at(TokenKind::RParen) {
@@ -508,6 +491,9 @@ impl<'src> Parser<'src> {
     fn parse_alias(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count("alias", 2, 0, start));
+        }
         let content = self.parse_expr()?;
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count("alias", 2, 1, start));
@@ -550,9 +536,13 @@ impl<'src> Parser<'src> {
         Ok(self.ast.push(node, start.merge(end)))
     }
 
+    /// Parse `reserved("context", content)` expression (not the config block).
     fn parse_reserved_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count("reserved", 2, 0, start));
+        }
         let cs = self.expect_string()?;
         let context = self
             .ast
@@ -607,6 +597,9 @@ impl<'src> Parser<'src> {
     fn parse_append(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count("append", 2, 0, start));
+        }
         let left = self.parse_expr()?;
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count("append", 2, 1, start));
@@ -648,7 +641,8 @@ impl<'src> Parser<'src> {
         loop {
             if self.at(TokenKind::Dot) {
                 self.pos += 1;
-                let field = self.expect_ident_node()?;
+                let field_span = self.expect_name()?;
+                let field = self.ast.push(Node::Ident, field_span);
                 id = self.ast.push(
                     Node::FieldAccess { obj: id, field },
                     start.merge(self.ast.span(field)),

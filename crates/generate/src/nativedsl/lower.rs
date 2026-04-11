@@ -187,30 +187,10 @@ pub fn lower_with_base(
         .map(|id| eval.eval_name_list(id))
         .transpose()?;
     let eval_word = config.word.map(|id| eval.eval_rule_name(id)).transpose()?;
-    let eval_reserved = if config.reserved.is_empty() {
-        None
-    } else {
-        Some(
-            config
-                .reserved
-                .iter()
-                .map(|rws| {
-                    let words = rws
-                        .words
-                        .iter()
-                        .map(|&id| {
-                            let rid = eval.lower_to_rule(id)?;
-                            Ok(eval.build_rule(rid))
-                        })
-                        .collect::<Result<_, LowerError>>()?;
-                    Ok(ReservedWordContext {
-                        name: ast.text(rws.name).to_string(),
-                        reserved_words: words,
-                    })
-                })
-                .collect::<Result<Vec<_>, LowerError>>()?,
-        )
-    };
+    let eval_reserved = config
+        .reserved
+        .map(|id| eval.eval_reserved(id))
+        .transpose()?;
     let eval_conflicts: Option<Vec<Vec<String>>> = if config.conflicts.is_empty() {
         None
     } else {
@@ -508,6 +488,62 @@ impl<'src> Evaluator<'src> {
         }
     }
 
+    /// Evaluate the `reserved` config expression into `Vec<ReservedWordContext<Rule>>`.
+    /// Accepts either an object literal `{ name: [words] }` or an expression
+    /// evaluating to a list of `{name: str, words: list<rule>}` objects.
+    fn eval_reserved(&mut self, id: NodeId) -> Result<Vec<ReservedWordContext<Rule>>, LowerError> {
+        let ast = self.ast;
+        // Object literal: each field is a named word set
+        if let Node::Object(range) = ast.node(id) {
+            return ast
+                .get_object(*range)
+                .iter()
+                .map(|&(name_span, val_id)| {
+                    let words = self.eval_rule_list(val_id)?;
+                    Ok(ReservedWordContext {
+                        name: ast.text(name_span).to_string(),
+                        reserved_words: words,
+                    })
+                })
+                .collect();
+        }
+        // Expression: evaluate to list of {name, words} objects
+        let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_reserved
+        let Value::List(items) = self.get_val(vid) else {
+            unreachable!()
+        };
+        items
+            .iter()
+            .map(|&v| {
+                let Value::Object(map) = self.get_val(v) else {
+                    unreachable!()
+                };
+                let name_vid = *map.get("name").unwrap();
+                let words_vid = *map.get("words").unwrap();
+                let Value::Str(name_sid) = self.get_val(name_vid) else {
+                    unreachable!()
+                };
+                let name = self.strings.to_string(*name_sid);
+                let Value::List(word_vals) = self.get_val(words_vid) else {
+                    unreachable!()
+                };
+                let words = word_vals
+                    .iter()
+                    .map(|&wv| match self.get_val(wv) {
+                        Value::Rule(rid) => self.build_rule(*rid),
+                        Value::Str(sid) => Rule::String(self.strings.to_string(*sid)),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                Ok(ReservedWordContext {
+                    name,
+                    reserved_words: words,
+                })
+            })
+            .collect()
+    }
+
     /// Import a config field from the base grammar as a DSL value.
     fn import_config_field(&mut self, field: &str) -> ValueId {
         // Guarded by super::typecheck::type_of (Node::FieldAccess) - only reachable
@@ -535,6 +571,22 @@ impl<'src> Evaluator<'src> {
                     let rid = self.alloc_rule(ARule::Blank);
                     self.alloc_val(Value::Rule(rid))
                 }
+            }
+            "reserved" => {
+                let sets: Vec<ValueId> = grammar
+                    .reserved_words
+                    .iter()
+                    .map(|ctx| {
+                        let name_sid = self.strings.intern_owned(ctx.name.clone());
+                        let name_val = self.alloc_val(Value::Str(name_sid));
+                        let words = self.import_rules_as_list(&ctx.reserved_words);
+                        let mut map = FxHashMap::default();
+                        map.insert("name", name_val);
+                        map.insert("words", words);
+                        self.alloc_val(Value::Object(map))
+                    })
+                    .collect();
+                self.alloc_val(Value::List(sets))
             }
             // Guarded by super::typecheck::type_of (Node::FieldAccess) - rejects
             // unknown config field names on Grammar values
