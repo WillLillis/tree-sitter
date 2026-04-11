@@ -574,8 +574,10 @@ fn type_of<'src>(
         Node::Ident => unreachable!(),
         Node::VarRef => {
             let name = ast.text(span);
-            // Invariant: resolve validates all variable names before typecheck
-            Ok(env.get_var(name).unwrap())
+            env.get_var(name).ok_or_else(|| TypeError {
+                kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
+                span,
+            })
         }
         Node::FieldAccess { obj, field } => {
             let obj_ty = type_of(ast, *obj, env, pool)?;
@@ -750,8 +752,10 @@ fn type_of<'src>(
         }
         Node::Call { name, args } => {
             let fn_name = ast.node_text(*name);
-            // Invariant: resolve validates all call names before typecheck
-            let sig = &env.fns[fn_name];
+            let sig = env.fns.get(fn_name).ok_or_else(|| TypeError {
+                kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
+                span,
+            })?;
             let return_ty = sig.return_ty;
             let n_params = sig.params.len();
             let args = ast.child_slice(*args);
@@ -860,6 +864,7 @@ pub enum TypeErrorKind {
         expected: Ty,
         got: Ty,
     },
+    UndefinedFunction(String),
     ArgCountMismatch {
         fn_name: String,
         expected: usize,
@@ -883,6 +888,7 @@ pub enum TypeErrorKind {
         bindings: usize,
         got: Ty,
     },
+    UnresolvedVariable(String),
     AppendRequiresList(Ty),
     ConfigAccessOnNonGrammar(Ty),
     UnknownConfigField(String),
@@ -898,6 +904,7 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::TypeMismatch { expected, got } => {
                 write!(f, "expected {expected}, got {got}")
             }
+            TypeErrorKind::UndefinedFunction(n) => write!(f, "undefined function '{n}'"),
             TypeErrorKind::ArgCountMismatch {
                 fn_name,
                 expected,
@@ -929,6 +936,7 @@ impl std::fmt::Display for TypeError {
                 f,
                 "for has {bindings} bindings but list elements are {got}, not tuples"
             ),
+            TypeErrorKind::UnresolvedVariable(n) => write!(f, "unresolved variable '{n}'"),
             TypeErrorKind::AppendRequiresList(got) => {
                 write!(f, "append requires list arguments, got {got}")
             }

@@ -1449,6 +1449,31 @@ fn error_undefined_function() {
 }
 
 #[test]
+fn error_rule_called_as_function() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test", word: ident }
+        rule program { ident("default", regexp("[a-z]+")) }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::UndefinedFunction("ident".into()));
+}
+
+#[test]
+fn error_self_referential_let() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let P = { a: P.a }
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::UnresolvedVariable("P".into()));
+}
+
+#[test]
 fn error_wrong_arg_count() {
     let err = dsl_err(
         r#"
