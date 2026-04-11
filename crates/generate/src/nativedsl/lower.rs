@@ -885,7 +885,6 @@ impl<'src> Evaluator<'src> {
         let ast = self.ast;
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
-                let is_seq = matches!(ast.node(id), Node::Seq(_));
                 let mut child_ids = Vec::with_capacity(ast.child_slice(*range).len());
                 for &member in ast.child_slice(*range) {
                     if let Node::For(idx) = ast.node(member) {
@@ -897,10 +896,10 @@ impl<'src> Evaluator<'src> {
                 let start = self.children_start();
                 self.rule_children.extend_from_slice(&child_ids);
                 let (offset, len) = self.children_range(start, ast.span(id))?;
-                Ok(self.alloc_rule(if is_seq {
-                    ARule::Seq(offset, len)
-                } else {
-                    ARule::Choice(offset, len)
+                Ok(self.alloc_rule(match ast.node(id) {
+                    Node::Seq(_) => ARule::Seq(offset, len),
+                    Node::Choice(_) => ARule::Choice(offset, len),
+                    _ => unreachable!(),
                 }))
             }
             Node::Repeat(inner) => {

@@ -303,12 +303,18 @@ fn resolve_expr(
         return Ok(());
     }
 
-    // Alias target gets special handling - Ident becomes RuleRef
+    // Alias target: bare identifiers become RuleRef (named alias) unless
+    // they refer to a local variable (VarRef for fn params / for bindings).
     if let Node::Alias { content, target } = &nodes[id.index()] {
         let (content, target) = (*content, *target);
         resolve_expr(nodes, ctx, names, content, locals)?;
         if matches!(nodes[target.index()], Node::Ident) {
-            nodes[target.index()] = Node::RuleRef;
+            let name = ctx.text(ctx.span(target));
+            if locals.contains(ctx, name) {
+                nodes[target.index()] = Node::VarRef;
+            } else {
+                nodes[target.index()] = Node::RuleRef;
+            }
         } else {
             resolve_expr(nodes, ctx, names, target, locals)?;
         }

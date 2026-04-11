@@ -390,6 +390,8 @@ pub enum Node {
 }
 
 impl Node {
+    /// Returns the child range for nodes that store plain `NodeId` children.
+    /// `Object` and `Call` use separate arenas and are not included.
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {
