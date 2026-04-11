@@ -356,10 +356,8 @@ fn check_item<'src>(
             if let Some(id) = config.word {
                 expect_name_ref(ast, id, env, pool)?;
             }
-            for rws in &config.reserved {
-                for &word_id in &rws.words {
-                    expect_rule(ast, word_id, env, pool)?;
-                }
+            if let Some(id) = config.reserved {
+                expect_reserved(ast, id, env, pool)?;
             }
             Ok(())
         }
@@ -443,8 +441,8 @@ fn expect_name_ref<'src>(
     pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
     match ast.node(id) {
-        Node::RuleRef | Node::VarRef => Ok(()),
-        Node::FieldAccess { .. } => {
+        Node::RuleRef => Ok(()),
+        Node::VarRef | Node::FieldAccess { .. } => {
             let ty = type_of(ast, id, env, pool)?;
             if ty != TyId::RULE {
                 return Err(pool.mismatch(TyId::RULE, ty, ast.span(id)));
@@ -478,6 +476,33 @@ fn expect_name_list<'src>(
         return Ok(());
     }
     Err(pool.mismatch(rule_list, ty, ast.span(id)))
+}
+
+/// Check that the `reserved` config expression is valid.
+/// Accepts an object literal `{ name: [words] }` where each value is a rule list,
+/// or an expression like `base.reserved` that evaluates to the reserved type.
+fn expect_reserved<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    pool: &mut TyPool<'src>,
+) -> Result<(), TypeError> {
+    // Object literal: each field value must be a rule list
+    if let Node::Object(range) = ast.node(id) {
+        for &(_, val_id) in ast.get_object(*range) {
+            expect_rule_list(ast, val_id, env, pool)?;
+        }
+        return Ok(());
+    }
+    // Otherwise, check the type matches list<{name: str, words: list<rule>}>
+    let ty = type_of(ast, id, env, pool)?;
+    let words = pool.list(TyId::RULE);
+    let set = pool.object(vec![("name", TyId::STR), ("words", words)]);
+    let expected = pool.list(set);
+    if !pool.is_compatible(ty, expected) {
+        return Err(pool.mismatch(expected, ty, ast.span(id)));
+    }
+    Ok(())
 }
 
 fn expect_rule<'src>(
@@ -569,6 +594,11 @@ fn type_of<'src>(
                         Ok(pool.list(lr))
                     }
                     "word" => Ok(TyId::RULE),
+                    "reserved" => {
+                        let words = pool.list(TyId::RULE);
+                        let set = pool.object(vec![("name", TyId::STR), ("words", words)]);
+                        Ok(pool.list(set))
+                    }
                     _ => Err(TypeError {
                         kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
                         span: ast.span(*field),
