@@ -278,8 +278,6 @@ impl<'src> Ast<'src> {
     }
 }
 
-pub type NodeList = Vec<NodeId>;
-
 #[derive(Clone, Copy, Debug)]
 pub struct ChildRange {
     pub start: u32,
@@ -414,19 +412,13 @@ pub struct GrammarConfig {
     pub word: Option<NodeId>,
     pub conflicts: Vec<Vec<Span>>,
     pub precedences: Vec<Vec<PrecEntry>>,
-    pub reserved: Vec<ReservedWordSet>,
+    pub reserved: Option<NodeId>,
 }
 
 #[derive(Clone, Debug)]
 pub enum PrecEntry {
     Name(String),
     Symbol(Span),
-}
-
-#[derive(Clone, Debug)]
-pub struct ReservedWordSet {
-    pub name: Span,
-    pub words: NodeList,
 }
 
 #[derive(Clone, Debug)]
