@@ -74,13 +74,7 @@ impl<'src> Parser<'src> {
     }
 
     fn expect_ident_node(&mut self) -> Result<NodeId, ParseError> {
-        let span = self.eat(TokenKind::Ident).ok_or_else(|| {
-            if self.tokens[self.pos].kind.is_keyword() {
-                self.error(ParseErrorKind::KeywordAsIdent)
-            } else {
-                self.error(ParseErrorKind::ExpectedIdent)
-            }
-        })?;
+        let span = self.expect_ident()?;
         Ok(self.ast.push(Node::Ident, span))
     }
 
@@ -141,6 +135,14 @@ impl<'src> Parser<'src> {
     ) -> Result<(), ParseError> {
         if self.at(TokenKind::Comma) {
             let mut got = expected;
+            // account for trailing comma with no extra args
+            self.eat(TokenKind::Comma).unwrap();
+            if self.at(TokenKind::RParen) {
+                return Ok(());
+            }
+            self.parse_expr()?;
+            got += 1;
+            // if there are extra args, count them
             while self.eat(TokenKind::Comma).is_some() {
                 if self.at(TokenKind::RParen) {
                     break;
@@ -189,6 +191,7 @@ impl<'src> Parser<'src> {
         }
         self.expect(TokenKind::LBrace)?;
         let mut config = GrammarConfig::default();
+        let mut seen = [None::<Span>; ConfigField::COUNT];
         loop {
             if let Some(end) = self.eat(TokenKind::RBrace) {
                 self.ast.context.grammar_config = Some(config);
@@ -196,30 +199,40 @@ impl<'src> Parser<'src> {
             }
             let key_span = self.expect_name()?;
             self.expect(TokenKind::Colon)?;
-            match self.ast.text(key_span) {
-                "language" => {
+            let key = self.ast.text(key_span);
+            let field = ConfigField::from_str(key).ok_or_else(|| ParseError {
+                kind: ParseErrorKind::UnknownGrammarField(key.to_string()),
+                span: key_span,
+                note: None,
+            })?;
+            if let Some(first_span) = seen[field as usize] {
+                return Err(ParseError {
+                    kind: ParseErrorKind::DuplicateGrammarField(key.to_string()),
+                    span: key_span,
+                    note: Some(Note {
+                        message: NoteMessage::FirstDefinedHere,
+                        span: first_span,
+                        path: self.grammar_path.clone(),
+                        source: self.ast.source().to_string(),
+                    }),
+                });
+            }
+            seen[field as usize] = Some(key_span);
+            match field {
+                ConfigField::Language => {
                     let s = self.expect_string()?;
                     let inner = Span::new(s.start + 1, s.end - 1);
                     config.language = Some(self.ast.text(inner).to_string());
                 }
-                "inherits" => config.inherits = Some(self.parse_expr()?),
-                "extras" => config.extras = Some(self.parse_expr()?),
-                "externals" => config.externals = Some(self.parse_expr()?),
-                "supertypes" => config.supertypes = Some(self.parse_expr()?),
-                "inline" => config.inline = Some(self.parse_expr()?),
-                "word" => config.word = Some(self.parse_expr()?),
-                "conflicts" => config.conflicts = self.parse_conflicts()?,
-                "precedences" => config.precedences = self.parse_precedences()?,
-                "reserved" => config.reserved = Some(self.parse_expr()?),
-                _ => {
-                    return Err(ParseError {
-                        kind: ParseErrorKind::UnknownGrammarField(
-                            self.ast.text(key_span).to_string(),
-                        ),
-                        span: key_span,
-                        note: None,
-                    });
-                }
+                ConfigField::Inherits => config.inherits = Some(self.parse_expr()?),
+                ConfigField::Extras => config.extras = Some(self.parse_expr()?),
+                ConfigField::Externals => config.externals = Some(self.parse_expr()?),
+                ConfigField::Supertypes => config.supertypes = Some(self.parse_expr()?),
+                ConfigField::Inline => config.inline = Some(self.parse_expr()?),
+                ConfigField::Word => config.word = Some(self.parse_expr()?),
+                ConfigField::Conflicts => config.conflicts = self.parse_conflicts()?,
+                ConfigField::Precedences => config.precedences = self.parse_precedences()?,
+                ConfigField::Reserved => config.reserved = Some(self.parse_expr()?),
             }
             if !self.at(TokenKind::RBrace) {
                 self.expect(TokenKind::Comma)?;
@@ -326,13 +339,10 @@ impl<'src> Parser<'src> {
         Ok(self.ast.push(Node::Fn(fn_idx), start.merge(end)))
     }
 
-    // -- Types --
-
     fn parse_type(&mut self) -> Result<NodeId, ParseError> {
         let start = self.span();
         if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ast.text(id_span) {
-                "rule" => Ok(self.ast.push(Node::TypeRule, id_span)),
                 "str" => Ok(self.ast.push(Node::TypeStr, id_span)),
                 "int" => Ok(self.ast.push(Node::TypeInt, id_span)),
                 "list" => {
@@ -368,8 +378,8 @@ impl<'src> Parser<'src> {
     fn parse_primary(&mut self) -> Result<NodeId, ParseError> {
         let start = self.span();
         match &self.tokens[self.pos].kind {
-            TokenKind::KwSeq => self.parse_variadic(start, "seq"),
-            TokenKind::KwChoice => self.parse_variadic(start, "choice"),
+            TokenKind::KwSeq => self.parse_variadic(start, Node::Seq),
+            TokenKind::KwChoice => self.parse_variadic(start, Node::Choice),
             TokenKind::KwRepeat => self.parse_unary(start, "repeat", Node::Repeat),
             TokenKind::KwRepeat1 => self.parse_unary(start, "repeat1", Node::Repeat1),
             TokenKind::KwOptional => self.parse_unary(start, "optional", Node::Optional),
@@ -401,7 +411,7 @@ impl<'src> Parser<'src> {
             TokenKind::KwPrecRight => self.parse_prec(start, PrecVariant::Right),
             TokenKind::KwPrecDynamic => self.parse_prec(start, PrecVariant::Dynamic),
             TokenKind::KwReserved => self.parse_reserved_expr(start),
-            TokenKind::KwConcat => self.parse_variadic(start, "concat"),
+            TokenKind::KwConcat => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp => self.parse_regexp(start),
             TokenKind::KwInherit => self.parse_inherit(start),
             TokenKind::KwAppend => self.parse_append(start),
@@ -437,18 +447,16 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn parse_variadic(&mut self, start: Span, name: &str) -> Result<NodeId, ParseError> {
+    fn parse_variadic(
+        &mut self,
+        start: Span,
+        make: fn(ChildRange) -> Node,
+    ) -> Result<NodeId, ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
-        let node = match name {
-            "seq" => Node::Seq(range),
-            "choice" => Node::Choice(range),
-            "concat" => Node::Concat(range),
-            _ => unreachable!(),
-        };
-        Ok(self.ast.push(node, start.merge(end)))
+        Ok(self.ast.push(make(range), start.merge(end)))
     }
 
     fn parse_unary(
@@ -566,7 +574,7 @@ impl<'src> Parser<'src> {
             return Err(self.err_arg_count("regexp", 1, 0, start));
         }
         let pattern = self.parse_expr()?;
-        let flags = if self.eat(TokenKind::Comma).is_some() {
+        let flags = if self.eat(TokenKind::Comma).is_some() && !self.at(TokenKind::RParen) {
             Some(self.parse_expr()?)
         } else {
             None
@@ -767,6 +775,40 @@ enum PrecVariant {
     Dynamic,
 }
 
+#[derive(Clone, Copy)]
+enum ConfigField {
+    Language,
+    Inherits,
+    Extras,
+    Externals,
+    Supertypes,
+    Inline,
+    Word,
+    Conflicts,
+    Precedences,
+    Reserved,
+}
+
+impl ConfigField {
+    const COUNT: usize = 10;
+
+    fn from_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "language" => Self::Language,
+            "inherits" => Self::Inherits,
+            "extras" => Self::Extras,
+            "externals" => Self::Externals,
+            "supertypes" => Self::Supertypes,
+            "inline" => Self::Inline,
+            "word" => Self::Word,
+            "conflicts" => Self::Conflicts,
+            "precedences" => Self::Precedences,
+            "reserved" => Self::Reserved,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Serialize, Error)]
 pub struct ParseError {
     pub kind: ParseErrorKind,
@@ -788,6 +830,7 @@ pub enum ParseErrorKind {
     ExpectedItem,
     UnknownType(String),
     UnknownGrammarField(String),
+    DuplicateGrammarField(String),
     MissingReturnType,
     ExpectedFunctionName,
     ExpectedStringOrIdent,
@@ -815,6 +858,9 @@ impl std::fmt::Display for ParseError {
             ParseErrorKind::ExpectedItem => write!(f, "expected 'grammar', 'rule', 'let', or 'fn'"),
             ParseErrorKind::UnknownType(n) => write!(f, "unknown type '{n}'"),
             ParseErrorKind::UnknownGrammarField(n) => write!(f, "unknown grammar field '{n}'"),
+            ParseErrorKind::DuplicateGrammarField(n) => {
+                write!(f, "duplicate grammar field '{n}'")
+            }
             ParseErrorKind::MissingReturnType => {
                 write!(f, "function must have a return type (-> type)")
             }

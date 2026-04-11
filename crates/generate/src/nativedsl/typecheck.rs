@@ -154,13 +154,7 @@ impl<'src> TyPool<'src> {
     }
 
     fn is_compatible(&self, actual: TyId, expected: TyId) -> bool {
-        self.eq(actual, expected)
-            || (actual == TyId::STR && expected == TyId::RULE)
-            || (expected == TyId::INT
-                && matches!(self.get(actual), TyEntry::Object { start: s, len: l } if {
-                    self.object_fields[*s as usize..*s as usize + *l as usize]
-                        .iter().all(|(_, ty)| *ty == TyId::INT)
-                }))
+        self.eq(actual, expected) || (actual == TyId::STR && expected == TyId::RULE)
     }
 
     fn is_list(&self, id: TyId) -> Option<TyId> {
@@ -261,11 +255,30 @@ impl<'src> TypeEnv<'src> {
             .rev()
             .find_map(|s| s.get(name).copied())
     }
-    fn push_scope(&mut self) {
+    fn scoped(&mut self) -> ScopeGuard<'_, 'src> {
         self.var_scopes.push(FxHashMap::default());
+        ScopeGuard(self)
     }
-    fn pop_scope(&mut self) {
-        self.var_scopes.pop();
+}
+
+struct ScopeGuard<'a, 'src>(&'a mut TypeEnv<'src>);
+
+impl Drop for ScopeGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.0.var_scopes.pop();
+    }
+}
+
+impl<'src> std::ops::Deref for ScopeGuard<'_, 'src> {
+    type Target = TypeEnv<'src>;
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl std::ops::DerefMut for ScopeGuard<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
     }
 }
 
@@ -379,14 +392,13 @@ fn check_item<'src>(
             let sig = &env.fns[fn_name];
             let return_ty = sig.return_ty;
             let n_params = sig.params.len();
-            env.push_scope();
+            let mut scope = env.scoped();
             for i in 0..n_params {
                 // Re-index each iteration so the borrow is temporary
-                let ty = env.fns[fn_name].params[i].1;
-                env.insert_var(ast.node_text(config.params[i].name), ty);
+                let ty = scope.fns[fn_name].params[i].1;
+                scope.insert_var(ast.node_text(config.params[i].name), ty);
             }
-            let body_ty = type_of(ast, config.body, env, pool)?;
-            env.pop_scope();
+            let body_ty = type_of(ast, config.body, &mut scope, pool)?;
             if !pool.is_compatible(body_ty, return_ty) {
                 return Err(pool.mismatch(return_ty, body_ty, ast.span(config.body)));
             }
@@ -514,34 +526,6 @@ fn expect_rule<'src>(
     let ty = type_of(ast, id, env, pool)?;
     if !is_rule_like(ty) {
         return Err(pool.mismatch(TyId::RULE, ty, ast.span(id)));
-    }
-    Ok(())
-}
-
-fn check_call_args<'src>(
-    ast: &'src Ast<'src>,
-    fn_name: &str,
-    args: &[NodeId],
-    sig: &FnSig,
-    call_span: Span,
-    env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
-) -> Result<(), TypeError> {
-    if args.len() != sig.params.len() {
-        return Err(TypeError {
-            kind: TypeErrorKind::ArgCountMismatch {
-                fn_name: fn_name.to_string(),
-                expected: sig.params.len(),
-                got: args.len(),
-            },
-            span: call_span,
-        });
-    }
-    for (&arg_id, (_, param_ty)) in args.iter().zip(sig.params.iter()) {
-        let arg_ty = type_of(ast, arg_id, env, pool)?;
-        if !pool.is_compatible(arg_ty, *param_ty) {
-            return Err(pool.mismatch(*param_ty, arg_ty, ast.span(arg_id)));
-        }
     }
     Ok(())
 }
@@ -753,16 +737,30 @@ fn type_of<'src>(
         }
         Node::Call { name, args } => {
             let fn_name = ast.node_text(*name);
-            let sig = env
-                .fns
-                .get(fn_name)
-                .ok_or_else(|| TypeError {
-                    kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
+            // Invariant: resolve validates all call names before typecheck
+            let sig = &env.fns[fn_name];
+            let return_ty = sig.return_ty;
+            let n_params = sig.params.len();
+            let args = ast.child_slice(*args);
+            if args.len() != n_params {
+                return Err(TypeError {
+                    kind: TypeErrorKind::ArgCountMismatch {
+                        fn_name: fn_name.to_string(),
+                        expected: n_params,
+                        got: args.len(),
+                    },
                     span,
-                })?
-                .clone();
-            check_call_args(ast, fn_name, ast.child_slice(*args), &sig, span, env, pool)?;
-            Ok(sig.return_ty)
+                });
+            }
+            for (i, &arg_id) in args.iter().enumerate() {
+                let arg_ty = type_of(ast, arg_id, env, pool)?;
+                // Re-index each iteration so the borrow is temporary
+                let param_ty = env.fns[fn_name].params[i].1;
+                if !pool.is_compatible(arg_ty, param_ty) {
+                    return Err(pool.mismatch(param_ty, arg_ty, ast.span(arg_id)));
+                }
+            }
+            Ok(return_ty)
         }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
@@ -793,11 +791,10 @@ fn check_for_expr<'src>(
         });
     };
 
-    env.push_scope();
+    let mut scope = env.scoped();
     if let Some(elem_tys) = pool.tuple_elems(elem_ty) {
         let elem_tys = elem_tys.to_vec();
         if config.bindings.len() != elem_tys.len() {
-            env.pop_scope();
             return Err(TypeError {
                 kind: TypeErrorKind::ForBindingCountMismatch {
                     bindings: config.bindings.len(),
@@ -809,20 +806,17 @@ fn check_for_expr<'src>(
         for ((name_span, ty_id), &actual_ty) in config.bindings.iter().zip(elem_tys.iter()) {
             let declared = ast_type_to_ty(ast, *ty_id, pool)?;
             if !pool.is_compatible(actual_ty, declared) {
-                env.pop_scope();
                 return Err(pool.mismatch(declared, actual_ty, span));
             }
-            env.insert_var(ast.text(*name_span), declared);
+            scope.insert_var(ast.text(*name_span), declared);
         }
     } else if let [(name_span, ty_id)] = config.bindings.as_slice() {
         let declared = ast_type_to_ty(ast, *ty_id, pool)?;
         if !pool.is_compatible(elem_ty, declared) {
-            env.pop_scope();
             return Err(pool.mismatch(declared, elem_ty, span));
         }
-        env.insert_var(ast.text(*name_span), declared);
+        scope.insert_var(ast.text(*name_span), declared);
     } else {
-        env.pop_scope();
         return Err(TypeError {
             kind: TypeErrorKind::ForBindingsNotTuple {
                 bindings: config.bindings.len(),
@@ -832,8 +826,7 @@ fn check_for_expr<'src>(
         });
     }
 
-    let body_ty = type_of(ast, config.body, env, pool)?;
-    env.pop_scope();
+    let body_ty = type_of(ast, config.body, &mut scope, pool)?;
     if !is_rule_like(body_ty) {
         return Err(pool.mismatch(TyId::RULE, body_ty, ast.span(config.body)));
     }
@@ -854,7 +847,6 @@ pub enum TypeErrorKind {
         expected: Ty,
         got: Ty,
     },
-    UndefinedFunction(String),
     ArgCountMismatch {
         fn_name: String,
         expected: usize,
@@ -894,7 +886,6 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::TypeMismatch { expected, got } => {
                 write!(f, "expected {expected}, got {got}")
             }
-            TypeErrorKind::UndefinedFunction(n) => write!(f, "undefined function '{n}'"),
             TypeErrorKind::ArgCountMismatch {
                 fn_name,
                 expected,

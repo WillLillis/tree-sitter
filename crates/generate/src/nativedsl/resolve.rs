@@ -350,8 +350,10 @@ fn resolve_children(
     }
 
     match &nodes[id.index()] {
-        Node::Call { args, .. } => {
-            for arg in ctx.child_slice(*args) {
+        Node::Call { name, args } => {
+            let (name, args) = (*name, *args);
+            resolve_expr(nodes, ctx, names, name, locals)?;
+            for arg in ctx.child_slice(args) {
                 resolve_expr(nodes, ctx, names, *arg, locals)?;
             }
             Ok(())

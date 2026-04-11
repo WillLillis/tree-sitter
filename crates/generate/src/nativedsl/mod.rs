@@ -133,33 +133,24 @@ fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
 /// Resolve the `Inherit` node from the grammar config's `inherits` field,
 /// following variable references to let bindings if needed.
 fn find_inherit_node(ast: &ast::Ast<'_>) -> Option<ast::NodeId> {
-    // Check config: `inherits: inherit("path")` or `inherits: varname`
-    if let Some(config) = ast.context.grammar_config.as_ref()
-        && let Some(inherits_id) = config.inherits
-    {
-        return match ast.node(inherits_id) {
-            ast::Node::Inherit { .. } => Some(inherits_id),
-            ast::Node::Ident => {
-                let name = ast.text(ast.span(inherits_id));
-                find_inherit_let(ast, name)
-            }
-            _ => None,
-        };
-    }
-    None
-}
-
-fn find_inherit_let(ast: &ast::Ast<'_>, name: &str) -> Option<ast::NodeId> {
-    ast.root_items.iter().find_map(|&item_id| {
-        if let ast::Node::Let { name: n, value, .. } = ast.node(item_id)
-            && ast.text(ast.span(*n)) == name
-            && matches!(ast.node(*value), ast::Node::Inherit { .. })
-        {
-            Some(*value)
-        } else {
-            None
+    let inherits_id = ast.context.grammar_config.as_ref()?.inherits?;
+    match ast.node(inherits_id) {
+        ast::Node::Inherit { .. } => Some(inherits_id),
+        ast::Node::Ident => {
+            let name = ast.text(ast.span(inherits_id));
+            ast.root_items.iter().find_map(|&item_id| {
+                if let ast::Node::Let { name: n, value, .. } = ast.node(item_id)
+                    && ast.text(ast.span(*n)) == name
+                    && matches!(ast.node(*value), ast::Node::Inherit { .. })
+                {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
         }
-    })
+        _ => None,
+    }
 }
 
 /// Load the base grammar from an `inherit("path")` node if found.
