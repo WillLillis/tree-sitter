@@ -214,7 +214,7 @@ impl<'src> Lexer<'src> {
             {
                 self.pos += 2;
                 match memchr(b'\n', &self.source[self.pos..]) {
-                    Some(offset) => self.pos += offset,
+                    Some(offset) => self.pos += offset + 1,
                     None => self.pos = self.source.len(),
                 }
                 continue;

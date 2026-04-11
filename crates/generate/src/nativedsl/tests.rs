@@ -1995,6 +1995,45 @@ fn error_duplicate_grammar_field() {
 }
 
 #[test]
+fn error_duplicate_object_key() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let x = { a: 1, b: 2, a: 3 }
+        rule foo { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Parse);
+    assert_eq!(e.kind, ParseErrorKind::DuplicateObjectKey("a".into()));
+    assert!(e.note.is_some());
+}
+
+#[test]
+fn empty_list_compatible_with_any_list_type() {
+    // Empty list in extras (list<rule> context)
+    dsl(r#"
+        grammar { language: "test", extras: [] }
+        rule foo { "x" }
+    "#);
+    // Empty list in a let with explicit list<str> annotation
+    dsl(r#"
+        grammar { language: "test" }
+        let x: list<str> = []
+        rule foo { "x" }
+    "#);
+}
+
+#[test]
+fn empty_list_append() {
+    // append([], concrete_list) should return the concrete list type
+    let g = dsl(r#"
+        grammar { language: "test", extras: append([], [regexp("\\s")]) }
+        rule foo { "x" }
+    "#);
+    assert_eq!(g.extra_symbols.len(), 1);
+}
+
+#[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
         r#"grammar { language: "test" } fn f(x: rule) -> rule { f(x) } rule program { f("x") }"#,

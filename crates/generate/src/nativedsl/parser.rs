@@ -705,6 +705,24 @@ impl<'src> Parser<'src> {
             this.expect(TokenKind::Colon)?;
             Ok((key, this.parse_expr()?))
         })?;
+        // Check for duplicate keys
+        for (i, &(span_a, _)) in fields.iter().enumerate() {
+            let key_a = self.ast.text(span_a);
+            for &(span_b, _) in &fields[..i] {
+                if self.ast.text(span_b) == key_a {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::DuplicateObjectKey(key_a.to_string()),
+                        span: span_a,
+                        note: Some(Note {
+                            message: NoteMessage::FirstDefinedHere,
+                            span: span_b,
+                            path: self.grammar_path.clone(),
+                            source: self.ast.source().to_string(),
+                        }),
+                    });
+                }
+            }
+        }
         let end = self.expect(TokenKind::RBrace)?;
         let range = self
             .ast
@@ -831,6 +849,7 @@ pub enum ParseErrorKind {
     UnknownType(String),
     UnknownGrammarField(String),
     DuplicateGrammarField(String),
+    DuplicateObjectKey(String),
     MissingReturnType,
     ExpectedFunctionName,
     ExpectedStringOrIdent,
@@ -861,6 +880,7 @@ impl std::fmt::Display for ParseError {
             ParseErrorKind::DuplicateGrammarField(n) => {
                 write!(f, "duplicate grammar field '{n}'")
             }
+            ParseErrorKind::DuplicateObjectKey(n) => write!(f, "duplicate object key '{n}'"),
             ParseErrorKind::MissingReturnType => {
                 write!(f, "function must have a return type (-> type)")
             }
