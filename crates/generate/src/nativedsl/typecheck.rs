@@ -13,6 +13,7 @@ use super::ast::{Ast, Node, NodeId, Span};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Ty {
+    Any,
     Int,
     Str,
     Rule,
@@ -26,6 +27,7 @@ pub enum Ty {
 impl std::fmt::Display for Ty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Any => write!(f, "any"),
             Self::Int => write!(f, "int"),
             Self::Str => write!(f, "str"),
             Self::Rule => write!(f, "rule"),
@@ -60,14 +62,16 @@ impl std::fmt::Display for Ty {
 struct TyId(u32);
 
 impl TyId {
-    const INT: Self = Self(0);
-    const STR: Self = Self(1);
-    const RULE: Self = Self(2);
-    const GRAMMAR: Self = Self(3);
-    const SPREAD: Self = Self(4);
+    const ANY: Self = Self(0);
+    const INT: Self = Self(1);
+    const STR: Self = Self(2);
+    const RULE: Self = Self(3);
+    const GRAMMAR: Self = Self(4);
+    const SPREAD: Self = Self(5);
 }
 
 enum TyEntry {
+    Any,
     Int,
     Str,
     Rule,
@@ -88,6 +92,7 @@ impl<'src> TyPool<'src> {
     fn new() -> Self {
         Self {
             entries: vec![
+                TyEntry::Any,
                 TyEntry::Int,
                 TyEntry::Str,
                 TyEntry::Rule,
@@ -154,7 +159,13 @@ impl<'src> TyPool<'src> {
     }
 
     fn is_compatible(&self, actual: TyId, expected: TyId) -> bool {
-        self.eq(actual, expected) || (actual == TyId::STR && expected == TyId::RULE)
+        actual == TyId::ANY
+            || self.eq(actual, expected)
+            || (actual == TyId::STR && expected == TyId::RULE)
+            || matches!(
+                (self.get(actual), self.get(expected)),
+                (TyEntry::List(a), TyEntry::List(b)) if self.is_compatible(*a, *b)
+            )
     }
 
     fn is_list(&self, id: TyId) -> Option<TyId> {
@@ -187,6 +198,7 @@ impl<'src> TyPool<'src> {
     /// Convert interned type to public `Ty` (only for error messages).
     fn to_ty(&self, id: TyId) -> Ty {
         match self.get(id) {
+            TyEntry::Any => Ty::Any,
             TyEntry::Int => Ty::Int,
             TyEntry::Str => Ty::Str,
             TyEntry::Rule => Ty::Rule,
@@ -548,7 +560,10 @@ fn type_of<'src>(
                 type_of(ast, *right, env, pool)?,
             );
             match (pool.is_list(lt), pool.is_list(rt)) {
-                (Some(_), Some(_)) if pool.eq(lt, rt) => Ok(lt),
+                (Some(le), Some(_)) if pool.is_compatible(lt, rt) => {
+                    // Prefer the concrete element type over ANY
+                    Ok(if le == TyId::ANY { rt } else { lt })
+                }
                 (Some(_), _) => Err(pool.mismatch(lt, rt, ast.span(*right))),
                 _ => Err(TypeError {
                     kind: TypeErrorKind::AppendRequiresList(pool.to_ty(lt)),
@@ -559,10 +574,8 @@ fn type_of<'src>(
         Node::Ident => unreachable!(),
         Node::VarRef => {
             let name = ast.text(span);
-            env.get_var(name).ok_or_else(|| TypeError {
-                kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
-                span,
-            })
+            // Invariant: resolve validates all variable names before typecheck
+            Ok(env.get_var(name).unwrap())
         }
         Node::FieldAccess { obj, field } => {
             let obj_ty = type_of(ast, *obj, env, pool)?;
@@ -631,7 +644,7 @@ fn type_of<'src>(
         Node::List(range) => {
             let items = ast.child_slice(*range);
             if items.is_empty() {
-                return Ok(pool.list(TyId::RULE));
+                return Ok(pool.list(TyId::ANY));
             }
             let first = type_of(ast, items[0], env, pool)?;
             for &item_id in &items[1..] {
@@ -806,14 +819,14 @@ fn check_for_expr<'src>(
         for ((name_span, ty_id), &actual_ty) in config.bindings.iter().zip(elem_tys.iter()) {
             let declared = ast_type_to_ty(ast, *ty_id, pool)?;
             if !pool.is_compatible(actual_ty, declared) {
-                return Err(pool.mismatch(declared, actual_ty, span));
+                return Err(pool.mismatch(declared, actual_ty, *name_span));
             }
             scope.insert_var(ast.text(*name_span), declared);
         }
     } else if let [(name_span, ty_id)] = config.bindings.as_slice() {
         let declared = ast_type_to_ty(ast, *ty_id, pool)?;
         if !pool.is_compatible(elem_ty, declared) {
-            return Err(pool.mismatch(declared, elem_ty, span));
+            return Err(pool.mismatch(declared, elem_ty, *name_span));
         }
         scope.insert_var(ast.text(*name_span), declared);
     } else {
@@ -870,7 +883,6 @@ pub enum TypeErrorKind {
         bindings: usize,
         got: Ty,
     },
-    UnresolvedVariable(String),
     AppendRequiresList(Ty),
     ConfigAccessOnNonGrammar(Ty),
     UnknownConfigField(String),
@@ -917,7 +929,6 @@ impl std::fmt::Display for TypeError {
                 f,
                 "for has {bindings} bindings but list elements are {got}, not tuples"
             ),
-            TypeErrorKind::UnresolvedVariable(n) => write!(f, "unresolved variable '{n}'"),
             TypeErrorKind::AppendRequiresList(got) => {
                 write!(f, "append requires list arguments, got {got}")
             }
