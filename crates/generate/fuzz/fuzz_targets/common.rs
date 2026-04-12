@@ -9,8 +9,7 @@ pub fn seed_corpus() {
         .parent()
         .unwrap();
     let corpus_dir = project_root.join("crates/generate/fuzz/corpus/native_dsl");
-    if corpus_dir.exists() && std::fs::read_dir(&corpus_dir).is_ok_and(|mut d| d.next().is_some())
-    {
+    if corpus_dir.exists() && std::fs::read_dir(&corpus_dir).is_ok_and(|mut d| d.next().is_some()) {
         return;
     }
     let _ = std::fs::create_dir_all(&corpus_dir);

@@ -31,7 +31,7 @@ pub use lexer::{LexError, LexErrorKind};
 pub use lower::{LowerError, LowerErrorKind};
 pub use parser::{ParseError, ParseErrorKind};
 pub use resolve::{ResolveError, ResolveErrorKind};
-pub use typecheck::{Ty, TypeError, TypeErrorKind};
+pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
 
 use serde::Serialize;
 use thiserror::Error;
@@ -349,8 +349,7 @@ fn span_context(span: Span, source_text: &str) -> SpanContext<'_> {
         .max(1)
         .min(line_text.len().saturating_sub(span_start_in_line));
 
-    let prev_line_text =
-        prev_line_start.map(|ps| &source_text[ps..line_start.saturating_sub(1)]);
+    let prev_line_text = prev_line_start.map(|ps| &source_text[ps..line_start.saturating_sub(1)]);
 
     SpanContext {
         line_num,
