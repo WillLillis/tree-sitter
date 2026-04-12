@@ -864,7 +864,7 @@ rule ternary_expression {
 
 rule binary_expression {
     choice(
-        for (op: str, prec_name: str) in [
+        for (op: str_t, prec_name: str_t) in [
             ("&&", "logical_and"),
             ("||", "logical_or"),
             (">>", "binary_shift"),
@@ -891,7 +891,7 @@ rule binary_expression {
             field(operator, "**"),
             field(right, expression),
         )),
-        for (op: str, prec_name: str) in [
+        for (op: str_t, prec_name: str_t) in [
             ("<", "binary_relation"),
             ("<=", "binary_relation"),
             ("==", "binary_equality"),
@@ -1030,11 +1030,11 @@ rule _identifier { choice(undefined, identifier) }
 
 // The identifier regex contains a double-quote character, so we use raw strings
 // with hash delimiters and concat to build the full pattern.
-let alpha: str = concat(
+let alpha: str_t = concat(
     r#"[^\x00-\x1F\s\p{Zs}0-9:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B\u2028\u2029]"#,
     r"|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}",
 )
-let alphanumeric: str = concat(
+let alphanumeric: str_t = concat(
     r#"[^\x00-\x1F\s\p{Zs}:;`"'@#.,|^&<=>+\-*/\\%?!~()\[\]{}\uFEFF\u2060\u200B\u2028\u2029]"#,
     r"|\\u[0-9a-fA-F]{4}|\\u\{[0-9a-fA-F]+\}",
 )
