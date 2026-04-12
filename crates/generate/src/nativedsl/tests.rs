@@ -1005,6 +1005,24 @@ fn cpp_direct_prepare_grammar() {
     crate::prepare_grammar::prepare_grammar(&grammar).unwrap();
 }
 
+// ===== Vim grammar roundtrip (external grammars dir) =====
+
+#[test]
+fn vim_native_grammar_roundtrip() {
+    let grammars_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../grammars/tree-sitter-vim");
+    let tsg_path = grammars_dir.join("grammar.tsg");
+    let js_json_path = grammars_dir.join("src/grammar.json");
+    let tsg_src = std::fs::read_to_string(&tsg_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", tsg_path.display()));
+    let js_json = std::fs::read_to_string(&js_json_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", js_json_path.display()));
+    let (_, native_json) = dsl_to_json(&tsg_src, &tsg_path);
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_grammar_eq(&native, &js);
+}
+
 // ===== Inheritance =====
 
 #[test]
