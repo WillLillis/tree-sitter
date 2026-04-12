@@ -354,25 +354,16 @@ impl<'src> Parser<'src> {
         let start = self.span();
         if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ast.text(id_span) {
-                "str" => Ok(self.ast.push(Node::TypeStr, id_span)),
-                "int" => Ok(self.ast.push(Node::TypeInt, id_span)),
-                "list" => {
-                    self.expect(TokenKind::Lt)?;
-                    let inner = self.parse_type()?;
-                    let end = self.expect(TokenKind::Gt)?;
-                    Ok(self.ast.push(Node::TypeList(inner), start.merge(end)))
-                }
+                "str_t" => Ok(self.ast.push(Node::TypeStr, id_span)),
+                "int_t" => Ok(self.ast.push(Node::TypeInt, id_span)),
+                "list_rule_t" => Ok(self.ast.push(Node::TypeListRule, id_span)),
+                "list_str_t" => Ok(self.ast.push(Node::TypeListStr, id_span)),
                 _ => Err(ParseError {
                     kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
                     span: id_span,
                     note: None,
                 }),
             };
-        }
-        if self.eat(TokenKind::LParen).is_some() {
-            let range = self.comma_sep_children(TokenKind::RParen, Self::parse_type)?;
-            let end = self.expect(TokenKind::RParen)?;
-            return Ok(self.ast.push(Node::TypeTuple(range), start.merge(end)));
         }
         if self.eat(TokenKind::KwRule).is_some() {
             return Ok(self.ast.push(Node::TypeRule, start));
@@ -554,7 +545,9 @@ impl<'src> Parser<'src> {
     fn parse_reserved_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
         let (context, content, end) = self.parse_binary(start, "reserved", |this| {
             let cs = this.expect_string()?;
-            Ok(this.ast.push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1)))
+            Ok(this
+                .ast
+                .push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1)))
         })?;
         Ok(self
             .ast
