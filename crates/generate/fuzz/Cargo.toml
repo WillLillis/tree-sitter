@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "tree-sitter-generate-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = {version = "1", features = [ "derive" ] }
+libfuzzer-sys = "0.4"
+tree-sitter-generate = { path = "..", features = ["nativedsl"] }
+
+[[bin]]
+name = "native_dsl"
+path = "fuzz_targets/native_dsl.rs"
+doc = false
+
+[[bin]]
+name = "native_dsl_inherit"
+path = "fuzz_targets/native_dsl_inherit.rs"
+doc = false

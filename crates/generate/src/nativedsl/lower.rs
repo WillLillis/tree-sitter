@@ -437,10 +437,7 @@ impl<'src> Evaluator<'src> {
         let Value::List(items) = self.get_val(vid) else {
             unreachable!()
         };
-        items
-            .iter()
-            .map(|&v| Ok(self.value_to_owned_rule(v)))
-            .collect()
+        Ok(items.iter().map(|&v| self.value_to_owned_rule(v)).collect())
     }
 
     fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {

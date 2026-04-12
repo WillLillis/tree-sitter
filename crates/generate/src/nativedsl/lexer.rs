@@ -329,7 +329,10 @@ impl<'src> Lexer<'src> {
         let mut hash_count: u8 = 0;
         while self.peek() == Some(b'#') {
             self.advance();
-            hash_count += 1;
+            hash_count = hash_count.checked_add(1).ok_or_else(|| LexError {
+                kind: LexErrorKind::TooManyHashes,
+                span: Span::from_usize(start, self.pos),
+            })?;
         }
         if self.peek() != Some(b'"') {
             return Err(LexError {
@@ -441,6 +444,7 @@ pub enum LexErrorKind {
     NewlineInString,
     ExpectedRawStringQuote,
     IntegerOverflow,
+    TooManyHashes,
     InputTooLarge,
 }
 
@@ -460,6 +464,9 @@ impl std::fmt::Display for LexError {
             }
             LexErrorKind::ExpectedRawStringQuote => {
                 write!(f, "expected '\"' after 'r' and '#' delimiters")
+            }
+            LexErrorKind::TooManyHashes => {
+                write!(f, "raw string has too many '#' delimiters (maximum {})", u8::MAX)
             }
             LexErrorKind::IntegerOverflow => {
                 write!(

@@ -86,21 +86,35 @@ struct TyPool<'src> {
     entries: Vec<TyEntry>,
     tuple_elems: Vec<TyId>,
     object_fields: Vec<(&'src str, TyId)>,
+    // Cached compound types to avoid re-creating them on every use
+    list_rule: TyId,
+    list_str: TyId,
+    list_any: TyId,
 }
 
 impl<'src> TyPool<'src> {
     fn new() -> Self {
+        let mut entries = vec![
+            TyEntry::Any,
+            TyEntry::Int,
+            TyEntry::Str,
+            TyEntry::Rule,
+            TyEntry::Grammar,
+            TyEntry::Spread,
+        ];
+        let list_rule = TyId(entries.len() as u32);
+        entries.push(TyEntry::List(TyId::RULE));
+        let list_str = TyId(entries.len() as u32);
+        entries.push(TyEntry::List(TyId::STR));
+        let list_any = TyId(entries.len() as u32);
+        entries.push(TyEntry::List(TyId::ANY));
         Self {
-            entries: vec![
-                TyEntry::Any,
-                TyEntry::Int,
-                TyEntry::Str,
-                TyEntry::Rule,
-                TyEntry::Grammar,
-                TyEntry::Spread,
-            ],
+            entries,
             tuple_elems: Vec::new(),
             object_fields: Vec::new(),
+            list_rule,
+            list_str,
+            list_any,
         }
     }
 
@@ -444,15 +458,10 @@ fn expect_rule_list<'src>(
     }
     // Non-literal: check overall type is list<rule> or list<str>
     let ty = type_of(ast, id, env, pool)?;
-    let rule_list = pool.list(TyId::RULE);
-    if pool.is_compatible(ty, rule_list) {
+    if pool.is_compatible(ty, pool.list_rule) || pool.is_compatible(ty, pool.list_str) {
         return Ok(());
     }
-    let str_list = pool.list(TyId::STR);
-    if pool.is_compatible(ty, str_list) {
-        return Ok(());
-    }
-    Err(pool.mismatch(rule_list, ty, ast.span(id)))
+    Err(pool.mismatch(pool.list_rule, ty, ast.span(id)))
 }
 
 /// Check that an expression is a rule name reference (`RuleRef`, `VarRef`,
@@ -495,11 +504,10 @@ fn expect_name_list<'src>(
     }
     // Non-literal: allow list<rule> variables (e.g. c.inline)
     let ty = type_of(ast, id, env, pool)?;
-    let rule_list = pool.list(TyId::RULE);
-    if pool.is_compatible(ty, rule_list) {
+    if pool.is_compatible(ty, pool.list_rule) {
         return Ok(());
     }
-    Err(pool.mismatch(rule_list, ty, ast.span(id)))
+    Err(pool.mismatch(pool.list_rule, ty, ast.span(id)))
 }
 
 /// Check that the `reserved` config expression is valid.
@@ -520,8 +528,7 @@ fn expect_reserved<'src>(
     }
     // Otherwise, check the type matches list<{name: str, words: list<rule>}>
     let ty = type_of(ast, id, env, pool)?;
-    let words = pool.list(TyId::RULE);
-    let set = pool.object(vec![("name", TyId::STR), ("words", words)]);
+    let set = pool.object(vec![("name", TyId::STR), ("words", pool.list_rule)]);
     let expected = pool.list(set);
     if !pool.is_compatible(ty, expected) {
         return Err(pool.mismatch(expected, ty, ast.span(id)));
@@ -587,15 +594,12 @@ fn type_of<'src>(
             }
             if obj_ty == TyId::GRAMMAR {
                 return match field_name {
-                    "extras" | "externals" | "inline" | "supertypes" => Ok(pool.list(TyId::RULE)),
-                    "conflicts" | "precedences" => {
-                        let lr = pool.list(TyId::RULE);
-                        Ok(pool.list(lr))
-                    }
+                    "extras" | "externals" | "inline" | "supertypes" => Ok(pool.list_rule),
+                    "conflicts" | "precedences" => Ok(pool.list(pool.list_rule)),
                     "word" => Ok(TyId::RULE),
                     "reserved" => {
-                        let words = pool.list(TyId::RULE);
-                        let set = pool.object(vec![("name", TyId::STR), ("words", words)]);
+                        let set =
+                            pool.object(vec![("name", TyId::STR), ("words", pool.list_rule)]);
                         Ok(pool.list(set))
                     }
                     _ => Err(TypeError {
@@ -646,7 +650,7 @@ fn type_of<'src>(
         Node::List(range) => {
             let items = ast.child_slice(*range);
             if items.is_empty() {
-                return Ok(pool.list(TyId::ANY));
+                return Ok(pool.list_any);
             }
             let first = type_of(ast, items[0], env, pool)?;
             for &item_id in &items[1..] {
@@ -746,8 +750,8 @@ fn type_of<'src>(
             expect_rule(ast, *content, env, pool)?;
             Ok(TyId::RULE)
         }
-        Node::For(_) => {
-            check_for_expr(ast, id, env, pool)?;
+        Node::For(for_idx) => {
+            check_for_expr(ast, *for_idx, span, env, pool)?;
             Ok(TyId::SPREAD)
         }
         Node::Call { name, args } => {
@@ -788,18 +792,12 @@ fn type_of<'src>(
 
 fn check_for_expr<'src>(
     ast: &'src Ast<'src>,
-    id: NodeId,
+    for_idx: super::ast::ForId,
+    span: Span,
     env: &mut TypeEnv<'src>,
     pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
-    let span = ast.span(id);
-    let Node::For(for_idx) = ast.node(id) else {
-        return Err(TypeError {
-            kind: TypeErrorKind::CannotInferType,
-            span,
-        });
-    };
-    let config = ast.get_for(*for_idx);
+    let config = ast.get_for(for_idx);
     let iter_ty = type_of(ast, config.iterable, env, pool)?;
     let Some(elem_ty) = pool.is_list(iter_ty) else {
         return Err(TypeError {
