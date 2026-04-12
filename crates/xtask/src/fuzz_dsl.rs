@@ -702,9 +702,12 @@ rule _inner { "y" }
     Ok(dir)
 }
 
-// -- Runner --
-
 pub fn run(options: &super::FuzzDsl) -> Result<()> {
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "warning: running in debug mode is ~6x slower than release. Use `cargo run --release -p xtask -- fuzz-dsl`"
+    );
+
     let root = super::root_dir();
     let inherit_dir = setup_inherit_dir()?;
     let base_paths = [
