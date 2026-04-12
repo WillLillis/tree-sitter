@@ -1817,7 +1817,7 @@ fn error_builtin_arg_count_messages() {
             concat!(r#"grammar { language: "test" } rule foo { "#, $expr, " }")
         };
     }
-    let cases: &[(&str, &str, u8, u8)] = &[
+    let cases: &[(&str, &str, u8, usize)] = &[
         // 0-arg: blank
         (g!("blank(\"a\")"), "blank", 0, 1),
         (g!("blank(\"a\", \"b\")"), "blank", 0, 2),
@@ -2031,6 +2031,23 @@ fn error_duplicate_object_key() {
     let e = assert_err!(err, Parse);
     assert_eq!(e.kind, ParseErrorKind::DuplicateObjectKey("a".into()));
     assert!(e.note.is_some());
+}
+
+#[test]
+fn error_too_many_raw_string_hashes() {
+    let src = format!("let x = r{}\"test\"", "#".repeat(256));
+    let err = dsl_err(&src);
+    let e = assert_err!(err, Lex);
+    assert_eq!(e.kind, LexErrorKind::TooManyHashes);
+}
+
+#[test]
+fn error_nesting_too_deep() {
+    let deep = "(-".repeat(300) + "1" + &")".repeat(300);
+    let src = format!("grammar {{ language: \"test\" }} rule foo {{ {deep} }}");
+    let err = dsl_err(&src);
+    let e = assert_err!(err, Parse);
+    assert_eq!(e.kind, ParseErrorKind::NestingTooDeep);
 }
 
 #[test]
