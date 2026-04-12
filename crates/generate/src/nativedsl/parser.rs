@@ -17,12 +17,15 @@ use super::{
     lexer::{Token, TokenKind},
 };
 
+const MAX_PARSE_DEPTH: u16 = 256;
+
 pub struct Parser<'src> {
     tokens: Vec<Token>,
     pos: usize,
     grammar_path: PathBuf,
     pub ast: Ast<'src>,
     scratch: Vec<NodeId>,
+    depth: u16,
 }
 
 impl<'src> Parser<'src> {
@@ -33,6 +36,7 @@ impl<'src> Parser<'src> {
             grammar_path,
             ast: Ast::new(source),
             scratch: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -113,7 +117,13 @@ impl<'src> Parser<'src> {
         }
     }
 
-    fn err_arg_count(&self, name: &'static str, expected: u8, got: u8, start: Span) -> ParseError {
+    fn err_arg_count(
+        &self,
+        name: &'static str,
+        expected: u8,
+        got: usize,
+        start: Span,
+    ) -> ParseError {
         ParseError {
             kind: ParseErrorKind::WrongArgumentCount {
                 name,
@@ -134,9 +144,9 @@ impl<'src> Parser<'src> {
         start: Span,
     ) -> Result<(), ParseError> {
         if self.at(TokenKind::Comma) {
-            let mut got = expected;
+            let mut got = expected as usize;
             // account for trailing comma with no extra args
-            self.eat(TokenKind::Comma).unwrap();
+            self.pos += 1;
             if self.at(TokenKind::RParen) {
                 return Ok(());
             }
@@ -233,6 +243,7 @@ impl<'src> Parser<'src> {
                 ConfigField::Conflicts => config.conflicts = self.parse_conflicts()?,
                 ConfigField::Precedences => config.precedences = self.parse_precedences()?,
                 ConfigField::Reserved => config.reserved = Some(self.parse_expr()?),
+                ConfigField::_Count => unreachable!(),
             }
             if !self.at(TokenKind::RBrace) {
                 self.expect(TokenKind::Comma)?;
@@ -372,7 +383,13 @@ impl<'src> Parser<'src> {
     // -- Expressions --
 
     fn parse_expr(&mut self) -> Result<NodeId, ParseError> {
-        self.parse_primary()
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(self.error(ParseErrorKind::NestingTooDeep));
+        }
+        let result = self.parse_primary();
+        self.depth -= 1;
+        result
     }
 
     fn parse_primary(&mut self) -> Result<NodeId, ParseError> {
@@ -387,7 +404,7 @@ impl<'src> Parser<'src> {
                 self.pos += 1;
                 self.expect(TokenKind::LParen)?;
                 if !self.at(TokenKind::RParen) {
-                    let mut got = 0u8;
+                    let mut got = 0usize;
                     loop {
                         self.parse_expr()?;
                         got += 1;
@@ -476,40 +493,41 @@ impl<'src> Parser<'src> {
         Ok(self.ast.push(make(inner), start.merge(end)))
     }
 
-    fn parse_field(&mut self, start: Span) -> Result<NodeId, ParseError> {
+    /// Parse a two-argument builtin: `name(first, second)`.
+    fn parse_binary(
+        &mut self,
+        start: Span,
+        name: &'static str,
+        parse_first: fn(&mut Self) -> Result<NodeId, ParseError>,
+    ) -> Result<(NodeId, NodeId, Span), ParseError> {
         self.pos += 1;
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("field", 2, 0, start));
+            return Err(self.err_arg_count(name, 2, 0, start));
         }
-        let name_span = self.expect_name()?;
-        let name = self.ast.push(Node::Ident, name_span);
+        let first = parse_first(self)?;
         if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("field", 2, 1, start));
+            return Err(self.err_arg_count(name, 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
-        let content = self.parse_expr()?;
-        self.expect_close_args("field", 2, start)?;
+        let second = self.parse_expr()?;
+        self.expect_close_args(name, 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
+        Ok((first, second, end))
+    }
+
+    fn parse_field(&mut self, start: Span) -> Result<NodeId, ParseError> {
+        let (name, content, end) = self.parse_binary(start, "field", |this| {
+            let s = this.expect_name()?;
+            Ok(this.ast.push(Node::Ident, s))
+        })?;
         Ok(self
             .ast
             .push(Node::Field { name, content }, start.merge(end)))
     }
 
     fn parse_alias(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
-        self.expect(TokenKind::LParen)?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("alias", 2, 0, start));
-        }
-        let content = self.parse_expr()?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("alias", 2, 1, start));
-        }
-        self.expect(TokenKind::Comma)?;
-        let target = self.parse_expr()?;
-        self.expect_close_args("alias", 2, start)?;
-        let end = self.expect(TokenKind::RParen)?;
+        let (content, target, end) = self.parse_binary(start, "alias", Self::parse_expr)?;
         Ok(self
             .ast
             .push(Node::Alias { content, target }, start.merge(end)))
@@ -522,19 +540,7 @@ impl<'src> Parser<'src> {
             PrecVariant::Right => "prec_right",
             PrecVariant::Dynamic => "prec_dynamic",
         };
-        self.pos += 1;
-        self.expect(TokenKind::LParen)?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count(name, 2, 0, start));
-        }
-        let value = self.parse_expr()?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count(name, 2, 1, start));
-        }
-        self.expect(TokenKind::Comma)?;
-        let content = self.parse_expr()?;
-        self.expect_close_args(name, 2, start)?;
-        let end = self.expect(TokenKind::RParen)?;
+        let (value, content, end) = self.parse_binary(start, name, Self::parse_expr)?;
         let node = match variant {
             PrecVariant::Default => Node::Prec { value, content },
             PrecVariant::Left => Node::PrecLeft { value, content },
@@ -546,22 +552,10 @@ impl<'src> Parser<'src> {
 
     /// Parse `reserved("context", content)` expression (not the config block).
     fn parse_reserved_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
-        self.expect(TokenKind::LParen)?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("reserved", 2, 0, start));
-        }
-        let cs = self.expect_string()?;
-        let context = self
-            .ast
-            .push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1));
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("reserved", 2, 1, start));
-        }
-        self.expect(TokenKind::Comma)?;
-        let content = self.parse_expr()?;
-        self.expect_close_args("reserved", 2, start)?;
-        let end = self.expect(TokenKind::RParen)?;
+        let (context, content, end) = self.parse_binary(start, "reserved", |this| {
+            let cs = this.expect_string()?;
+            Ok(this.ast.push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1)))
+        })?;
         Ok(self
             .ast
             .push(Node::Reserved { context, content }, start.merge(end)))
@@ -603,19 +597,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_append(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
-        self.expect(TokenKind::LParen)?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("append", 2, 0, start));
-        }
-        let left = self.parse_expr()?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count("append", 2, 1, start));
-        }
-        self.expect(TokenKind::Comma)?;
-        let right = self.parse_expr()?;
-        self.expect_close_args("append", 2, start)?;
-        let end = self.expect(TokenKind::RParen)?;
+        let (left, right, end) = self.parse_binary(start, "append", Self::parse_expr)?;
         Ok(self
             .ast
             .push(Node::Append { left, right }, start.merge(end)))
@@ -805,10 +787,12 @@ enum ConfigField {
     Conflicts,
     Precedences,
     Reserved,
+    // Sentinel - must be last. Used to derive COUNT.
+    _Count,
 }
 
 impl ConfigField {
-    const COUNT: usize = 10;
+    const COUNT: usize = Self::_Count as usize;
 
     fn from_str(s: &str) -> Option<Self> {
         Some(match s {
@@ -855,11 +839,12 @@ pub enum ParseErrorKind {
     ExpectedStringOrIdent,
     KeywordAsIdent,
     DuplicateGrammarBlock,
+    NestingTooDeep,
     TooManyChildren,
     WrongArgumentCount {
         name: &'static str,
         expected: u8,
-        got: u8,
+        got: usize,
     },
 }
 
@@ -892,6 +877,9 @@ impl std::fmt::Display for ParseError {
                 write!(f, "keywords cannot be used as identifiers")
             }
             ParseErrorKind::DuplicateGrammarBlock => write!(f, "only one grammar block is allowed"),
+            ParseErrorKind::NestingTooDeep => {
+                write!(f, "expression nesting too deep (maximum {MAX_PARSE_DEPTH})")
+            }
             ParseErrorKind::TooManyChildren => {
                 write!(f, "too many elements (maximum {})", u16::MAX)
             }
