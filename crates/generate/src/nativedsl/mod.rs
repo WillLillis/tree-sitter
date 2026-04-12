@@ -349,10 +349,8 @@ fn span_context(span: Span, source_text: &str) -> SpanContext<'_> {
         .max(1)
         .min(line_text.len().saturating_sub(span_start_in_line));
 
-    let prev_line_text = prev_line_start.map(|ps| {
-        let pe = memchr::memchr(b'\n', &bytes[ps..]).map_or(bytes.len(), |pos| ps + pos);
-        &source_text[ps..pe]
-    });
+    let prev_line_text =
+        prev_line_start.map(|ps| &source_text[ps..line_start.saturating_sub(1)]);
 
     SpanContext {
         line_num,

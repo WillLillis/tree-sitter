@@ -12,7 +12,6 @@ let PREC = {
 fn comma_sep1(item: rule) -> rule { seq(item, repeat(seq(",", item))) }
 fn comma_sep(item: rule) -> rule { optional(comma_sep1(item)) }
 
-// Digits with optional ' separators: e.g. digits("[0-9]") = /[0-9]('?[0-9]+)*/
 fn digits(pat: rule) -> rule { seq(repeat1(pat), repeat(seq("'", repeat1(pat)))) }
 
 let BIN_DIGIT = regexp("[01]")
