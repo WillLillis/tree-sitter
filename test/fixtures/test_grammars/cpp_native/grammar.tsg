@@ -20,13 +20,13 @@ let HEX_DIGIT = regexp("[0-9a-fA-F]")
 let OCT_DIGIT = regexp("[0-7]")
 let SIGN = regexp(r"[-\+]")
 
-let ASSIGNMENT_OPERATORS: list<str> = [
+let ASSIGNMENT_OPERATORS: list_str_t = [
     "=", "*=", "/=", "%=", "+=", "-=",
     "<<=", ">>=", "&=", "^=", "|=",
     "and_eq", "or_eq", "xor_eq",
 ]
 
-let FOLD_OPERATORS: list<str> = [
+let FOLD_OPERATORS: list_str_t = [
     "+", "-", "*", "/", "%", "^", "&", "|",
     "=", "<", ">", "<<", ">>",
     "+=", "-=", "*=", "/=", "%=", "^=", "&=", "|=",
@@ -274,7 +274,7 @@ override rule unary_expression {
 override rule binary_expression {
     choice(
         c::binary_expression,
-        for (op: str, p: int) in [
+        for (op: str_t, p: int_t) in [
             ("<=>", PREC.THREE_WAY),
             ("or", PREC.LOGICAL_OR), ("and", PREC.LOGICAL_AND),
             ("bitor", PREC.INCLUSIVE_OR), ("xor", PREC.EXCLUSIVE_OR),
@@ -422,7 +422,7 @@ override rule parameter_list {
 override rule assignment_expression {
     prec_right(PREC.ASSIGNMENT, seq(
         field(left, _assignment_left_expression),
-        field(operator, choice(for (op: str) in ASSIGNMENT_OPERATORS { op })),
+        field(operator, choice(for (op: str_t) in ASSIGNMENT_OPERATORS { op })),
         field(right, choice(expression, initializer_list)),
     ))
 }
@@ -974,10 +974,10 @@ rule lambda_capture_initializer {
 
 rule _lambda_capture { choice(seq(optional("*"), this), _lambda_capture_identifier, lambda_capture_initializer) }
 
-rule _fold_operator { choice(for (op: str) in FOLD_OPERATORS { op }) }
+rule _fold_operator { choice(for (op: str_t) in FOLD_OPERATORS { op }) }
 
 rule _binary_fold_operator {
-    choice(for (op: str) in FOLD_OPERATORS { seq(field(operator, op), "...", op) })
+    choice(for (op: str_t) in FOLD_OPERATORS { seq(field(operator, op), "...", op) })
 }
 
 rule _unary_left_fold { seq(field(left, "..."), field(operator, _fold_operator), field(right, expression)) }
@@ -1046,7 +1046,7 @@ rule qualified_operator_cast_identifier {
 
 rule _assignment_expression_lhs {
     seq(field(left, expression),
-        field(operator, choice(for (op: str) in ASSIGNMENT_OPERATORS { op })),
+        field(operator, choice(for (op: str_t) in ASSIGNMENT_OPERATORS { op })),
         field(right, choice(expression, initializer_list)))
 }
 

@@ -5,8 +5,8 @@ use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
 use super::{
-    DslError, LexErrorKind, LowerErrorKind, ParseErrorKind, ResolveErrorKind, Ty, TypeErrorKind,
-    ast, parse_native_dsl,
+    DslError, InnerTy, LexErrorKind, LowerErrorKind, ParseErrorKind, ResolveErrorKind, Ty,
+    TypeErrorKind, ast, parse_native_dsl,
 };
 
 macro_rules! assert_err {
@@ -334,7 +334,7 @@ fn prec_with_string_name() {
 fn let_binding_int() {
     let g = dsl(r#"
         grammar { language: "test" }
-        let P: int = 5
+        let P: int_t = 5
         rule program { prec(P, "x") }
     "#);
     assert_eq!(
@@ -366,10 +366,61 @@ fn let_binding_object_field_access() {
 }
 
 #[test]
+fn object_with_list_rule_values() {
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            reserved: { global: ["if", "else"], props: ["get", "set"] },
+        }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.reserved_words.len(), 2);
+    assert_eq!(g.reserved_words[0].name, "global");
+    assert_eq!(g.reserved_words[1].name, "props");
+}
+
+#[test]
+fn object_field_access_list_value() {
+    // Access a field from an object with list values
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let GROUPS = { kw: ["if", "else"], ops: ["+", "-"] }
+        rule program {
+            choice(
+                for (k: str_t) in GROUPS.kw { k },
+                for (o: str_t) in GROUPS.ops { o },
+            )
+        }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::String("if".into()),
+            Rule::String("else".into()),
+            Rule::String("+".into()),
+            Rule::String("-".into()),
+        ])
+    );
+}
+
+#[test]
+fn object_with_str_values() {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let ALIASES = { plus: "+", minus: "-" }
+        rule program { seq(ALIASES.plus, ALIASES.minus) }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::seq(vec![Rule::String("+".into()), Rule::String("-".into()),])
+    );
+}
+
+#[test]
 fn let_binding_negative_int() {
     let g = dsl(r#"
         grammar { language: "test" }
-        let P: int = -1
+        let P: int_t = -1
         rule program { prec(P, "x") }
     "#);
     assert_eq!(
@@ -442,7 +493,7 @@ fn for_tuple_destructure() {
         grammar { language: "test" }
         rule binary {
             choice(
-                for (op: str, p: int) in [("+", 1), ("*", 2)] {
+                for (op: str_t, p: int_t) in [("+", 1), ("*", 2)] {
                     prec_left(p, seq(expr, op, expr))
                 }
             )
@@ -477,7 +528,7 @@ fn for_single_binding() {
     let g = dsl(r#"
         grammar { language: "test" }
         rule keywords {
-            choice(for (kw: str) in ["if", "else", "while"] { kw })
+            choice(for (kw: str_t) in ["if", "else", "while"] { kw })
         }
     "#);
     assert_eq!(
@@ -495,7 +546,7 @@ fn for_single_element_tuple_destructure() {
     let g = dsl(r#"
         grammar { language: "test" }
         rule keywords {
-            choice(for (kw: str) in [("if"), ("else"), ("while")] { kw })
+            choice(for (kw: str_t) in [("if"), ("else"), ("while")] { kw })
         }
     "#);
     assert_eq!(
@@ -672,7 +723,7 @@ fn for_inline_in_seq() {
         rule program {
             seq(
                 "start",
-                for (kw: str) in ["a", "b"] { kw },
+                for (kw: str_t) in ["a", "b"] { kw },
                 "end",
             )
         }
@@ -714,7 +765,7 @@ fn rule_reference_in_body() {
 fn let_binding_typed_str() {
     let g = dsl(r#"
         grammar { language: "test" }
-        let SEP: str = ","
+        let SEP: str_t = ","
         rule program { seq("a", SEP, "b") }
     "#);
     assert_eq!(
@@ -731,7 +782,7 @@ fn let_binding_typed_str() {
 fn function_multi_params() {
     let g = dsl(r#"
         grammar { language: "test" }
-        fn wrap(before: str, content: rule, after: str) -> rule {
+        fn wrap(before: str_t, content: rule, after: str_t) -> rule {
             seq(before, content, after)
         }
         rule program { wrap("(", identifier, ")") }
@@ -783,7 +834,7 @@ fn error_type_mismatch_fn_args() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        fn needs_int(x: int) -> rule { prec(x, "a") }
+        fn needs_int(x: int_t) -> rule { prec(x, "a") }
         rule program { needs_int("not_an_int") }
     "#,
     );
@@ -802,7 +853,7 @@ fn error_for_binding_count_mismatch() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        rule bad { choice(for (a: str, b: int) in [("x")] { a }) }
+        rule bad { choice(for (a: str_t, b: int_t) in [("x")] { a }) }
     "#,
     );
     let e = assert_err!(err, Type);
@@ -852,7 +903,7 @@ fn error_forward_reference_let() {
         r#"
         grammar { language: "test" }
         rule program { MY_VAR }
-        let MY_VAR: str = "x"
+        let MY_VAR: str_t = "x"
     "#,
     );
     let e = assert_err!(err, Resolve);
@@ -1017,7 +1068,7 @@ fn inherit_config_append_extras() {
 #[test]
 fn config_expr_let_binding() {
     let g = dsl(r#"
-        let my_extras: list<rule> = [regexp(r"\s"), comment]
+        let my_extras: list_rule_t = [regexp(r"\s"), comment]
         grammar {
             language: "test",
             extras: my_extras,
@@ -1182,10 +1233,10 @@ fn inherit_from_json() {
 fn append_concatenates_lists() {
     let g = dsl(r#"
         grammar { language: "test" }
-        let a: list<str> = ["x", "y"]
-        let b: list<str> = ["z"]
-        let c: list<str> = append(a, b)
-        rule program { choice(for (s: str) in c { s }) }
+        let a: list_str_t = ["x", "y"]
+        let b: list_str_t = ["z"]
+        let c: list_str_t = append(a, b)
+        rule program { choice(for (s: str_t) in c { s }) }
     "#);
     assert_eq!(
         g.variables[0].rule,
@@ -1353,24 +1404,16 @@ fn error_inherit_cycle() {
 }
 
 #[test]
-fn error_append_mismatched_types() {
+fn error_append_non_list_arg() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let a: list<str> = ["x"]
-        let b: list<int> = [1]
-        let c = append(a, b)
+        let c = append("x", ["y"])
         rule program { "x" }
     "#,
     );
     let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::List(Box::new(Ty::Str)),
-            got: Ty::List(Box::new(Ty::Int)),
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::AppendRequiresList(Ty::Str));
 }
 
 #[test]
@@ -1378,8 +1421,8 @@ fn error_append_non_list() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let a: str = "x"
-        let b: list<str> = ["y"]
+        let a: str_t = "x"
+        let b: list_str_t = ["y"]
         let c = append(a, b)
         rule program { "x" }
     "#,
@@ -1418,7 +1461,7 @@ fn error_let_type_annotation_mismatch() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let X: int = "not_an_int"
+        let X: int_t = "not_an_int"
         rule program { "x" }
     "#,
     );
@@ -1505,7 +1548,7 @@ fn error_rule_inline_on_non_grammar() {
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
-        TypeErrorKind::ConfigAccessOnNonGrammar(Ty::Object(vec![("x".into(), Ty::Int)]))
+        TypeErrorKind::ConfigAccessOnNonGrammar(Ty::Object(InnerTy::Int))
     );
 }
 
@@ -1514,7 +1557,7 @@ fn error_field_access_on_non_object() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let x: int = 5
+        let x: int_t = 5
         rule program { prec(x.foo, "a") }
     "#,
     );
@@ -1536,7 +1579,7 @@ fn error_field_not_found() {
         e.kind,
         TypeErrorKind::FieldNotFound {
             field: "b".into(),
-            on_type: Ty::Object(vec![("a".into(), Ty::Int)]),
+            on_type: Ty::Object(InnerTy::Int),
         }
     );
 }
@@ -1578,8 +1621,8 @@ fn error_duplicate_let() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let X: int = 1
-        let X: int = 2
+        let X: int_t = 1
+        let X: int_t = 2
         rule program { "x" }
     "#,
     );
@@ -1606,8 +1649,8 @@ fn error_for_requires_list() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let x: int = 5
-        rule program { choice(for (v: int) in x { prec(v, "a") }) }
+        let x: int_t = 5
+        rule program { choice(for (v: int_t) in x { prec(v, "a") }) }
     "#,
     );
     let e = assert_err!(err, Type);
@@ -1637,7 +1680,7 @@ fn error_fn_return_type_mismatch() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        fn bad(x: rule) -> int { x }
+        fn bad(x: rule) -> int_t { x }
         rule program { "x" }
     "#,
     );
@@ -2052,15 +2095,15 @@ fn error_nesting_too_deep() {
 
 #[test]
 fn empty_list_compatible_with_any_list_type() {
-    // Empty list in extras (list<rule> context)
+    // Empty list in extras (list_rule_t context)
     dsl(r#"
         grammar { language: "test", extras: [] }
         rule foo { "x" }
     "#);
-    // Empty list in a let with explicit list<str> annotation
+    // Empty list in a let with explicit list_str_t annotation
     dsl(r#"
         grammar { language: "test" }
-        let x: list<str> = []
+        let x: list_str_t = []
         rule foo { "x" }
     "#);
 }
@@ -2133,7 +2176,7 @@ fn error_for_bindings_not_tuple() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        let items: list<rule> = [identifier]
+        let items: list_rule_t = [identifier]
         rule identifier { regexp("[a-z]+") }
         rule program { seq(for (a: rule, b: rule) in items { a }) }
     "#,

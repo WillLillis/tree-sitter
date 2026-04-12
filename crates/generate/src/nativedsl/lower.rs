@@ -104,7 +104,7 @@ enum Value<'src> {
     Grammar,
 }
 
-const MAX_CALL_DEPTH: u16 = 128;
+const MAX_CALL_DEPTH: u16 = 64;
 
 struct Evaluator<'src> {
     ast: &'src Ast<'src>,
@@ -127,16 +127,19 @@ pub fn lower_with_base(
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
+    // Register all functions first so forward references work
+    for &item_id in &ast.root_items {
+        if let Node::Fn(fn_idx) = ast.node(item_id) {
+            let config = ast.get_fn(*fn_idx);
+            eval.fns.insert(ast.node_text(config.name), item_id);
+        }
+    }
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
-            Node::Grammar => {}
+            Node::Grammar | Node::Fn(_) => {}
             Node::Let { name, value, .. } => {
                 let val = eval.eval_expr(*value)?;
                 eval.bind(ast.node_text(*name), val);
-            }
-            Node::Fn(fn_idx) => {
-                let config = ast.get_fn(*fn_idx);
-                eval.fns.insert(ast.node_text(config.name), item_id);
             }
             Node::Rule { name, body } => {
                 let rule_id = eval.lower_to_rule(*body)?;

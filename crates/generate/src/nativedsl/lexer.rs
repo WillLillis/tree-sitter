@@ -466,7 +466,11 @@ impl std::fmt::Display for LexError {
                 write!(f, "expected '\"' after 'r' and '#' delimiters")
             }
             LexErrorKind::TooManyHashes => {
-                write!(f, "raw string has too many '#' delimiters (maximum {})", u8::MAX)
+                write!(
+                    f,
+                    "raw string has too many '#' delimiters (maximum {})",
+                    u8::MAX
+                )
             }
             LexErrorKind::IntegerOverflow => {
                 write!(

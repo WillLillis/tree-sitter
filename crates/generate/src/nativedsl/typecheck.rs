@@ -1,268 +1,99 @@
-//! Structural type checker for the native grammar DSL.
+//! Type checker for the native grammar DSL.
 //!
-//! Runs after name resolution and before lowering. `Str` is a subtype of
-//! `Rule` (string literals can appear where rules are expected).
-//! Internally uses interned type IDs ([`TyId`]) to avoid heap allocations;
-//! the public [`Ty`] enum is only constructed for error messages.
+//! Runs after name resolution and before lowering. Uses a simple flat type
+//! system with no generics - just concrete types for the values that grammar
+//! definitions actually use.
+//!
+//! Subtyping: `str_t` is a subtype of `rule_t`, `list_str_t` is a subtype of
+//! `list_rule_t`.
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, Node, NodeId, Span};
+use super::ast::{Ast, ForId, Node, NodeId, Span};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub enum Ty {
-    Any,
-    Int,
-    Str,
+/// Types that can appear as homogeneous object field values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum InnerTy {
     Rule,
+    Str,
+    Int,
+    ListRule,
+    ListStr,
+}
+
+impl std::fmt::Display for InnerTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rule => "rule_t",
+            Self::Str => "str_t",
+            Self::Int => "int_t",
+            Self::ListRule => "list_rule_t",
+            Self::ListStr => "list_str_t",
+        })
+    }
+}
+
+/// The type of a DSL expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Ty {
+    Rule,
+    Str,
+    Int,
+    ListRule,
+    ListStr,
     Grammar,
     Spread,
-    List(Box<Self>),
-    Tuple(Vec<Self>),
-    Object(Vec<(String, Self)>),
+    /// Homogeneous object `{ field: T, ... }`. The inner type is what field
+    /// access returns. Field name validation is done via `ObjectInfo` in the env.
+    Object(InnerTy),
+}
+
+impl Ty {
+    fn is_rule_like(self) -> bool {
+        self == Self::Rule || self == Self::Str
+    }
+
+    fn is_list(self) -> bool {
+        self == Self::ListRule || self == Self::ListStr
+    }
+
+    /// Check if `self` is assignable to `expected`.
+    fn is_compatible(self, expected: Self) -> bool {
+        self == expected
+            || (self == Self::Str && expected == Self::Rule)
+            || (self == Self::ListStr && expected == Self::ListRule)
+    }
 }
 
 impl std::fmt::Display for Ty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Any => write!(f, "any"),
-            Self::Int => write!(f, "int"),
-            Self::Str => write!(f, "str"),
-            Self::Rule => write!(f, "rule"),
-            Self::Spread => write!(f, "for-loop expansion"),
-            Self::Grammar => write!(f, "grammar"),
-            Self::List(inner) => write!(f, "list<{inner}>"),
-            Self::Tuple(elems) => {
-                write!(f, "(")?;
-                for (i, e) in elems.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{e}")?;
-                }
-                write!(f, ")")
-            }
-            Self::Object(fields) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{k}: {v}")?;
-                }
-                write!(f, "}}")
-            }
+            Self::Rule => f.write_str("rule_t"),
+            Self::Str => f.write_str("str_t"),
+            Self::Int => f.write_str("int_t"),
+            Self::ListRule => f.write_str("list_rule_t"),
+            Self::ListStr => f.write_str("list_str_t"),
+            Self::Grammar => f.write_str("grammar_t"),
+            Self::Spread => f.write_str("for-loop expansion"),
+            Self::Object(inner) => write!(f, "object<{inner}>"),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct TyId(u32);
-
-impl TyId {
-    const ANY: Self = Self(0);
-    const INT: Self = Self(1);
-    const STR: Self = Self(2);
-    const RULE: Self = Self(3);
-    const GRAMMAR: Self = Self(4);
-    const SPREAD: Self = Self(5);
-}
-
-enum TyEntry {
-    Any,
-    Int,
-    Str,
-    Rule,
-    Grammar,
-    Spread,
-    List(TyId),
-    Tuple { start: u32, len: u16 },
-    Object { start: u32, len: u16 },
-}
-
-struct TyPool<'src> {
-    entries: Vec<TyEntry>,
-    tuple_elems: Vec<TyId>,
-    object_fields: Vec<(&'src str, TyId)>,
-    // Cached compound types to avoid re-creating them on every use
-    list_rule: TyId,
-    list_str: TyId,
-    list_any: TyId,
-}
-
-impl<'src> TyPool<'src> {
-    fn new() -> Self {
-        let mut entries = vec![
-            TyEntry::Any,
-            TyEntry::Int,
-            TyEntry::Str,
-            TyEntry::Rule,
-            TyEntry::Grammar,
-            TyEntry::Spread,
-        ];
-        let list_rule = TyId(entries.len() as u32);
-        entries.push(TyEntry::List(TyId::RULE));
-        let list_str = TyId(entries.len() as u32);
-        entries.push(TyEntry::List(TyId::STR));
-        let list_any = TyId(entries.len() as u32);
-        entries.push(TyEntry::List(TyId::ANY));
-        Self {
-            entries,
-            tuple_elems: Vec::new(),
-            object_fields: Vec::new(),
-            list_rule,
-            list_str,
-            list_any,
-        }
-    }
-
-    fn list(&mut self, inner: TyId) -> TyId {
-        let id = TyId(self.entries.len() as u32);
-        self.entries.push(TyEntry::List(inner));
-        id
-    }
-
-    fn tuple(&mut self, elems: &[TyId]) -> TyId {
-        let start = self.tuple_elems.len() as u32;
-        let len = elems.len() as u16;
-        self.tuple_elems.extend_from_slice(elems);
-        let id = TyId(self.entries.len() as u32);
-        self.entries.push(TyEntry::Tuple { start, len });
-        id
-    }
-
-    fn object(&mut self, fields: Vec<(&'src str, TyId)>) -> TyId {
-        let start = self.object_fields.len() as u32;
-        let len = fields.len() as u16;
-        self.object_fields.extend(fields);
-        let id = TyId(self.entries.len() as u32);
-        self.entries.push(TyEntry::Object { start, len });
-        id
-    }
-
-    fn get(&self, id: TyId) -> &TyEntry {
-        &self.entries[id.0 as usize]
-    }
-
-    fn eq(&self, a: TyId, b: TyId) -> bool {
-        if a == b {
-            return true;
-        }
-        match (self.get(a), self.get(b)) {
-            (TyEntry::List(a), TyEntry::List(b)) => self.eq(*a, *b),
-            (TyEntry::Tuple { start: sa, len: la }, TyEntry::Tuple { start: sb, len: lb }) => {
-                la == lb && {
-                    let ae = &self.tuple_elems[*sa as usize..*sa as usize + *la as usize];
-                    let be = &self.tuple_elems[*sb as usize..*sb as usize + *lb as usize];
-                    ae.iter().zip(be).all(|(a, b)| self.eq(*a, *b))
-                }
-            }
-            (TyEntry::Object { start: sa, len: la }, TyEntry::Object { start: sb, len: lb }) => {
-                la == lb && {
-                    let af = &self.object_fields[*sa as usize..*sa as usize + *la as usize];
-                    let bf = &self.object_fields[*sb as usize..*sb as usize + *lb as usize];
-                    af.iter()
-                        .zip(bf)
-                        .all(|((ka, ta), (kb, tb))| ka == kb && self.eq(*ta, *tb))
-                }
-            }
-            _ => false,
-        }
-    }
-
-    fn is_compatible(&self, actual: TyId, expected: TyId) -> bool {
-        actual == TyId::ANY
-            || self.eq(actual, expected)
-            || (actual == TyId::STR && expected == TyId::RULE)
-            || matches!(
-                (self.get(actual), self.get(expected)),
-                (TyEntry::List(a), TyEntry::List(b)) if self.is_compatible(*a, *b)
-            )
-    }
-
-    fn is_list(&self, id: TyId) -> Option<TyId> {
-        match self.get(id) {
-            TyEntry::List(inner) => Some(*inner),
-            _ => None,
-        }
-    }
-
-    fn tuple_elems(&self, id: TyId) -> Option<&[TyId]> {
-        match self.get(id) {
-            TyEntry::Tuple { start: s, len: l } => {
-                Some(&self.tuple_elems[*s as usize..*s as usize + *l as usize])
-            }
-            _ => None,
-        }
-    }
-
-    fn object_field(&self, id: TyId, name: &str) -> Option<TyId> {
-        match self.get(id) {
-            TyEntry::Object { start: s, len: l } => self.object_fields
-                [*s as usize..*s as usize + *l as usize]
-                .iter()
-                .find(|(k, _)| *k == name)
-                .map(|(_, ty)| *ty),
-            _ => None,
-        }
-    }
-
-    /// Convert interned type to public `Ty` (only for error messages).
-    fn to_ty(&self, id: TyId) -> Ty {
-        match self.get(id) {
-            TyEntry::Any => Ty::Any,
-            TyEntry::Int => Ty::Int,
-            TyEntry::Str => Ty::Str,
-            TyEntry::Rule => Ty::Rule,
-            TyEntry::Grammar => Ty::Grammar,
-            TyEntry::Spread => Ty::Spread,
-            TyEntry::List(inner) => Ty::List(Box::new(self.to_ty(*inner))),
-            TyEntry::Tuple { start: s, len: l } => Ty::Tuple(
-                self.tuple_elems[*s as usize..*s as usize + *l as usize]
-                    .iter()
-                    .map(|&id| self.to_ty(id))
-                    .collect(),
-            ),
-            TyEntry::Object { start: s, len: l } => Ty::Object(
-                self.object_fields[*s as usize..*s as usize + *l as usize]
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), self.to_ty(*v)))
-                    .collect(),
-            ),
-        }
-    }
-
-    fn mismatch(&self, expected: TyId, got: TyId, span: Span) -> TypeError {
-        TypeError {
-            kind: TypeErrorKind::TypeMismatch {
-                expected: self.to_ty(expected),
-                got: self.to_ty(got),
-            },
-            span,
-        }
-    }
-}
-
-fn is_rule_like(ty: TyId) -> bool {
-    ty == TyId::RULE || ty == TyId::STR
-}
-fn is_prec_like(ty: TyId) -> bool {
-    ty == TyId::INT || ty == TyId::STR
 }
 
 // -- Type environment --
 
-#[derive(Clone, Debug)]
 struct FnSig {
-    params: Vec<(String, TyId)>,
-    return_ty: TyId,
+    params: Vec<Ty>,
+    return_ty: Ty,
 }
 
 struct TypeEnv<'src> {
-    var_scopes: Vec<FxHashMap<&'src str, TyId>>,
+    var_scopes: Vec<FxHashMap<&'src str, Ty>>,
     fns: FxHashMap<&'src str, FnSig>,
+    /// Field names for Object variables, keyed by variable name.
+    object_fields: FxHashMap<&'src str, Vec<&'src str>>,
 }
 
 impl<'src> TypeEnv<'src> {
@@ -270,12 +101,20 @@ impl<'src> TypeEnv<'src> {
         Self {
             var_scopes: vec![FxHashMap::default()],
             fns: FxHashMap::default(),
+            object_fields: FxHashMap::default(),
         }
     }
-    fn insert_var(&mut self, name: &'src str, ty: TyId) {
+    fn insert_var(&mut self, name: &'src str, ty: Ty) {
         self.var_scopes.last_mut().unwrap().insert(name, ty);
     }
-    fn get_var(&self, name: &str) -> Option<TyId> {
+    fn insert_object(&mut self, name: &'src str, ty: Ty, fields: Vec<&'src str>) {
+        self.insert_var(name, ty);
+        self.object_fields.insert(name, fields);
+    }
+    fn get_object_fields(&self, name: &str) -> Option<&[&'src str]> {
+        self.object_fields.get(name).map(Vec::as_slice)
+    }
+    fn get_var(&self, name: &str) -> Option<Ty> {
         self.var_scopes
             .iter()
             .rev()
@@ -308,61 +147,39 @@ impl std::ops::DerefMut for ScopeGuard<'_, '_> {
     }
 }
 
-fn ast_type_to_ty(ast: &Ast<'_>, ty_id: NodeId, pool: &mut TyPool<'_>) -> Result<TyId, TypeError> {
-    match ast.node(ty_id) {
-        Node::TypeInt => Ok(TyId::INT),
-        Node::TypeStr => Ok(TyId::STR),
-        Node::TypeRule => Ok(TyId::RULE),
-        Node::TypeList(inner) => {
-            let inner = ast_type_to_ty(ast, *inner, pool)?;
-            Ok(pool.list(inner))
-        }
-        Node::TypeTuple(range) => {
-            let elems: Vec<TyId> = ast
-                .child_slice(*range)
-                .iter()
-                .map(|&id| ast_type_to_ty(ast, id, pool))
-                .collect::<Result<_, _>>()?;
-            Ok(pool.tuple(&elems))
-        }
+// -- Type annotation resolution --
+
+fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
+    match ast.node(id) {
+        Node::TypeRule => Ok(Ty::Rule),
+        Node::TypeStr => Ok(Ty::Str),
+        Node::TypeInt => Ok(Ty::Int),
+        Node::TypeListRule => Ok(Ty::ListRule),
+        Node::TypeListStr => Ok(Ty::ListStr),
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
-            span: ast.span(ty_id),
+            span: ast.span(id),
         }),
     }
-}
-
-fn parse_fn_params(
-    ast: &Ast<'_>,
-    config: &super::ast::FnConfig,
-    pool: &mut TyPool<'_>,
-) -> Result<Vec<(String, TyId)>, TypeError> {
-    config
-        .params
-        .iter()
-        .map(|p| {
-            Ok((
-                ast.node_text(p.name).to_string(),
-                ast_type_to_ty(ast, p.ty, pool)?,
-            ))
-        })
-        .collect()
 }
 
 // -- Entry point --
 
 pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
     let mut env = TypeEnv::new();
-    let mut pool = TyPool::new();
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
-                env.insert_var(ast.node_text(*name), TyId::RULE);
+                env.insert_var(ast.node_text(*name), Ty::Rule);
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                let params = parse_fn_params(ast, config, &mut pool)?;
-                let return_ty = ast_type_to_ty(ast, config.return_ty, &mut pool)?;
+                let params: Vec<Ty> = config
+                    .params
+                    .iter()
+                    .map(|p| resolve_type_annotation(ast, p.ty))
+                    .collect::<Result<_, _>>()?;
+                let return_ty = resolve_type_annotation(ast, config.return_ty)?;
                 env.fns
                     .insert(ast.node_text(config.name), FnSig { params, return_ty });
             }
@@ -370,7 +187,7 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
         }
     }
     for &item_id in &ast.root_items {
-        check_item(ast, item_id, &mut env, &mut pool)?;
+        check_item(ast, item_id, &mut env)?;
     }
     Ok(())
 }
@@ -379,60 +196,80 @@ fn check_item<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::Grammar => {
             let config = ast.context.grammar_config.as_ref().unwrap();
-            // extras/externals accept any rule expression (regexp, strings, etc.)
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_rule_list(ast, id, env, pool)?;
+                expect_rule_list(ast, id, env)?;
             }
-            // inline/supertypes/word only accept rule name references
             for id in [config.inline, config.supertypes].into_iter().flatten() {
-                expect_name_list(ast, id, env, pool)?;
+                expect_name_list(ast, id, env)?;
             }
             if let Some(id) = config.word {
-                expect_name_ref(ast, id, env, pool)?;
+                expect_name_ref(ast, id, env)?;
             }
             if let Some(id) = config.reserved {
-                expect_reserved(ast, id, env, pool)?;
+                expect_reserved(ast, id, env)?;
             }
             Ok(())
         }
         Node::Let { name, ty, value } => {
-            let inferred = type_of(ast, *value, env, pool)?;
-            if let Some(ty_id) = ty {
-                let declared = ast_type_to_ty(ast, *ty_id, pool)?;
-                if !pool.is_compatible(inferred, declared) {
-                    return Err(pool.mismatch(declared, inferred, ast.span(*value)));
+            let var_name = ast.node_text(*name);
+            let declared = ty.map(|t| resolve_type_annotation(ast, t)).transpose()?;
+            // Empty list: type comes from annotation, not inference
+            let is_empty_list =
+                matches!(ast.node(*value), Node::List(r) if ast.child_slice(*r).is_empty());
+            let resolved_ty = if is_empty_list {
+                match declared {
+                    Some(ty) if ty.is_list() => ty,
+                    _ => {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::EmptyListNeedsAnnotation,
+                            span: ast.span(*value),
+                        });
+                    }
                 }
+            } else {
+                let inferred = type_of(ast, *value, env)?;
+                if let Some(d) = declared
+                    && !inferred.is_compatible(d)
+                {
+                    return Err(mismatch(d, inferred, ast.span(*value)));
+                }
+                inferred
+            };
+            // If the value is an object literal, register its field names
+            if let Node::Object(range) = ast.node(*value) {
+                let fields: Vec<&str> = ast
+                    .get_object(*range)
+                    .iter()
+                    .map(|(span, _)| ast.text(*span))
+                    .collect();
+                env.insert_object(var_name, resolved_ty, fields);
+            } else {
+                env.insert_var(var_name, resolved_ty);
             }
-            env.insert_var(ast.node_text(*name), inferred);
             Ok(())
         }
         Node::Fn(fn_idx) => {
             let config = ast.get_fn(*fn_idx);
             let fn_name = ast.node_text(config.name);
-            // Registered in the first pass of `check()`
             let sig = &env.fns[fn_name];
             let return_ty = sig.return_ty;
             let n_params = sig.params.len();
             let mut scope = env.scoped();
             for i in 0..n_params {
-                // Re-index each iteration so the borrow is temporary
-                let ty = scope.fns[fn_name].params[i].1;
+                let ty = scope.fns[fn_name].params[i];
                 scope.insert_var(ast.node_text(config.params[i].name), ty);
             }
-            let body_ty = type_of(ast, config.body, &mut scope, pool)?;
-            if !pool.is_compatible(body_ty, return_ty) {
-                return Err(pool.mismatch(return_ty, body_ty, ast.span(config.body)));
+            let body_ty = type_of(ast, config.body, &mut scope)?;
+            if !body_ty.is_compatible(return_ty) {
+                return Err(mismatch(return_ty, body_ty, ast.span(config.body)));
             }
             Ok(())
         }
-        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
-            expect_rule(ast, *body, env, pool)
-        }
+        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => expect_rule(ast, *body, env),
         _ => Err(TypeError {
             kind: TypeErrorKind::UnexpectedTopLevel,
             span: ast.span(id),
@@ -440,45 +277,57 @@ fn check_item<'src>(
     }
 }
 
-/// Check that an expression evaluates to a list where each element is rule-like.
-/// For literal lists, checks each element individually to permit mixed rule/str
-/// (e.g. `[regexp("\\s"), " "]` in extras).
+// -- Config field validators --
+
+/// Check a list config field. For literal lists, checks each element with `check_elem`.
+/// For non-literal expressions, checks the overall type is a list type.
+fn expect_list<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    check_elem: fn(&'src Ast<'src>, NodeId, &mut TypeEnv<'src>) -> Result<(), TypeError>,
+    accept_list_str: bool,
+) -> Result<(), TypeError> {
+    if let Node::List(range) = ast.node(id) {
+        for &child in ast.child_slice(*range) {
+            check_elem(ast, child, env)?;
+        }
+        return Ok(());
+    }
+    let ty = type_of(ast, id, env)?;
+    if ty == Ty::ListRule || (accept_list_str && ty == Ty::ListStr) {
+        return Ok(());
+    }
+    Err(mismatch(Ty::ListRule, ty, ast.span(id)))
+}
+
 fn expect_rule_list<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
-    // Literal lists: check each element (allows mixed rule/str)
-    if let Node::List(range) = ast.node(id) {
-        for &child in ast.child_slice(*range) {
-            expect_rule(ast, child, env, pool)?;
-        }
-        return Ok(());
-    }
-    // Non-literal: check overall type is list<rule> or list<str>
-    let ty = type_of(ast, id, env, pool)?;
-    if pool.is_compatible(ty, pool.list_rule) || pool.is_compatible(ty, pool.list_str) {
-        return Ok(());
-    }
-    Err(pool.mismatch(pool.list_rule, ty, ast.span(id)))
+    expect_list(ast, id, env, expect_rule, true)
 }
 
-/// Check that an expression is a rule name reference (`RuleRef`, `VarRef`,
-/// or field access like `base.word`). Rejects complex rule expressions
-/// like `regexp(...)` or `prec(...)` that have type `rule` but aren't names.
+fn expect_name_list<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    expect_list(ast, id, env, expect_name_ref, false)
+}
+
 fn expect_name_ref<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::RuleRef => Ok(()),
         Node::VarRef | Node::FieldAccess { .. } => {
-            let ty = type_of(ast, id, env, pool)?;
-            if ty != TyId::RULE {
-                return Err(pool.mismatch(TyId::RULE, ty, ast.span(id)));
+            let ty = type_of(ast, id, env)?;
+            if ty != Ty::Rule {
+                return Err(mismatch(Ty::Rule, ty, ast.span(id)));
             }
             Ok(())
         }
@@ -489,95 +338,54 @@ fn expect_name_ref<'src>(
     }
 }
 
-/// Check that an expression is a list of rule name references.
-fn expect_name_list<'src>(
-    ast: &'src Ast<'src>,
-    id: NodeId,
-    env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
-) -> Result<(), TypeError> {
-    if let Node::List(range) = ast.node(id) {
-        for &child in ast.child_slice(*range) {
-            expect_name_ref(ast, child, env, pool)?;
-        }
-        return Ok(());
-    }
-    // Non-literal: allow list<rule> variables (e.g. c.inline)
-    let ty = type_of(ast, id, env, pool)?;
-    if pool.is_compatible(ty, pool.list_rule) {
-        return Ok(());
-    }
-    Err(pool.mismatch(pool.list_rule, ty, ast.span(id)))
-}
-
-/// Check that the `reserved` config expression is valid.
-/// Accepts an object literal `{ name: [words] }` where each value is a rule list,
-/// or an expression like `base.reserved` that evaluates to the reserved type.
 fn expect_reserved<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = ast.node(id) {
         for &(_, val_id) in ast.get_object(*range) {
-            expect_rule_list(ast, val_id, env, pool)?;
+            expect_rule_list(ast, val_id, env)?;
         }
         return Ok(());
     }
-    // Otherwise, check the type matches list<{name: str, words: list<rule>}>
-    let ty = type_of(ast, id, env, pool)?;
-    let set = pool.object(vec![("name", TyId::STR), ("words", pool.list_rule)]);
-    let expected = pool.list(set);
-    if !pool.is_compatible(ty, expected) {
-        return Err(pool.mismatch(expected, ty, ast.span(id)));
+    // Non-literal: must be inherited (base.reserved -> Object(ListRule))
+    let ty = type_of(ast, id, env)?;
+    if ty == Ty::Object(InnerTy::ListRule) {
+        return Ok(());
     }
-    Ok(())
+    Err(TypeError {
+        kind: TypeErrorKind::ExpectedReservedConfig,
+        span: ast.span(id),
+    })
 }
 
 fn expect_rule<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env, pool)?;
-    if !is_rule_like(ty) {
-        return Err(pool.mismatch(TyId::RULE, ty, ast.span(id)));
+    let ty = type_of(ast, id, env)?;
+    if !ty.is_rule_like() {
+        return Err(mismatch(Ty::Rule, ty, ast.span(id)));
     }
     Ok(())
 }
+
+// -- Type inference --
 
 fn type_of<'src>(
     ast: &'src Ast<'src>,
     id: NodeId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
-) -> Result<TyId, TypeError> {
+) -> Result<Ty, TypeError> {
     let span = ast.span(id);
     match ast.node(id) {
-        Node::IntLit(_) => Ok(TyId::INT),
-        Node::StringLit | Node::RawStringLit { .. } => Ok(TyId::STR),
-        Node::RuleRef | Node::Blank => Ok(TyId::RULE),
-        Node::Inherit { .. } => Ok(TyId::GRAMMAR),
-        Node::Append { left, right } => {
-            let (lt, rt) = (
-                type_of(ast, *left, env, pool)?,
-                type_of(ast, *right, env, pool)?,
-            );
-            match (pool.is_list(lt), pool.is_list(rt)) {
-                (Some(le), Some(_)) if pool.is_compatible(lt, rt) => {
-                    // Prefer the concrete element type over ANY
-                    Ok(if le == TyId::ANY { rt } else { lt })
-                }
-                (Some(_), _) => Err(pool.mismatch(lt, rt, ast.span(*right))),
-                _ => Err(TypeError {
-                    kind: TypeErrorKind::AppendRequiresList(pool.to_ty(lt)),
-                    span: ast.span(*left),
-                }),
-            }
-        }
+        Node::IntLit(_) => Ok(Ty::Int),
+        Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
+        Node::RuleRef | Node::Blank => Ok(Ty::Rule),
+        Node::Inherit { .. } => Ok(Ty::Grammar),
         Node::Ident => unreachable!(),
         Node::VarRef => {
             let name = ast.text(span);
@@ -586,173 +394,253 @@ fn type_of<'src>(
                 span,
             })
         }
-        Node::FieldAccess { obj, field } => {
-            let obj_ty = type_of(ast, *obj, env, pool)?;
-            let field_name = ast.node_text(*field);
-            if let Some(ty) = pool.object_field(obj_ty, field_name) {
-                return Ok(ty);
+        Node::Neg(inner) => {
+            let ty = type_of(ast, *inner, env)?;
+            if ty != Ty::Int {
+                return Err(mismatch(Ty::Int, ty, span));
             }
-            if obj_ty == TyId::GRAMMAR {
-                return match field_name {
-                    "extras" | "externals" | "inline" | "supertypes" => Ok(pool.list_rule),
-                    "conflicts" | "precedences" => Ok(pool.list(pool.list_rule)),
-                    "word" => Ok(TyId::RULE),
-                    "reserved" => {
-                        let set =
-                            pool.object(vec![("name", TyId::STR), ("words", pool.list_rule)]);
-                        Ok(pool.list(set))
+            Ok(Ty::Int)
+        }
+        Node::Append { left, right } => {
+            let l_empty =
+                matches!(ast.node(*left), Node::List(r) if ast.child_slice(*r).is_empty());
+            let r_empty =
+                matches!(ast.node(*right), Node::List(r) if ast.child_slice(*r).is_empty());
+            let lt = if l_empty {
+                None
+            } else {
+                Some(type_of(ast, *left, env)?)
+            };
+            let rt = if r_empty {
+                None
+            } else {
+                Some(type_of(ast, *right, env)?)
+            };
+            match (lt, rt) {
+                (Some(l), Some(r)) => {
+                    if !l.is_list() {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::AppendRequiresList(l),
+                            span: ast.span(*left),
+                        });
                     }
+                    if !r.is_list() {
+                        return Err(mismatch(l, r, ast.span(*right)));
+                    }
+                    Ok(if l == r { l } else { Ty::ListRule })
+                }
+                (Some(t), None) | (None, Some(t)) => {
+                    if !t.is_list() {
+                        return Err(TypeError {
+                            kind: TypeErrorKind::AppendRequiresList(t),
+                            span,
+                        });
+                    }
+                    Ok(t)
+                }
+                (None, None) => Err(TypeError {
+                    kind: TypeErrorKind::EmptyListNeedsAnnotation,
+                    span,
+                }),
+            }
+        }
+        Node::FieldAccess { obj, field } => {
+            let obj_ty = type_of(ast, *obj, env)?;
+            let field_name = ast.node_text(*field);
+            match obj_ty {
+                Ty::Object(inner) => {
+                    // Validate field exists if the object came from a known variable
+                    if matches!(ast.node(*obj), Node::VarRef) {
+                        let var_name = ast.text(ast.span(*obj));
+                        if let Some(fields) = env.get_object_fields(var_name)
+                            && !fields.contains(&field_name)
+                        {
+                            return Err(TypeError {
+                                kind: TypeErrorKind::FieldNotFound {
+                                    field: field_name.to_string(),
+                                    on_type: obj_ty,
+                                },
+                                span: ast.span(*field),
+                            });
+                        }
+                    }
+                    Ok(match inner {
+                        InnerTy::Rule => Ty::Rule,
+                        InnerTy::Str => Ty::Str,
+                        InnerTy::Int => Ty::Int,
+                        InnerTy::ListRule => Ty::ListRule,
+                        InnerTy::ListStr => Ty::ListStr,
+                    })
+                }
+                Ty::Grammar => match field_name {
+                    "extras" | "externals" | "inline" | "supertypes" | "conflicts"
+                    | "precedences" => Ok(Ty::ListRule),
+                    "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
+                    "word" => Ok(Ty::Rule),
                     _ => Err(TypeError {
                         kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
                         span: ast.span(*field),
                     }),
-                };
+                },
+                _ => Err(TypeError {
+                    kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty),
+                    span: ast.span(*obj),
+                }),
             }
-            if matches!(pool.get(obj_ty), TyEntry::Object { .. }) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::FieldNotFound {
-                        field: field_name.to_string(),
-                        on_type: pool.to_ty(obj_ty),
-                    },
-                    span,
-                });
-            }
-            Err(TypeError {
-                kind: TypeErrorKind::FieldAccessOnNonObject(pool.to_ty(obj_ty)),
-                span: ast.span(*obj),
-            })
         }
         Node::RuleInline { obj, .. } => {
-            let obj_ty = type_of(ast, *obj, env, pool)?;
-            if obj_ty != TyId::GRAMMAR {
+            let obj_ty = type_of(ast, *obj, env)?;
+            if obj_ty != Ty::Grammar {
                 return Err(TypeError {
-                    kind: TypeErrorKind::ConfigAccessOnNonGrammar(pool.to_ty(obj_ty)),
+                    kind: TypeErrorKind::ConfigAccessOnNonGrammar(obj_ty),
                     span: ast.span(*obj),
                 });
             }
-            Ok(TyId::RULE)
-        }
-        Node::Neg(inner) => {
-            let ty = type_of(ast, *inner, env, pool)?;
-            if ty != TyId::INT {
-                return Err(pool.mismatch(TyId::INT, ty, span));
-            }
-            Ok(TyId::INT)
+            Ok(Ty::Rule)
         }
         Node::Object(range) => {
-            let fields: Vec<(&str, TyId)> = ast
-                .get_object(*range)
-                .iter()
-                .map(|(ks, vid)| Ok((ast.text(*ks), type_of(ast, *vid, env, pool)?)))
-                .collect::<Result<_, TypeError>>()?;
-            Ok(pool.object(fields))
+            let fields = ast.get_object(*range);
+            if fields.is_empty() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::CannotInferType,
+                    span,
+                });
+            }
+            let first_ty = type_of(ast, fields[0].1, env)?;
+            let inner = match first_ty {
+                Ty::Rule => InnerTy::Rule,
+                Ty::Str => InnerTy::Str,
+                Ty::Int => InnerTy::Int,
+                Ty::ListRule => InnerTy::ListRule,
+                Ty::ListStr => InnerTy::ListStr,
+                _ => {
+                    return Err(TypeError {
+                        kind: TypeErrorKind::InvalidObjectValue(first_ty),
+                        span: ast.span(fields[0].1),
+                    });
+                }
+            };
+            for &(_, val_id) in &fields[1..] {
+                let ty = type_of(ast, val_id, env)?;
+                if ty != first_ty {
+                    return Err(mismatch(first_ty, ty, ast.span(val_id)));
+                }
+            }
+            Ok(Ty::Object(inner))
         }
         Node::List(range) => {
             let items = ast.child_slice(*range);
             if items.is_empty() {
-                return Ok(pool.list_any);
+                return Err(TypeError {
+                    kind: TypeErrorKind::EmptyListNeedsAnnotation,
+                    span,
+                });
             }
-            let first = type_of(ast, items[0], env, pool)?;
+            let first = type_of(ast, items[0], env)?;
             for &item_id in &items[1..] {
-                let ty = type_of(ast, item_id, env, pool)?;
-                if !pool.eq(ty, first) {
+                let ty = type_of(ast, item_id, env)?;
+                if ty != first {
                     return Err(TypeError {
-                        kind: TypeErrorKind::ListElementTypeMismatch {
-                            first: pool.to_ty(first),
-                            got: pool.to_ty(ty),
-                        },
+                        kind: TypeErrorKind::ListElementTypeMismatch { first, got: ty },
                         span: ast.span(item_id),
                     });
                 }
             }
-            Ok(pool.list(first))
+            match first {
+                Ty::Str => Ok(Ty::ListStr),
+                _ if first.is_rule_like() => Ok(Ty::ListRule),
+                _ => Err(TypeError {
+                    kind: TypeErrorKind::InvalidListElement,
+                    span: ast.span(items[0]),
+                }),
+            }
         }
-        Node::Tuple(range) => {
-            let elems: Vec<TyId> = ast
-                .child_slice(*range)
-                .iter()
-                .map(|&id| type_of(ast, id, env, pool))
-                .collect::<Result<_, _>>()?;
-            Ok(pool.tuple(&elems))
+        Node::Tuple(_) => {
+            // Tuples are only valid as elements of for-loop lists.
+            // They're checked structurally in check_for_expr.
+            // If we reach here, it's a tuple in an invalid context.
+            Err(TypeError {
+                kind: TypeErrorKind::CannotInferType,
+                span,
+            })
         }
         Node::Concat(range) => {
             for &part in ast.child_slice(*range) {
-                let ty = type_of(ast, part, env, pool)?;
-                if ty != TyId::STR {
-                    return Err(pool.mismatch(TyId::STR, ty, ast.span(part)));
+                let ty = type_of(ast, part, env)?;
+                if ty != Ty::Str {
+                    return Err(mismatch(Ty::Str, ty, ast.span(part)));
                 }
             }
-            Ok(TyId::STR)
+            Ok(Ty::Str)
         }
         Node::DynRegex { pattern, flags } => {
-            let pt = type_of(ast, *pattern, env, pool)?;
-            if pt != TyId::STR {
-                return Err(pool.mismatch(TyId::STR, pt, ast.span(*pattern)));
+            let pt = type_of(ast, *pattern, env)?;
+            if pt != Ty::Str {
+                return Err(mismatch(Ty::Str, pt, ast.span(*pattern)));
             }
             if let Some(fid) = flags {
-                let ft = type_of(ast, *fid, env, pool)?;
-                if ft != TyId::STR {
-                    return Err(pool.mismatch(TyId::STR, ft, ast.span(*fid)));
+                let ft = type_of(ast, *fid, env)?;
+                if ft != Ty::Str {
+                    return Err(mismatch(Ty::Str, ft, ast.span(*fid)));
                 }
             }
-            Ok(TyId::RULE)
+            Ok(Ty::Rule)
         }
         Node::Seq(range) | Node::Choice(range) => {
             for &member in ast.child_slice(*range) {
-                let ty = type_of(ast, member, env, pool)?;
-                if ty != TyId::SPREAD && !is_rule_like(ty) {
-                    return Err(pool.mismatch(TyId::RULE, ty, ast.span(member)));
+                let ty = type_of(ast, member, env)?;
+                if ty != Ty::Spread && !ty.is_rule_like() {
+                    return Err(mismatch(Ty::Rule, ty, ast.span(member)));
                 }
             }
-            Ok(TyId::RULE)
+            Ok(Ty::Rule)
         }
         Node::Repeat(inner)
         | Node::Repeat1(inner)
         | Node::Optional(inner)
         | Node::Token(inner)
         | Node::TokenImmediate(inner) => {
-            expect_rule(ast, *inner, env, pool)?;
-            Ok(TyId::RULE)
+            expect_rule(ast, *inner, env)?;
+            Ok(Ty::Rule)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
-            expect_rule(ast, *content, env, pool)?;
-            Ok(TyId::RULE)
+            expect_rule(ast, *content, env)?;
+            Ok(Ty::Rule)
         }
         Node::Alias { content, target } => {
-            expect_rule(ast, *content, env, pool)?;
-            let target_ty = type_of(ast, *target, env, pool)?;
-            // Alias target must be a named symbol or a string literal
-            let is_valid_target =
-                matches!(ast.node(*target), Node::RuleRef | Node::VarRef) || target_ty == TyId::STR;
-            if !is_valid_target {
+            expect_rule(ast, *content, env)?;
+            let target_ty = type_of(ast, *target, env)?;
+            let is_valid =
+                matches!(ast.node(*target), Node::RuleRef | Node::VarRef) || target_ty == Ty::Str;
+            if !is_valid {
                 return Err(TypeError {
-                    kind: TypeErrorKind::InvalidAliasTarget(pool.to_ty(target_ty)),
+                    kind: TypeErrorKind::InvalidAliasTarget(target_ty),
                     span: ast.span(*target),
                 });
             }
-            Ok(TyId::RULE)
+            Ok(Ty::Rule)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content } => {
-            let vt = type_of(ast, *value, env, pool)?;
-            if !is_prec_like(vt) {
-                return Err(pool.mismatch(TyId::INT, vt, ast.span(*value)));
+            let vt = type_of(ast, *value, env)?;
+            if vt != Ty::Int && vt != Ty::Str {
+                return Err(mismatch(Ty::Int, vt, ast.span(*value)));
             }
-            expect_rule(ast, *content, env, pool)?;
-            Ok(TyId::RULE)
+            expect_rule(ast, *content, env)?;
+            Ok(Ty::Rule)
         }
         Node::PrecDynamic { value, content } => {
-            let vt = type_of(ast, *value, env, pool)?;
-            if vt != TyId::INT {
-                return Err(pool.mismatch(TyId::INT, vt, ast.span(*value)));
+            let vt = type_of(ast, *value, env)?;
+            if vt != Ty::Int {
+                return Err(mismatch(Ty::Int, vt, ast.span(*value)));
             }
-            expect_rule(ast, *content, env, pool)?;
-            Ok(TyId::RULE)
+            expect_rule(ast, *content, env)?;
+            Ok(Ty::Rule)
         }
         Node::For(for_idx) => {
-            check_for_expr(ast, *for_idx, span, env, pool)?;
-            Ok(TyId::SPREAD)
+            check_for_expr(ast, *for_idx, env)?;
+            Ok(Ty::Spread)
         }
         Node::Call { name, args } => {
             let fn_name = ast.node_text(*name);
@@ -774,11 +662,10 @@ fn type_of<'src>(
                 });
             }
             for (i, &arg_id) in args.iter().enumerate() {
-                let arg_ty = type_of(ast, arg_id, env, pool)?;
-                // Re-index each iteration so the borrow is temporary
-                let param_ty = env.fns[fn_name].params[i].1;
-                if !pool.is_compatible(arg_ty, param_ty) {
-                    return Err(pool.mismatch(param_ty, arg_ty, ast.span(arg_id)));
+                let arg_ty = type_of(ast, arg_id, env)?;
+                let param_ty = env.fns[fn_name].params[i];
+                if !arg_ty.is_compatible(param_ty) {
+                    return Err(mismatch(param_ty, arg_ty, ast.span(arg_id)));
                 }
             }
             Ok(return_ty)
@@ -790,62 +677,100 @@ fn type_of<'src>(
     }
 }
 
+// -- For-loop checking --
+
 fn check_for_expr<'src>(
     ast: &'src Ast<'src>,
-    for_idx: super::ast::ForId,
-    span: Span,
+    for_idx: ForId,
     env: &mut TypeEnv<'src>,
-    pool: &mut TyPool<'src>,
 ) -> Result<(), TypeError> {
     let config = ast.get_for(for_idx);
-    let iter_ty = type_of(ast, config.iterable, env, pool)?;
-    let Some(elem_ty) = pool.is_list(iter_ty) else {
+
+    // Check if iterable is a literal list of tuples (for destructuring)
+    if let Node::List(range) = ast.node(config.iterable) {
+        let items = ast.child_slice(*range);
+        let has_tuples = items
+            .first()
+            .is_some_and(|&id| matches!(ast.node(id), Node::Tuple(_)));
+        if has_tuples {
+            let mut scope = env.scoped();
+            for &item_id in items {
+                check_for_tuple_element(ast, item_id, config, &mut scope)?;
+            }
+            return expect_rule(ast, config.body, &mut scope);
+        }
+    }
+
+    // Single binding over a flat list
+    if config.bindings.len() != 1 {
         return Err(TypeError {
-            kind: TypeErrorKind::ForRequiresList(pool.to_ty(iter_ty)),
+            kind: TypeErrorKind::ForRequiresTuples,
             span: ast.span(config.iterable),
         });
-    };
-
-    let mut scope = env.scoped();
-    if let Some(elem_tys) = pool.tuple_elems(elem_ty) {
-        let elem_tys = elem_tys.to_vec();
-        if config.bindings.len() != elem_tys.len() {
-            return Err(TypeError {
-                kind: TypeErrorKind::ForBindingCountMismatch {
-                    bindings: config.bindings.len(),
-                    tuple_elements: elem_tys.len(),
-                },
-                span,
-            });
-        }
-        for ((name_span, ty_id), &actual_ty) in config.bindings.iter().zip(elem_tys.iter()) {
-            let declared = ast_type_to_ty(ast, *ty_id, pool)?;
-            if !pool.is_compatible(actual_ty, declared) {
-                return Err(pool.mismatch(declared, actual_ty, *name_span));
-            }
-            scope.insert_var(ast.text(*name_span), declared);
-        }
-    } else if let [(name_span, ty_id)] = config.bindings.as_slice() {
-        let declared = ast_type_to_ty(ast, *ty_id, pool)?;
-        if !pool.is_compatible(elem_ty, declared) {
-            return Err(pool.mismatch(declared, elem_ty, *name_span));
-        }
-        scope.insert_var(ast.text(*name_span), declared);
-    } else {
+    }
+    let iter_ty = type_of(ast, config.iterable, env)?;
+    if !iter_ty.is_list() {
         return Err(TypeError {
-            kind: TypeErrorKind::ForBindingsNotTuple {
-                bindings: config.bindings.len(),
-                got: pool.to_ty(elem_ty),
-            },
-            span,
+            kind: TypeErrorKind::ForRequiresList(iter_ty),
+            span: ast.span(config.iterable),
         });
     }
+    let (name_span, ty_id) = &config.bindings[0];
+    let declared = resolve_type_annotation(ast, *ty_id)?;
+    let elem_ty = match iter_ty {
+        Ty::ListRule => Ty::Rule,
+        Ty::ListStr => Ty::Str,
+        _ => unreachable!(),
+    };
+    if !elem_ty.is_compatible(declared) {
+        return Err(mismatch(declared, elem_ty, *name_span));
+    }
+    let mut scope = env.scoped();
+    scope.insert_var(ast.text(*name_span), declared);
+    expect_rule(ast, config.body, &mut scope)
+}
 
-    let body_ty = type_of(ast, config.body, &mut scope, pool)?;
-    if !is_rule_like(body_ty) {
-        return Err(pool.mismatch(TyId::RULE, body_ty, ast.span(config.body)));
+fn check_for_tuple_element<'src>(
+    ast: &'src Ast<'src>,
+    item_id: NodeId,
+    config: &super::ast::ForConfig,
+    scope: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    let Node::Tuple(range) = ast.node(item_id) else {
+        return Err(TypeError {
+            kind: TypeErrorKind::ForRequiresTuples,
+            span: ast.span(item_id),
+        });
+    };
+    let elems = ast.child_slice(*range);
+    if elems.len() != config.bindings.len() {
+        return Err(TypeError {
+            kind: TypeErrorKind::ForBindingCountMismatch {
+                bindings: config.bindings.len(),
+                tuple_elements: elems.len(),
+            },
+            span: ast.span(item_id),
+        });
+    }
+    // Pop and re-push scope vars for each tuple (last iteration's bindings win)
+    for (i, &(name_span, ty_id)) in config.bindings.iter().enumerate() {
+        let declared = resolve_type_annotation(ast, ty_id)?;
+        let actual = type_of(ast, elems[i], scope)?;
+        if !actual.is_compatible(declared) {
+            return Err(mismatch(declared, actual, name_span));
+        }
+        scope.insert_var(ast.text(name_span), declared);
     }
     Ok(())
+}
+
+// -- Helpers --
+
+const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
+    TypeError {
+        kind: TypeErrorKind::TypeMismatch { expected, got },
+        span,
+    }
 }
 
 // -- Error types --
@@ -877,7 +802,11 @@ pub enum TypeErrorKind {
         first: Ty,
         got: Ty,
     },
+    InvalidObjectValue(Ty),
+    InvalidListElement,
+    EmptyListNeedsAnnotation,
     ForRequiresList(Ty),
+    ForRequiresTuples,
     ForBindingCountMismatch {
         bindings: usize,
         tuple_elements: usize,
@@ -892,6 +821,7 @@ pub enum TypeErrorKind {
     UnknownConfigField(String),
     InvalidAliasTarget(Ty),
     ExpectedRuleName,
+    ExpectedReservedConfig,
     UnexpectedTopLevel,
     CannotInferType,
 }
@@ -915,13 +845,23 @@ impl std::fmt::Display for TypeError {
                 write!(f, "no field '{field}' on {on_type}")
             }
             TypeErrorKind::FieldAccessOnNonObject(ty) => {
-                write!(f, "field access on non-object type {ty}")
+                write!(f, "field access requires object or grammar_t, got {ty}")
             }
             TypeErrorKind::ListElementTypeMismatch { first, got } => {
                 write!(f, "list elements have inconsistent types: {first} vs {got}")
             }
+            TypeErrorKind::InvalidObjectValue(ty) => {
+                write!(f, "object values must be rule_t, str_t, or int_t, got {ty}")
+            }
+            TypeErrorKind::InvalidListElement => write!(f, "list elements must be rule_t or str_t"),
+            TypeErrorKind::EmptyListNeedsAnnotation => {
+                write!(f, "empty list requires a type annotation")
+            }
             TypeErrorKind::ForRequiresList(got) => {
                 write!(f, "for-expression requires a list, got {got}")
+            }
+            TypeErrorKind::ForRequiresTuples => {
+                write!(f, "for with multiple bindings requires a list of tuples")
             }
             TypeErrorKind::ForBindingCountMismatch {
                 bindings,
@@ -939,14 +879,15 @@ impl std::fmt::Display for TypeError {
                 write!(f, "append requires list arguments, got {got}")
             }
             TypeErrorKind::ConfigAccessOnNonGrammar(ty) => {
-                write!(f, "'::' requires a grammar value, got {ty}")
+                write!(f, "'::' requires grammar_t, got {ty}")
             }
             TypeErrorKind::UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
             TypeErrorKind::InvalidAliasTarget(got) => {
                 write!(f, "alias target must be a name or string, got {got}")
             }
-            TypeErrorKind::ExpectedRuleName => {
-                write!(f, "expected a rule name")
+            TypeErrorKind::ExpectedRuleName => write!(f, "expected a rule name"),
+            TypeErrorKind::ExpectedReservedConfig => {
+                write!(f, "reserved config must be an object literal or inherited")
             }
             TypeErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
             TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
