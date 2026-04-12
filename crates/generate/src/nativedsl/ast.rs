@@ -384,8 +384,8 @@ pub enum Node {
     TypeRule,
     TypeStr,
     TypeInt,
-    TypeList(NodeId),
-    TypeTuple(ChildRange),
+    TypeListRule,
+    TypeListStr,
     Unreachable,
 }
 
