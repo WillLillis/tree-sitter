@@ -435,7 +435,7 @@ fn let_binding_negative_int() {
 fn function_expansion() {
     let g = dsl(r#"
         grammar { language: "test" }
-        fn comma_sep(item: rule) -> rule {
+        fn comma_sep(item: rule_t) -> rule_t {
             seq(item, repeat(seq(",", item)))
         }
         rule program { comma_sep(identifier) }
@@ -461,7 +461,7 @@ fn function_expansion() {
 fn function_multiple_calls() {
     let g = dsl(r##"
         grammar { language: "test" }
-        fn make_if(content: rule) -> rule { seq("#if", content, "#endif") }
+        fn make_if(content: rule_t) -> rule_t { seq("#if", content, "#endif") }
         rule preproc_if { make_if(_statement) }
         rule preproc_block_if { make_if(_block_item) }
         rule _statement { "stmt" }
@@ -782,7 +782,7 @@ fn let_binding_typed_str() {
 fn function_multi_params() {
     let g = dsl(r#"
         grammar { language: "test" }
-        fn wrap(before: str_t, content: rule, after: str_t) -> rule {
+        fn wrap(before: str_t, content: rule_t, after: str_t) -> rule_t {
             seq(before, content, after)
         }
         rule program { wrap("(", identifier, ")") }
@@ -802,8 +802,8 @@ fn function_multi_params() {
 fn nested_function_calls() {
     let g = dsl(r#"
         grammar { language: "test" }
-        fn comma_sep1(item: rule) -> rule { seq(item, repeat(seq(",", item))) }
-        fn comma_sep(item: rule) -> rule { optional(comma_sep1(item)) }
+        fn comma_sep1(item: rule_t) -> rule_t { seq(item, repeat(seq(",", item))) }
+        fn comma_sep(item: rule_t) -> rule_t { optional(comma_sep1(item)) }
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }
     "#);
@@ -834,7 +834,7 @@ fn error_type_mismatch_fn_args() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        fn needs_int(x: int_t) -> rule { prec(x, "a") }
+        fn needs_int(x: int_t) -> rule_t { prec(x, "a") }
         rule program { needs_int("not_an_int") }
     "#,
     );
@@ -1539,7 +1539,7 @@ fn error_wrong_arg_count() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        fn one_arg(x: rule) -> rule { x }
+        fn one_arg(x: rule_t) -> rule_t { x }
         rule program { one_arg("a", "b") }
     "#,
     );
@@ -1653,8 +1653,8 @@ fn error_duplicate_fn() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        fn f(x: rule) -> rule { x }
-        fn f(x: rule) -> rule { x }
+        fn f(x: rule_t) -> rule_t { x }
+        fn f(x: rule_t) -> rule_t { x }
         rule program { "x" }
     "#,
     );
@@ -1698,7 +1698,7 @@ fn error_fn_return_type_mismatch() {
     let err = dsl_err(
         r#"
         grammar { language: "test" }
-        fn bad(x: rule) -> int_t { x }
+        fn bad(x: rule_t) -> int_t { x }
         rule program { "x" }
     "#,
     );
@@ -1866,7 +1866,7 @@ fn error_unknown_type() {
 
 #[test]
 fn error_missing_return_type() {
-    let err = dsl_err(r#"grammar { language: "test" } fn f(x: rule) { x } rule program { "x" }"#);
+    let err = dsl_err(r#"grammar { language: "test" } fn f(x: rule_t) { x } rule program { "x" }"#);
     let e = assert_err!(err, Parse);
     assert_eq!(e.kind, ParseErrorKind::MissingReturnType);
 }
@@ -2003,7 +2003,7 @@ fn error_keyword_as_ident() {
     for src in [
         r#"grammar { language: "test" } rule seq { "x" }"#,
         r#"grammar { language: "test" } let token = "x" rule foo { "x" }"#,
-        r#"grammar { language: "test" } fn repeat(x: rule) -> rule { x } rule foo { "x" }"#,
+        r#"grammar { language: "test" } fn repeat(x: rule_t) -> rule_t { x } rule foo { "x" }"#,
     ] {
         let err = dsl_err(src);
         let e = assert_err!(err, Parse);
@@ -2139,7 +2139,7 @@ fn empty_list_append() {
 #[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
-        r#"grammar { language: "test" } fn f(x: rule) -> rule { f(x) } rule program { f("x") }"#,
+        r#"grammar { language: "test" } fn f(x: rule_t) -> rule_t { f(x) } rule program { f("x") }"#,
     );
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
@@ -2196,7 +2196,7 @@ fn error_for_bindings_not_tuple() {
         grammar { language: "test" }
         let items: list_rule_t = [identifier]
         rule identifier { regexp("[a-z]+") }
-        rule program { seq(for (a: rule, b: rule) in items { a }) }
+        rule program { seq(for (a: rule_t, b: rule_t) in items { a }) }
     "#,
     );
     let e = assert_err!(err, Type);
