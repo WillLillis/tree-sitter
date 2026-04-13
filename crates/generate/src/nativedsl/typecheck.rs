@@ -84,16 +84,16 @@ impl std::fmt::Display for Ty {
 
 // -- Type environment --
 
-struct FnSig {
-    params: Vec<Ty>,
-    return_ty: Ty,
+pub struct FnSig {
+    pub params: Vec<Ty>,
+    pub return_ty: Ty,
 }
 
-struct TypeEnv<'src> {
-    var_scopes: Vec<FxHashMap<&'src str, Ty>>,
-    fns: FxHashMap<&'src str, FnSig>,
+pub struct TypeEnv<'src> {
+    pub var_scopes: Vec<FxHashMap<&'src str, Ty>>,
+    pub fns: FxHashMap<&'src str, FnSig>,
     /// Field names for Object variables, keyed by variable name.
-    object_fields: FxHashMap<&'src str, Vec<&'src str>>,
+    pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
 }
 
 impl<'src> TypeEnv<'src> {
@@ -165,7 +165,8 @@ fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
 
 // -- Entry point --
 
-pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
+/// Run typechecking and return the type environment.
+pub fn check<'src>(ast: &'src Ast<'src>) -> Result<TypeEnv<'src>, TypeError> {
     let mut env = TypeEnv::new();
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
@@ -189,7 +190,7 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<(), TypeError> {
     for &item_id in &ast.root_items {
         check_item(ast, item_id, &mut env)?;
     }
-    Ok(())
+    Ok(env)
 }
 
 fn check_item<'src>(

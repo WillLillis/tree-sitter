@@ -49,10 +49,10 @@ let PREC = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn comma_sep1(item: rule) -> rule { seq(item, repeat(seq(",", item))) }
-fn comma_sep(item: rule) -> rule { optional(comma_sep1(item)) }
+fn comma_sep1(item: rule_t) -> rule_t { seq(item, repeat(seq(",", item))) }
+fn comma_sep(item: rule_t) -> rule_t { optional(comma_sep1(item)) }
 
-fn preprocessor(command: str_t) -> rule {
+fn preprocessor(command: str_t) -> rule_t {
     alias(regexp(concat("#[ \t]*", command)), concat("#", command))
 }
 
@@ -60,22 +60,22 @@ fn preprocessor(command: str_t) -> rule {
 // Preprocessor if/ifdef/else/elif/elifdef helpers
 // ---------------------------------------------------------------------------
 
-fn preproc_if_body(content: rule, p: int_t, else_alt: rule, elif_alt: rule, elifdef_alt: rule) -> rule {
+fn preproc_if_body(content: rule_t, p: int_t, else_alt: rule_t, elif_alt: rule_t, elifdef_alt: rule_t) -> rule_t {
     prec(p, seq(preprocessor("if"), field(condition, _preproc_expression), "\n", repeat(content),
         field(alternative, optional(choice(else_alt, elif_alt, elifdef_alt))), preprocessor("endif")))
 }
-fn preproc_ifdef_body(content: rule, p: int_t, else_alt: rule, elif_alt: rule, elifdef_alt: rule) -> rule {
+fn preproc_ifdef_body(content: rule_t, p: int_t, else_alt: rule_t, elif_alt: rule_t, elifdef_alt: rule_t) -> rule_t {
     prec(p, seq(choice(preprocessor("ifdef"), preprocessor("ifndef")), field(name, identifier), repeat(content),
         field(alternative, optional(choice(else_alt, elif_alt, elifdef_alt))), preprocessor("endif")))
 }
-fn preproc_else_body(content: rule, p: int_t) -> rule {
+fn preproc_else_body(content: rule_t, p: int_t) -> rule_t {
     prec(p, seq(preprocessor("else"), repeat(content)))
 }
-fn preproc_elif_body(content: rule, p: int_t, else_alt: rule, elif_alt: rule, elifdef_alt: rule) -> rule {
+fn preproc_elif_body(content: rule_t, p: int_t, else_alt: rule_t, elif_alt: rule_t, elifdef_alt: rule_t) -> rule_t {
     prec(p, seq(preprocessor("elif"), field(condition, _preproc_expression), "\n", repeat(content),
         field(alternative, optional(choice(else_alt, elif_alt, elifdef_alt)))))
 }
-fn preproc_elifdef_body(content: rule, p: int_t, else_alt: rule, elif_alt: rule, elifdef_alt: rule) -> rule {
+fn preproc_elifdef_body(content: rule_t, p: int_t, else_alt: rule_t, elif_alt: rule_t, elifdef_alt: rule_t) -> rule_t {
     prec(p, seq(choice(preprocessor("elifdef"), preprocessor("elifndef")), field(name, identifier), repeat(content),
         field(alternative, optional(choice(else_alt, elif_alt, elifdef_alt)))))
 }

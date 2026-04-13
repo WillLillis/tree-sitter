@@ -75,10 +75,14 @@ pub enum TokenKind {
     Lt,
     Gt,
 
+    /// A `//` line comment. Span covers from `//` to end of line (excluding `\n`).
+    Comment,
+
     Eof,
 }
 
 impl TokenKind {
+    #[must_use]
     #[rustfmt::skip]
     pub const fn is_keyword(self) -> bool {
         matches!(self,
@@ -140,6 +144,7 @@ impl std::fmt::Display for TokenKind {
             Self::Eq => "'='",
             Self::Lt => "'<'",
             Self::Gt => "'>'",
+            Self::Comment => "comment",
             Self::Eof => "end of file",
         })
     }
@@ -160,6 +165,7 @@ pub struct Lexer<'src> {
 
 impl<'src> Lexer<'src> {
     /// Create a new lexer for the given source text.
+    #[must_use]
     pub const fn new(source: &'src str) -> Self {
         Self {
             source: source.as_bytes(),
@@ -180,13 +186,29 @@ impl<'src> Lexer<'src> {
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens = Vec::with_capacity(self.source.len() / 4);
         loop {
-            self.skip_whitespace_and_comments();
+            self.skip_whitespace();
             if self.pos >= self.source.len() {
                 tokens.push(Token {
                     kind: TokenKind::Eof,
                     span: Span::from_usize(self.pos, self.pos),
                 });
                 break;
+            }
+            if self.pos + 1 < self.source.len()
+                && self.source[self.pos] == b'/'
+                && self.source[self.pos + 1] == b'/'
+            {
+                let start = self.pos;
+                self.pos += 2;
+                match memchr(b'\n', &self.source[self.pos..]) {
+                    Some(offset) => self.pos += offset,
+                    None => self.pos = self.source.len(),
+                }
+                tokens.push(Token {
+                    kind: TokenKind::Comment,
+                    span: Span::from_usize(start, self.pos),
+                });
+                continue;
             }
             tokens.push(self.next_token()?);
         }
@@ -203,23 +225,9 @@ impl<'src> Lexer<'src> {
         b
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
-        loop {
-            while self.pos < self.source.len() && self.source[self.pos].is_ascii_whitespace() {
-                self.pos += 1;
-            }
-            if self.pos + 1 < self.source.len()
-                && self.source[self.pos] == b'/'
-                && self.source[self.pos + 1] == b'/'
-            {
-                self.pos += 2;
-                match memchr(b'\n', &self.source[self.pos..]) {
-                    Some(offset) => self.pos += offset + 1,
-                    None => self.pos = self.source.len(),
-                }
-                continue;
-            }
-            break;
+    fn skip_whitespace(&mut self) {
+        while self.pos < self.source.len() && self.source[self.pos].is_ascii_whitespace() {
+            self.pos += 1;
         }
     }
 

@@ -13,13 +13,13 @@
 //! Each stage produces structured, serializable errors that carry source spans.
 
 pub mod ast;
-mod lexer;
+pub mod lexer;
 pub mod lower;
-mod parser;
-mod resolve;
+pub mod parser;
+pub mod resolve;
 #[cfg(test)]
 mod tests;
-mod typecheck;
+pub mod typecheck;
 
 use std::path::{Path, PathBuf};
 
@@ -69,7 +69,7 @@ fn parse_native_dsl_inner(
     validate_inherit(&ast)?;
 
     // Load base grammar before resolve so we can register its rule names
-    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?;
+    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?.map(|(g, _)| g);
     let base_rule_names: Vec<String> = base
         .as_ref()
         .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
@@ -78,7 +78,7 @@ fn parse_native_dsl_inner(
     let inherit_span = find_inherit_node(&ast).map(|id| ast.span(id));
 
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
-    typecheck::check(&ast)?;
+    let _ = typecheck::check(&ast)?;
     Ok(lower::lower_with_base(&ast, base)?)
 }
 
@@ -86,7 +86,7 @@ fn parse_native_dsl_inner(
 /// - At most one `inherit()` call
 /// - If `inherit()` exists, `inherits` must be set in grammar config
 /// - If `inherits` is set, it must trace to an `inherit()` call
-fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
+pub fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
     let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
@@ -132,7 +132,8 @@ fn validate_inherit(ast: &ast::Ast<'_>) -> Result<(), DslError> {
 
 /// Resolve the `Inherit` node from the grammar config's `inherits` field,
 /// following variable references to let bindings if needed.
-fn find_inherit_node(ast: &ast::Ast<'_>) -> Option<ast::NodeId> {
+#[must_use]
+pub fn find_inherit_node(ast: &ast::Ast<'_>) -> Option<ast::NodeId> {
     let inherits_id = ast.context.grammar_config.as_ref()?.inherits?;
     match ast.node(inherits_id) {
         ast::Node::Inherit { .. } => Some(inherits_id),
@@ -154,11 +155,15 @@ fn find_inherit_node(ast: &ast::Ast<'_>) -> Option<ast::NodeId> {
 }
 
 /// Load the base grammar from an `inherit("path")` node if found.
-fn load_base_grammar(
+/// Load the base grammar from an `inherit("path")` node if found.
+///
+/// Returns the loaded grammar and the canonical path to the base grammar file,
+/// or `None` if this grammar doesn't inherit.
+pub fn load_base_grammar(
     ast: &ast::Ast<'_>,
     grammar_dir: &Path,
     ancestor_paths: &[PathBuf],
-) -> Result<Option<InputGrammar>, DslError> {
+) -> Result<Option<(InputGrammar, PathBuf)>, DslError> {
     use lower::{LowerError, LowerErrorKind};
 
     if let Some(inherit_id) = find_inherit_node(ast)
@@ -229,7 +234,7 @@ fn load_base_grammar(
             }
         };
 
-        return Ok(Some(grammar));
+        return Ok(Some((grammar, canonical)));
     }
     Ok(None)
 }
