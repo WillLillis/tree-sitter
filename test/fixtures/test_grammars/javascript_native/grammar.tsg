@@ -96,11 +96,11 @@ grammar {
     word: identifier,
 }
 
-fn commaSep1(item: rule) -> rule {
+fn commaSep1(item: rule_t) -> rule_t {
     seq(item, repeat(seq(",", item)))
 }
 
-fn commaSep(item: rule) -> rule {
+fn commaSep(item: rule_t) -> rule_t {
     optional(commaSep1(item))
 }
 
@@ -1000,18 +1000,18 @@ rule regex_pattern {
 rule regex_flags { token_immediate(regexp("[a-z]+")) }
 
 // number uses local variables in JS; we use let bindings
-let hex_literal: rule = seq(choice("0x", "0X"), regexp(r"[\da-fA-F](_?[\da-fA-F])*"))
-let decimal_digits: rule = regexp(r"\d(_?\d)*")
-let signed_integer: rule = seq(optional(choice("-", "+")), decimal_digits)
-let exponent_part: rule = seq(choice("e", "E"), signed_integer)
-let binary_literal: rule = seq(choice("0b", "0B"), regexp(r"[0-1](_?[0-1])*"))
-let octal_literal: rule = seq(choice("0o", "0O"), regexp(r"[0-7](_?[0-7])*"))
-let bigint_literal: rule = seq(choice(hex_literal, binary_literal, octal_literal, decimal_digits), "n")
-let decimal_integer_literal: rule = choice(
+let hex_literal: rule_t = seq(choice("0x", "0X"), regexp(r"[\da-fA-F](_?[\da-fA-F])*"))
+let decimal_digits: rule_t = regexp(r"\d(_?\d)*")
+let signed_integer: rule_t = seq(optional(choice("-", "+")), decimal_digits)
+let exponent_part: rule_t = seq(choice("e", "E"), signed_integer)
+let binary_literal: rule_t = seq(choice("0b", "0B"), regexp(r"[0-1](_?[0-1])*"))
+let octal_literal: rule_t = seq(choice("0o", "0O"), regexp(r"[0-7](_?[0-7])*"))
+let bigint_literal: rule_t = seq(choice(hex_literal, binary_literal, octal_literal, decimal_digits), "n")
+let decimal_integer_literal: rule_t = choice(
     "0",
     seq(optional("0"), regexp("[1-9]"), optional(seq(optional("_"), decimal_digits)))
 )
-let decimal_literal: rule = choice(
+let decimal_literal: rule_t = choice(
     seq(decimal_integer_literal, ".", optional(decimal_digits), optional(exponent_part)),
     seq(".", decimal_digits, optional(exponent_part)),
     seq(decimal_integer_literal, exponent_part),

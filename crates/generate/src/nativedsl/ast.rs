@@ -18,7 +18,7 @@ impl fmt::Display for CapacityError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(NonZeroU32);
+pub struct NodeId(pub NonZeroU32);
 
 impl NodeId {
     #[inline]
@@ -130,7 +130,7 @@ pub struct AstContext<'src> {
     pub object_fields: Vec<(Span, NodeId)>,
     pub spans: Vec<Span>,
     pub children: Vec<NodeId>,
-    source: &'src str,
+    pub source: &'src str,
 }
 
 impl AstContext<'_> {
