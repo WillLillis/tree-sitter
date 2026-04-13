@@ -29,6 +29,7 @@ pub struct Parser<'src> {
 }
 
 impl<'src> Parser<'src> {
+    #[must_use]
     pub fn new(tokens: Vec<Token>, source: &'src str, grammar_path: PathBuf) -> Self {
         Self {
             tokens,
@@ -41,6 +42,10 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse(mut self) -> Result<Ast<'src>, ParseError> {
+        // Skip any leading comments.
+        while self.tokens[self.pos].kind == TokenKind::Comment {
+            self.pos += 1;
+        }
         while !self.at_eof() {
             let id = self.parse_item()?;
             self.ast.root_items.push(id);
@@ -58,10 +63,19 @@ impl<'src> Parser<'src> {
         self.tokens[self.pos].kind == kind
     }
 
+    /// Advance past the current token, skipping any comments.
+    /// Safe without bounds check: the token stream always ends with `Eof`.
+    fn advance_pos(&mut self) {
+        self.pos += 1;
+        while self.tokens[self.pos].kind == TokenKind::Comment {
+            self.pos += 1;
+        }
+    }
+
     fn eat(&mut self, kind: TokenKind) -> Option<Span> {
         if self.at(kind) {
             let s = self.span();
-            self.pos += 1;
+            self.advance_pos();
             Some(s)
         } else {
             None
@@ -102,7 +116,7 @@ impl<'src> Parser<'src> {
         let span = self.span();
         let kind = self.tokens[self.pos].kind;
         if kind == TokenKind::Ident || kind.is_keyword() {
-            self.pos += 1;
+            self.advance_pos();
             Ok(span)
         } else {
             Err(self.error(ParseErrorKind::ExpectedName))
@@ -146,7 +160,7 @@ impl<'src> Parser<'src> {
         if self.at(TokenKind::Comma) {
             let mut got = expected as usize;
             // account for trailing comma with no extra args
-            self.pos += 1;
+            self.advance_pos();
             if self.at(TokenKind::RParen) {
                 return Ok(());
             }
@@ -351,9 +365,9 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_type(&mut self) -> Result<NodeId, ParseError> {
-        let start = self.span();
         if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ast.text(id_span) {
+                "rule_t" => Ok(self.ast.push(Node::TypeRule, id_span)),
                 "str_t" => Ok(self.ast.push(Node::TypeStr, id_span)),
                 "int_t" => Ok(self.ast.push(Node::TypeInt, id_span)),
                 "list_rule_t" => Ok(self.ast.push(Node::TypeListRule, id_span)),
@@ -364,9 +378,6 @@ impl<'src> Parser<'src> {
                     note: None,
                 }),
             };
-        }
-        if self.eat(TokenKind::KwRule).is_some() {
-            return Ok(self.ast.push(Node::TypeRule, start));
         }
         Err(self.error(ParseErrorKind::ExpectedType))
     }
@@ -392,7 +403,7 @@ impl<'src> Parser<'src> {
             TokenKind::KwRepeat1 => self.parse_unary(start, "repeat1", Node::Repeat1),
             TokenKind::KwOptional => self.parse_unary(start, "optional", Node::Optional),
             TokenKind::KwBlank => {
-                self.pos += 1;
+                self.advance_pos();
                 self.expect(TokenKind::LParen)?;
                 if !self.at(TokenKind::RParen) {
                     let mut got = 0usize;
@@ -426,23 +437,23 @@ impl<'src> Parser<'src> {
             TokenKind::KwFor => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             TokenKind::StringLit => {
-                self.pos += 1;
+                self.advance_pos();
                 Ok(self
                     .ast
                     .push(Node::StringLit, Span::new(start.start + 1, start.end - 1)))
             }
             TokenKind::IntLit(n) => {
                 let n = *n;
-                self.pos += 1;
+                self.advance_pos();
                 Ok(self.ast.push(Node::IntLit(n), start))
             }
             TokenKind::RawStringLit { hash_count } => {
                 let h = *hash_count;
-                self.pos += 1;
+                self.advance_pos();
                 Ok(self.ast.push(Node::RawStringLit { hash_count: h }, start))
             }
             TokenKind::Minus => {
-                self.pos += 1;
+                self.advance_pos();
                 let inner = self.parse_expr()?;
                 Ok(self
                     .ast
@@ -460,7 +471,7 @@ impl<'src> Parser<'src> {
         start: Span,
         make: fn(ChildRange) -> Node,
     ) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
@@ -473,7 +484,7 @@ impl<'src> Parser<'src> {
         name: &'static str,
         make: fn(NodeId) -> Node,
     ) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count(name, 1, 0, start));
@@ -491,7 +502,7 @@ impl<'src> Parser<'src> {
         name: &'static str,
         parse_first: fn(&mut Self) -> Result<NodeId, ParseError>,
     ) -> Result<(NodeId, NodeId, Span), ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count(name, 2, 0, start));
@@ -555,7 +566,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_regexp(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count("regexp", 1, 0, start));
@@ -574,7 +585,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_inherit(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count("inherit", 1, 0, start));
@@ -597,7 +608,7 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_for(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
             let name = this.expect_ident()?;
@@ -623,7 +634,7 @@ impl<'src> Parser<'src> {
         let mut id = name_id;
         loop {
             if self.at(TokenKind::Dot) {
-                self.pos += 1;
+                self.advance_pos();
                 let field_span = self.expect_name()?;
                 let field = self.ast.push(Node::Ident, field_span);
                 id = self.ast.push(
@@ -631,7 +642,7 @@ impl<'src> Parser<'src> {
                     start.merge(self.ast.span(field)),
                 );
             } else if self.at(TokenKind::ColonColon) {
-                self.pos += 1;
+                self.advance_pos();
                 let rule = self.expect_ident_node()?;
                 id = self.ast.push(
                     Node::RuleInline { obj: id, rule },
@@ -641,7 +652,7 @@ impl<'src> Parser<'src> {
                 if !matches!(self.ast.node(id), Node::Ident) {
                     return Err(self.error(ParseErrorKind::ExpectedFunctionName));
                 }
-                self.pos += 1;
+                self.advance_pos();
                 let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
                 let end = self.expect(TokenKind::RParen)?;
                 id = self.ast.push(
@@ -660,21 +671,21 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_list(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         let range = self.comma_sep_children(TokenKind::RBracket, Self::parse_expr)?;
         let end = self.expect(TokenKind::RBracket)?;
         Ok(self.ast.push(Node::List(range), start.merge(end)))
     }
 
     fn parse_tuple(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.ast.push(Node::Tuple(range), start.merge(end)))
     }
 
     fn parse_object(&mut self, start: Span) -> Result<NodeId, ParseError> {
-        self.pos += 1;
+        self.advance_pos();
         let fields = self.comma_sep(TokenKind::RBrace, |this| {
             let key = this.expect_ident()?;
             this.expect(TokenKind::Colon)?;
