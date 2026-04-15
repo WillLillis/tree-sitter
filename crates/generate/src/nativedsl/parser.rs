@@ -7,7 +7,7 @@
 use serde::Serialize;
 use thiserror::Error;
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use super::{
     ast::{
@@ -19,18 +19,18 @@ use super::{
 
 const MAX_PARSE_DEPTH: u16 = 256;
 
-pub struct Parser<'src> {
-    tokens: Vec<Token>,
+pub struct Parser<'src, 'tok, 'path> {
+    tokens: &'tok [Token],
     pos: usize,
-    grammar_path: PathBuf,
+    grammar_path: &'path Path,
     pub ast: Ast<'src>,
     scratch: Vec<NodeId>,
     depth: u16,
 }
 
-impl<'src> Parser<'src> {
+impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
     #[must_use]
-    pub fn new(tokens: Vec<Token>, source: &'src str, grammar_path: PathBuf) -> Self {
+    pub fn new(tokens: &'tok [Token], source: &'src str, grammar_path: &'path Path) -> Self {
         Self {
             tokens,
             pos: 0,
@@ -42,15 +42,19 @@ impl<'src> Parser<'src> {
     }
 
     pub fn parse(mut self) -> Result<Ast<'src>, ParseError> {
-        // Skip any leading comments.
-        while self.tokens[self.pos].kind == TokenKind::Comment {
-            self.pos += 1;
-        }
+        self.skip_comments();
         while !self.at_eof() {
             let id = self.parse_item()?;
             self.ast.root_items.push(id);
+            self.skip_comments();
         }
         Ok(self.ast)
+    }
+
+    fn skip_comments(&mut self) {
+        while self.tokens[self.pos].kind == TokenKind::Comment {
+            self.pos += 1;
+        }
     }
 
     fn span(&self) -> Span {
@@ -208,7 +212,7 @@ impl<'src> Parser<'src> {
                 note: Some(Note {
                     message: NoteMessage::FirstDefinedHere,
                     span: first_span,
-                    path: self.grammar_path.clone(),
+                    path: self.grammar_path.to_path_buf(),
                     source: self.ast.source().to_string(),
                 }),
             });
@@ -236,7 +240,7 @@ impl<'src> Parser<'src> {
                     note: Some(Note {
                         message: NoteMessage::FirstDefinedHere,
                         span: first_span,
-                        path: self.grammar_path.clone(),
+                        path: self.grammar_path.to_path_buf(),
                         source: self.ast.source().to_string(),
                     }),
                 });
@@ -702,7 +706,7 @@ impl<'src> Parser<'src> {
                         note: Some(Note {
                             message: NoteMessage::FirstDefinedHere,
                             span: span_b,
-                            path: self.grammar_path.clone(),
+                            path: self.grammar_path.to_path_buf(),
                             source: self.ast.source().to_string(),
                         }),
                     });
