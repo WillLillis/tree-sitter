@@ -5,7 +5,7 @@
 //! definitions actually use.
 //!
 //! Subtyping: `str_t` is a subtype of `rule_t`, `list_str_t` is a subtype of
-//! `list_rule_t`.
+//! `list_rule_t`, and `list_list_str_t` is a subtype of `list_list_rule_t`.
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -43,6 +43,10 @@ pub enum Ty {
     Int,
     ListRule,
     ListStr,
+    ListInt,
+    ListListRule,
+    ListListStr,
+    ListListInt,
     Grammar,
     Spread,
     /// Homogeneous object `{ field: T, ... }`. The inner type is what field
@@ -55,8 +59,16 @@ impl Ty {
         self == Self::Rule || self == Self::Str
     }
 
-    fn is_list(self) -> bool {
-        self == Self::ListRule || self == Self::ListStr
+    const fn is_list(self) -> bool {
+        matches!(
+            self,
+            Self::ListRule
+                | Self::ListStr
+                | Self::ListInt
+                | Self::ListListRule
+                | Self::ListListStr
+                | Self::ListListInt
+        )
     }
 
     /// Check if `self` is assignable to `expected`.
@@ -64,6 +76,7 @@ impl Ty {
         self == expected
             || (self == Self::Str && expected == Self::Rule)
             || (self == Self::ListStr && expected == Self::ListRule)
+            || (self == Self::ListListStr && expected == Self::ListListRule)
     }
 }
 
@@ -75,6 +88,10 @@ impl std::fmt::Display for Ty {
             Self::Int => f.write_str("int_t"),
             Self::ListRule => f.write_str("list_rule_t"),
             Self::ListStr => f.write_str("list_str_t"),
+            Self::ListInt => f.write_str("list_int_t"),
+            Self::ListListRule => f.write_str("list_list_rule_t"),
+            Self::ListListStr => f.write_str("list_list_str_t"),
+            Self::ListListInt => f.write_str("list_list_int_t"),
             Self::Grammar => f.write_str("grammar_t"),
             Self::Spread => f.write_str("for-loop expansion"),
             Self::Object(inner) => write!(f, "object<{inner}>"),
@@ -156,6 +173,10 @@ fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
         Node::TypeInt => Ok(Ty::Int),
         Node::TypeListRule => Ok(Ty::ListRule),
         Node::TypeListStr => Ok(Ty::ListStr),
+        Node::TypeListInt => Ok(Ty::ListInt),
+        Node::TypeListListRule => Ok(Ty::ListListRule),
+        Node::TypeListListStr => Ok(Ty::ListListStr),
+        Node::TypeListListInt => Ok(Ty::ListListInt),
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
             span: ast.span(id),
@@ -428,7 +449,15 @@ fn type_of<'src>(
                     if !r.is_list() {
                         return Err(mismatch(l, r, ast.span(*right)));
                     }
-                    Ok(if l == r { l } else { Ty::ListRule })
+                    if l == r {
+                        Ok(l)
+                    } else if l.is_compatible(r) {
+                        Ok(r)
+                    } else if r.is_compatible(l) {
+                        Ok(l)
+                    } else {
+                        Err(mismatch(l, r, ast.span(*right)))
+                    }
                 }
                 (Some(t), None) | (None, Some(t)) => {
                     if !t.is_list() {
@@ -550,6 +579,10 @@ fn type_of<'src>(
             match first {
                 Ty::Str => Ok(Ty::ListStr),
                 _ if first.is_rule_like() => Ok(Ty::ListRule),
+                Ty::Int => Ok(Ty::ListInt),
+                Ty::ListRule => Ok(Ty::ListListRule),
+                Ty::ListStr => Ok(Ty::ListListStr),
+                Ty::ListInt => Ok(Ty::ListListInt),
                 _ => Err(TypeError {
                     kind: TypeErrorKind::InvalidListElement,
                     span: ast.span(items[0]),
@@ -721,6 +754,10 @@ fn check_for_expr<'src>(
     let elem_ty = match iter_ty {
         Ty::ListRule => Ty::Rule,
         Ty::ListStr => Ty::Str,
+        Ty::ListInt => Ty::Int,
+        Ty::ListListRule => Ty::ListRule,
+        Ty::ListListStr => Ty::ListStr,
+        Ty::ListListInt => Ty::ListInt,
         _ => unreachable!(),
     };
     if !elem_ty.is_compatible(declared) {
@@ -854,7 +891,12 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::InvalidObjectValue(ty) => {
                 write!(f, "object values must be rule_t, str_t, or int_t, got {ty}")
             }
-            TypeErrorKind::InvalidListElement => write!(f, "list elements must be rule_t or str_t"),
+            TypeErrorKind::InvalidListElement => {
+                write!(
+                    f,
+                    "list elements must be rule_t, str_t, int_t, or a list type"
+                )
+            }
             TypeErrorKind::EmptyListNeedsAnnotation => {
                 write!(f, "empty list requires a type annotation")
             }
