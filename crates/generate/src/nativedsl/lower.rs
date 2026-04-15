@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType};
 use crate::rules::{Precedence, Rule};
 
-use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, PrecEntry, Span};
+use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, Span};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Str(NonZeroU32);
@@ -194,37 +194,14 @@ pub fn lower_with_base(
         .reserved
         .map(|id| eval.eval_reserved(id))
         .transpose()?;
-    let eval_conflicts: Option<Vec<Vec<String>>> = if config.conflicts.is_empty() {
-        None
-    } else {
-        Some(
-            config
-                .conflicts
-                .iter()
-                .map(|g| g.iter().map(|s| ast.text(*s).to_string()).collect())
-                .collect(),
-        )
-    };
-    let eval_precedences: Option<Vec<Vec<PrecedenceEntry>>> = if config.precedences.is_empty() {
-        None
-    } else {
-        Some(
-            config
-                .precedences
-                .iter()
-                .map(|g| {
-                    g.iter()
-                        .map(|e| match e {
-                            PrecEntry::Name(s) => PrecedenceEntry::Name(s.clone()),
-                            PrecEntry::Symbol(s) => {
-                                PrecedenceEntry::Symbol(ast.text(*s).to_string())
-                            }
-                        })
-                        .collect()
-                })
-                .collect(),
-        )
-    };
+    let eval_conflicts = config
+        .conflicts
+        .map(|id| eval.eval_conflicts(id))
+        .transpose()?;
+    let eval_precedences = config
+        .precedences
+        .map(|id| eval.eval_precedences(id))
+        .transpose()?;
     drop(eval);
 
     // Build the output grammar. Start from the base and overwrite fields
@@ -461,6 +438,69 @@ impl<'src> Evaluator<'src> {
                     // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
                     _ => unreachable!(),
                 }
+            })
+            .collect()
+    }
+
+    /// Evaluate a `conflicts` expression into `Vec<Vec<String>>`. Each inner
+    /// element must evaluate to a named rule reference.
+    fn eval_conflicts(&mut self, id: NodeId) -> Result<Vec<Vec<String>>, LowerError> {
+        let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_list_list with expect_name_list
+        let Value::List(outer) = self.get_val(vid) else {
+            unreachable!()
+        };
+        outer
+            .iter()
+            .map(|&group_vid| {
+                let Value::List(inner) = self.get_val(group_vid) else {
+                    unreachable!()
+                };
+                inner
+                    .iter()
+                    .map(|&v| {
+                        // Guarded by expect_name_ref - only allows RuleRef/VarRef
+                        let Value::Rule(rid) = *self.get_val(v) else {
+                            unreachable!()
+                        };
+                        match &self.rules[rid.0 as usize] {
+                            ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
+                            _ => unreachable!(),
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Evaluate a `precedences` expression into `Vec<Vec<PrecedenceEntry>>`.
+    /// Each inner element is either a string literal (`PrecedenceEntry::Name`)
+    /// or a named rule reference (`PrecedenceEntry::Symbol`).
+    fn eval_precedences(&mut self, id: NodeId) -> Result<Vec<Vec<PrecedenceEntry>>, LowerError> {
+        let vid = self.eval_expr(id)?;
+        // Guarded by super::typecheck::expect_list_list with expect_precedence_group
+        let Value::List(outer) = self.get_val(vid) else {
+            unreachable!()
+        };
+        outer
+            .iter()
+            .map(|&group_vid| {
+                let Value::List(inner) = self.get_val(group_vid) else {
+                    unreachable!()
+                };
+                inner
+                    .iter()
+                    .map(|&v| match *self.get_val(v) {
+                        Value::Str(sid) => Ok(PrecedenceEntry::Name(self.strings.to_string(sid))),
+                        Value::Rule(rid) => match &self.rules[rid.0 as usize] {
+                            ARule::NamedSymbol(sid) => {
+                                Ok(PrecedenceEntry::Symbol(self.strings.to_string(*sid)))
+                            }
+                            _ => unreachable!(),
+                        },
+                        _ => unreachable!(),
+                    })
+                    .collect()
             })
             .collect()
     }

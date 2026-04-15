@@ -575,6 +575,8 @@ fn grammar_config_all_fields() {
         }
         rule program { _expression }
         rule _expression { "x" }
+        rule primary { "p" }
+        rule arrow { "->" }
         rule comment { regexp(r"\/\/.*") }
         rule identifier { regexp("[a-z]+") }
     "#);
@@ -2124,6 +2126,59 @@ fn empty_list_compatible_with_any_list_type() {
         let x: list_str_t = []
         rule foo { "x" }
     "#);
+}
+
+#[test]
+fn conflicts_accepts_appended_list() {
+    // conflicts expression is no longer special-cased, so `append` works.
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            conflicts: append([[a, b]], [[a, c]]),
+        }
+        rule program { "x" }
+        rule a { "a" }
+        rule b { "b" }
+        rule c { "c" }
+    "#);
+    assert_eq!(
+        g.expected_conflicts,
+        vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "c".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn precedences_mixed_names_and_idents() {
+    // precedences inner list accepts string literals and rule references together.
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            precedences: [["member", call, "binary"]],
+        }
+        rule program { "x" }
+        rule call { "c" }
+    "#);
+    assert_eq!(g.precedence_orderings.len(), 1);
+    assert_eq!(g.precedence_orderings[0].len(), 3);
+}
+
+#[test]
+fn error_conflicts_rejects_non_name() {
+    // conflicts inner elements must be name refs.
+    let err = dsl_err(
+        r#"
+        grammar {
+            language: "test",
+            conflicts: [[repeat("x")]],
+        }
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::ExpectedRuleName);
 }
 
 #[test]
