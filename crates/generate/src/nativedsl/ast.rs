@@ -416,15 +416,9 @@ pub struct GrammarConfig {
     pub inline: Option<NodeId>,
     pub supertypes: Option<NodeId>,
     pub word: Option<NodeId>,
-    pub conflicts: Vec<Vec<Span>>,
-    pub precedences: Vec<Vec<PrecEntry>>,
+    pub conflicts: Option<NodeId>,
+    pub precedences: Option<NodeId>,
     pub reserved: Option<NodeId>,
-}
-
-#[derive(Clone, Debug)]
-pub enum PrecEntry {
-    Name(String),
-    Symbol(Span),
 }
 
 #[derive(Clone, Debug)]
