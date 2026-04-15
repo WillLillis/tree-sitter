@@ -244,6 +244,8 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
                 grammar_config.inline,
                 grammar_config.supertypes,
                 grammar_config.word,
+                grammar_config.conflicts,
+                grammar_config.precedences,
                 grammar_config.reserved,
             ]
             .into_iter()

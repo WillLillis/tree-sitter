@@ -228,6 +228,12 @@ fn check_item<'src>(
             for id in [config.inline, config.supertypes].into_iter().flatten() {
                 expect_name_list(ast, id, env)?;
             }
+            if let Some(id) = config.conflicts {
+                expect_list_list(ast, id, env, expect_name_list)?;
+            }
+            if let Some(id) = config.precedences {
+                expect_list_list(ast, id, env, expect_precedence_group)?;
+            }
             if let Some(id) = config.word {
                 expect_name_ref(ast, id, env)?;
             }
@@ -358,6 +364,49 @@ fn expect_name_ref<'src>(
             span: ast.span(id),
         }),
     }
+}
+
+/// Check a `list_list_rule_t` config field. For literal lists-of-lists, validates
+/// each inner list element-wise with `check_inner`. For non-literal expressions,
+/// checks the overall type is `list_list_rule_t` (or a subtype thereof).
+fn expect_list_list<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+    check_inner: fn(&'src Ast<'src>, NodeId, &mut TypeEnv<'src>) -> Result<(), TypeError>,
+) -> Result<(), TypeError> {
+    if let Node::List(range) = ast.node(id) {
+        for &child in ast.child_slice(*range) {
+            check_inner(ast, child, env)?;
+        }
+        return Ok(());
+    }
+    let ty = type_of(ast, id, env)?;
+    if ty == Ty::ListListRule || ty == Ty::ListListStr {
+        return Ok(());
+    }
+    Err(mismatch(Ty::ListListRule, ty, ast.span(id)))
+}
+
+/// Inner element for `precedences`: a name ref or a string literal.
+fn expect_name_or_str<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    if matches!(ast.node(id), Node::StringLit | Node::RawStringLit { .. }) {
+        return Ok(());
+    }
+    expect_name_ref(ast, id, env)
+}
+
+/// Check a `precedences` inner list: each element must be a name-ref or string literal.
+fn expect_precedence_group<'src>(
+    ast: &'src Ast<'src>,
+    id: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<(), TypeError> {
+    expect_list(ast, id, env, expect_name_or_str, true)
 }
 
 fn expect_reserved<'src>(
@@ -503,8 +552,8 @@ fn type_of<'src>(
                     })
                 }
                 Ty::Grammar => match field_name {
-                    "extras" | "externals" | "inline" | "supertypes" | "conflicts"
-                    | "precedences" => Ok(Ty::ListRule),
+                    "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
+                    "conflicts" | "precedences" => Ok(Ty::ListListRule),
                     "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
                     "word" => Ok(Ty::Rule),
                     _ => Err(TypeError {

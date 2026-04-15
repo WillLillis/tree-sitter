@@ -12,7 +12,7 @@ use std::path::Path;
 use super::{
     ast::{
         Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Note, NoteMessage,
-        Param, PrecEntry, Span,
+        Param, Span,
     },
     lexer::{Token, TokenKind},
 };
@@ -258,8 +258,8 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 ConfigField::Supertypes => config.supertypes = Some(self.parse_expr()?),
                 ConfigField::Inline => config.inline = Some(self.parse_expr()?),
                 ConfigField::Word => config.word = Some(self.parse_expr()?),
-                ConfigField::Conflicts => config.conflicts = self.parse_conflicts()?,
-                ConfigField::Precedences => config.precedences = self.parse_precedences()?,
+                ConfigField::Conflicts => config.conflicts = Some(self.parse_expr()?),
+                ConfigField::Precedences => config.precedences = Some(self.parse_expr()?),
                 ConfigField::Reserved => config.reserved = Some(self.parse_expr()?),
                 ConfigField::_Count => unreachable!(),
             }
@@ -267,39 +267,6 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 self.expect(TokenKind::Comma)?;
             }
         }
-    }
-
-    fn parse_conflicts(&mut self) -> Result<Vec<Vec<Span>>, ParseError> {
-        self.expect(TokenKind::LBracket)?;
-        let items = self.comma_sep(TokenKind::RBracket, |this| {
-            this.expect(TokenKind::LBracket)?;
-            let group = this.comma_sep(TokenKind::RBracket, Self::expect_ident)?;
-            this.expect(TokenKind::RBracket)?;
-            Ok(group)
-        })?;
-        self.expect(TokenKind::RBracket)?;
-        Ok(items)
-    }
-
-    fn parse_precedences(&mut self) -> Result<Vec<Vec<PrecEntry>>, ParseError> {
-        self.expect(TokenKind::LBracket)?;
-        let items = self.comma_sep(TokenKind::RBracket, |this| {
-            this.expect(TokenKind::LBracket)?;
-            let group = this.comma_sep(TokenKind::RBracket, |this| {
-                if let Some(span) = this.eat(TokenKind::StringLit) {
-                    let inner = Span::new(span.start + 1, span.end - 1);
-                    Ok(PrecEntry::Name(this.ast.text(inner).to_string()))
-                } else if let Some(span) = this.eat(TokenKind::Ident) {
-                    Ok(PrecEntry::Symbol(span))
-                } else {
-                    Err(this.error(ParseErrorKind::ExpectedStringOrIdent))
-                }
-            })?;
-            this.expect(TokenKind::RBracket)?;
-            Ok(group)
-        })?;
-        self.expect(TokenKind::RBracket)?;
-        Ok(items)
     }
 
     fn parse_rule_def(&mut self) -> Result<NodeId, ParseError> {
@@ -848,7 +815,6 @@ pub enum ParseErrorKind {
     DuplicateObjectKey(String),
     MissingReturnType,
     ExpectedFunctionName,
-    ExpectedStringOrIdent,
     KeywordAsIdent,
     DuplicateGrammarBlock,
     NestingTooDeep,
@@ -884,7 +850,6 @@ impl std::fmt::Display for ParseError {
             ParseErrorKind::ExpectedFunctionName => {
                 write!(f, "only identifiers can be used as function names")
             }
-            ParseErrorKind::ExpectedStringOrIdent => write!(f, "expected string or identifier"),
             ParseErrorKind::KeywordAsIdent => {
                 write!(f, "keywords cannot be used as identifiers")
             }
