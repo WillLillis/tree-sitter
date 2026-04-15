@@ -2127,6 +2127,96 @@ fn empty_list_compatible_with_any_list_type() {
 }
 
 #[test]
+fn list_int_literal_infers_list_int() {
+    dsl(r#"
+        grammar { language: "test" }
+        let nums: list_int_t = [1, 2, 3]
+        rule program { "x" }
+    "#);
+}
+
+#[test]
+fn list_list_rule_literal_infers_list_list_rule() {
+    dsl(r#"
+        grammar { language: "test" }
+        let pairs: list_list_rule_t = [[a, b], [c]]
+        rule program { "x" }
+        rule a { "a" }
+        rule b { "b" }
+        rule c { "c" }
+    "#);
+}
+
+#[test]
+fn list_list_str_subtype_of_list_list_rule() {
+    dsl(r#"
+        grammar { language: "test" }
+        let groups: list_list_rule_t = [["a", "b"], ["c"]]
+        rule program { "x" }
+    "#);
+}
+
+#[test]
+fn list_list_int_literal_infers_list_list_int() {
+    dsl(r#"
+        grammar { language: "test" }
+        let nested: list_list_int_t = [[1], [2, 3]]
+        rule program { "x" }
+    "#);
+}
+
+#[test]
+fn for_over_list_list_rule_yields_list_rule() {
+    dsl(r#"
+        grammar { language: "test" }
+        let groups: list_list_rule_t = [[a], [b]]
+        rule program { choice(for (inner: list_rule_t) in groups { seq(for (r: rule_t) in inner { r }) }) }
+        rule a { "a" }
+        rule b { "b" }
+    "#);
+}
+
+#[test]
+fn error_int_literal_assigned_to_list_rule() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let x: list_rule_t = [1, 2]
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ListRule,
+            got: Ty::ListInt,
+        }
+    );
+}
+
+#[test]
+fn error_flat_list_assigned_to_list_list_rule() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let x: list_list_rule_t = [a, b]
+        rule program { "x" }
+        rule a { "a" }
+        rule b { "b" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ListListRule,
+            got: Ty::ListRule,
+        }
+    );
+}
+
+#[test]
 fn empty_list_append() {
     // append([], concrete_list) should return the concrete list type
     let g = dsl(r#"

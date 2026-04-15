@@ -386,6 +386,10 @@ pub enum Node {
     TypeInt,
     TypeListRule,
     TypeListStr,
+    TypeListInt,
+    TypeListListRule,
+    TypeListListStr,
+    TypeListListInt,
     Unreachable,
 }
 
