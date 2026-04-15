@@ -63,7 +63,7 @@ fn parse_native_dsl_inner(
     let grammar_dir = grammar_path.parent().unwrap();
 
     let tokens = lexer::Lexer::new(input).tokenize()?;
-    let mut ast = parser::Parser::new(tokens, input, grammar_path.to_path_buf()).parse()?;
+    let mut ast = parser::Parser::new(&tokens, input, grammar_path).parse()?;
 
     // Validate inherit() usage before loading
     validate_inherit(&ast)?;
