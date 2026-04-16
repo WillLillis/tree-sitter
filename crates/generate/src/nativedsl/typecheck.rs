@@ -126,16 +126,20 @@ impl<'src> TypeEnv<'src> {
             object_fields: FxHashMap::default(),
         }
     }
+    #[inline]
     fn insert_var(&mut self, name: &'src str, ty: Ty) {
         self.vars.insert(name, ty);
     }
+    #[inline]
     fn insert_object(&mut self, name: &'src str, ty: Ty, fields: Vec<&'src str>) {
         self.insert_var(name, ty);
         self.object_fields.insert(name, fields);
     }
+    #[inline]
     fn get_object_fields(&self, name: &str) -> Option<&[&'src str]> {
         self.object_fields.get(name).map(Vec::as_slice)
     }
+    #[inline]
     fn get_var(&self, name: &str) -> Option<Ty> {
         self.vars.get(name)
     }
