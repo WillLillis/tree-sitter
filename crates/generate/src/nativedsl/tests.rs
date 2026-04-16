@@ -2252,6 +2252,19 @@ fn error_void_t_type_annotation_rejected() {
 }
 
 #[test]
+fn error_spread_t_type_annotation_rejected() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let x: spread_t = "hello"
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::SpreadTypeNotAllowed);
+}
+
+#[test]
 fn conflicts_accepts_appended_list() {
     // conflicts expression is no longer special-cased, so `append` works.
     let g = dsl(r#"
