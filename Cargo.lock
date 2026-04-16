@@ -2778,7 +2778,6 @@ dependencies = [
  "indoc",
  "notify",
  "notify-debouncer-full",
- "rand",
  "regex",
  "schemars",
  "semver",
