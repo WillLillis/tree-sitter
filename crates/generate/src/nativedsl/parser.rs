@@ -192,8 +192,17 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
             TokenKind::KwOverride => self.parse_override_rule_def(),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwFn => self.parse_fn_def(),
+            TokenKind::KwPrint => self.parse_print_item(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
+    }
+
+    fn parse_print_item(&mut self) -> Result<NodeId, ParseError> {
+        let start = self.expect(TokenKind::KwPrint)?;
+        self.expect(TokenKind::LParen)?;
+        let arg = self.parse_expr()?;
+        let end = self.expect(TokenKind::RParen)?;
+        Ok(self.ast.push(Node::Print(arg), start.merge(end)))
     }
 
     fn parse_grammar_block(&mut self) -> Result<NodeId, ParseError> {
@@ -347,6 +356,7 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 "list_list_rule_t" => Ok(self.ast.push(Node::TypeListListRule, id_span)),
                 "list_list_str_t" => Ok(self.ast.push(Node::TypeListListStr, id_span)),
                 "list_list_int_t" => Ok(self.ast.push(Node::TypeListListInt, id_span)),
+                "void_t" => Ok(self.ast.push(Node::TypeVoid, id_span)),
                 _ => Err(ParseError {
                     kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
                     span: id_span,
@@ -837,7 +847,9 @@ impl std::fmt::Display for ParseError {
             ParseErrorKind::ExpectedName => write!(f, "expected name"),
             ParseErrorKind::ExpectedExpression => write!(f, "expected expression"),
             ParseErrorKind::ExpectedType => write!(f, "expected type"),
-            ParseErrorKind::ExpectedItem => write!(f, "expected 'grammar', 'rule', 'let', or 'fn'"),
+            ParseErrorKind::ExpectedItem => {
+                write!(f, "expected 'grammar', 'rule', 'let', 'fn', or 'print'")
+            }
             ParseErrorKind::UnknownType(n) => write!(f, "unknown type '{n}'"),
             ParseErrorKind::UnknownGrammarField(n) => write!(f, "unknown grammar field '{n}'"),
             ParseErrorKind::DuplicateGrammarField(n) => {
