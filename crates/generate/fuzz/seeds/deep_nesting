@@ -1,0 +1,1 @@
+grammar { language: "test" } rule program { repeat(optional(token(repeat(optional(token(repeat(optional(token(repeat(optional(token(repeat(optional(token(repeat(optional(token("x")))))))))))))))))) }

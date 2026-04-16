@@ -1,0 +1,1 @@
+grammar { language: "test" } let x = "a" let x = "b" rule program { x }
