@@ -57,6 +57,7 @@ pub enum TokenKind {
     KwInherit,
     KwOverride,
     KwAppend,
+    KwPrint,
 
     // Punctuation
     LBrace,
@@ -91,7 +92,7 @@ impl TokenKind {
             | Self::KwBlank | Self::KwField | Self::KwAlias | Self::KwToken | Self::KwPrec
             | Self::KwPrecLeft | Self::KwPrecRight | Self::KwPrecDynamic | Self::KwReserved
             | Self::KwTokenImmediate | Self::KwConcat | Self::KwRegexp | Self::KwInherit
-            | Self::KwOverride | Self::KwAppend
+            | Self::KwOverride | Self::KwAppend | Self::KwPrint
         )
     }
 }
@@ -129,6 +130,7 @@ impl std::fmt::Display for TokenKind {
             Self::KwInherit => "'inherit'",
             Self::KwOverride => "'override'",
             Self::KwAppend => "'append'",
+            Self::KwPrint => "'print'",
             Self::LBrace => "'{'",
             Self::RBrace => "'}'",
             Self::LParen => "'('",
@@ -429,6 +431,7 @@ impl<'src> Lexer<'src> {
             "inherit" => TokenKind::KwInherit,
             "override" => TokenKind::KwOverride,
             "append" => TokenKind::KwAppend,
+            "print" => TokenKind::KwPrint,
             _ => TokenKind::Ident,
         })
     }
