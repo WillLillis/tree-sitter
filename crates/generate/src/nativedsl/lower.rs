@@ -149,6 +149,10 @@ pub fn lower_with_base(
                 let rule_id = eval.lower_to_rule(*body)?;
                 override_entries.push((ast.node_text(*name), rule_id, ast.span(*name)));
             }
+            Node::Print(arg) => {
+                let val = eval.eval_expr(*arg)?;
+                eval.emit_print(val, ast.span(item_id));
+            }
             _ => unreachable!(),
         }
     }
@@ -1097,6 +1101,216 @@ impl<'src> Evaluator<'src> {
         }
         Ok(results)
     }
+}
+
+// -- `print(...)` rendering ----------------------------------------------
+//
+// Debug output for the top-level `print` item. Write to stderr with a line
+// prefix, swallow any IO errors. Compound values (lists, objects, and rule
+// combinators with children) break their direct children onto indented lines;
+// each child renders on a single line. Rules are fully traversed.
+
+impl Evaluator<'_> {
+    /// Format `val_id` and write it to stderr, prefixed with the line of the
+    /// `print(...)` call. IO errors are ignored.
+    fn emit_print(&self, val_id: ValueId, item_span: Span) {
+        use std::io::Write as _;
+        let line = offset_to_line(self.ast.source(), item_span.start as usize);
+        let mut buf = String::new();
+        self.write_value(&mut buf, val_id, 0);
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        let _ = writeln!(stderr, "line {line}: {buf}");
+    }
+
+    /// Write a value in compact form. Compound values at depth 0 break their
+    /// direct children onto their own lines (one-level destructuring); nested
+    /// compounds render flat.
+    fn write_value(&self, w: &mut String, val_id: ValueId, depth: u32) {
+        match self.get_val(val_id) {
+            Value::Int(n) => {
+                use std::fmt::Write as _;
+                let _ = write!(w, "{n}");
+            }
+            Value::Str(sid) => {
+                w.push('"');
+                w.push_str(self.strings.resolve(*sid));
+                w.push('"');
+            }
+            Value::Rule(rid) => self.write_rule(w, *rid, depth),
+            Value::List(items) => self.write_compound(w, '[', ']', items, depth, |this, w, vid| {
+                this.write_value(w, vid, depth + 1);
+            }),
+            Value::Tuple(items) => {
+                self.write_compound(w, '(', ')', items, depth, |this, w, vid| {
+                    this.write_value(w, vid, depth + 1);
+                });
+            }
+            Value::Object(fields) => {
+                // Render in source-insertion order; FxHashMap iteration is
+                // undefined, so sort for deterministic output.
+                let mut pairs: Vec<_> = fields.iter().collect();
+                pairs.sort_by_key(|(k, _)| *k);
+                self.write_compound(w, '{', '}', &pairs, depth, |this, w, (key, vid)| {
+                    w.push_str(key);
+                    w.push_str(": ");
+                    this.write_value(w, *vid, depth + 1);
+                });
+            }
+            Value::Grammar => w.push_str("<grammar>"),
+        }
+    }
+
+    /// Write a rule fully traversed. At `depth == 0`, combinators with
+    /// multiple children (seq/choice) break their children onto indented
+    /// lines; otherwise everything is flat.
+    fn write_rule(&self, w: &mut String, rid: RuleId, depth: u32) {
+        match &self.rules[rid.0 as usize] {
+            ARule::Blank => w.push_str("blank()"),
+            ARule::String(s) => {
+                w.push('"');
+                w.push_str(self.strings.resolve(*s));
+                w.push('"');
+            }
+            ARule::Pattern(p, flags) => {
+                w.push_str("regexp(\"");
+                w.push_str(self.strings.resolve(*p));
+                w.push('"');
+                if let Some(f) = flags {
+                    w.push_str(", \"");
+                    w.push_str(self.strings.resolve(*f));
+                    w.push('"');
+                }
+                w.push(')');
+            }
+            ARule::NamedSymbol(s) => w.push_str(self.strings.resolve(*s)),
+            ARule::Seq(offset, len) | ARule::Choice(offset, len) => {
+                let name = match &self.rules[rid.0 as usize] {
+                    ARule::Seq(..) => "seq",
+                    ARule::Choice(..) => "choice",
+                    _ => unreachable!(),
+                };
+                let start = *offset as usize;
+                let end = start + *len as usize;
+                let children: Vec<RuleId> = self.rule_children[start..end].to_vec();
+                w.push_str(name);
+                self.write_compound(w, '(', ')', &children, depth, |this, w, cid| {
+                    this.write_rule(w, cid, depth + 1);
+                });
+            }
+            ARule::Repeat(inner) => {
+                w.push_str("repeat1(");
+                self.write_rule(w, *inner, depth + 1);
+                w.push(')');
+            }
+            ARule::Token(inner) => {
+                w.push_str("token(");
+                self.write_rule(w, *inner, depth + 1);
+                w.push(')');
+            }
+            ARule::ImmediateToken(inner) => {
+                w.push_str("token_immediate(");
+                self.write_rule(w, *inner, depth + 1);
+                w.push(')');
+            }
+            ARule::Prec(v, inner) => self.write_prec(w, "prec", *v, *inner, depth),
+            ARule::PrecLeft(v, inner) => self.write_prec(w, "prec_left", *v, *inner, depth),
+            ARule::PrecRight(v, inner) => self.write_prec(w, "prec_right", *v, *inner, depth),
+            ARule::PrecDynamic(n, inner) => {
+                use std::fmt::Write as _;
+                let _ = write!(w, "prec_dynamic({n}, ");
+                self.write_rule(w, *inner, depth + 1);
+                w.push(')');
+            }
+            ARule::Field(name, inner) => {
+                w.push_str("field(");
+                w.push_str(self.strings.resolve(*name));
+                w.push_str(", ");
+                self.write_rule(w, *inner, depth + 1);
+                w.push(')');
+            }
+            ARule::Alias(name, named, inner) => {
+                w.push_str("alias(");
+                self.write_rule(w, *inner, depth + 1);
+                w.push_str(", ");
+                if *named {
+                    w.push_str(self.strings.resolve(*name));
+                } else {
+                    w.push('"');
+                    w.push_str(self.strings.resolve(*name));
+                    w.push('"');
+                }
+                w.push(')');
+            }
+            ARule::Reserved(ctx, inner) => {
+                w.push_str("reserved(");
+                w.push_str(self.strings.resolve(*ctx));
+                w.push_str(", ");
+                self.write_rule(w, *inner, depth + 1);
+                w.push(')');
+            }
+        }
+    }
+
+    fn write_prec(&self, w: &mut String, name: &str, v: APrec, inner: RuleId, depth: u32) {
+        w.push_str(name);
+        w.push('(');
+        match v {
+            APrec::Integer(n) => {
+                use std::fmt::Write as _;
+                let _ = write!(w, "{n}");
+            }
+            APrec::Name(s) => {
+                w.push('"');
+                w.push_str(self.strings.resolve(s));
+                w.push('"');
+            }
+        }
+        w.push_str(", ");
+        self.write_rule(w, inner, depth + 1);
+        w.push(')');
+    }
+
+    /// Write a compound `(open ... close)` form. At `depth == 0` with 2+
+    /// children, breaks each child onto its own indented line; otherwise
+    /// flat comma-space separated.
+    fn write_compound<T, F: Fn(&Self, &mut String, T)>(
+        &self,
+        w: &mut String,
+        open: char,
+        close: char,
+        children: &[T],
+        depth: u32,
+        write_child: F,
+    ) where
+        T: Copy,
+    {
+        w.push(open);
+        if depth == 0 && children.len() > 1 {
+            w.push('\n');
+            for (i, &child) in children.iter().enumerate() {
+                w.push_str("  ");
+                write_child(self, w, child);
+                if i + 1 < children.len() {
+                    w.push(',');
+                }
+                w.push('\n');
+            }
+        } else {
+            for (i, &child) in children.iter().enumerate() {
+                if i > 0 {
+                    w.push_str(", ");
+                }
+                write_child(self, w, child);
+            }
+        }
+        w.push(close);
+    }
+}
+
+/// Count newlines in `source[..offset]` and return a 1-based line number.
+fn offset_to_line(source: &str, offset: usize) -> usize {
+    1 + memchr::memchr_iter(b'\n', &source.as_bytes()[..offset.min(source.len())]).count()
 }
 
 /// Convert an [`InputGrammar`] to `grammar.json` format.

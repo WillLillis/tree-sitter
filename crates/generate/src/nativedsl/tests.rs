@@ -2128,6 +2128,129 @@ fn empty_list_compatible_with_any_list_type() {
     "#);
 }
 
+// ===== print debugging builtin =====
+
+#[test]
+fn print_accepts_string() {
+    // Just check parse/typecheck/lower all succeed. The actual stderr output
+    // isn't captured by this test since it'd require redirecting stderr in a
+    // portable way; output format is verified by running the CLI manually.
+    dsl(r#"
+        grammar { language: "test" }
+        print("hello")
+        rule program { "x" }
+    "#);
+}
+
+#[test]
+fn print_accepts_rule_ref() {
+    dsl(r#"
+        grammar { language: "test" }
+        print(program)
+        rule program { seq("a", "b") }
+    "#);
+}
+
+#[test]
+fn print_accepts_list() {
+    dsl(r#"
+        grammar { language: "test" }
+        let extras: list_rule_t = [regexp(r"\s"), comment]
+        print(extras)
+        rule program { "x" }
+        rule comment { "//" }
+    "#);
+}
+
+#[test]
+fn print_accepts_object() {
+    dsl(r#"
+        grammar { language: "test" }
+        let PREC = { ADD: 1, MUL: 2 }
+        print(PREC)
+        rule program { "x" }
+    "#);
+}
+
+#[test]
+fn print_accepts_grammar_config_access() {
+    dsl(r#"
+        grammar { language: "test", conflicts: [[a, b]] }
+        rule program { "x" }
+        rule a { "a" }
+        rule b { "b" }
+    "#);
+    // Note: testing c.extras requires inheritance fixture; covered separately.
+}
+
+#[test]
+fn error_print_rejects_for_loop_arg() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        print(for (k: str_t) in ["a", "b"] { k })
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::CannotPrintType(Ty::Spread));
+}
+
+#[test]
+fn error_print_as_expression_rejected() {
+    // `print` is only a top-level item for now, not an expression.
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        rule program { seq(print("hi"), "x") }
+    "#,
+    );
+    let e = assert_err!(err, Parse);
+    assert_eq!(e.kind, ParseErrorKind::ExpectedExpression);
+}
+
+#[test]
+fn error_let_rhs_print_rejected() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let x = print("hi")
+        rule program { "x" }
+    "#,
+    );
+    // print isn't a valid expression, so we hit the parser first.
+    let e = assert_err!(err, Parse);
+    assert_eq!(e.kind, ParseErrorKind::ExpectedExpression);
+}
+
+#[test]
+fn error_let_rhs_for_loop_rejected() {
+    // Previously panicked at lowering with `unreachable!` because lower has
+    // no `Node::For` case in `eval_expr`. Typecheck now rejects at the let.
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let foo = for (k: str_t) in ["a", "b"] { k }
+        rule program { seq(foo) }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::CannotBindSpread);
+}
+
+#[test]
+fn error_void_t_type_annotation_rejected() {
+    let err = dsl_err(
+        r#"
+        grammar { language: "test" }
+        let x: void_t = "hello"
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::VoidTypeNotAllowed);
+}
+
 #[test]
 fn conflicts_accepts_appended_list() {
     // conflicts expression is no longer special-cased, so `append` works.

@@ -381,6 +381,11 @@ pub enum Node {
     Tuple(ChildRange),
     Object(ChildRange),
     Neg(NodeId),
+    /// Top-level `print(expr)` debugging item. Evaluates `expr` during
+    /// lowering and writes a representation of the value to stderr. Returns
+    /// `Ty::Void` from typecheck - only valid as a top-level item, never
+    /// inside an expression that expects a value.
+    Print(NodeId),
     TypeRule,
     TypeStr,
     TypeInt,
@@ -390,6 +395,9 @@ pub enum Node {
     TypeListListRule,
     TypeListListStr,
     TypeListListInt,
+    /// `void_t` annotation. Parseable so users get a clear error message
+    /// instead of "unknown type"; always rejected by `resolve_type_annotation`.
+    TypeVoid,
     Unreachable,
 }
 
