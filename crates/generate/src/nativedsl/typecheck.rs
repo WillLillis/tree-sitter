@@ -49,6 +49,9 @@ pub enum Ty {
     ListListInt,
     Grammar,
     Spread,
+    /// Result of `print(...)`: no value. Purely internal - users cannot
+    /// annotate this type. Rejected anywhere a real value is expected.
+    Void,
     /// Homogeneous object `{ field: T, ... }`. The inner type is what field
     /// access returns. Field name validation is done via `ObjectInfo` in the env.
     Object(InnerTy),
@@ -94,6 +97,7 @@ impl std::fmt::Display for Ty {
             Self::ListListInt => f.write_str("list_list_int_t"),
             Self::Grammar => f.write_str("grammar_t"),
             Self::Spread => f.write_str("for-loop expansion"),
+            Self::Void => f.write_str("void_t"),
             Self::Object(inner) => write!(f, "object<{inner}>"),
         }
     }
@@ -177,6 +181,10 @@ fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
         Node::TypeListListRule => Ok(Ty::ListListRule),
         Node::TypeListListStr => Ok(Ty::ListListStr),
         Node::TypeListListInt => Ok(Ty::ListListInt),
+        Node::TypeVoid => Err(TypeError {
+            kind: TypeErrorKind::VoidTypeNotAllowed,
+            span: ast.span(id),
+        }),
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
             span: ast.span(id),
@@ -260,6 +268,22 @@ fn check_item<'src>(
                 }
             } else {
                 let inferred = type_of(ast, *value, env)?;
+                // `print(...)` and `for (...) { ... }` yield non-storable types
+                // (`void_t` and for-expansion respectively). Reject them at the
+                // let binding with a specific message; without this the
+                // for-expansion case would panic during lowering.
+                if inferred == Ty::Void {
+                    return Err(TypeError {
+                        kind: TypeErrorKind::CannotBindVoid,
+                        span: ast.span(*value),
+                    });
+                }
+                if inferred == Ty::Spread {
+                    return Err(TypeError {
+                        kind: TypeErrorKind::CannotBindSpread,
+                        span: ast.span(*value),
+                    });
+                }
                 if let Some(d) = declared
                     && !inferred.is_compatible(d)
                 {
@@ -298,6 +322,19 @@ fn check_item<'src>(
             Ok(())
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => expect_rule(ast, *body, env),
+        Node::Print(arg) => {
+            // The argument can have any concrete type, but not a for-expansion
+            // (which doesn't produce a standalone value) or another `print`
+            // call (void is nothing to print).
+            let ty = type_of(ast, *arg, env)?;
+            if ty == Ty::Void || ty == Ty::Spread {
+                return Err(TypeError {
+                    kind: TypeErrorKind::CannotPrintType(ty),
+                    span: ast.span(*arg),
+                });
+            }
+            Ok(())
+        }
         _ => Err(TypeError {
             kind: TypeErrorKind::UnexpectedTopLevel,
             span: ast.span(id),
@@ -911,6 +948,10 @@ pub enum TypeErrorKind {
     ExpectedReservedConfig,
     UnexpectedTopLevel,
     CannotInferType,
+    VoidTypeNotAllowed,
+    CannotBindVoid,
+    CannotBindSpread,
+    CannotPrintType(Ty),
 }
 
 impl std::fmt::Display for TypeError {
@@ -983,6 +1024,19 @@ impl std::fmt::Display for TypeError {
             }
             TypeErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
             TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
+            TypeErrorKind::VoidTypeNotAllowed => write!(
+                f,
+                "void_t is an internal type and cannot be used as a type annotation"
+            ),
+            TypeErrorKind::CannotBindVoid => write!(
+                f,
+                "cannot bind 'print' to a variable: 'print' does not produce a value"
+            ),
+            TypeErrorKind::CannotBindSpread => write!(
+                f,
+                "cannot bind a for-loop expansion to a variable: for-loops are expanded inline into their enclosing list"
+            ),
+            TypeErrorKind::CannotPrintType(ty) => write!(f, "cannot print a value of type {ty}"),
         }
     }
 }
