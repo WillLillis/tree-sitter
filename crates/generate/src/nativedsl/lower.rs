@@ -13,6 +13,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType};
+use crate::nativedsl::scope_stack::ScopeStack;
 use crate::rules::{Precedence, Rule};
 
 use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, Span};
@@ -126,7 +127,7 @@ const MAX_CALL_DEPTH: u16 = 64;
 struct Evaluator<'src> {
     ast: &'src Ast<'src>,
     values: Vec<Value<'src>>,
-    scopes: Vec<FxHashMap<&'src str, ValueId>>,
+    scopes: ScopeStack<'src, ValueId>, //Vec<FxHashMap<&'src str, ValueId>>,
     fns: FxHashMap<&'src str, NodeId>,
     rules: Vec<ARule>,
     rule_children: Vec<RuleId>,
@@ -309,7 +310,7 @@ impl<'src> Evaluator<'src> {
         Self {
             ast,
             values: Vec::with_capacity(cap),
-            scopes: vec![FxHashMap::default()],
+            scopes: ScopeStack::new(),
             fns: FxHashMap::default(),
             rules: Vec::with_capacity(cap),
             rule_children: Vec::with_capacity(cap),
@@ -399,7 +400,7 @@ impl<'src> Evaluator<'src> {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(FxHashMap::default());
+        self.scopes.push();
     }
 
     fn pop_scope(&mut self) {
@@ -407,14 +408,11 @@ impl<'src> Evaluator<'src> {
     }
 
     fn bind(&mut self, name: &'src str, val: ValueId) {
-        self.scopes.last_mut().unwrap().insert(name, val);
+        self.scopes.insert(name, val);
     }
 
     fn lookup(&self, name: &str) -> Option<ValueId> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
+        self.scopes.get(name)
     }
 
     fn alloc_rule(&mut self, rule: ARule) -> RuleId {
