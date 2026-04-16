@@ -677,23 +677,26 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
             this.expect(TokenKind::Colon)?;
             Ok((key, this.parse_expr()?))
         })?;
-        // Check for duplicate keys
-        for (i, &(span_a, _)) in fields.iter().enumerate() {
-            let key_a = self.ast.text(span_a);
-            for &(span_b, _) in &fields[..i] {
-                if self.ast.text(span_b) == key_a {
-                    return Err(ParseError {
-                        kind: ParseErrorKind::DuplicateObjectKey(key_a.to_string()),
-                        span: span_a,
-                        note: Some(Note {
-                            message: NoteMessage::FirstDefinedHere,
-                            span: span_b,
-                            path: self.grammar_path.to_path_buf(),
-                            source: self.ast.source().to_string(),
-                        }),
-                    });
-                }
+        // Check for duplicate keys (O(n) via hash set).
+        let mut seen = rustc_hash::FxHashMap::with_capacity_and_hasher(
+            fields.len(),
+            rustc_hash::FxBuildHasher,
+        );
+        for &(span, _) in &fields {
+            let key = self.ast.text(span);
+            if let Some(&first_span) = seen.get(key) {
+                return Err(ParseError {
+                    kind: ParseErrorKind::DuplicateObjectKey(key.to_string()),
+                    span,
+                    note: Some(Note {
+                        message: NoteMessage::FirstDefinedHere,
+                        span: first_span,
+                        path: self.grammar_path.to_path_buf(),
+                        source: self.ast.source().to_string(),
+                    }),
+                });
             }
+            seen.insert(key, span);
         }
         let end = self.expect(TokenKind::RBrace)?;
         let range = self
