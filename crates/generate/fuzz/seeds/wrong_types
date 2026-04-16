@@ -1,0 +1,2 @@
+grammar { language: "test" }
+rule program { prec(repeat("x"), "y") }

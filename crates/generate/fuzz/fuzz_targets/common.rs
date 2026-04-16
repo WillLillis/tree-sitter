@@ -15,14 +15,14 @@ pub fn seed_corpus() {
     let _ = std::fs::create_dir_all(&corpus_dir);
 
     let sources = [
-        project_root.join("crates/xtask/fuzz_corpus/inputs"),
+        project_root.join("crates/generate/fuzz/seeds"),
         project_root.join("crates/generate/src/nativedsl/fuzz_regressions"),
     ];
     for dir in &sources {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "tsg") {
+                if path.is_file() {
                     let _ = std::fs::copy(&path, corpus_dir.join(path.file_name().unwrap()));
                 }
             }

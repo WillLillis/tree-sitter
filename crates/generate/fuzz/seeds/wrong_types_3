@@ -1,0 +1,2 @@
+grammar { language: "test" }
+rule program { seq(42, "x") }
