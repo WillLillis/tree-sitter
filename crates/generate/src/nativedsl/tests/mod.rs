@@ -309,3 +309,101 @@ fn bench_lexer_breakdown() {
         full.checked_sub(scan_only).unwrap()
     );
 }
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_per_stage() {
+    let path = native_grammar_path("c_native");
+    let source = read_native_grammar("c_native");
+    let n = 10000u32;
+
+    // Lex
+    let start = std::time::Instant::now();
+    let mut tokens_store = None;
+    for _ in 0..n {
+        let t = super::lexer::Lexer::new(&source).tokenize().unwrap();
+        tokens_store = Some(t);
+    }
+    let lex_time = start.elapsed() / n;
+    let tokens = tokens_store.unwrap();
+
+    // Parse
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(
+            super::parser::Parser::new(&tokens, &source, &path)
+                .parse()
+                .unwrap(),
+        );
+    }
+    let parse_time = start.elapsed() / n;
+
+    let mut ast = super::parser::Parser::new(&tokens, &source, &path)
+        .parse()
+        .unwrap();
+    super::validate_inherit(&ast).unwrap();
+    let base = super::load_base_grammar(&ast, path.parent().unwrap(), &[])
+        .unwrap()
+        .map(|(g, _)| g);
+    let base_names: Vec<String> = base
+        .as_ref()
+        .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
+        .unwrap_or_default();
+    let inherit_span = super::find_inherit_node(&ast).map(|id| ast.span(id));
+
+    // Resolve
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        let mut a = super::parser::Parser::new(&tokens, &source, &path)
+            .parse()
+            .unwrap();
+        super::resolve::resolve(&mut a, &base_names, inherit_span, &path).unwrap();
+    }
+    let resolve_time = start.elapsed() / n;
+
+    super::resolve::resolve(&mut ast, &base_names, inherit_span, &path).unwrap();
+
+    // Typecheck
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(super::typecheck::check(&ast).unwrap());
+    }
+    let typecheck_time = start.elapsed() / n;
+
+    // Lower (C grammar has no base, so base is always None)
+    // This includes: eval all expressions + build_rule (ARule→Rule conversion)
+    // + config field evaluation. build_rule dominates due to String allocations.
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(super::lower::lower_with_base(&ast, None, &path).unwrap());
+    }
+    let lower_time = start.elapsed() / n;
+
+    let total = lex_time + parse_time + resolve_time + typecheck_time + lower_time;
+    eprintln!(
+        "Lex:       {:>8?} ({:.1}%)",
+        lex_time,
+        lex_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+    );
+    eprintln!(
+        "Parse:     {:>8?} ({:.1}%)",
+        parse_time,
+        parse_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+    );
+    eprintln!(
+        "Resolve:   {:>8?} ({:.1}%)",
+        resolve_time,
+        resolve_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+    );
+    eprintln!(
+        "Typecheck: {:>8?} ({:.1}%)",
+        typecheck_time,
+        typecheck_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+    );
+    eprintln!(
+        "Lower:     {:>8?} ({:.1}%)",
+        lower_time,
+        lower_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+    );
+    eprintln!("Total:     {:>8?}", total);
+}
