@@ -218,12 +218,12 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
             return Err(ParseError {
                 kind: ParseErrorKind::DuplicateGrammarBlock,
                 span: start,
-                note: Some(Note {
+                note: Some(Box::new(Note {
                     message: NoteMessage::FirstDefinedHere,
                     span: first_span,
                     path: self.grammar_path.to_path_buf(),
                     source: self.ast.source().to_string(),
-                }),
+                })),
             });
         }
         self.expect(TokenKind::LBrace)?;
@@ -246,12 +246,12 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 return Err(ParseError {
                     kind: ParseErrorKind::DuplicateGrammarField(key.to_string()),
                     span: key_span,
-                    note: Some(Note {
+                    note: Some(Box::new(Note {
                         message: NoteMessage::FirstDefinedHere,
                         span: first_span,
                         path: self.grammar_path.to_path_buf(),
                         source: self.ast.source().to_string(),
-                    }),
+                    })),
                 });
             }
             seen[field as usize] = Some(key_span);
@@ -688,12 +688,12 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 return Err(ParseError {
                     kind: ParseErrorKind::DuplicateObjectKey(key.to_string()),
                     span,
-                    note: Some(Note {
+                    note: Some(Box::new(Note {
                         message: NoteMessage::FirstDefinedHere,
                         span: first_span,
                         path: self.grammar_path.to_path_buf(),
                         source: self.ast.source().to_string(),
-                    }),
+                    })),
                 });
             }
             seen.insert(key, span);
@@ -808,7 +808,7 @@ impl ConfigField {
 pub struct ParseError {
     pub kind: ParseErrorKind,
     pub span: Span,
-    pub note: Option<Note>,
+    pub note: Option<Box<Note>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]

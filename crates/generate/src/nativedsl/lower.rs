@@ -52,6 +52,7 @@ impl<'src> StringPool<'src> {
         id
     }
 
+    #[inline]
     fn resolve(&self, id: Str) -> &str {
         match &self.entries[id.0.get() as usize] {
             StrEntry::Source(span) => span.resolve(self.source),
@@ -60,6 +61,7 @@ impl<'src> StringPool<'src> {
         }
     }
 
+    #[inline]
     fn to_string(&self, id: Str) -> String {
         self.resolve(id).to_string()
     }
@@ -399,18 +401,22 @@ impl<'src> Evaluator<'src> {
         items
     }
 
+    #[inline]
     fn push_scope(&mut self) {
         self.scopes.push();
     }
 
+    #[inline]
     fn pop_scope(&mut self) {
         self.scopes.pop();
     }
 
+    #[inline]
     fn bind(&mut self, name: &'src str, val: ValueId) {
         self.scopes.insert(name, val);
     }
 
+    #[inline]
     fn lookup(&self, name: &str) -> Option<ValueId> {
         self.scopes.get(name)
     }
@@ -1539,7 +1545,7 @@ pub struct LowerError {
     pub kind: LowerErrorKind,
     pub span: Span,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<Note>,
+    pub note: Option<Box<Note>>,
 }
 
 impl LowerError {

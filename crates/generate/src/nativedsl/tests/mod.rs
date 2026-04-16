@@ -180,3 +180,132 @@ fn bench_json_parse_c() {
         crate::parse_grammar::parse_grammar(&json).unwrap();
     });
 }
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_lexer_only() {
+    let source = read_native_grammar("c_native");
+    let n = 20000u32;
+    // Warmup
+    for _ in 0..10 {
+        std::hint::black_box(super::lexer::Lexer::new(&source).tokenize().unwrap());
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(super::lexer::Lexer::new(&source).tokenize().unwrap());
+    }
+    let elapsed = start.elapsed();
+    eprintln!("Lexer only: {:?}/iter", elapsed / n);
+
+    // Also measure: how many tokens?
+    let tokens = super::lexer::Lexer::new(&source).tokenize().unwrap();
+    eprintln!("Token count: {}", tokens.len());
+    let mut ident_count = 0u32;
+    let mut kw_count = 0u32;
+    let mut str_count = 0u32;
+    let mut punct_count = 0u32;
+    let mut comment_count = 0u32;
+    for t in &tokens {
+        match t.kind {
+            super::lexer::TokenKind::Ident => ident_count += 1,
+            super::lexer::TokenKind::StringLit | super::lexer::TokenKind::RawStringLit { .. } => {
+                str_count += 1;
+            }
+            super::lexer::TokenKind::Comment => comment_count += 1,
+            k if k.is_keyword() => kw_count += 1,
+            _ => punct_count += 1,
+        }
+    }
+    eprintln!(
+        "  Idents: {ident_count}, Keywords: {kw_count}, Strings: {str_count}, Punct: {punct_count}, Comments: {comment_count}"
+    );
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_lexer_breakdown() {
+    use super::lexer::{Lexer, Token, TokenKind};
+    let source = read_native_grammar("c_native");
+
+    eprintln!("Token size: {} bytes", std::mem::size_of::<Token>());
+    eprintln!("TokenKind size: {} bytes", std::mem::size_of::<TokenKind>());
+
+    // Measure: tokenize fully
+    let n = 20000u32;
+    for _ in 0..10 {
+        std::hint::black_box(Lexer::new(&source).tokenize().unwrap());
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(Lexer::new(&source).tokenize().unwrap());
+    }
+    let full = start.elapsed();
+    eprintln!("Full tokenize: {:?}/iter", full / n);
+
+    // Measure: just scanning (skip_whitespace + classify first byte) without building tokens
+    // We approximate by counting bytes processed
+    let bytes = source.as_bytes();
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        let mut pos = 0usize;
+        let mut count = 0u32;
+        while pos < bytes.len() {
+            // Skip whitespace
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos >= bytes.len() {
+                break;
+            }
+            // Just advance past one "token" worth of bytes
+            match bytes[pos] {
+                b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b'.' | b'=' | b'<' | b'>' => {
+                    pos += 1;
+                }
+                b':' | b'-' => {
+                    pos += if pos + 1 < bytes.len() && matches!(bytes[pos + 1], b':' | b'>') {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                b'"' => {
+                    pos += 1;
+                    while pos < bytes.len() && bytes[pos] != b'"' {
+                        if bytes[pos] == b'\\' {
+                            pos += 1;
+                        }
+                        pos += 1;
+                    }
+                    pos += 1;
+                }
+                b'/' if pos + 1 < bytes.len() && bytes[pos + 1] == b'/' => {
+                    while pos < bytes.len() && bytes[pos] != b'\n' {
+                        pos += 1;
+                    }
+                }
+                b'0'..=b'9' => {
+                    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                }
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                    while pos < bytes.len()
+                        && matches!(bytes[pos], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+                    {
+                        pos += 1;
+                    }
+                }
+                _ => pos += 1,
+            }
+            count += 1;
+        }
+        std::hint::black_box(count);
+    }
+    let scan_only = start.elapsed();
+    eprintln!("Scan only (no Token/Vec): {:?}/iter", scan_only / n);
+    eprintln!(
+        "Overhead (Token construction + Vec + keywords): {:?}/iter",
+        full.checked_sub(scan_only).unwrap()
+    );
+}
