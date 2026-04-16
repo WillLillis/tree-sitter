@@ -357,6 +357,7 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 "list_list_str_t" => Ok(self.ast.push(Node::TypeListListStr, id_span)),
                 "list_list_int_t" => Ok(self.ast.push(Node::TypeListListInt, id_span)),
                 "void_t" => Ok(self.ast.push(Node::TypeVoid, id_span)),
+                "spread_t" => Ok(self.ast.push(Node::TypeSpread, id_span)),
                 _ => Err(ParseError {
                     kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
                     span: id_span,
