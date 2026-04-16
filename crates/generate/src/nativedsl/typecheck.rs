@@ -512,101 +512,8 @@ fn type_of<'src>(
             }
             Ok(Ty::Int)
         }
-        Node::Append { left, right } => {
-            let l_empty =
-                matches!(ast.node(*left), Node::List(r) if ast.child_slice(*r).is_empty());
-            let r_empty =
-                matches!(ast.node(*right), Node::List(r) if ast.child_slice(*r).is_empty());
-            let lt = if l_empty {
-                None
-            } else {
-                Some(type_of(ast, *left, env)?)
-            };
-            let rt = if r_empty {
-                None
-            } else {
-                Some(type_of(ast, *right, env)?)
-            };
-            match (lt, rt) {
-                (Some(l), Some(r)) => {
-                    if !l.is_list() {
-                        return Err(TypeError {
-                            kind: TypeErrorKind::AppendRequiresList(l),
-                            span: ast.span(*left),
-                        });
-                    }
-                    if !r.is_list() {
-                        return Err(mismatch(l, r, ast.span(*right)));
-                    }
-                    if l == r {
-                        Ok(l)
-                    } else if l.is_compatible(r) {
-                        Ok(r)
-                    } else if r.is_compatible(l) {
-                        Ok(l)
-                    } else {
-                        Err(mismatch(l, r, ast.span(*right)))
-                    }
-                }
-                (Some(t), None) | (None, Some(t)) => {
-                    if !t.is_list() {
-                        return Err(TypeError {
-                            kind: TypeErrorKind::AppendRequiresList(t),
-                            span,
-                        });
-                    }
-                    Ok(t)
-                }
-                (None, None) => Err(TypeError {
-                    kind: TypeErrorKind::EmptyListNeedsAnnotation,
-                    span,
-                }),
-            }
-        }
-        Node::FieldAccess { obj, field } => {
-            let obj_ty = type_of(ast, *obj, env)?;
-            let field_name = ast.node_text(*field);
-            match obj_ty {
-                Ty::Object(inner) => {
-                    // Validate field exists if the object came from a known variable
-                    if matches!(ast.node(*obj), Node::VarRef) {
-                        let var_name = ast.text(ast.span(*obj));
-                        if let Some(fields) = env.get_object_fields(var_name)
-                            && !fields.contains(&field_name)
-                        {
-                            return Err(TypeError {
-                                kind: TypeErrorKind::FieldNotFound {
-                                    field: field_name.to_string(),
-                                    on_type: obj_ty,
-                                },
-                                span: ast.span(*field),
-                            });
-                        }
-                    }
-                    Ok(match inner {
-                        InnerTy::Rule => Ty::Rule,
-                        InnerTy::Str => Ty::Str,
-                        InnerTy::Int => Ty::Int,
-                        InnerTy::ListRule => Ty::ListRule,
-                        InnerTy::ListStr => Ty::ListStr,
-                    })
-                }
-                Ty::Grammar => match field_name {
-                    "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
-                    "conflicts" | "precedences" => Ok(Ty::ListListRule),
-                    "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
-                    "word" => Ok(Ty::Rule),
-                    _ => Err(TypeError {
-                        kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                        span: ast.span(*field),
-                    }),
-                },
-                _ => Err(TypeError {
-                    kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty),
-                    span: ast.span(*obj),
-                }),
-            }
-        }
+        Node::Append { left, right } => type_of_append(ast, *left, *right, span, env),
+        Node::FieldAccess { obj, field } => type_of_field_access(ast, *obj, *field, env),
         Node::RuleInline { obj, .. } => {
             let obj_ty = type_of(ast, *obj, env)?;
             if obj_ty != Ty::Grammar {
@@ -617,67 +524,8 @@ fn type_of<'src>(
             }
             Ok(Ty::Rule)
         }
-        Node::Object(range) => {
-            let fields = ast.get_object(*range);
-            if fields.is_empty() {
-                return Err(TypeError {
-                    kind: TypeErrorKind::CannotInferType,
-                    span,
-                });
-            }
-            let first_ty = type_of(ast, fields[0].1, env)?;
-            let inner = match first_ty {
-                Ty::Rule => InnerTy::Rule,
-                Ty::Str => InnerTy::Str,
-                Ty::Int => InnerTy::Int,
-                Ty::ListRule => InnerTy::ListRule,
-                Ty::ListStr => InnerTy::ListStr,
-                _ => {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::InvalidObjectValue(first_ty),
-                        span: ast.span(fields[0].1),
-                    });
-                }
-            };
-            for &(_, val_id) in &fields[1..] {
-                let ty = type_of(ast, val_id, env)?;
-                if ty != first_ty {
-                    return Err(mismatch(first_ty, ty, ast.span(val_id)));
-                }
-            }
-            Ok(Ty::Object(inner))
-        }
-        Node::List(range) => {
-            let items = ast.child_slice(*range);
-            if items.is_empty() {
-                return Err(TypeError {
-                    kind: TypeErrorKind::EmptyListNeedsAnnotation,
-                    span,
-                });
-            }
-            let first = type_of(ast, items[0], env)?;
-            for &item_id in &items[1..] {
-                let ty = type_of(ast, item_id, env)?;
-                if ty != first {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::ListElementTypeMismatch { first, got: ty },
-                        span: ast.span(item_id),
-                    });
-                }
-            }
-            match first {
-                Ty::Str => Ok(Ty::ListStr),
-                _ if first.is_rule_like() => Ok(Ty::ListRule),
-                Ty::Int => Ok(Ty::ListInt),
-                Ty::ListRule => Ok(Ty::ListListRule),
-                Ty::ListStr => Ok(Ty::ListListStr),
-                Ty::ListInt => Ok(Ty::ListListInt),
-                _ => Err(TypeError {
-                    kind: TypeErrorKind::InvalidListElement,
-                    span: ast.span(items[0]),
-                }),
-            }
-        }
+        Node::Object(range) => type_of_object(ast, *range, span, env),
+        Node::List(range) => type_of_list(ast, *range, span, env),
         Node::Tuple(_) => {
             // Tuples are only valid as elements of for-loop lists.
             // They're checked structurally in check_for_expr.
@@ -765,39 +613,229 @@ fn type_of<'src>(
             check_for_expr(ast, *for_idx, env)?;
             Ok(Ty::Spread)
         }
-        Node::Call { name, args } => {
-            let fn_name = ast.node_text(*name);
-            let sig = env.fns.get(fn_name).ok_or_else(|| TypeError {
-                kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
-                span,
-            })?;
-            let return_ty = sig.return_ty;
-            let n_params = sig.params.len();
-            let args = ast.child_slice(*args);
-            if args.len() != n_params {
-                return Err(TypeError {
-                    kind: TypeErrorKind::ArgCountMismatch {
-                        fn_name: fn_name.to_string(),
-                        expected: n_params,
-                        got: args.len(),
-                    },
-                    span,
-                });
-            }
-            for (i, &arg_id) in args.iter().enumerate() {
-                let arg_ty = type_of(ast, arg_id, env)?;
-                let param_ty = env.fns[fn_name].params[i];
-                if !arg_ty.is_compatible(param_ty) {
-                    return Err(mismatch(param_ty, arg_ty, ast.span(arg_id)));
-                }
-            }
-            Ok(return_ty)
-        }
+        Node::Call { name, args } => type_of_call(ast, *name, *args, span, env),
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
             span,
         }),
     }
+}
+
+// -- For-loop checking --
+
+// -- type_of helpers (extracted from the main match) --
+
+fn type_of_append<'src>(
+    ast: &'src Ast<'src>,
+    left: NodeId,
+    right: NodeId,
+    span: Span,
+    env: &mut TypeEnv<'src>,
+) -> Result<Ty, TypeError> {
+    let l_empty = matches!(ast.node(left), Node::List(r) if ast.child_slice(*r).is_empty());
+    let r_empty = matches!(ast.node(right), Node::List(r) if ast.child_slice(*r).is_empty());
+    let lt = if l_empty {
+        None
+    } else {
+        Some(type_of(ast, left, env)?)
+    };
+    let rt = if r_empty {
+        None
+    } else {
+        Some(type_of(ast, right, env)?)
+    };
+    match (lt, rt) {
+        (Some(l), Some(r)) => {
+            if !l.is_list() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::AppendRequiresList(l),
+                    span: ast.span(left),
+                });
+            }
+            if !r.is_list() {
+                return Err(mismatch(l, r, ast.span(right)));
+            }
+            if l == r {
+                Ok(l)
+            } else if l.is_compatible(r) {
+                Ok(r)
+            } else if r.is_compatible(l) {
+                Ok(l)
+            } else {
+                Err(mismatch(l, r, ast.span(right)))
+            }
+        }
+        (Some(t), None) | (None, Some(t)) => {
+            if !t.is_list() {
+                return Err(TypeError {
+                    kind: TypeErrorKind::AppendRequiresList(t),
+                    span,
+                });
+            }
+            Ok(t)
+        }
+        (None, None) => Err(TypeError {
+            kind: TypeErrorKind::EmptyListNeedsAnnotation,
+            span,
+        }),
+    }
+}
+
+fn type_of_field_access<'src>(
+    ast: &'src Ast<'src>,
+    obj: NodeId,
+    field: NodeId,
+    env: &mut TypeEnv<'src>,
+) -> Result<Ty, TypeError> {
+    let obj_ty = type_of(ast, obj, env)?;
+    let field_name = ast.node_text(field);
+    match obj_ty {
+        Ty::Object(inner) => {
+            if matches!(ast.node(obj), Node::VarRef) {
+                let var_name = ast.text(ast.span(obj));
+                if let Some(fields) = env.get_object_fields(var_name)
+                    && !fields.contains(&field_name)
+                {
+                    return Err(TypeError {
+                        kind: TypeErrorKind::FieldNotFound {
+                            field: field_name.to_string(),
+                            on_type: obj_ty,
+                        },
+                        span: ast.span(field),
+                    });
+                }
+            }
+            Ok(match inner {
+                InnerTy::Rule => Ty::Rule,
+                InnerTy::Str => Ty::Str,
+                InnerTy::Int => Ty::Int,
+                InnerTy::ListRule => Ty::ListRule,
+                InnerTy::ListStr => Ty::ListStr,
+            })
+        }
+        Ty::Grammar => match field_name {
+            "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
+            "conflicts" | "precedences" => Ok(Ty::ListListRule),
+            "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
+            "word" => Ok(Ty::Rule),
+            _ => Err(TypeError {
+                kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
+                span: ast.span(field),
+            }),
+        },
+        _ => Err(TypeError {
+            kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty),
+            span: ast.span(obj),
+        }),
+    }
+}
+
+fn type_of_object<'src>(
+    ast: &'src Ast<'src>,
+    range: super::ast::ChildRange,
+    span: Span,
+    env: &mut TypeEnv<'src>,
+) -> Result<Ty, TypeError> {
+    let fields = ast.get_object(range);
+    if fields.is_empty() {
+        return Err(TypeError {
+            kind: TypeErrorKind::CannotInferType,
+            span,
+        });
+    }
+    let first_ty = type_of(ast, fields[0].1, env)?;
+    let inner = match first_ty {
+        Ty::Rule => InnerTy::Rule,
+        Ty::Str => InnerTy::Str,
+        Ty::Int => InnerTy::Int,
+        Ty::ListRule => InnerTy::ListRule,
+        Ty::ListStr => InnerTy::ListStr,
+        _ => {
+            return Err(TypeError {
+                kind: TypeErrorKind::InvalidObjectValue(first_ty),
+                span: ast.span(fields[0].1),
+            });
+        }
+    };
+    for &(_, val_id) in &fields[1..] {
+        let ty = type_of(ast, val_id, env)?;
+        if ty != first_ty {
+            return Err(mismatch(first_ty, ty, ast.span(val_id)));
+        }
+    }
+    Ok(Ty::Object(inner))
+}
+
+fn type_of_list<'src>(
+    ast: &'src Ast<'src>,
+    range: super::ast::ChildRange,
+    span: Span,
+    env: &mut TypeEnv<'src>,
+) -> Result<Ty, TypeError> {
+    let items = ast.child_slice(range);
+    if items.is_empty() {
+        return Err(TypeError {
+            kind: TypeErrorKind::EmptyListNeedsAnnotation,
+            span,
+        });
+    }
+    let first = type_of(ast, items[0], env)?;
+    for &item_id in &items[1..] {
+        let ty = type_of(ast, item_id, env)?;
+        if ty != first {
+            return Err(TypeError {
+                kind: TypeErrorKind::ListElementTypeMismatch { first, got: ty },
+                span: ast.span(item_id),
+            });
+        }
+    }
+    match first {
+        Ty::Str => Ok(Ty::ListStr),
+        _ if first.is_rule_like() => Ok(Ty::ListRule),
+        Ty::Int => Ok(Ty::ListInt),
+        Ty::ListRule => Ok(Ty::ListListRule),
+        Ty::ListStr => Ok(Ty::ListListStr),
+        Ty::ListInt => Ok(Ty::ListListInt),
+        _ => Err(TypeError {
+            kind: TypeErrorKind::InvalidListElement,
+            span: ast.span(items[0]),
+        }),
+    }
+}
+
+fn type_of_call<'src>(
+    ast: &'src Ast<'src>,
+    name: NodeId,
+    args: super::ast::ChildRange,
+    span: Span,
+    env: &mut TypeEnv<'src>,
+) -> Result<Ty, TypeError> {
+    let fn_name = ast.node_text(name);
+    let sig = env.fns.get(fn_name).ok_or_else(|| TypeError {
+        kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
+        span,
+    })?;
+    let return_ty = sig.return_ty;
+    let n_params = sig.params.len();
+    let args = ast.child_slice(args);
+    if args.len() != n_params {
+        return Err(TypeError {
+            kind: TypeErrorKind::ArgCountMismatch {
+                fn_name: fn_name.to_string(),
+                expected: n_params,
+                got: args.len(),
+            },
+            span,
+        });
+    }
+    for (i, &arg_id) in args.iter().enumerate() {
+        let arg_ty = type_of(ast, arg_id, env)?;
+        let param_ty = env.fns[fn_name].params[i];
+        if !arg_ty.is_compatible(param_ty) {
+            return Err(mismatch(param_ty, arg_ty, ast.span(arg_id)));
+        }
+    }
+    Ok(return_ty)
 }
 
 // -- For-loop checking --
