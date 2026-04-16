@@ -1,11 +1,38 @@
 use super::*;
 
-// ===== Node size =====
+// ===== Type sizes =====
 
 #[test]
 fn node_enum_is_16_bytes() {
     // 4 nodes per 64-byte cache line
     assert_eq!(std::mem::size_of::<ast::Node>(), 16);
+}
+
+#[test]
+fn print_type_sizes() {
+    use super::super::{lower::LowerError, typecheck::TypeError};
+    use crate::nativedsl::lexer::LexError;
+    use crate::nativedsl::parser::ParseError;
+    use crate::nativedsl::resolve::ResolveError;
+    let sizes = [
+        ("LowerError", std::mem::size_of::<LowerError>()),
+        ("TypeError", std::mem::size_of::<TypeError>()),
+        ("LexError", std::mem::size_of::<LexError>()),
+        ("ParseError", std::mem::size_of::<ParseError>()),
+        ("ResolveError", std::mem::size_of::<ResolveError>()),
+        (
+            "Result<(), LowerError>",
+            std::mem::size_of::<Result<(), LowerError>>(),
+        ),
+        (
+            "Result<(), TypeError>",
+            std::mem::size_of::<Result<(), TypeError>>(),
+        ),
+        ("Rule", std::mem::size_of::<Rule>()),
+    ];
+    for (name, size) in &sizes {
+        eprintln!("{name:>30}: {size:>3} bytes");
+    }
 }
 
 // ===== Minimal grammar =====

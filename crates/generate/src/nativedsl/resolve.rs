@@ -129,12 +129,12 @@ impl Names {
             return Err(ResolveError {
                 kind: ResolveErrorKind::DuplicateDeclaration(name.to_string()),
                 span,
-                note: Some(Note {
+                note: Some(Box::new(Note {
                     message: NoteMessage::FirstDefinedHere,
                     span: *first_span,
                     path: grammar_path.to_path_buf(),
                     source: source.to_string(),
-                }),
+                })),
             });
         }
         self.decls.insert(name.to_string(), (kind, span));
@@ -422,7 +422,7 @@ fn resolve_children(
 pub struct ResolveError {
     pub kind: ResolveErrorKind,
     pub span: Span,
-    pub note: Option<Note>,
+    pub note: Option<Box<Note>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
