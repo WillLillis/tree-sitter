@@ -198,7 +198,9 @@ impl<'src> Ast<'src> {
     #[inline]
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
         let index = self.nodes.len() as u32;
-        let id = NodeId(NonZeroU32::new(index).expect("AST overflow"));
+        // SAFETY: index is always >= 1 because the constructor pre-populates
+        // nodes[0] with a sentinel (Node::Unreachable).
+        let id = NodeId(unsafe { NonZeroU32::new_unchecked(index) });
         self.nodes.push(node);
         self.context.spans.push(span);
         id
