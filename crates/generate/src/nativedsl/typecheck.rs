@@ -339,10 +339,9 @@ fn check_item<'src>(
             }
             Ok(())
         }
-        _ => Err(TypeError {
-            kind: TypeErrorKind::UnexpectedTopLevel,
-            span: ast.span(id),
-        }),
+        // Unreachable: parse_item() only produces Grammar, Let, Fn, Rule,
+        // OverrideRule, and Print nodes at root level.
+        _ => unreachable!(),
     }
 }
 
@@ -950,7 +949,6 @@ pub enum TypeErrorKind {
     InvalidAliasTarget(Ty),
     ExpectedRuleName,
     ExpectedReservedConfig,
-    UnexpectedTopLevel,
     CannotInferType,
     VoidTypeNotAllowed,
     SpreadTypeNotAllowed,
@@ -1027,7 +1025,6 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::ExpectedReservedConfig => {
                 write!(f, "reserved config must be an object literal or inherited")
             }
-            TypeErrorKind::UnexpectedTopLevel => write!(f, "unexpected node at top level"),
             TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
             TypeErrorKind::VoidTypeNotAllowed => write!(
                 f,
