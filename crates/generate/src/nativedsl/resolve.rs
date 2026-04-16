@@ -263,6 +263,10 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
             let value = *value;
             resolve_expr(&mut ast.nodes, &ast.context, names, value, &Locals::EMPTY)
         }
+        Node::Print(arg) => {
+            let arg = *arg;
+            resolve_expr(&mut ast.nodes, &ast.context, names, arg, &Locals::EMPTY)
+        }
         Node::Fn(fn_idx) => {
             let fn_config = ast.context.get_fn(*fn_idx);
             let body = fn_config.body;
