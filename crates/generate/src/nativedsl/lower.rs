@@ -95,6 +95,22 @@ enum ARule {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ValueId(u32);
 
+/// Typed wrappers around [`ValueId`] that guarantee the underlying value has
+/// been validated. Constructed via `Evaluator::expect_*` methods; zero-cost
+/// at runtime (same size as `ValueId`).
+#[derive(Clone, Copy)]
+struct ListVal(ValueId);
+#[derive(Clone, Copy)]
+struct RuleVal(ValueId);
+#[derive(Clone, Copy)]
+struct StrVal(ValueId);
+#[derive(Clone, Copy)]
+struct IntVal(ValueId);
+#[derive(Clone, Copy)]
+struct ObjectVal(ValueId);
+#[derive(Clone, Copy)]
+struct TupleVal(ValueId);
+
 enum Value<'src> {
     Int(i32),
     Str(Str),
@@ -313,6 +329,75 @@ impl<'src> Evaluator<'src> {
         &self.values[id.0 as usize]
     }
 
+    // -- Typed value constructors and accessors --
+    //
+    // `expect_*` wraps a `ValueId` in a typed newtype. The compile-time
+    // safety comes from the wrapper: you can't call `list_items` without
+    // going through `expect_list`. Each accessor has a single `unreachable!`
+    // as the runtime safety net.
+
+    const fn expect_list(vid: ValueId) -> ListVal {
+        ListVal(vid)
+    }
+    fn list_items(&self, v: ListVal) -> &[ValueId] {
+        let Value::List(items) = self.get_val(v.0) else {
+            unreachable!()
+        };
+        items
+    }
+
+    const fn expect_rule(vid: ValueId) -> RuleVal {
+        RuleVal(vid)
+    }
+    fn rule_id(&self, v: RuleVal) -> RuleId {
+        let Value::Rule(rid) = *self.get_val(v.0) else {
+            unreachable!()
+        };
+        rid
+    }
+
+    const fn expect_str(vid: ValueId) -> StrVal {
+        StrVal(vid)
+    }
+    fn str_id(&self, v: StrVal) -> Str {
+        let Value::Str(s) = *self.get_val(v.0) else {
+            unreachable!()
+        };
+        s
+    }
+
+    const fn expect_int(vid: ValueId) -> IntVal {
+        IntVal(vid)
+    }
+    fn int_val(&self, v: IntVal) -> i32 {
+        let Value::Int(n) = *self.get_val(v.0) else {
+            unreachable!()
+        };
+        n
+    }
+
+    const fn expect_object(vid: ValueId) -> ObjectVal {
+        ObjectVal(vid)
+    }
+    fn object_fields(&self, v: ObjectVal) -> &FxHashMap<&'src str, ValueId> {
+        let Value::Object(map) = self.get_val(v.0) else {
+            unreachable!()
+        };
+        map
+    }
+
+    #[expect(dead_code, reason = "API symmetry with other typed wrappers")]
+    const fn expect_tuple(vid: ValueId) -> TupleVal {
+        TupleVal(vid)
+    }
+    #[expect(dead_code, reason = "API symmetry with other typed wrappers")]
+    fn tuple_items(&self, v: TupleVal) -> &[ValueId] {
+        let Value::Tuple(items) = self.get_val(v.0) else {
+            unreachable!()
+        };
+        items
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(FxHashMap::default());
     }
@@ -373,12 +458,7 @@ impl<'src> Evaluator<'src> {
     }
 
     fn get_str_val(&self, id: ValueId) -> Str {
-        match self.get_val(id) {
-            Value::Str(s) => *s,
-            // Guarded by super::typecheck::type_of (Node::Concat, Node::DynRegex) -
-            // ensures arguments are str type
-            _ => unreachable!(),
-        }
+        self.str_id(Self::expect_str(id))
     }
 
     fn build_rule(&self, id: RuleId) -> Rule {
@@ -437,30 +517,20 @@ impl<'src> Evaluator<'src> {
 
     fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
         let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_rule_list - ensures list type
-        let Value::List(items) = self.get_val(vid) else {
-            unreachable!()
-        };
+        let items = self.list_items(Self::expect_list(vid));
         Ok(items.iter().map(|&v| self.value_to_owned_rule(v)).collect())
     }
 
     fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
         let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_name_list - ensures list type
-        let Value::List(items) = self.get_val(vid) else {
-            unreachable!()
-        };
+        let items = self.list_items(Self::expect_list(vid));
         items
             .iter()
             .map(|&v| {
-                // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
-                let Value::Rule(rid) = *self.get_val(v) else {
-                    unreachable!()
-                };
+                let rid = self.rule_id(Self::expect_rule(v));
                 match &self.rules[rid.0 as usize] {
                     ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-                    // Guarded by super::typecheck::expect_name_ref - only allows RuleRef/VarRef
-                    _ => unreachable!(),
+                    _ => unreachable!("expect_name_ref guarantees NamedSymbol"),
                 }
             })
             .collect()
@@ -470,26 +540,18 @@ impl<'src> Evaluator<'src> {
     /// element must evaluate to a named rule reference.
     fn eval_conflicts(&mut self, id: NodeId) -> Result<Vec<Vec<String>>, LowerError> {
         let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_list_list with expect_name_list
-        let Value::List(outer) = self.get_val(vid) else {
-            unreachable!()
-        };
+        let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
             .map(|&group_vid| {
-                let Value::List(inner) = self.get_val(group_vid) else {
-                    unreachable!()
-                };
+                let inner = self.list_items(Self::expect_list(group_vid));
                 inner
                     .iter()
                     .map(|&v| {
-                        // Guarded by expect_name_ref - only allows RuleRef/VarRef
-                        let Value::Rule(rid) = *self.get_val(v) else {
-                            unreachable!()
-                        };
+                        let rid = self.rule_id(Self::expect_rule(v));
                         match &self.rules[rid.0 as usize] {
                             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-                            _ => unreachable!(),
+                            _ => unreachable!("expect_name_ref guarantees NamedSymbol"),
                         }
                     })
                     .collect()
@@ -502,16 +564,11 @@ impl<'src> Evaluator<'src> {
     /// or a named rule reference (`PrecedenceEntry::Symbol`).
     fn eval_precedences(&mut self, id: NodeId) -> Result<Vec<Vec<PrecedenceEntry>>, LowerError> {
         let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_list_list with expect_precedence_group
-        let Value::List(outer) = self.get_val(vid) else {
-            unreachable!()
-        };
+        let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
             .map(|&group_vid| {
-                let Value::List(inner) = self.get_val(group_vid) else {
-                    unreachable!()
-                };
+                let inner = self.list_items(Self::expect_list(group_vid));
                 inner
                     .iter()
                     .map(|&v| match *self.get_val(v) {
@@ -565,25 +622,17 @@ impl<'src> Evaluator<'src> {
         }
         // Expression: evaluate to list of {name, words} objects
         let vid = self.eval_expr(id)?;
-        // Guarded by super::typecheck::expect_reserved
-        let Value::List(items) = self.get_val(vid) else {
-            unreachable!()
-        };
+        let items = self.list_items(Self::expect_list(vid));
         items
             .iter()
             .map(|&v| {
-                let Value::Object(map) = self.get_val(v) else {
-                    unreachable!()
-                };
+                let map = self.object_fields(Self::expect_object(v));
                 let name_vid = *map.get("name").unwrap();
                 let words_vid = *map.get("words").unwrap();
-                let Value::Str(name_sid) = self.get_val(name_vid) else {
-                    unreachable!()
-                };
-                let name = self.strings.to_string(*name_sid);
-                let Value::List(word_vals) = self.get_val(words_vid) else {
-                    unreachable!()
-                };
+                let name = self
+                    .strings
+                    .to_string(self.str_id(Self::expect_str(name_vid)));
+                let word_vals = self.list_items(Self::expect_list(words_vid));
                 let words = word_vals
                     .iter()
                     .map(|&wv| self.value_to_owned_rule(wv))
@@ -777,10 +826,8 @@ impl<'src> Evaluator<'src> {
             Node::Neg(inner) => {
                 let vid = self.eval_expr(*inner)?;
                 // Guarded by super::typecheck::type_of (Node::Neg) - ensures inner is int
-                let Value::Int(n) = self.get_val(vid) else {
-                    unreachable!()
-                };
-                Ok(self.alloc_val(Value::Int(-*n)))
+                let n = self.int_val(Self::expect_int(vid));
+                Ok(self.alloc_val(Value::Int(-n)))
             }
             // Guarded by super::resolve - all Idents replaced with RuleRef/VarRef
             Node::Ident => unreachable!(),
@@ -797,13 +844,10 @@ impl<'src> Evaluator<'src> {
                 let lv = self.eval_expr(left)?;
                 let rv = self.eval_expr(right)?;
                 // Guarded by super::typecheck::type_of (Node::Append) - ensures both are lists
-                let Value::List(li) = self.get_val(lv) else {
-                    unreachable!()
-                };
-                let Value::List(ri) = self.get_val(rv) else {
-                    unreachable!()
-                };
-                let mut combined = li.clone();
+                let li = self.list_items(Self::expect_list(lv));
+                let ri = self.list_items(Self::expect_list(rv));
+                let mut combined = Vec::with_capacity(li.len() + ri.len());
+                combined.extend_from_slice(li);
                 combined.extend_from_slice(ri);
                 Ok(self.alloc_val(Value::List(combined)))
             }
@@ -1044,11 +1088,7 @@ impl<'src> Evaluator<'src> {
             }
             Node::PrecDynamic { value, content } => {
                 let vid = self.eval_expr(*value)?;
-                // Guarded by super::typecheck::type_of (Node::PrecDynamic) - ensures int
-                let Value::Int(n) = self.get_val(vid) else {
-                    unreachable!()
-                };
-                let n = *n;
+                let n = self.int_val(Self::expect_int(vid));
                 let inner = self.lower_to_rule(*content)?;
                 Ok(self.alloc_rule(ARule::PrecDynamic(n, inner)))
             }
@@ -1097,17 +1137,10 @@ impl<'src> Evaluator<'src> {
 
     fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
         let iter_vid = self.eval_expr(config.iterable)?;
-        // Guarded by super::typecheck::check_for_expr - ensures iterable is a list
-        let n_items = match self.get_val(iter_vid) {
-            Value::List(items) => items.len(),
-            _ => unreachable!(),
-        };
+        let n_items = self.list_items(Self::expect_list(iter_vid)).len();
         let mut results = Vec::with_capacity(n_items);
         for i in 0..n_items {
-            let item_id = match self.get_val(iter_vid) {
-                Value::List(items) => items[i],
-                _ => unreachable!(),
-            };
+            let item_id = self.list_items(Self::expect_list(iter_vid))[i];
             self.push_scope();
             for (j, &(name_span, _)) in config.bindings.iter().enumerate() {
                 let value_id = match self.get_val(item_id) {
