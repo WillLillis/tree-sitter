@@ -17,6 +17,7 @@ pub mod lexer;
 pub mod lower;
 pub mod parser;
 pub mod resolve;
+mod scope_stack;
 #[cfg(test)]
 mod tests;
 pub mod typecheck;

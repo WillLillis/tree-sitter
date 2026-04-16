@@ -12,6 +12,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::ast::{Ast, ForId, Node, NodeId, Span};
+use super::scope_stack::ScopeStack;
 
 /// Types that can appear as homogeneous object field values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -111,7 +112,7 @@ pub struct FnSig {
 }
 
 pub struct TypeEnv<'src> {
-    pub var_scopes: Vec<FxHashMap<&'src str, Ty>>,
+    pub vars: ScopeStack<'src, Ty>,
     pub fns: FxHashMap<&'src str, FnSig>,
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
@@ -120,13 +121,13 @@ pub struct TypeEnv<'src> {
 impl<'src> TypeEnv<'src> {
     fn new() -> Self {
         Self {
-            var_scopes: vec![FxHashMap::default()],
+            vars: ScopeStack::new(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
         }
     }
     fn insert_var(&mut self, name: &'src str, ty: Ty) {
-        self.var_scopes.last_mut().unwrap().insert(name, ty);
+        self.vars.insert(name, ty);
     }
     fn insert_object(&mut self, name: &'src str, ty: Ty, fields: Vec<&'src str>) {
         self.insert_var(name, ty);
@@ -136,13 +137,10 @@ impl<'src> TypeEnv<'src> {
         self.object_fields.get(name).map(Vec::as_slice)
     }
     fn get_var(&self, name: &str) -> Option<Ty> {
-        self.var_scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.get(name).copied())
+        self.vars.get(name)
     }
     fn scoped(&mut self) -> ScopeGuard<'_, 'src> {
-        self.var_scopes.push(FxHashMap::default());
+        self.vars.push();
         ScopeGuard(self)
     }
 }
@@ -151,7 +149,7 @@ struct ScopeGuard<'a, 'src>(&'a mut TypeEnv<'src>);
 
 impl Drop for ScopeGuard<'_, '_> {
     fn drop(&mut self) {
-        self.0.var_scopes.pop();
+        self.0.vars.pop();
     }
 }
 
