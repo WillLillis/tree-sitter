@@ -79,7 +79,7 @@ fn parse_native_dsl_inner(
 
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
     let _ = typecheck::check(&ast)?;
-    Ok(lower::lower_with_base(&ast, base)?)
+    Ok(lower::lower_with_base(&ast, base, grammar_path)?)
 }
 
 /// Validate that `inherit()` usage is consistent:

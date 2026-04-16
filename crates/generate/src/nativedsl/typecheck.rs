@@ -96,7 +96,7 @@ impl std::fmt::Display for Ty {
             Self::ListListStr => f.write_str("list_list_str_t"),
             Self::ListListInt => f.write_str("list_list_int_t"),
             Self::Grammar => f.write_str("grammar_t"),
-            Self::Spread => f.write_str("for-loop expansion"),
+            Self::Spread => f.write_str("spread_t"),
             Self::Void => f.write_str("void_t"),
             Self::Object(inner) => write!(f, "object<{inner}>"),
         }
@@ -183,6 +183,10 @@ fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
         Node::TypeListListInt => Ok(Ty::ListListInt),
         Node::TypeVoid => Err(TypeError {
             kind: TypeErrorKind::VoidTypeNotAllowed,
+            span: ast.span(id),
+        }),
+        Node::TypeSpread => Err(TypeError {
+            kind: TypeErrorKind::SpreadTypeNotAllowed,
             span: ast.span(id),
         }),
         _ => Err(TypeError {
@@ -949,6 +953,7 @@ pub enum TypeErrorKind {
     UnexpectedTopLevel,
     CannotInferType,
     VoidTypeNotAllowed,
+    SpreadTypeNotAllowed,
     CannotBindVoid,
     CannotBindSpread,
     CannotPrintType(Ty),
@@ -1027,6 +1032,10 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::VoidTypeNotAllowed => write!(
                 f,
                 "void_t is an internal type and cannot be used as a type annotation"
+            ),
+            TypeErrorKind::SpreadTypeNotAllowed => write!(
+                f,
+                "spread_t is an internal type and cannot be used as a type annotation"
             ),
             TypeErrorKind::CannotBindVoid => write!(
                 f,
