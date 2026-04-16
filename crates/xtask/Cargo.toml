@@ -23,7 +23,6 @@ ctrlc.workspace       = true
 etcetera.workspace    = true
 indoc.workspace       = true
 notify                = "8.2.0"
-rand.workspace        = true
 notify-debouncer-full = "0.7.0"
 regex.workspace       = true
 schemars.workspace    = true

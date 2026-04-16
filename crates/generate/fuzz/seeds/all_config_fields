@@ -1,0 +1,20 @@
+grammar {
+    language: "test",
+    extras: [regexp("\\s"), comment],
+    externals: [ext],
+    inline: [_inner],
+    supertypes: [_expr],
+    conflicts: [[primary, secondary]],
+    precedences: [["member", call]],
+    word: ident,
+    reserved: { default: ["if", "else"] }
+}
+rule program { choice(_expr, "x") }
+rule _expr { "e" }
+rule _inner { "i" }
+rule primary { "p" }
+rule secondary { "s" }
+rule call { "c" }
+rule comment { regexp("//.*") }
+rule ident { regexp("[a-z]+") }
+rule ext { "ext" }
