@@ -1,0 +1,1 @@
+grammar { language: "test" } rule program { prec(2147483647, "x") }
