@@ -14,6 +14,45 @@ use thiserror::Error;
 
 use super::ast::Span;
 
+/// Byte classification flags for the lexer's hot loops.
+const CLASS_WHITESPACE: u8 = 1;
+const CLASS_IDENT_CONTINUE: u8 = 2;
+
+/// Lookup table mapping byte value to classification flags.
+/// Replaces per-byte range checks with a single indexed load.
+const BYTE_CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    t[b' ' as usize] = CLASS_WHITESPACE;
+    t[b'\t' as usize] = CLASS_WHITESPACE;
+    t[b'\n' as usize] = CLASS_WHITESPACE;
+    t[b'\r' as usize] = CLASS_WHITESPACE;
+    t[0x0c] = CLASS_WHITESPACE; // form feed
+    let mut i = b'a';
+    while i <= b'z' {
+        t[i as usize] |= CLASS_IDENT_CONTINUE;
+        i += 1;
+    }
+    i = b'A';
+    while i <= b'Z' {
+        t[i as usize] |= CLASS_IDENT_CONTINUE;
+        i += 1;
+    }
+    i = b'0';
+    while i <= b'9' {
+        t[i as usize] |= CLASS_IDENT_CONTINUE;
+        i += 1;
+    }
+    t[b'_' as usize] |= CLASS_IDENT_CONTINUE;
+    t
+};
+
+/// Classify a byte using the lookup table (no bounds check needed — table is 256 entries).
+#[inline]
+fn byte_is(b: u8, class: u8) -> bool {
+    // SAFETY: b is u8, BYTE_CLASS has 256 entries — every u8 is a valid index.
+    unsafe { *BYTE_CLASS.get_unchecked(b as usize) & class != 0 }
+}
+
 /// The kind of a lexer token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum TokenKind {
@@ -197,8 +236,8 @@ impl<'src> Lexer<'src> {
                 break;
             }
             if self.pos + 1 < self.source.len()
-                && self.source[self.pos] == b'/'
-                && self.source[self.pos + 1] == b'/'
+                && unsafe { *self.source.get_unchecked(self.pos) == b'/' }
+                && unsafe { *self.source.get_unchecked(self.pos + 1) == b'/' }
             {
                 let start = self.pos;
                 self.pos += 2;
@@ -228,7 +267,10 @@ impl<'src> Lexer<'src> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.pos < self.source.len() && self.source[self.pos].is_ascii_whitespace() {
+        while self.pos < self.source.len()
+            // SAFETY: pos < source.len() checked by loop condition.
+            && byte_is(unsafe { *self.source.get_unchecked(self.pos) }, CLASS_WHITESPACE)
+        {
             self.pos += 1;
         }
     }
@@ -396,8 +438,11 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_ident(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        while let Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') = self.peek() {
-            self.advance();
+        while self.pos < self.source.len()
+            // SAFETY: pos < source.len() checked by loop condition.
+            && byte_is(unsafe { *self.source.get_unchecked(self.pos) }, CLASS_IDENT_CONTINUE)
+        {
+            self.pos += 1;
         }
         // SAFETY: the slice contains only ASCII ident chars (a-z, A-Z, 0-9, _), which are valid UTF-8.
         let text = unsafe { std::str::from_utf8_unchecked(&self.source[start..self.pos]) };

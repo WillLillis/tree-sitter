@@ -296,9 +296,9 @@ impl DslError {
     #[must_use]
     pub fn note(&self) -> Option<&Note> {
         match self {
-            Self::Parse(e) => e.note.as_ref(),
-            Self::Resolve(e) => e.note.as_ref(),
-            Self::Lower(e) => e.note.as_ref(),
+            Self::Parse(e) => e.note.as_deref(),
+            Self::Resolve(e) => e.note.as_deref(),
+            Self::Lower(e) => e.note.as_deref(),
             Self::Inherited(e) => e.inner.note(),
             _ => None,
         }
