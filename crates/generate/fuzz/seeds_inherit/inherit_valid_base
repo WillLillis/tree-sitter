@@ -1,0 +1,2 @@
+grammar { language: "base" } rule program { "x" } rule statement { "s" }
+override rule program { "y" } rule new_rule { "z" }
