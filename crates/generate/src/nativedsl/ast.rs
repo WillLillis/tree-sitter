@@ -398,6 +398,9 @@ pub enum Node {
     /// `void_t` annotation. Parseable so users get a clear error message
     /// instead of "unknown type"; always rejected by `resolve_type_annotation`.
     TypeVoid,
+    /// `spread_t` annotation. Like `TypeVoid`, parseable but always rejected -
+    /// `Ty::Spread` is an internal type produced only by for-loop expansions.
+    TypeSpread,
     Unreachable,
 }
 
