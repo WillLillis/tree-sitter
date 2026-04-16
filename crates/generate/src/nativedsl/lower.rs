@@ -6,6 +6,7 @@
 //! (`Vec<Value>`), and [`Evaluator`] (scope chain + function registry).
 
 use std::num::NonZeroU32;
+use std::path::Path;
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -118,14 +119,25 @@ struct Evaluator<'src> {
     call_stack: Vec<(&'src str, Span)>,
 }
 
+/// A `print(...)` statement captured during the item loop but rendered after
+/// all rules are lowered, so name references can be expanded into their bodies.
+struct PendingPrint {
+    value: ValueId,
+    span: Span,
+}
+
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(
     ast: &Ast<'_>,
     base_grammar: Option<InputGrammar>,
+    grammar_path: &Path,
 ) -> Result<InputGrammar, LowerError> {
     let mut eval = Evaluator::new(ast, base_grammar.as_ref());
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
+    // Prints are deferred to after all rules are lowered so `print(rule_name)`
+    // can expand the rule body, not just show the name.
+    let mut pending_prints: Vec<PendingPrint> = Vec::new();
 
     // Register all functions first so forward references work
     for &item_id in &ast.root_items {
@@ -150,11 +162,19 @@ pub fn lower_with_base(
                 override_entries.push((ast.node_text(*name), rule_id, ast.span(*name)));
             }
             Node::Print(arg) => {
-                let val = eval.eval_expr(*arg)?;
-                eval.emit_print(val, ast.span(item_id));
+                let value = eval.eval_expr(*arg)?;
+                pending_prints.push(PendingPrint {
+                    value,
+                    span: ast.span(item_id),
+                });
             }
             _ => unreachable!(),
         }
+    }
+
+    // Emit deferred prints now that rule bodies are available for expansion.
+    for p in &pending_prints {
+        eval.emit_print(p.value, p.span, grammar_path, &rule_entries);
     }
 
     let config = ast
@@ -1111,16 +1131,35 @@ impl<'src> Evaluator<'src> {
 // each child renders on a single line. Rules are fully traversed.
 
 impl Evaluator<'_> {
-    /// Format `val_id` and write it to stderr, prefixed with the line of the
-    /// `print(...)` call. IO errors are ignored.
-    fn emit_print(&self, val_id: ValueId, item_span: Span) {
+    /// Format `val_id` and write it to stderr, prefixed with `path:line:`. IO
+    /// errors are ignored. If the value is a bare `NamedSymbol` (e.g. from
+    /// `print(my_rule)`), the rule body is expanded once so the user sees
+    /// what the rule lowered to; nested rule references remain as names.
+    fn emit_print(
+        &self,
+        val_id: ValueId,
+        item_span: Span,
+        grammar_path: &Path,
+        rule_entries: &[(&str, RuleId)],
+    ) {
         use std::io::Write as _;
         let line = offset_to_line(self.ast.source(), item_span.start as usize);
         let mut buf = String::new();
-        self.write_value(&mut buf, val_id, 0);
+        // Top-level NamedSymbol expansion: look up the rule body and render it.
+        if let Value::Rule(rid) = self.get_val(val_id)
+            && let ARule::NamedSymbol(sid) = &self.rules[rid.0 as usize]
+            && let Some((_, body_rid)) = {
+                let name = self.strings.resolve(*sid);
+                rule_entries.iter().find(|(n, _)| *n == name).copied()
+            }
+        {
+            self.write_rule(&mut buf, body_rid, 0);
+        } else {
+            self.write_value(&mut buf, val_id, 0);
+        }
         let stderr = std::io::stderr();
         let mut stderr = stderr.lock();
-        let _ = writeln!(stderr, "line {line}: {buf}");
+        let _ = writeln!(stderr, "{}:{line}: {buf}", grammar_path.display());
     }
 
     /// Write a value in compact form. Compound values at depth 0 break their
@@ -1163,7 +1202,8 @@ impl Evaluator<'_> {
 
     /// Write a rule fully traversed. At `depth == 0`, combinators with
     /// multiple children (seq/choice) break their children onto indented
-    /// lines; otherwise everything is flat.
+    /// lines; otherwise everything is flat. `NamedSymbol`s render as just the
+    /// name (no expansion; top-level expansion is handled by `emit_print`).
     fn write_rule(&self, w: &mut String, rid: RuleId, depth: u32) {
         match &self.rules[rid.0 as usize] {
             ARule::Blank => w.push_str("blank()"),
