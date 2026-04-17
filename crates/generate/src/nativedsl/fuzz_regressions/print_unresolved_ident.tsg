@@ -1,0 +1,1 @@
+grammar { language: "" } rule s { print(seq(seq(ohc))) }

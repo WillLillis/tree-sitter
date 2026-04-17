@@ -24,6 +24,7 @@ pub mod serialize;
 mod tests;
 pub mod typecheck;
 
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
@@ -212,6 +213,54 @@ pub fn find_inherit_node(ast: &ast::Ast) -> Option<ast::NodeId> {
 
 // -- Child module loading --
 
+/// Load a child module from a path string. Handles .tsg and .json extensions,
+/// cycle detection, and error wrapping.
+fn load_child_module(
+    path_str: &str,
+    module_dir: &Path,
+    span: ast::Span,
+    ancestor_paths: &[PathBuf],
+    kind: ModuleKind,
+) -> Result<Module, DslError> {
+    use lower::{LowerError, LowerErrorKind};
+
+    let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
+
+    let mut child_ancestors = ancestor_paths.to_vec();
+    child_ancestors.push(canonical.clone());
+
+    let ext = canonical.extension().and_then(|e| e.to_str());
+    match ext {
+        Some("tsg") => load_module(&content, &canonical, kind, &child_ancestors).map_err(|inner| {
+            ModuleError {
+                inner: Box::new(inner),
+                source_text: content,
+                path: canonical,
+                reference_span: span,
+            }
+            .into()
+        }),
+        Some("json") if matches!(kind, ModuleKind::Grammar) => {
+            let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
+                LowerError::new(
+                    LowerErrorKind::ModuleJsonError {
+                        path: canonical.display().to_string(),
+                        error: e,
+                    },
+                    span,
+                )
+            })?;
+            Ok(Module {
+                ast: ast::Ast::new(String::new()),
+                path: canonical,
+                sub_modules: Vec::new(),
+                lowered: Some(grammar),
+            })
+        }
+        _ => Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
+    }
+}
+
 /// Resolve the path for a child module, read its source, and handle
 /// cycle detection. Returns `(content, canonical_path)`.
 fn read_child_module(
@@ -261,8 +310,6 @@ fn load_inherit_child(
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
 ) -> Result<Vec<String>, DslError> {
-    use lower::{LowerError, LowerErrorKind};
-
     let Some(inherit_id) = find_inherit_node(ast) else {
         return Ok(Vec::new());
     };
@@ -272,42 +319,7 @@ fn load_inherit_child(
 
     let path_str = ast.node_text(*path);
     let span = ast.span(*path);
-
-    let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
-
-    let mut child_ancestors = ancestor_paths.to_vec();
-    child_ancestors.push(canonical.clone());
-
-    let ext = canonical.extension().and_then(|e| e.to_str());
-    let child_module = match ext {
-        Some("tsg") => load_module(&content, &canonical, ModuleKind::Grammar, &child_ancestors)
-            .map_err(|inner| ModuleError {
-                inner: Box::new(inner),
-                source_text: content.clone(),
-                path: canonical.clone(),
-                reference_span: span,
-            })?,
-        Some("json") => {
-            let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
-                LowerError::new(
-                    LowerErrorKind::ModuleJsonError {
-                        path: canonical.display().to_string(),
-                        error: e,
-                    },
-                    span,
-                )
-            })?;
-            Module {
-                ast: ast::Ast::new(String::new()),
-                path: canonical,
-                sub_modules: Vec::new(),
-                lowered: Some(grammar),
-            }
-        }
-        _ => {
-            return Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into());
-        }
-    };
+    let child_module = load_child_module(path_str, module_dir, span, ancestor_paths, ModuleKind::Grammar)?;
 
     let rule_names: Vec<String> = child_module
         .lowered
@@ -333,8 +345,8 @@ pub struct Module {
     pub lowered: Option<InputGrammar>,
 }
 
-/// Walk the AST for `let x = import("path")` patterns, load each file
-/// via `load_module`, and set `Node::Import { module }` indices.
+/// Walk ALL nodes in the AST for unresolved `import()` nodes, load each
+/// file via `load_module`, and set `Node::Import { module }` indices.
 fn load_import_children(
     ast: &mut ast::Ast,
     module_dir: &Path,
@@ -343,43 +355,35 @@ fn load_import_children(
 ) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
-    for i in 0..ast.root_items.len() {
-        let item_id = ast.root_items[i];
-        let (value_id, import_path_id, span) = match ast.node(item_id) {
-            ast::Node::Let { value, .. } => {
-                if let ast::Node::Import { path, module: None } = ast.node(*value) {
-                    (*value, *path, ast.span(*path))
-                } else {
-                    continue;
-                }
+    // Scan all nodes (not just top-level lets) so imports/inherits in any
+    // expression position are resolved (e.g. `extras: import("h.tsg")::EXTRAS`).
+    let mut i = 1; // skip index 0 (Unreachable sentinel)
+    while i < ast.nodes.len() {
+        let node_id = ast::NodeId(NonZeroU32::new(i as u32).unwrap());
+        let (import_path_id, span, kind) = match ast.node(node_id) {
+            ast::Node::Import { path, module: None } => (*path, ast.span(*path), ModuleKind::Helper),
+            ast::Node::Inherit { path, module: None } => (*path, ast.span(*path), ModuleKind::Grammar),
+            _ => {
+                i += 1;
+                continue;
             }
-            _ => continue,
         };
 
         let path_str = ast.node_text(import_path_id);
-        let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
-
-        let mut child_ancestors = ancestor_paths.to_vec();
-        child_ancestors.push(canonical.clone());
-
-        let child = load_module(&content, &canonical, ModuleKind::Helper, &child_ancestors)
-            .map_err(|inner| ModuleError {
-                inner: Box::new(inner),
-                source_text: content.clone(),
-                path: canonical.clone(),
-                reference_span: span,
-            })?;
+        let child = load_child_module(path_str, module_dir, span, ancestor_paths, kind)?;
 
         let idx = u8::try_from(modules.len())
             .map_err(|_| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
 
-        // Tag the Import node with its module index
-        ast.nodes[value_id.index()] = ast::Node::Import {
-            path: import_path_id,
-            module: Some(idx),
+        let new_node = match ast.node(node_id) {
+            ast::Node::Import { .. } => ast::Node::Import { path: import_path_id, module: Some(idx) },
+            ast::Node::Inherit { .. } => ast::Node::Inherit { path: import_path_id, module: Some(idx) },
+            _ => unreachable!(),
         };
+        ast.nodes[node_id.index()] = new_node;
 
         modules.push(child);
+        i += 1;
     }
 
     Ok(())

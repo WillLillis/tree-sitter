@@ -704,19 +704,26 @@ fn type_of_field_access<'ast>(
     let field_name = ast.node_text(field);
     match obj_ty {
         Ty::Object(inner) => {
-            if matches!(ast.node(obj), Node::VarRef) {
-                let var_name = ast.text(ast.span(obj));
-                if let Some(fields) = env.get_object_fields(var_name)
-                    && !fields.contains(&field_name)
-                {
-                    return Err(TypeError::new(
-                        TypeErrorKind::FieldNotFound {
-                            field: field_name.to_string(),
-                            on_type: obj_ty,
-                        },
-                        ast.span(field),
-                    ));
+            let field_known = match ast.node(obj) {
+                Node::VarRef => {
+                    let var_name = ast.text(ast.span(obj));
+                    env.get_object_fields(var_name)
+                        .is_none_or(|fields| fields.contains(&field_name))
                 }
+                Node::Object(range) => {
+                    let fields = ast.get_object(*range);
+                    fields.iter().any(|(key_span, _)| ast.text(*key_span) == field_name)
+                }
+                _ => true, // can't validate dynamically-produced objects
+            };
+            if !field_known {
+                return Err(TypeError::new(
+                    TypeErrorKind::FieldNotFound {
+                        field: field_name.to_string(),
+                        on_type: obj_ty,
+                    },
+                    ast.span(field),
+                ));
             }
             Ok(match inner {
                 InnerTy::Rule => Ty::Rule,

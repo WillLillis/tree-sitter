@@ -64,6 +64,10 @@ parse_error_tests! {
         rule program { "x" }"#,
         ParseErrorKind::ExpectedType
     }
+    error_truncated_rule_body {
+        r#"grammar { language: "test" } rule program {"#,
+        ParseErrorKind::ExpectedExpression
+    }
     error_nesting_too_deep {
         // Constructed inline since it needs dynamic depth
         &{
