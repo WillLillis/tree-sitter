@@ -121,8 +121,7 @@ enum Value<'src> {
     Object(FxHashMap<&'src str, ValueId>),
     List(Vec<ValueId>),
     Tuple(Vec<ValueId>),
-    Grammar,
-    Import(u8),
+    Module(u8),
 }
 
 const MAX_CALL_DEPTH: u16 = 64;
@@ -864,11 +863,10 @@ impl<'ast> Evaluator<'ast> {
             }
             // Guarded by super::resolve::resolve - all variable names validated
             Node::VarRef => Ok(self.lookup(ast.text(span)).unwrap()),
-            Node::Inherit { .. } => Ok(self.alloc_val(Value::Grammar)),
-            Node::Import { module, .. } => {
-                let idx = module.expect("import module index not set");
+            Node::Inherit { module, .. } | Node::Import { module, .. } => {
+                let idx = module.expect("module index not set by loading pre-pass");
                 self.eval_import_module(idx, span)?;
-                Ok(self.alloc_val(Value::Import(idx)))
+                Ok(self.alloc_val(Value::Module(idx)))
             }
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
@@ -890,7 +888,7 @@ impl<'ast> Evaluator<'ast> {
                     // Guarded by super::typecheck::type_of (Node::FieldAccess) -
                     // validates field exists on object/grammar
                     Value::Object(map) => Ok(*map.get(field_name).unwrap()),
-                    Value::Grammar => Ok(self.import_config_field(field_name)),
+                    // Module values use :: not . - guarded by typecheck
                     _ => unreachable!(),
                 }
             }
@@ -898,35 +896,30 @@ impl<'ast> Evaluator<'ast> {
                 let (obj, member) = (*obj, *member);
                 let obj_val = self.eval_expr(obj)?;
                 let member_name = ast.node_text(member);
-                match self.get_val(obj_val) {
-                    Value::Grammar => {
-                        let grammar = self.base_grammar.unwrap();
-                        match grammar.variables.iter().find(|v| v.name == member_name) {
-                            Some(var) => {
-                                let rid = self.import_rule(&var.rule);
-                                Ok(self.alloc_val(Value::Rule(rid)))
-                            }
-                            None => Err(LowerError::new(
-                                LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
-                                ast.span(member),
-                            )),
+                let Value::Module(idx) = *self.get_val(obj_val) else {
+                    unreachable!() // guarded by typecheck
+                };
+                let idx = idx as usize;
+                // Check pre-evaluated let values first (user bindings shadow config/rules)
+                if let Some(&val) = self.import_evals[idx].values.get(member_name) {
+                    Ok(val)
+                } else if let Some(grammar) = &self.base_grammar {
+                    // For inherited grammar modules, fall back to rule bodies
+                    match grammar.variables.iter().find(|v| v.name == member_name) {
+                        Some(var) => {
+                            let rid = self.import_rule(&var.rule);
+                            Ok(self.alloc_val(Value::Rule(rid)))
                         }
+                        None => Err(LowerError::new(
+                            LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
+                            ast.span(member),
+                        )),
                     }
-                    Value::Import(idx) => {
-                        let idx = *idx as usize;
-                        let val = self.import_evals[idx]
-                            .values
-                            .get(member_name)
-                            .copied()
-                            .ok_or_else(|| {
-                                LowerError::new(
-                                    LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
-                                    ast.span(member),
-                                )
-                            })?;
-                        Ok(val)
-                    }
-                    _ => unreachable!(), // guarded by typecheck
+                } else {
+                    Err(LowerError::new(
+                        LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
+                        ast.span(member),
+                    ))
                 }
             }
             Node::Object(range) => {
@@ -984,7 +977,7 @@ impl<'ast> Evaluator<'ast> {
             Node::QualifiedCall(range) => {
                 let (obj, name, args) = ast.get_qualified_call(*range);
                 let obj_val = self.eval_expr(obj)?;
-                let Value::Import(idx) = *self.get_val(obj_val) else {
+                let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
                 // Evaluate args in current AST context
@@ -1273,7 +1266,9 @@ impl<'ast> Evaluator<'ast> {
         let body = config.body;
         let params: Vec<_> = config.params.iter().map(|p| p.name).collect();
         let import_fns = self.import_evals[idx].fns.clone();
-        let import_values: Vec<_> = self.import_evals[idx].values.iter()
+        let import_values: Vec<_> = self.import_evals[idx]
+            .values
+            .iter()
             .map(|(&k, &v)| (k, v))
             .collect();
 
@@ -1398,10 +1393,14 @@ impl Evaluator<'_> {
                     this.write_value(w, *vid, depth + 1);
                 });
             }
-            Value::Grammar => w.push_str("<grammar>"),
-            Value::Import(idx) => {
-                w.push_str("<import:");
-                w.push_str(&self.import_modules[*idx as usize].path.display().to_string());
+            Value::Module(idx) => {
+                w.push_str("<module:");
+                w.push_str(
+                    &self.import_modules[*idx as usize]
+                        .path
+                        .display()
+                        .to_string(),
+                );
                 w.push('>');
             }
         }

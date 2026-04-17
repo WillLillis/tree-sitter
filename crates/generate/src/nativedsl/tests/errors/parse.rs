@@ -313,8 +313,8 @@ rule extra { "hello" }
     .to_string();
     let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
 
-    let DslError::Inherited(inherited) = &err else {
-        panic!("expected Inherited error, got {err:?}")
+    let DslError::Module(inherited) = &err else {
+        panic!("expected Module error, got {err:?}")
     };
     let DslError::Parse(parse_err) = inherited.inner.as_ref() else {
         panic!("expected Parse error, got {:?}", inherited.inner)
@@ -328,7 +328,7 @@ rule extra { "hello" }
     );
     assert_eq!(inherited.path, base_path);
     assert_eq!(
-        &parent_src[inherited.inherit_span.start as usize..inherited.inherit_span.end as usize],
+        &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
         "base.tsg"
     );
 }
