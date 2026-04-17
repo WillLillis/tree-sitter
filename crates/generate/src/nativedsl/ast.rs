@@ -383,6 +383,8 @@ pub enum Node {
         /// Module index, set by the loading pre-pass.
         module: Option<u8>,
     },
+    /// `grammar_config(module)` - returns the grammar config of a module as an object.
+    GrammarConfig(NodeId),
     /// `import("path.tsg")` expression - loads a helper file, returns module_t.
     /// `module` is `None` after parsing, set to an index into `Vec<Module>`
     /// by the loading pre-pass.
