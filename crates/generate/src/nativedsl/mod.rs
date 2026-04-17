@@ -319,7 +319,13 @@ fn load_inherit_child(
 
     let path_str = ast.node_text(*path);
     let span = ast.span(*path);
-    let child_module = load_child_module(path_str, module_dir, span, ancestor_paths, ModuleKind::Grammar)?;
+    let child_module = load_child_module(
+        path_str,
+        module_dir,
+        span,
+        ancestor_paths,
+        ModuleKind::Grammar,
+    )?;
 
     let rule_names: Vec<String> = child_module
         .lowered
@@ -361,8 +367,12 @@ fn load_import_children(
     while i < ast.nodes.len() {
         let node_id = ast::NodeId(NonZeroU32::new(i as u32).unwrap());
         let (import_path_id, span, kind) = match ast.node(node_id) {
-            ast::Node::Import { path, module: None } => (*path, ast.span(*path), ModuleKind::Helper),
-            ast::Node::Inherit { path, module: None } => (*path, ast.span(*path), ModuleKind::Grammar),
+            ast::Node::Import { path, module: None } => {
+                (*path, ast.span(*path), ModuleKind::Helper)
+            }
+            ast::Node::Inherit { path, module: None } => {
+                (*path, ast.span(*path), ModuleKind::Grammar)
+            }
             _ => {
                 i += 1;
                 continue;
@@ -376,8 +386,14 @@ fn load_import_children(
             .map_err(|_| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
 
         let new_node = match ast.node(node_id) {
-            ast::Node::Import { .. } => ast::Node::Import { path: import_path_id, module: Some(idx) },
-            ast::Node::Inherit { .. } => ast::Node::Inherit { path: import_path_id, module: Some(idx) },
+            ast::Node::Import { .. } => ast::Node::Import {
+                path: import_path_id,
+                module: Some(idx),
+            },
+            ast::Node::Inherit { .. } => ast::Node::Inherit {
+                path: import_path_id,
+                module: Some(idx),
+            },
             _ => unreachable!(),
         };
         ast.nodes[node_id.index()] = new_node;

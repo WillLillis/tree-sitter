@@ -97,6 +97,15 @@ impl Span {
         }
     }
 
+    /// Strip the first and last byte (e.g. surrounding quotes).
+    #[must_use]
+    pub const fn strip_quotes(self) -> Self {
+        Self {
+            start: self.start + 1,
+            end: self.end - 1,
+        }
+    }
+
     #[must_use]
     pub fn merge(self, other: Self) -> Self {
         Self {
@@ -106,6 +115,7 @@ impl Span {
     }
 
     /// Resolve to a `&str` slice.
+    #[inline]
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
         // SAFETY: span boundaries are at ASCII byte positions (all token
@@ -139,14 +149,17 @@ impl AstContext {
     pub fn span(&self, id: NodeId) -> Span {
         self.spans[id.index()]
     }
+    #[inline]
     #[must_use]
     pub fn get_fn(&self, id: FnId) -> &FnConfig {
         &self.fn_configs[id.index()]
     }
+    #[inline]
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         &self.for_configs[id.index()]
     }
+    #[inline]
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
         &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
@@ -157,12 +170,14 @@ impl AstContext {
         &self.children[range.start as usize..range.start as usize + range.len as usize]
     }
     /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
+    #[inline]
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
         let children = self.child_slice(range);
         debug_assert!(children.len() >= 2);
         (children[0], children[1], &children[2..])
     }
+    #[inline]
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
@@ -256,22 +271,27 @@ impl Ast {
     }
 
     // Delegating accessors used by all pipeline stages
+    #[inline]
     #[must_use]
     pub fn get_fn(&self, id: FnId) -> &FnConfig {
         self.context.get_fn(id)
     }
+    #[inline]
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         self.context.get_for(id)
     }
+    #[inline]
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
         self.context.get_object(range)
     }
+    #[inline]
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
         self.context.get_qualified_call(range)
     }
+    #[inline]
     #[must_use]
     pub fn source(&self) -> &str {
         &self.context.source
