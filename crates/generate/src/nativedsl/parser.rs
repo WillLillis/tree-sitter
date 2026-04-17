@@ -51,18 +51,22 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         Ok(self.ast)
     }
 
+    #[inline]
     fn skip_comments(&mut self) {
         while self.tokens[self.pos].kind == TokenKind::Comment {
             self.pos += 1;
         }
     }
 
+    #[inline]
     fn span(&self) -> Span {
         self.tokens[self.pos].span
     }
+    #[inline]
     fn at_eof(&self) -> bool {
         self.tokens[self.pos].kind == TokenKind::Eof
     }
+    #[inline]
     fn at(&self, kind: TokenKind) -> bool {
         self.tokens[self.pos].kind == kind
     }
@@ -84,6 +88,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     /// Advance past the current token, skipping any comments.
     /// Safe without bounds check: the token stream always ends with `Eof`.
+    #[inline]
     fn advance_pos(&mut self) {
         self.pos += 1;
         while self.tokens[self.pos].kind == TokenKind::Comment {
@@ -91,6 +96,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
+    #[inline]
     fn eat(&mut self, kind: TokenKind) -> Option<Span> {
         if self.at(kind) {
             let s = self.span();
@@ -101,6 +107,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
+    #[inline]
     fn expect(&mut self, kind: TokenKind) -> Result<Span, ParseError> {
         self.eat(kind).ok_or_else(|| {
             self.error(ParseErrorKind::ExpectedToken {
@@ -147,6 +154,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
+    #[cold]
     fn error(&self, kind: ParseErrorKind) -> ParseError {
         ParseError {
             kind,
@@ -155,6 +163,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
+    #[cold]
     fn err_arg_count(
         &self,
         name: &'static str,
@@ -278,7 +287,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             match field {
                 ConfigField::Language => {
                     let s = self.expect_string()?;
-                    let inner = Span::new(s.start + 1, s.end - 1);
+                    let inner = s.strip_quotes();
                     config.language = Some(self.ast.text(inner).to_string());
                 }
                 ConfigField::Inherits => config.inherits = Some(self.parse_expr()?),
@@ -471,9 +480,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             k if k.is_keyword() => self.parse_ident_expr(start),
             TokenKind::StringLit => {
                 self.advance_pos();
-                Ok(self
-                    .ast
-                    .push(Node::StringLit, Span::new(start.start + 1, start.end - 1)))
+                Ok(self.ast.push(Node::StringLit, start.strip_quotes()))
             }
             TokenKind::IntLit(n) => {
                 let n = *n;
@@ -589,9 +596,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     fn parse_reserved_expr(&mut self, start: Span) -> Result<NodeId, ParseError> {
         let (context, content, end) = self.parse_binary(start, "reserved", |this| {
             let cs = this.expect_string()?;
-            Ok(this
-                .ast
-                .push(Node::StringLit, Span::new(cs.start + 1, cs.end - 1)))
+            Ok(this.ast.push(Node::StringLit, cs.strip_quotes()))
         })?;
         Ok(self
             .ast
@@ -624,10 +629,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             return Err(self.err_arg_count("import", 1, 0, start));
         }
         let path_span = self.expect_string()?;
-        let path = self.ast.push(
-            Node::StringLit,
-            Span::new(path_span.start + 1, path_span.end - 1),
-        );
+        let path = self.ast.push(Node::StringLit, path_span.strip_quotes());
         self.expect_close_args("import", 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
@@ -642,10 +644,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             return Err(self.err_arg_count("inherit", 1, 0, start));
         }
         let path_span = self.expect_string()?;
-        let path = self.ast.push(
-            Node::StringLit,
-            Span::new(path_span.start + 1, path_span.end - 1),
-        );
+        let path = self.ast.push(Node::StringLit, path_span.strip_quotes());
         self.expect_close_args("inherit", 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self

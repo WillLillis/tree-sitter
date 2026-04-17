@@ -712,7 +712,9 @@ fn type_of_field_access<'ast>(
                 }
                 Node::Object(range) => {
                     let fields = ast.get_object(*range);
-                    fields.iter().any(|(key_span, _)| ast.text(*key_span) == field_name)
+                    fields
+                        .iter()
+                        .any(|(key_span, _)| ast.text(*key_span) == field_name)
                 }
                 _ => true, // can't validate dynamically-produced objects
             };
