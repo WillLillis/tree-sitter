@@ -106,7 +106,7 @@ fn load_module(
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, path)?;
 
     // Load imports (after resolve so import nodes are identified).
-    load_import_children(&mut ast, module_dir, &mut sub_modules)?;
+    load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules)?;
 
     // For Grammar modules: typecheck and lower to produce InputGrammar.
     let lowered = if matches!(kind, ModuleKind::Grammar) {
@@ -336,6 +336,7 @@ pub struct Module {
 fn load_import_children(
     ast: &mut ast::Ast,
     module_dir: &Path,
+    ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
 ) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
@@ -354,16 +355,17 @@ fn load_import_children(
         };
 
         let path_str = ast.node_text(import_path_id);
-        let (content, canonical) = read_child_module(path_str, module_dir, span, &[])?;
+        let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
 
-        let child =
-            load_module(&content, &canonical, ModuleKind::Helper, &[]).map_err(|inner| {
-                ModuleError {
-                    inner: Box::new(inner),
-                    source_text: content.clone(),
-                    path: canonical.clone(),
-                    reference_span: span,
-                }
+        let mut child_ancestors = ancestor_paths.to_vec();
+        child_ancestors.push(canonical.clone());
+
+        let child = load_module(&content, &canonical, ModuleKind::Helper, &child_ancestors)
+            .map_err(|inner| ModuleError {
+                inner: Box::new(inner),
+                source_text: content.clone(),
+                path: canonical.clone(),
+                reference_span: span,
             })?;
 
         let idx = u8::try_from(modules.len())

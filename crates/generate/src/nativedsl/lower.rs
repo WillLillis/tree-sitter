@@ -21,15 +21,19 @@ use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, Span};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Str(NonZeroU32);
 
-enum StrEntry {
+enum StrEntry<'src> {
     Unreachable,
-    Source(Span),
+    /// Span into a source string, captured at intern time so that entries
+    /// from different modules (import/inherit) resolve correctly.
+    Source(Span, &'src str),
     Owned(String),
 }
 
 struct StringPool<'src> {
+    /// Current source string, used by `intern_span` to capture the
+    /// source reference into the entry. Swapped when evaluating imports.
     source: &'src str,
-    entries: Vec<StrEntry>,
+    entries: Vec<StrEntry<'src>>,
 }
 
 impl<'src> StringPool<'src> {
@@ -42,7 +46,7 @@ impl<'src> StringPool<'src> {
 
     fn intern_span(&mut self, span: Span) -> Str {
         let id = Str(NonZeroU32::new(self.entries.len() as u32).unwrap());
-        self.entries.push(StrEntry::Source(span));
+        self.entries.push(StrEntry::Source(span, self.source));
         id
     }
 
@@ -55,7 +59,7 @@ impl<'src> StringPool<'src> {
     #[inline]
     fn resolve(&self, id: Str) -> &str {
         match &self.entries[id.0.get() as usize] {
-            StrEntry::Source(span) => span.resolve(self.source),
+            StrEntry::Source(span, source) => span.resolve(source),
             StrEntry::Owned(s) => s,
             StrEntry::Unreachable => unreachable!(),
         }
@@ -152,6 +156,9 @@ struct ImportEval<'ast> {
     values: FxHashMap<&'ast str, ValueId>,
     /// Function definitions from the imported file (name -> fn node in import AST).
     fns: FxHashMap<&'ast str, NodeId>,
+    /// Evaluated state for this module's own imports, needed when calling
+    /// the module's functions (they may reference the module's imports).
+    sub_evals: Vec<ImportEval<'ast>>,
 }
 
 /// A `print(...)` statement captured during the item loop but rendered after
@@ -1260,13 +1267,18 @@ impl<'ast> Evaluator<'ast> {
             }
         }
 
-        // Evaluate top-level let bindings by temporarily swapping to the import AST
+        // Swap to the import's context
         let saved_ast = self.ast;
-        self.ast = import_ast;
-
-        // Register the import's fns so they can call each other during let evaluation
         let saved_fns = std::mem::take(&mut self.fns);
+        let saved_source = self.strings.source;
+        let saved_modules = self.import_modules;
+        let saved_evals = std::mem::take(&mut self.import_evals);
+        let saved_base = self.base_grammar;
+        self.ast = import_ast;
         self.fns = fns.clone();
+        self.strings.source = import_ast.source();
+        self.import_modules = &module.sub_modules;
+        self.base_grammar = module.lowered.as_ref();
 
         self.push_scope();
         let mut values = FxHashMap::default();
@@ -1280,18 +1292,29 @@ impl<'ast> Evaluator<'ast> {
         }
         self.pop_scope();
 
-        // Restore
+        // Save child's import evals before restoring parent state
+        let sub_evals = std::mem::replace(&mut self.import_evals, saved_evals);
+
+        // Restore parent context
         self.fns = saved_fns;
         self.ast = saved_ast;
+        self.strings.source = saved_source;
+        self.import_modules = saved_modules;
+        self.base_grammar = saved_base;
 
         // Pad import_evals if needed (for ordered evaluation)
         while self.import_evals.len() < idx {
             self.import_evals.push(ImportEval {
                 values: FxHashMap::default(),
                 fns: FxHashMap::default(),
+                sub_evals: Vec::new(),
             });
         }
-        self.import_evals.push(ImportEval { values, fns });
+        self.import_evals.push(ImportEval {
+            values,
+            fns,
+            sub_evals,
+        });
         Ok(())
     }
 
@@ -1304,7 +1327,8 @@ impl<'ast> Evaluator<'ast> {
         call_span: Span,
     ) -> Result<ValueId, LowerError> {
         let idx = idx as usize;
-        let import_ast = &self.import_modules[idx].ast;
+        let module = &self.import_modules[idx];
+        let import_ast = &module.ast;
 
         // Extract everything we need from import_evals before mutating self
         let fn_node_id = self.import_evals[idx].fns[fn_name];
@@ -1322,11 +1346,19 @@ impl<'ast> Evaluator<'ast> {
             .map(|(&k, &v)| (k, v))
             .collect();
 
-        // Swap to the import AST
+        // Swap to the import's context
+        let child_evals = std::mem::take(&mut self.import_evals[idx].sub_evals);
         let saved_ast = self.ast;
         let saved_fns = std::mem::take(&mut self.fns);
+        let saved_source = self.strings.source;
+        let saved_modules = self.import_modules;
+        let saved_evals = std::mem::replace(&mut self.import_evals, child_evals);
+        let saved_base = self.base_grammar;
         self.ast = import_ast;
         self.fns = import_fns;
+        self.strings.source = import_ast.source();
+        self.import_modules = &module.sub_modules;
+        self.base_grammar = module.lowered.as_ref();
 
         self.push_scope();
         // Bind the import's let values so the function body can reference them
@@ -1343,8 +1375,15 @@ impl<'ast> Evaluator<'ast> {
         self.call_stack.pop();
 
         self.pop_scope();
+
+        // Restore parent context, preserving any child eval changes
+        let child_evals = std::mem::replace(&mut self.import_evals, saved_evals);
+        self.import_evals[idx].sub_evals = child_evals;
         self.fns = saved_fns;
         self.ast = saved_ast;
+        self.strings.source = saved_source;
+        self.import_modules = saved_modules;
+        self.base_grammar = saved_base;
 
         result
     }
