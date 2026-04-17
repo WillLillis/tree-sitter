@@ -223,10 +223,10 @@ fn read_child_module(
     let full_path = module_dir.join(path_str);
     let canonical = dunce::canonicalize(&full_path).map_err(|e| {
         LowerError::new(
-            LowerErrorKind::ModuleLoadError(format!(
-                "failed to resolve '{}': {e}",
-                full_path.display()
-            )),
+            LowerErrorKind::ModuleResolveFailed {
+                path: full_path.display().to_string(),
+                error: e.to_string(),
+            },
             span,
         )
     })?;
@@ -240,10 +240,10 @@ fn read_child_module(
 
     let content = std::fs::read_to_string(&full_path).map_err(|e| {
         LowerError::new(
-            LowerErrorKind::ModuleLoadError(format!(
-                "failed to read '{}': {e}",
-                full_path.display()
-            )),
+            LowerErrorKind::ModuleReadFailed {
+                path: full_path.display().to_string(),
+                error: e.to_string(),
+            },
             span,
         )
     })?;
@@ -288,7 +288,10 @@ fn load_inherit_child(
         Some("json") => {
             let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
-                    LowerErrorKind::ModuleLoadError(format!("in '{}': {e}", canonical.display())),
+                    LowerErrorKind::ModuleJsonError {
+                        path: canonical.display().to_string(),
+                        error: e,
+                    },
                     span,
                 )
             })?;
@@ -300,13 +303,7 @@ fn load_inherit_child(
             }
         }
         _ => {
-            return Err(LowerError::new(
-                LowerErrorKind::ModuleLoadError(
-                    "unsupported file extension, expected .tsg or .json".to_string(),
-                ),
-                span,
-            )
-            .into());
+            return Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into());
         }
     };
 
@@ -369,12 +366,8 @@ fn load_import_children(
                 }
             })?;
 
-        let idx = u8::try_from(modules.len()).map_err(|_| {
-            LowerError::new(
-                LowerErrorKind::ModuleLoadError("too many modules (max 256)".to_string()),
-                span,
-            )
-        })?;
+        let idx = u8::try_from(modules.len())
+            .map_err(|_| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
 
         // Tag the Import node with its module index
         ast.nodes[value_id.index()] = ast::Node::Import {
@@ -396,9 +389,7 @@ fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
             ast::Node::Let { .. } | ast::Node::Fn(_) | ast::Node::Print(_) => {}
             _ => {
                 return Err(LowerError::new(
-                    LowerErrorKind::ModuleLoadError(
-                        "imported files can only contain let, fn, and print items".to_string(),
-                    ),
+                    LowerErrorKind::ModuleDisallowedItem,
                     ast.span(item_id),
                 ))?;
             }
@@ -413,9 +404,7 @@ fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
             .map(|&id| ast.span(id))
             .unwrap_or(Span::new(0, 0));
         return Err(LowerError::new(
-            LowerErrorKind::ModuleLoadError(
-                "imported files cannot contain a grammar block".to_string(),
-            ),
+            LowerErrorKind::ModuleContainsGrammarBlock,
             span,
         ))?;
     }
@@ -429,26 +418,7 @@ fn typecheck_modules(modules: &[Module]) -> Result<Vec<typecheck::TypeEnv<'_>>, 
         .iter()
         .map(|m| {
             let sub_envs = typecheck_modules(&m.sub_modules)?;
-            let mut env = typecheck::check(&m.ast, sub_envs)?;
-            // For grammar modules, register config fields as vars so they're
-            // accessible via :: from the parent. User let bindings with the
-            // same name (already in env.vars) take priority.
-            if m.ast.context.grammar_config.is_some() {
-                for &(name, ty) in &[
-                    ("extras", Ty::ListRule),
-                    ("externals", Ty::ListRule),
-                    ("inline", Ty::ListRule),
-                    ("supertypes", Ty::ListRule),
-                    ("conflicts", Ty::ListListRule),
-                    ("precedences", Ty::ListListRule),
-                    ("word", Ty::Rule),
-                ] {
-                    if env.vars.get(name).is_none() {
-                        env.vars.insert(name, ty);
-                    }
-                }
-            }
-            Ok(env)
+            Ok(typecheck::check(&m.ast, sub_envs)?)
         })
         .collect()
 }
