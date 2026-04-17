@@ -437,9 +437,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwPrec if next_lparen => self.parse_prec(start, PrecVariant::Default),
             TokenKind::KwPrecLeft if next_lparen => self.parse_prec(start, PrecVariant::Left),
             TokenKind::KwPrecRight if next_lparen => self.parse_prec(start, PrecVariant::Right),
-            TokenKind::KwPrecDynamic if next_lparen => {
-                self.parse_prec(start, PrecVariant::Dynamic)
-            }
+            TokenKind::KwPrecDynamic if next_lparen => self.parse_prec(start, PrecVariant::Dynamic),
             TokenKind::KwReserved if next_lparen => self.parse_reserved_expr(start),
             TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
@@ -612,7 +610,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         );
         self.expect_close_args("import", 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self.ast.push(Node::Import { path, module: None }, start.merge(end)))
+        Ok(self
+            .ast
+            .push(Node::Import { path, module: None }, start.merge(end)))
     }
 
     fn parse_inherit(&mut self, start: Span) -> Result<NodeId, ParseError> {
@@ -628,7 +628,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         );
         self.expect_close_args("inherit", 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self.ast.push(Node::Inherit { path }, start.merge(end)))
+        Ok(self
+            .ast
+            .push(Node::Inherit { path, module: None }, start.merge(end)))
     }
 
     fn parse_append(&mut self, start: Span) -> Result<NodeId, ParseError> {
@@ -679,17 +681,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     // h::fn_name(args) - qualified call
                     self.advance_pos();
                     let mut children = vec![id, member];
-                    let arg_ids =
-                        self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
+                    let arg_ids = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
                     children.extend_from_slice(self.ast.child_slice(arg_ids));
                     let end = self.expect(TokenKind::RParen)?;
-                    let range = self.ast.push_children(&children).map_err(|_| {
-                        self.error(ParseErrorKind::NestingTooDeep)
-                    })?;
-                    id = self.ast.push(
-                        Node::QualifiedCall(range),
-                        start.merge(end),
-                    );
+                    let range = self
+                        .ast
+                        .push_children(&children)
+                        .map_err(|_| self.error(ParseErrorKind::NestingTooDeep))?;
+                    id = self.ast.push(Node::QualifiedCall(range), start.merge(end));
                     break;
                 }
                 id = self.ast.push(

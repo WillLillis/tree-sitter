@@ -76,9 +76,9 @@ fn parse_native_dsl_inner(
         .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
         .unwrap_or_default();
 
-    let inherit_span = find_inherit_node(&ast).map(|id| ast.span(id));
+    let reference_span = find_inherit_node(&ast).map(|id| ast.span(id));
 
-    resolve::resolve(&mut ast, &base_rule_names, inherit_span, grammar_path)?;
+    resolve::resolve(&mut ast, &base_rule_names, reference_span, grammar_path)?;
 
     // Load imports between resolve and typecheck: lex/parse/resolve/typecheck
     // each imported file recursively, producing type envs for the main typecheck.
@@ -86,7 +86,12 @@ fn parse_native_dsl_inner(
     let import_type_envs = typecheck_imports(&import_modules)?;
 
     let _ = typecheck::check(&ast, import_type_envs)?;
-    Ok(lower::lower_with_base(&ast, base, grammar_path, &import_modules)?)
+    Ok(lower::lower_with_base(
+        &ast,
+        base,
+        grammar_path,
+        &import_modules,
+    )?)
 }
 
 /// Validate that `inherit()` usage is consistent:
@@ -174,7 +179,7 @@ pub fn load_base_grammar(
     use lower::{LowerError, LowerErrorKind};
 
     if let Some(inherit_id) = find_inherit_node(ast)
-        && let ast::Node::Inherit { path } = ast.node(inherit_id)
+        && let ast::Node::Inherit { path, .. } = ast.node(inherit_id)
     {
         let path_str = ast.node_text(*path);
         let span = ast.span(*path);
@@ -217,11 +222,11 @@ pub fn load_base_grammar(
         let grammar = match ext {
             Some("tsg") => {
                 parse_native_dsl_inner(&content, &canonical, &child_ancestors).map_err(|inner| {
-                    InheritedError {
+                    ModuleError {
                         inner: Box::new(inner),
                         source_text: content.clone(),
                         path: canonical.clone(),
-                        inherit_span: span,
+                        reference_span: span,
                     }
                 })?
             }
@@ -258,10 +263,7 @@ pub struct ImportedModule {
 
 /// Walk the AST for `let x = import("path")` patterns, load each file,
 /// run lex/parse/resolve recursively, and set `Node::Import { module }` indices.
-fn load_imports(
-    ast: &mut ast::Ast,
-    grammar_dir: &Path,
-) -> Result<Vec<ImportedModule>, DslError> {
+fn load_imports(ast: &mut ast::Ast, grammar_dir: &Path) -> Result<Vec<ImportedModule>, DslError> {
     use lower::{LowerError, LowerErrorKind};
 
     let mut modules = Vec::new();
@@ -302,35 +304,32 @@ fn load_imports(
         })?;
 
         // Lex + parse the imported file
-        let tokens = lexer::Lexer::new(&content).tokenize().map_err(|inner| {
-            ImportedError {
+        let tokens = lexer::Lexer::new(&content)
+            .tokenize()
+            .map_err(|inner| ModuleError {
                 inner: Box::new(inner.into()),
                 source_text: content.clone(),
                 path: canonical.clone(),
-                import_span: span,
-            }
-        })?;
-        let mut import_ast =
-            parser::Parser::new(&tokens, content.clone(), &canonical)
-                .parse()
-                .map_err(|inner| ImportedError {
-                    inner: Box::new(inner.into()),
-                    source_text: content.clone(),
-                    path: canonical.clone(),
-                    import_span: span,
-                })?;
+                reference_span: span,
+            })?;
+        let mut import_ast = parser::Parser::new(&tokens, content.clone(), &canonical)
+            .parse()
+            .map_err(|inner| ModuleError {
+                inner: Box::new(inner.into()),
+                source_text: content.clone(),
+                path: canonical.clone(),
+                reference_span: span,
+            })?;
 
         // Validate: no grammar, rule, override, inherit, append
         validate_import_items(&import_ast, span)?;
 
         // Resolve names within the imported file
-        resolve::resolve(&mut import_ast, &[], None, &canonical).map_err(|inner| {
-            ImportedError {
-                inner: Box::new(inner.into()),
-                source_text: content.clone(),
-                path: canonical.clone(),
-                import_span: span,
-            }
+        resolve::resolve(&mut import_ast, &[], None, &canonical).map_err(|inner| ModuleError {
+            inner: Box::new(inner.into()),
+            source_text: content.clone(),
+            path: canonical.clone(),
+            reference_span: span,
         })?;
 
         // Recursively load sub-imports
@@ -339,9 +338,7 @@ fn load_imports(
 
         let idx = u8::try_from(modules.len()).map_err(|_| {
             LowerError::new(
-                LowerErrorKind::InheritLoadError(
-                    "too many imports (max 256)".to_string(),
-                ),
+                LowerErrorKind::InheritLoadError("too many imports (max 256)".to_string()),
                 span,
             )
         })?;
@@ -363,7 +360,7 @@ fn load_imports(
 }
 
 /// Validate that an imported file only contains allowed items.
-fn validate_import_items(ast: &ast::Ast, import_span: Span) -> Result<(), DslError> {
+fn validate_import_items(ast: &ast::Ast, reference_span: Span) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
@@ -373,7 +370,7 @@ fn validate_import_items(ast: &ast::Ast, import_span: Span) -> Result<(), DslErr
                     LowerErrorKind::InheritLoadError(
                         "imported files can only contain let, fn, and print items".to_string(),
                     ),
-                    import_span,
+                    reference_span,
                 ))?;
             }
         }
@@ -383,14 +380,14 @@ fn validate_import_items(ast: &ast::Ast, import_span: Span) -> Result<(), DslErr
             LowerErrorKind::InheritLoadError(
                 "imported files cannot contain a grammar block".to_string(),
             ),
-            import_span,
+            reference_span,
         ))?;
     }
     Ok(())
 }
 
 /// Recursively typecheck imported modules, producing type envs indexed
-/// to match the module indices in `Ty::Import(idx)`.
+/// to match the module indices in `Ty::Module(idx)`.
 fn typecheck_imports(modules: &[ImportedModule]) -> Result<Vec<typecheck::TypeEnv<'_>>, DslError> {
     modules
         .iter()
@@ -414,31 +411,19 @@ pub enum DslError {
     #[error(transparent)]
     Lower(#[from] LowerError),
     #[error(transparent)]
-    Inherited(#[from] InheritedError),
-    #[error(transparent)]
-    Imported(#[from] ImportedError),
+    Module(#[from] ModuleError),
 }
 
+/// Error from loading a child module (inherited or imported).
 #[derive(Debug, Serialize, Error)]
 #[error("{inner}")]
-pub struct InheritedError {
+pub struct ModuleError {
     pub inner: Box<DslError>,
     #[serde(skip)]
     pub source_text: String,
     #[serde(skip)]
     pub path: PathBuf,
-    pub inherit_span: Span,
-}
-
-#[derive(Debug, Serialize, Error)]
-#[error("{inner}")]
-pub struct ImportedError {
-    pub inner: Box<DslError>,
-    #[serde(skip)]
-    pub source_text: String,
-    #[serde(skip)]
-    pub path: PathBuf,
-    pub import_span: Span,
+    pub reference_span: Span,
 }
 
 use ast::Note;
@@ -452,8 +437,7 @@ impl DslError {
             Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
-            Self::Inherited(e) => e.inherit_span,
-            Self::Imported(e) => e.import_span,
+            Self::Module(e) => e.reference_span,
         }
     }
 
@@ -474,8 +458,7 @@ impl DslError {
             Self::Parse(e) => e.note.as_deref(),
             Self::Resolve(e) => e.note.as_deref(),
             Self::Lower(e) => e.note.as_deref(),
-            Self::Inherited(e) => e.inner.note(),
-            Self::Imported(e) => e.inner.note(),
+            Self::Module(e) => e.inner.note(),
             _ => None,
         }
     }
@@ -549,16 +532,16 @@ fn render_diagnostic(error: &DslError, source_text: &str, path: &Path) -> String
 
     use anstyle::AnsiColor;
 
-    // Inherited errors: render the inner error with the inherited file's context,
-    // then append a "inherited from here" note pointing to the parent.
-    if let DslError::Inherited(e) = error {
+    // Module errors: render the inner error with the child file's context,
+    // then append a note pointing back to the import/inherit in the parent.
+    if let DslError::Module(e) = error {
         let mut out = render_diagnostic(&e.inner, &e.source_text, &e.path);
         render_note_snippet(
             &mut out,
-            e.inherit_span,
+            e.reference_span,
             source_text,
             path,
-            &ast::NoteMessage::InheritedFromHere,
+            &ast::NoteMessage::ReferencedFromHere,
         );
         return out;
     }
