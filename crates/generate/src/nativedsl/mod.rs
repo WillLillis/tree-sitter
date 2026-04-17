@@ -49,56 +49,98 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> Result<InputGrammar
     parse_native_dsl_inner(input, grammar_path, &[])
 }
 
-fn parse_native_dsl_inner(
-    input: &str,
-    grammar_path: &Path,
+enum ModuleKind {
+    /// Grammar file (root or inherited) - must have grammar block, may have rules.
+    Grammar,
+    /// Helper file (imported) - only let/fn/import allowed.
+    Helper,
+}
+
+fn load_module(
+    source: &str,
+    path: &Path,
+    kind: ModuleKind,
     ancestor_paths: &[PathBuf],
-) -> Result<InputGrammar, DslError> {
-    if input.len() >= u32::MAX as usize {
+) -> Result<Module, DslError> {
+    if source.len() >= u32::MAX as usize {
         Err(LexError {
             kind: LexErrorKind::InputTooLarge,
             span: Span::new(0, 0),
         })?;
     }
 
-    let grammar_dir = grammar_path.parent().unwrap();
+    let module_dir = path.parent().unwrap();
 
-    let tokens = lexer::Lexer::new(input).tokenize()?;
-    let mut ast = parser::Parser::new(&tokens, input.to_string(), grammar_path).parse()?;
+    let tokens = lexer::Lexer::new(source).tokenize()?;
+    let mut ast = parser::Parser::new(&tokens, source.to_string(), path).parse()?;
 
-    // Validate inherit() usage before loading
-    validate_inherit(&ast)?;
+    // Validate items based on module kind
+    match kind {
+        ModuleKind::Grammar => validate_grammar(&ast)?,
+        ModuleKind::Helper => validate_import_items(&ast, Span::new(0, 0))?,
+    }
 
-    // Load base grammar before resolve so we can register its rule names
-    let base = load_base_grammar(&ast, grammar_dir, ancestor_paths)?.map(|(g, _)| g);
-    let base_rule_names: Vec<String> = base
-        .as_ref()
-        .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
-        .unwrap_or_default();
+    // All child modules go into one list.
+    let mut sub_modules: Vec<Module> = Vec::new();
 
-    let reference_span = find_inherit_node(&ast).map(|id| ast.span(id));
+    // Load inherited grammar (Grammar kind only, must happen before resolve).
+    let base_rule_names = if matches!(kind, ModuleKind::Grammar) {
+        let names = load_inherit_child(&ast, module_dir, ancestor_paths, &mut sub_modules)?;
+        // Tag the Inherit node with its module index (always 0 - first child)
+        if let Some(inherit_id) = find_inherit_node(&ast) {
+            let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
+                unreachable!()
+            };
+            ast.nodes[inherit_id.index()] = ast::Node::Inherit {
+                path: *p,
+                module: Some(0),
+            };
+        }
+        names
+    } else {
+        Vec::new()
+    };
 
-    resolve::resolve(&mut ast, &base_rule_names, reference_span, grammar_path)?;
+    let inherit_span = find_inherit_node(&ast).map(|id| ast.span(id));
 
-    // Load imports between resolve and typecheck: lex/parse/resolve/typecheck
-    // each imported file recursively, producing type envs for the main typecheck.
-    let import_modules = load_imports(&mut ast, grammar_dir)?;
-    let import_type_envs = typecheck_imports(&import_modules)?;
+    resolve::resolve(&mut ast, &base_rule_names, inherit_span, path)?;
 
-    let _ = typecheck::check(&ast, import_type_envs)?;
-    Ok(lower::lower_with_base(
-        &ast,
-        base,
-        grammar_path,
-        &import_modules,
-    )?)
+    // Load imports (after resolve so import nodes are identified).
+    load_import_children(&mut ast, module_dir, &mut sub_modules)?;
+
+    // For Grammar modules: typecheck and lower to produce InputGrammar.
+    let lowered = if matches!(kind, ModuleKind::Grammar) {
+        let type_envs = typecheck_modules(&sub_modules)?;
+        let _ = typecheck::check(&ast, type_envs)?;
+        Some(lower::lower_with_base(&ast, path, &sub_modules)?)
+    } else {
+        None
+    };
+
+    Ok(Module {
+        ast,
+        path: path.to_path_buf(),
+        sub_modules,
+        lowered,
+    })
+}
+
+fn parse_native_dsl_inner(
+    input: &str,
+    grammar_path: &Path,
+    ancestor_paths: &[PathBuf],
+) -> Result<InputGrammar, DslError> {
+    let module = load_module(input, grammar_path, ModuleKind::Grammar, ancestor_paths)?;
+    Ok(module
+        .lowered
+        .expect("Grammar module always has lowered grammar"))
 }
 
 /// Validate that `inherit()` usage is consistent:
 /// - At most one `inherit()` call
 /// - If `inherit()` exists, `inherits` must be set in grammar config
 /// - If `inherits` is set, it must trace to an `inherit()` call
-pub fn validate_inherit(ast: &ast::Ast) -> Result<(), DslError> {
+pub fn validate_grammar(ast: &ast::Ast) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
     let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
@@ -166,107 +208,140 @@ pub fn find_inherit_node(ast: &ast::Ast) -> Option<ast::NodeId> {
     }
 }
 
-/// Load the base grammar from an `inherit("path")` node if found.
-/// Load the base grammar from an `inherit("path")` node if found.
-///
-/// Returns the loaded grammar and the canonical path to the base grammar file,
-/// or `None` if this grammar doesn't inherit.
-pub fn load_base_grammar(
-    ast: &ast::Ast,
-    grammar_dir: &Path,
+// -- Child module loading --
+
+/// Resolve the path for a child module, read its source, and handle
+/// cycle detection. Returns `(content, canonical_path)`.
+fn read_child_module(
+    path_str: &str,
+    module_dir: &Path,
+    span: Span,
     ancestor_paths: &[PathBuf],
-) -> Result<Option<(InputGrammar, PathBuf)>, DslError> {
+) -> Result<(String, PathBuf), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
-    if let Some(inherit_id) = find_inherit_node(ast)
-        && let ast::Node::Inherit { path, .. } = ast.node(inherit_id)
-    {
-        let path_str = ast.node_text(*path);
-        let span = ast.span(*path);
-        let full_path = grammar_dir.join(path_str);
-        let canonical = dunce::canonicalize(&full_path).map_err(|e| {
-            LowerError::new(
-                LowerErrorKind::InheritLoadError(format!(
-                    "failed to resolve '{}': {e}",
-                    full_path.display()
-                )),
-                span,
-            )
-        })?;
+    let full_path = module_dir.join(path_str);
+    let canonical = dunce::canonicalize(&full_path).map_err(|e| {
+        LowerError::new(
+            LowerErrorKind::InheritLoadError(format!(
+                "failed to resolve '{}': {e}",
+                full_path.display()
+            )),
+            span,
+        )
+    })?;
 
-        // Cycle detection
-        if ancestor_paths.iter().any(|p| p == &canonical) {
-            let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
-            chain.push(canonical);
-            #[expect(
-                clippy::needless_return_with_question_mark,
-                reason = "`canonical` is moved"
-            )]
-            return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span))?;
-        }
+    // Cycle detection
+    if ancestor_paths.iter().any(|p| p == &canonical) {
+        let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
+        chain.push(canonical);
+        return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span).into());
+    }
 
-        let content = std::fs::read_to_string(&full_path).map_err(|e| {
-            LowerError::new(
-                LowerErrorKind::InheritLoadError(format!(
-                    "failed to read '{}': {e}",
-                    full_path.display()
-                )),
-                span,
-            )
-        })?;
+    let content = std::fs::read_to_string(&full_path).map_err(|e| {
+        LowerError::new(
+            LowerErrorKind::InheritLoadError(format!(
+                "failed to read '{}': {e}",
+                full_path.display()
+            )),
+            span,
+        )
+    })?;
 
-        let mut child_ancestors = ancestor_paths.to_vec();
-        child_ancestors.push(canonical.clone());
+    Ok((content, canonical))
+}
 
-        let ext = full_path.extension().and_then(|e| e.to_str());
-        let grammar = match ext {
-            Some("tsg") => {
-                parse_native_dsl_inner(&content, &canonical, &child_ancestors).map_err(|inner| {
-                    ModuleError {
-                        inner: Box::new(inner),
-                        source_text: content.clone(),
-                        path: canonical.clone(),
-                        reference_span: span,
-                    }
-                })?
-            }
-            Some("json") => crate::parse_grammar::parse_grammar(&content).map_err(|e| {
+/// Load the inherited grammar as a child module. Tags the Inherit node with
+/// its module index and returns the base rule names for resolve.
+fn load_inherit_child(
+    ast: &ast::Ast,
+    module_dir: &Path,
+    ancestor_paths: &[PathBuf],
+    modules: &mut Vec<Module>,
+) -> Result<Vec<String>, DslError> {
+    use lower::{LowerError, LowerErrorKind};
+
+    let Some(inherit_id) = find_inherit_node(ast) else {
+        return Ok(Vec::new());
+    };
+    let ast::Node::Inherit { path, .. } = ast.node(inherit_id) else {
+        unreachable!()
+    };
+
+    let path_str = ast.node_text(*path);
+    let span = ast.span(*path);
+
+    let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
+
+    let mut child_ancestors = ancestor_paths.to_vec();
+    child_ancestors.push(canonical.clone());
+
+    let ext = canonical.extension().and_then(|e| e.to_str());
+    let child_module = match ext {
+        Some("tsg") => load_module(&content, &canonical, ModuleKind::Grammar, &child_ancestors)
+            .map_err(|inner| ModuleError {
+                inner: Box::new(inner),
+                source_text: content.clone(),
+                path: canonical.clone(),
+                reference_span: span,
+            })?,
+        Some("json") => {
+            let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
-                    LowerErrorKind::InheritLoadError(format!("in '{}': {e}", full_path.display())),
+                    LowerErrorKind::InheritLoadError(format!("in '{}': {e}", canonical.display())),
                     span,
                 )
-            })?,
-            _ => {
-                return Err(LowerError::new(
-                    LowerErrorKind::InheritLoadError(
-                        "unsupported file extension, expected .tsg or .json".to_string(),
-                    ),
-                    span,
-                ))?;
+            })?;
+            Module {
+                ast: ast::Ast::new(String::new()),
+                path: canonical,
+                sub_modules: Vec::new(),
+                lowered: Some(grammar),
             }
-        };
+        }
+        _ => {
+            return Err(LowerError::new(
+                LowerErrorKind::InheritLoadError(
+                    "unsupported file extension, expected .tsg or .json".to_string(),
+                ),
+                span,
+            )
+            .into());
+        }
+    };
 
-        return Ok(Some((grammar, canonical)));
-    }
-    Ok(None)
+    let rule_names: Vec<String> = child_module
+        .lowered
+        .as_ref()
+        .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
+        .unwrap_or_default();
+
+    modules.push(child_module);
+    Ok(rule_names)
 }
 
-// -- Import loading --
+/// Load import children. Tags each Import node with its module index.
 
-/// A loaded and resolved imported module, ready for typechecking and lowering.
-pub struct ImportedModule {
+/// A loaded and resolved module (imported or inherited), ready for
+/// typechecking and lowering.
+pub struct Module {
     pub ast: ast::Ast,
     pub path: PathBuf,
-    /// Sub-imports within this module (recursive).
-    pub sub_modules: Vec<ImportedModule>,
+    /// Child modules (imports within this module).
+    pub sub_modules: Vec<Module>,
+    /// For inherited grammar modules: the fully lowered grammar, needed
+    /// for rule merging and config access. `None` for import-only modules.
+    pub lowered: Option<InputGrammar>,
 }
 
-/// Walk the AST for `let x = import("path")` patterns, load each file,
-/// run lex/parse/resolve recursively, and set `Node::Import { module }` indices.
-fn load_imports(ast: &mut ast::Ast, grammar_dir: &Path) -> Result<Vec<ImportedModule>, DslError> {
+/// Walk the AST for `let x = import("path")` patterns, load each file
+/// via `load_module`, and set `Node::Import { module }` indices.
+fn load_import_children(
+    ast: &mut ast::Ast,
+    module_dir: &Path,
+    modules: &mut Vec<Module>,
+) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
-
-    let mut modules = Vec::new();
 
     for i in 0..ast.root_items.len() {
         let item_id = ast.root_items[i];
@@ -282,63 +357,21 @@ fn load_imports(ast: &mut ast::Ast, grammar_dir: &Path) -> Result<Vec<ImportedMo
         };
 
         let path_str = ast.node_text(import_path_id);
-        let full_path = grammar_dir.join(path_str);
-        let canonical = dunce::canonicalize(&full_path).map_err(|e| {
-            LowerError::new(
-                LowerErrorKind::InheritLoadError(format!(
-                    "failed to resolve import '{}': {e}",
-                    full_path.display()
-                )),
-                span,
-            )
-        })?;
+        let (content, canonical) = read_child_module(path_str, module_dir, span, &[])?;
 
-        let content = std::fs::read_to_string(&full_path).map_err(|e| {
-            LowerError::new(
-                LowerErrorKind::InheritLoadError(format!(
-                    "failed to read import '{}': {e}",
-                    full_path.display()
-                )),
-                span,
-            )
-        })?;
-
-        // Lex + parse the imported file
-        let tokens = lexer::Lexer::new(&content)
-            .tokenize()
-            .map_err(|inner| ModuleError {
-                inner: Box::new(inner.into()),
-                source_text: content.clone(),
-                path: canonical.clone(),
-                reference_span: span,
+        let child =
+            load_module(&content, &canonical, ModuleKind::Helper, &[]).map_err(|inner| {
+                ModuleError {
+                    inner: Box::new(inner),
+                    source_text: content.clone(),
+                    path: canonical.clone(),
+                    reference_span: span,
+                }
             })?;
-        let mut import_ast = parser::Parser::new(&tokens, content.clone(), &canonical)
-            .parse()
-            .map_err(|inner| ModuleError {
-                inner: Box::new(inner.into()),
-                source_text: content.clone(),
-                path: canonical.clone(),
-                reference_span: span,
-            })?;
-
-        // Validate: no grammar, rule, override, inherit, append
-        validate_import_items(&import_ast, span)?;
-
-        // Resolve names within the imported file
-        resolve::resolve(&mut import_ast, &[], None, &canonical).map_err(|inner| ModuleError {
-            inner: Box::new(inner.into()),
-            source_text: content.clone(),
-            path: canonical.clone(),
-            reference_span: span,
-        })?;
-
-        // Recursively load sub-imports
-        let import_dir = canonical.parent().unwrap();
-        let sub_modules = load_imports(&mut import_ast, import_dir)?;
 
         let idx = u8::try_from(modules.len()).map_err(|_| {
             LowerError::new(
-                LowerErrorKind::InheritLoadError("too many imports (max 256)".to_string()),
+                LowerErrorKind::InheritLoadError("too many modules (max 256)".to_string()),
                 span,
             )
         })?;
@@ -349,14 +382,10 @@ fn load_imports(ast: &mut ast::Ast, grammar_dir: &Path) -> Result<Vec<ImportedMo
             module: Some(idx),
         };
 
-        modules.push(ImportedModule {
-            ast: import_ast,
-            path: canonical,
-            sub_modules,
-        });
+        modules.push(child);
     }
 
-    Ok(modules)
+    Ok(())
 }
 
 /// Validate that an imported file only contains allowed items.
@@ -388,12 +417,31 @@ fn validate_import_items(ast: &ast::Ast, reference_span: Span) -> Result<(), Dsl
 
 /// Recursively typecheck imported modules, producing type envs indexed
 /// to match the module indices in `Ty::Module(idx)`.
-fn typecheck_imports(modules: &[ImportedModule]) -> Result<Vec<typecheck::TypeEnv<'_>>, DslError> {
+fn typecheck_modules(modules: &[Module]) -> Result<Vec<typecheck::TypeEnv<'_>>, DslError> {
     modules
         .iter()
         .map(|m| {
-            let sub_envs = typecheck_imports(&m.sub_modules)?;
-            Ok(typecheck::check(&m.ast, sub_envs)?)
+            let sub_envs = typecheck_modules(&m.sub_modules)?;
+            let mut env = typecheck::check(&m.ast, sub_envs)?;
+            // For grammar modules, register config fields as vars so they're
+            // accessible via :: from the parent. User let bindings with the
+            // same name (already in env.vars) take priority.
+            if m.ast.context.grammar_config.is_some() {
+                for &(name, ty) in &[
+                    ("extras", Ty::ListRule),
+                    ("externals", Ty::ListRule),
+                    ("inline", Ty::ListRule),
+                    ("supertypes", Ty::ListRule),
+                    ("conflicts", Ty::ListListRule),
+                    ("precedences", Ty::ListListRule),
+                    ("word", Ty::Rule),
+                ] {
+                    if env.vars.get(name).is_none() {
+                        env.vars.insert(name, ty);
+                    }
+                }
+            }
+            Ok(env)
         })
         .collect()
 }
