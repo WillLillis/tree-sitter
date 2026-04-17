@@ -341,15 +341,10 @@ fn bench_per_stage() {
     let mut ast = super::parser::Parser::new(&tokens, source.clone(), &path)
         .parse()
         .unwrap();
-    super::validate_inherit(&ast).unwrap();
-    let base = super::load_base_grammar(&ast, path.parent().unwrap(), &[])
-        .unwrap()
-        .map(|(g, _)| g);
-    let base_names: Vec<String> = base
-        .as_ref()
-        .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
-        .unwrap_or_default();
-    let inherit_span = super::find_inherit_node(&ast).map(|id| ast.span(id));
+    super::validate_grammar(&ast).unwrap();
+    // C grammar has no inheritance or imports
+    let base_names: Vec<String> = Vec::new();
+    let inherit_span = None;
 
     // Resolve
     let start = std::time::Instant::now();
@@ -375,7 +370,7 @@ fn bench_per_stage() {
     // + config field evaluation. build_rule dominates due to String allocations.
     let start = std::time::Instant::now();
     for _ in 0..n {
-        std::hint::black_box(super::lower::lower_with_base(&ast, None, &path, &[]).unwrap());
+        std::hint::black_box(super::lower::lower_with_base(&ast, &path, &[]).unwrap());
     }
     let lower_time = start.elapsed() / n;
 

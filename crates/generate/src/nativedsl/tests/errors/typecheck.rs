@@ -202,11 +202,11 @@ fn error_config_access_unknown_field() {
         r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-        let x = base.bogus
+        let x = base::bogus
     "#,
     );
     let e = assert_err!(err, Type);
-    assert_eq!(e.kind, TypeErrorKind::UnknownConfigField("bogus".into()));
+    assert_eq!(e.kind, TypeErrorKind::ImportMemberNotFound("bogus".into()));
 }
 
 #[test]

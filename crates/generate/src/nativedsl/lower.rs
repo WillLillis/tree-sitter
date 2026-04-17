@@ -137,7 +137,7 @@ struct Evaluator<'ast> {
     base_grammar: Option<&'ast InputGrammar>,
     call_stack: Vec<(&'ast str, Span)>,
     /// Loaded import modules, indexed by `Value::Import(idx)`.
-    import_modules: &'ast [super::ImportedModule],
+    import_modules: &'ast [super::Module],
     /// Evaluated state for each import module, populated when
     /// `let h = import(...)` is first evaluated during lowering.
     import_evals: Vec<ImportEval<'ast>>,
@@ -159,18 +159,46 @@ struct PendingPrint {
     span: Span,
 }
 
+/// Intermediate results from the evaluation phase, ready to be assembled
+/// into an `InputGrammar` once the base grammar can be moved out.
+struct EvalResult {
+    language: String,
+    rules: Vec<(String, Rule)>,
+    overrides: Vec<(String, Rule, Span)>,
+    extras: Option<Vec<Rule>>,
+    externals: Option<Vec<Rule>>,
+    inline: Option<Vec<String>>,
+    supertypes: Option<Vec<String>>,
+    word: Option<String>,
+    conflicts: Option<Vec<Vec<String>>>,
+    precedences: Option<Vec<Vec<PrecedenceEntry>>>,
+    reserved: Option<Vec<ReservedWordContext<Rule>>>,
+}
+
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(
     ast: &Ast,
-    base_grammar: Option<InputGrammar>,
     grammar_path: &Path,
-    import_modules: &[super::ImportedModule],
+    modules: &[super::Module],
 ) -> Result<InputGrammar, LowerError> {
-    let mut eval = Evaluator::new(ast, base_grammar.as_ref(), import_modules);
+    let result = evaluate(ast, grammar_path, modules)?;
+    let mut base = modules
+        .iter()
+        .find_map(|m| m.lowered.clone())
+        .unwrap_or_default();
+    build_grammar(result, &mut base)
+}
+
+/// Evaluate the AST, producing intermediate results.
+fn evaluate(
+    ast: &Ast,
+    grammar_path: &Path,
+    modules: &[super::Module],
+) -> Result<EvalResult, LowerError> {
+    let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
+    let mut eval = Evaluator::new(ast, base_grammar, modules);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
-    // Prints are deferred to after all rules are lowered so `print(rule_name)`
-    // can expand the rule body, not just show the name.
     let mut pending_prints: Vec<PendingPrint> = Vec::new();
 
     // Register all functions first so forward references work
@@ -206,7 +234,6 @@ pub fn lower_with_base(
         }
     }
 
-    // Emit deferred prints now that rule bodies are available for expansion.
     for p in &pending_prints {
         eval.emit_print(p.value, p.span, grammar_path, &rule_entries);
     }
@@ -221,111 +248,112 @@ pub fn lower_with_base(
         .as_ref()
         .ok_or_else(|| LowerError::new(LowerErrorKind::MissingLanguageField, Span::new(0, 0)))?;
 
-    // Evaluate all expressions and build output Rules while eval borrows base_grammar.
-    // After this block, eval is dropped and base_grammar can be moved.
-    let built_overrides: Vec<(&str, Rule, Span)> = override_entries
+    let rules: Vec<(String, Rule)> = rule_entries
         .iter()
-        .map(|(name, rid, span)| (*name, eval.build_rule(*rid), *span))
+        .map(|(name, rid)| (name.to_string(), eval.build_rule(*rid)))
         .collect();
-    let built_rules: Vec<(&str, Rule)> = rule_entries
+    let overrides: Vec<(String, Rule, Span)> = override_entries
         .iter()
-        .map(|(name, rid)| (*name, eval.build_rule(*rid)))
+        .map(|(name, rid, span)| (name.to_string(), eval.build_rule(*rid), *span))
         .collect();
-    let eval_extras = config
-        .extras
-        .map(|id| eval.eval_rule_list(id))
-        .transpose()?;
-    let eval_externals = config
-        .externals
-        .map(|id| eval.eval_rule_list(id))
-        .transpose()?;
-    let eval_inline = config
-        .inline
-        .map(|id| eval.eval_name_list(id))
-        .transpose()?;
-    let eval_supertypes = config
-        .supertypes
-        .map(|id| eval.eval_name_list(id))
-        .transpose()?;
-    let eval_word = config.word.map(|id| eval.eval_rule_name(id)).transpose()?;
-    let eval_reserved = config
-        .reserved
-        .map(|id| eval.eval_reserved(id))
-        .transpose()?;
-    let eval_conflicts = config
-        .conflicts
-        .map(|id| eval.eval_conflicts(id))
-        .transpose()?;
-    let eval_precedences = config
-        .precedences
-        .map(|id| eval.eval_precedences(id))
-        .transpose()?;
-    drop(eval);
 
-    // Build the output grammar. Start from the base and overwrite fields
-    // that the derived grammar specifies.
-    let mut out = base_grammar.unwrap_or_default();
-    out.name.clone_from(language);
+    Ok(EvalResult {
+        language: language.clone(),
+        rules,
+        overrides,
+        extras: config
+            .extras
+            .map(|id| eval.eval_rule_list(id))
+            .transpose()?,
+        externals: config
+            .externals
+            .map(|id| eval.eval_rule_list(id))
+            .transpose()?,
+        inline: config
+            .inline
+            .map(|id| eval.eval_name_list(id))
+            .transpose()?,
+        supertypes: config
+            .supertypes
+            .map(|id| eval.eval_name_list(id))
+            .transpose()?,
+        word: config.word.map(|id| eval.eval_rule_name(id)).transpose()?,
+        conflicts: config
+            .conflicts
+            .map(|id| eval.eval_conflicts(id))
+            .transpose()?,
+        precedences: config
+            .precedences
+            .map(|id| eval.eval_precedences(id))
+            .transpose()?,
+        reserved: config
+            .reserved
+            .map(|id| eval.eval_reserved(id))
+            .transpose()?,
+    })
+}
 
-    // Merge rules: apply overrides to base, then append new rules
-    if !built_overrides.is_empty() && out.variables.is_empty() {
+/// Assemble evaluated results into an `InputGrammar`, merging with the base.
+fn build_grammar(result: EvalResult, out: &mut InputGrammar) -> Result<InputGrammar, LowerError> {
+    out.name = result.language;
+
+    if !result.overrides.is_empty() && out.variables.is_empty() {
         return Err(LowerError::new(
             LowerErrorKind::OverrideWithoutInherit,
-            built_overrides[0].2,
+            result.overrides[0].2,
         ));
     }
-    for (name, rule, span) in built_overrides {
+    for (name, rule, span) in result.overrides {
         if let Some(var) = out.variables.iter_mut().find(|v| v.name == name) {
             var.rule = rule;
         } else {
             return Err(LowerError::new(
-                LowerErrorKind::OverrideRuleNotFound(name.to_string()),
+                LowerErrorKind::OverrideRuleNotFound(name),
                 span,
             ));
         }
     }
-    for (name, rule) in built_rules {
+    for (name, rule) in result.rules {
         out.variables.push(Variable {
-            name: name.to_string(),
+            name,
             kind: VariableType::Named,
             rule,
         });
     }
 
-    // Config: derived values override base (which was moved in)
-    if let Some(v) = eval_extras {
+    if let Some(v) = result.extras {
         out.extra_symbols = v;
     }
-    if let Some(v) = eval_externals {
+    if let Some(v) = result.externals {
         out.external_tokens = v;
     }
-    if let Some(v) = eval_inline {
+    if let Some(v) = result.inline {
         out.variables_to_inline = v;
     }
-    if let Some(v) = eval_supertypes {
+    if let Some(v) = result.supertypes {
         out.supertype_symbols = v;
     }
-    if let Some(v) = eval_word {
+    if let Some(v) = result.word {
         out.word_token = Some(v);
     }
-    if let Some(v) = eval_conflicts {
+    if let Some(v) = result.conflicts {
         out.expected_conflicts = v;
     }
-    if let Some(v) = eval_precedences {
+    if let Some(v) = result.precedences {
         out.precedence_orderings = v;
     }
-    if let Some(v) = eval_reserved {
+    if let Some(v) = result.reserved {
         out.reserved_words = v;
     }
 
-    Ok(out)
+    Ok(std::mem::take(out))
 }
 
 impl<'ast> Evaluator<'ast> {
     fn new(
         ast: &'ast Ast,
         base_grammar: Option<&'ast InputGrammar>,
-        import_modules: &'ast [super::ImportedModule],
+        modules: &'ast [super::Module],
     ) -> Self {
         let cap = ast.nodes.len();
         Self {
@@ -338,7 +366,7 @@ impl<'ast> Evaluator<'ast> {
             strings: StringPool::new(ast.source()),
             base_grammar,
             call_stack: Vec::new(),
-            import_modules,
+            import_modules: modules,
             import_evals: Vec::new(),
         }
     }
@@ -671,31 +699,33 @@ impl<'ast> Evaluator<'ast> {
     }
 
     /// Import a config field from the base grammar as a DSL value.
-    fn import_config_field(&mut self, field: &str) -> ValueId {
-        // Guarded by super::typecheck::type_of (Node::FieldAccess) - only reachable
-        // via field access on a Grammar value, which requires an inherit() binding.
+    /// Returns an error if the field name is not a known config field.
+    fn import_config_field_or_err(
+        &mut self,
+        field: &str,
+        span: Span,
+    ) -> Result<ValueId, LowerError> {
         let grammar = self.base_grammar.unwrap();
         match field {
-            "extras" => self.import_rules_as_list(&grammar.extra_symbols),
-            "externals" => self.import_rules_as_list(&grammar.external_tokens),
-            "inline" => self.import_names_as_list(&grammar.variables_to_inline),
-            "supertypes" => self.import_names_as_list(&grammar.supertype_symbols),
+            "extras" => Ok(self.import_rules_as_list(&grammar.extra_symbols)),
+            "externals" => Ok(self.import_rules_as_list(&grammar.external_tokens)),
+            "inline" => Ok(self.import_names_as_list(&grammar.variables_to_inline)),
+            "supertypes" => Ok(self.import_names_as_list(&grammar.supertype_symbols)),
             "conflicts" => {
                 let vals: Vec<ValueId> = grammar
                     .expected_conflicts
                     .iter()
                     .map(|g| self.import_names_as_list(g))
                     .collect();
-                self.alloc_val(Value::List(vals))
+                Ok(self.alloc_val(Value::List(vals)))
             }
             "word" => {
                 if let Some(name) = &grammar.word_token {
                     let sid = self.strings.intern_owned(name.clone());
                     let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                    self.alloc_val(Value::Rule(rid))
+                    Ok(self.alloc_val(Value::Rule(rid)))
                 } else {
-                    let rid = self.alloc_rule(ARule::Blank);
-                    self.alloc_val(Value::Rule(rid))
+                    Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
             }
             "reserved" => {
@@ -712,11 +742,12 @@ impl<'ast> Evaluator<'ast> {
                         self.alloc_val(Value::Object(map))
                     })
                     .collect();
-                self.alloc_val(Value::List(sets))
+                Ok(self.alloc_val(Value::List(sets)))
             }
-            // Guarded by super::typecheck::type_of (Node::FieldAccess) - rejects
-            // unknown config field names on Grammar values
-            _ => unreachable!(),
+            _ => Err(LowerError::new(
+                LowerErrorKind::InheritRuleNotFound(field.to_string()),
+                span,
+            )),
         }
     }
 
@@ -904,16 +935,13 @@ impl<'ast> Evaluator<'ast> {
                 if let Some(&val) = self.import_evals[idx].values.get(member_name) {
                     Ok(val)
                 } else if let Some(grammar) = &self.base_grammar {
-                    // For inherited grammar modules, fall back to rule bodies
-                    match grammar.variables.iter().find(|v| v.name == member_name) {
-                        Some(var) => {
-                            let rid = self.import_rule(&var.rule);
-                            Ok(self.alloc_val(Value::Rule(rid)))
-                        }
-                        None => Err(LowerError::new(
-                            LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
-                            ast.span(member),
-                        )),
+                    // For inherited grammar modules, fall back to rule bodies,
+                    // then config fields.
+                    if let Some(var) = grammar.variables.iter().find(|v| v.name == member_name) {
+                        let rid = self.import_rule(&var.rule);
+                        Ok(self.alloc_val(Value::Rule(rid)))
+                    } else {
+                        self.import_config_field_or_err(member_name, ast.span(member))
                     }
                 } else {
                     Err(LowerError::new(
