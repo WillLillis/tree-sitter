@@ -230,7 +230,9 @@ impl<'src> Lexer<'src> {
     /// Returns [`LexError`] on unterminated strings, invalid escapes, or
     /// unexpected characters.
     pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
-        let mut tokens = Vec::with_capacity(self.source.len() / 4);
+        // Source length is validated < u32::MAX by load_module before lexing.
+        // Truncating to u32 lets LLVM prove the capacity can't overflow.
+        let mut tokens = Vec::with_capacity((self.source.len() as u32 / 4) as usize);
         loop {
             self.skip_whitespace();
             if self.pos >= self.source.len() {
