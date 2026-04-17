@@ -50,8 +50,8 @@ rule extra { "hello" }
     .to_string();
     let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
 
-    let DslError::Inherited(inherited) = &err else {
-        panic!("expected Inherited error, got {err:?}")
+    let DslError::Module(inherited) = &err else {
+        panic!("expected Module error, got {err:?}")
     };
     // Inner error is a resolve error from the base grammar
     let DslError::Resolve(resolve_err) = inherited.inner.as_ref() else {
@@ -61,12 +61,12 @@ rule extra { "hello" }
         resolve_err.kind,
         ResolveErrorKind::UnknownIdentifier("bogus_ref".to_string())
     );
-    // InheritedError carries the base file's context
+    // ModuleError carries the base file's context
     assert_eq!(inherited.path, base_path);
     assert!(inherited.source_text.contains("bogus_ref"));
-    // inherit_span points to the base.tsg path in the parent (quotes stripped)
+    // reference_span points to the base.tsg path in the parent (quotes stripped)
     assert_eq!(
-        &parent_src[inherited.inherit_span.start as usize..inherited.inherit_span.end as usize],
+        &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
         "base.tsg"
     );
 }
@@ -138,9 +138,9 @@ fn error_inherit_cycle() {
     let source = std::fs::read_to_string(&a_path).unwrap();
     let err = parse_native_dsl(&source, dir.path()).unwrap_err();
     // a inherits b, b inherits a -> cycle detected when a is loaded recursively from b
-    let outer = assert_err!(err, Inherited);
-    let DslError::Inherited(inner) = outer.inner.as_ref() else {
-        panic!("expected nested Inherited error, got {:?}", outer.inner)
+    let outer = assert_err!(err, Module);
+    let DslError::Module(inner) = outer.inner.as_ref() else {
+        panic!("expected nested Module error, got {:?}", outer.inner)
     };
     let DslError::Lower(e) = inner.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", inner.inner)
@@ -267,8 +267,8 @@ rule extra { "hello" }
     .to_string();
     let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
 
-    let DslError::Inherited(inherited) = &err else {
-        panic!("expected Inherited error, got {err:?}")
+    let DslError::Module(inherited) = &err else {
+        panic!("expected Module error, got {err:?}")
     };
     let DslError::Lower(lower_err) = inherited.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", inherited.inner)
@@ -276,7 +276,7 @@ rule extra { "hello" }
     assert_eq!(lower_err.kind, LowerErrorKind::MissingLanguageField);
     assert_eq!(inherited.path, base_path);
     assert_eq!(
-        &parent_src[inherited.inherit_span.start as usize..inherited.inherit_span.end as usize],
+        &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
         "base.tsg"
     );
 }
