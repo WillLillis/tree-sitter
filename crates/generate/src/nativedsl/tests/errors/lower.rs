@@ -80,9 +80,7 @@ fn error_inherit_bad_path() {
     "#,
     );
     let e = assert_err!(err, Lower);
-    assert!(
-        matches!(e.kind, LowerErrorKind::ModuleLoadError(ref msg) if msg.contains("nonexistent"))
-    );
+    assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
 }
 
 #[test]
@@ -100,9 +98,7 @@ fn error_inherit_bad_extension() {
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let e = assert_err!(err, Lower);
-    assert!(
-        matches!(e.kind, LowerErrorKind::ModuleLoadError(ref msg) if msg.contains("unsupported file extension"))
-    );
+    assert_eq!(e.kind, LowerErrorKind::ModuleUnsupportedExtension);
 }
 
 #[test]
@@ -219,23 +215,22 @@ fn error_inherits_without_inherit() {
 
 #[test]
 fn error_config_field_unset() {
-    // inherit_base_no_word has no word set, so base::word produces ConfigFieldUnset
+    // inherit_base_no_word has no word set, so grammar_config(base).word produces ConfigFieldUnset
     let err = dsl_err(
         r#"
         let base = inherit("inherit_base_no_word/grammar.tsg")
-        grammar { language: "test", inherits: base, word: base::word }
+        grammar { language: "test", inherits: base, word: grammar_config(base).word }
         override rule program { "x" }
     "#,
     );
-    // base::word in grammar config is validated by typecheck - it expects
-    // a bare rule name but gets a rule expression from the inherited config.
-    let e = assert_err!(err, Type);
-    assert_eq!(e.kind, TypeErrorKind::ExpectedRuleName);
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::ConfigFieldUnset);
 }
 
 #[test]
-#[ignore = "error now caught at typecheck instead of lower after :: unification"]
 fn error_inherit_rule_not_found() {
+    // base::nonexistent_rule is caught at typecheck since :: access
+    // validates members against the module's TypeEnv.
     let err = dsl_err(
         r#"
         let base = inherit("inherit_base/grammar.tsg")
@@ -243,10 +238,10 @@ fn error_inherit_rule_not_found() {
         rule extra { base::nonexistent_rule }
     "#,
     );
-    let e = assert_err!(err, Lower);
+    let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
-        LowerErrorKind::ModuleMemberNotFound("nonexistent_rule".into())
+        TypeErrorKind::ImportMemberNotFound("nonexistent_rule".into())
     );
 }
 

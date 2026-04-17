@@ -391,9 +391,21 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         if self.depth > MAX_PARSE_DEPTH {
             return Err(self.error(ParseErrorKind::NestingTooDeep));
         }
-        let result = self.parse_primary();
+        let mut result = self.parse_primary()?;
+        // Post-primary chaining: allow `.field` after any expression
+        // (e.g. `grammar_config(base).extras`).
+        let start = self.ast.span(result);
+        while self.at(TokenKind::Dot) {
+            self.advance_pos();
+            let field_span = self.expect_name()?;
+            let field = self.ast.push(Node::Ident, field_span);
+            result = self.ast.push(
+                Node::FieldAccess { obj: result, field },
+                start.merge(self.ast.span(field)),
+            );
+        }
         self.depth -= 1;
-        result
+        Ok(result)
     }
 
     fn parse_primary(&mut self) -> Result<NodeId, ParseError> {
@@ -446,6 +458,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwImport if next_lparen => self.parse_import(start),
             TokenKind::KwAppend if next_lparen => self.parse_append(start),
             TokenKind::KwPrint if next_lparen => self.parse_print_item(),
+            TokenKind::KwGrammarConfig if next_lparen => {
+                self.parse_unary(start, "grammar_config", Node::GrammarConfig)
+            }
             TokenKind::KwFor => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             // Keyword used as identifier (e.g. `import` as a rule reference)
