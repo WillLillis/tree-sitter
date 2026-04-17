@@ -98,6 +98,7 @@ pub enum TokenKind {
     KwOverride,
     KwAppend,
     KwPrint,
+    KwGrammarConfig,
 
     // Punctuation
     LBrace,
@@ -133,6 +134,7 @@ impl TokenKind {
             | Self::KwPrecLeft | Self::KwPrecRight | Self::KwPrecDynamic | Self::KwReserved
             | Self::KwTokenImmediate | Self::KwConcat | Self::KwRegexp | Self::KwInherit
             | Self::KwImport | Self::KwOverride | Self::KwAppend | Self::KwPrint
+            | Self::KwGrammarConfig
         )
     }
 }
@@ -172,6 +174,7 @@ impl std::fmt::Display for TokenKind {
             Self::KwOverride => "'override'",
             Self::KwAppend => "'append'",
             Self::KwPrint => "'print'",
+            Self::KwGrammarConfig => "'grammar_config'",
             Self::LBrace => "'{'",
             Self::RBrace => "'}'",
             Self::LParen => "'('",
@@ -480,6 +483,7 @@ impl<'src> Lexer<'src> {
             "override" => TokenKind::KwOverride,
             "append" => TokenKind::KwAppend,
             "print" => TokenKind::KwPrint,
+            "grammar_config" => TokenKind::KwGrammarConfig,
             _ => TokenKind::Ident,
         })
     }

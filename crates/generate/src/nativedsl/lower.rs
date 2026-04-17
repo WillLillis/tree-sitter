@@ -122,6 +122,8 @@ enum Value<'src> {
     List(Vec<ValueId>),
     Tuple(Vec<ValueId>),
     Module(u8),
+    /// Grammar config accessor - lazily resolves fields on `.` access.
+    GrammarConfig,
 }
 
 const MAX_CALL_DEPTH: u16 = 64;
@@ -894,6 +896,13 @@ impl<'ast> Evaluator<'ast> {
             }
             // Guarded by super::resolve::resolve - all variable names validated
             Node::VarRef => Ok(self.lookup(ast.text(span)).unwrap()),
+            Node::GrammarConfig(inner) => {
+                let inner_val = self.eval_expr(*inner)?;
+                let Value::Module(_) = *self.get_val(inner_val) else {
+                    unreachable!() // guarded by typecheck
+                };
+                Ok(self.alloc_val(Value::GrammarConfig))
+            }
             Node::Inherit { module, .. } | Node::Import { module, .. } => {
                 let idx = module.expect("module index not set by loading pre-pass");
                 self.eval_import_module(idx)?;
@@ -916,11 +925,11 @@ impl<'ast> Evaluator<'ast> {
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = ast.node_text(field);
                 match self.get_val(obj_val) {
-                    // Guarded by super::typecheck::type_of (Node::FieldAccess) -
-                    // validates field exists on object/grammar
                     Value::Object(map) => Ok(*map.get(field_name).unwrap()),
-                    // Module values use :: not . - guarded by typecheck
-                    _ => unreachable!(),
+                    Value::GrammarConfig => {
+                        self.import_config_field_or_err(field_name, ast.span(field))
+                    }
+                    _ => unreachable!(), // guarded by typecheck
                 }
             }
             Node::QualifiedAccess { obj, member } => {
@@ -931,17 +940,21 @@ impl<'ast> Evaluator<'ast> {
                     unreachable!() // guarded by typecheck
                 };
                 let idx = idx as usize;
-                // Check pre-evaluated let values first (user bindings shadow config/rules)
+                // Check pre-evaluated let values first
                 if let Some(&val) = self.import_evals[idx].values.get(member_name) {
                     Ok(val)
                 } else if let Some(grammar) = &self.base_grammar {
-                    // For inherited grammar modules, fall back to rule bodies,
-                    // then config fields.
-                    if let Some(var) = grammar.variables.iter().find(|v| v.name == member_name) {
-                        let rid = self.import_rule(&var.rule);
-                        Ok(self.alloc_val(Value::Rule(rid)))
-                    } else {
-                        self.import_config_field_or_err(member_name, ast.span(member))
+                    // For inherited grammar modules, fall back to rule bodies.
+                    // Config fields are accessed via grammar_config() builtin.
+                    match grammar.variables.iter().find(|v| v.name == member_name) {
+                        Some(var) => {
+                            let rid = self.import_rule(&var.rule);
+                            Ok(self.alloc_val(Value::Rule(rid)))
+                        }
+                        None => Err(LowerError::new(
+                            LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
+                            ast.span(member),
+                        )),
                     }
                 } else {
                     Err(LowerError::new(
@@ -1431,6 +1444,7 @@ impl Evaluator<'_> {
                 );
                 w.push('>');
             }
+            Value::GrammarConfig => w.push_str("<grammar_config>"),
         }
     }
 
@@ -1762,7 +1776,22 @@ pub enum LowerErrorKind {
     MissingLanguageField,
     OverrideRuleNotFound(String),
     OverrideWithoutInherit,
-    ModuleLoadError(String),
+    ModuleResolveFailed {
+        path: String,
+        error: String,
+    },
+    ModuleReadFailed {
+        path: String,
+        error: String,
+    },
+    ModuleJsonError {
+        path: String,
+        error: crate::parse_grammar::ParseGrammarError,
+    },
+    ModuleUnsupportedExtension,
+    ModuleTooMany,
+    ModuleDisallowedItem,
+    ModuleContainsGrammarBlock,
     ModuleCycle(Vec<std::path::PathBuf>),
     ModuleMemberNotFound(String),
     ExpectedRuleName,
@@ -1787,8 +1816,29 @@ impl std::fmt::Display for LowerError {
             LowerErrorKind::OverrideWithoutInherit => {
                 write!(f, "'override rule' requires a grammar with 'inherits'")
             }
-            LowerErrorKind::ModuleLoadError(msg) => {
-                write!(f, "failed to load module: {msg}")
+            LowerErrorKind::ModuleResolveFailed { path, error } => {
+                write!(f, "failed to resolve '{path}': {error}")
+            }
+            LowerErrorKind::ModuleReadFailed { path, error } => {
+                write!(f, "failed to read '{path}': {error}")
+            }
+            LowerErrorKind::ModuleJsonError { path, error } => {
+                write!(f, "failed to parse '{path}': {error}")
+            }
+            LowerErrorKind::ModuleUnsupportedExtension => {
+                write!(f, "unsupported file extension, expected .tsg or .json")
+            }
+            LowerErrorKind::ModuleTooMany => {
+                write!(f, "too many modules (max 256)")
+            }
+            LowerErrorKind::ModuleDisallowedItem => {
+                write!(
+                    f,
+                    "imported files can only contain let, fn, and print items"
+                )
+            }
+            LowerErrorKind::ModuleContainsGrammarBlock => {
+                write!(f, "imported files cannot contain a grammar block")
             }
             LowerErrorKind::ModuleCycle(chain) => {
                 write!(f, "module cycle detected: ")?;

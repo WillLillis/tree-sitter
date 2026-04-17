@@ -381,7 +381,8 @@ fn resolve_children(
         | Node::Optional(inner)
         | Node::Token(inner)
         | Node::TokenImmediate(inner)
-        | Node::Neg(inner) => {
+        | Node::Neg(inner)
+        | Node::GrammarConfig(inner) => {
             let inner = *inner;
             resolve_expr(nodes, ctx, names, inner, locals)
         }
