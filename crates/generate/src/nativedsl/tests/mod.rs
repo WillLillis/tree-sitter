@@ -331,14 +331,14 @@ fn bench_per_stage() {
     let start = std::time::Instant::now();
     for _ in 0..n {
         std::hint::black_box(
-            super::parser::Parser::new(&tokens, &source, &path)
+            super::parser::Parser::new(&tokens, source.clone(), &path)
                 .parse()
                 .unwrap(),
         );
     }
     let parse_time = start.elapsed() / n;
 
-    let mut ast = super::parser::Parser::new(&tokens, &source, &path)
+    let mut ast = super::parser::Parser::new(&tokens, source.clone(), &path)
         .parse()
         .unwrap();
     super::validate_inherit(&ast).unwrap();
@@ -354,7 +354,7 @@ fn bench_per_stage() {
     // Resolve
     let start = std::time::Instant::now();
     for _ in 0..n {
-        let mut a = super::parser::Parser::new(&tokens, &source, &path)
+        let mut a = super::parser::Parser::new(&tokens, source.clone(), &path)
             .parse()
             .unwrap();
         super::resolve::resolve(&mut a, &base_names, inherit_span, &path).unwrap();
@@ -366,7 +366,7 @@ fn bench_per_stage() {
     // Typecheck
     let start = std::time::Instant::now();
     for _ in 0..n {
-        std::hint::black_box(super::typecheck::check(&ast).unwrap());
+        std::hint::black_box(super::typecheck::check(&ast, Vec::new()).unwrap());
     }
     let typecheck_time = start.elapsed() / n;
 
@@ -375,7 +375,7 @@ fn bench_per_stage() {
     // + config field evaluation. build_rule dominates due to String allocations.
     let start = std::time::Instant::now();
     for _ in 0..n {
-        std::hint::black_box(super::lower::lower_with_base(&ast, None, &path).unwrap());
+        std::hint::black_box(super::lower::lower_with_base(&ast, None, &path, &[]).unwrap());
     }
     let lower_time = start.elapsed() / n;
 

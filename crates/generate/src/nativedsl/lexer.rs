@@ -94,6 +94,7 @@ pub enum TokenKind {
     KwConcat,
     KwRegexp,
     KwInherit,
+    KwImport,
     KwOverride,
     KwAppend,
     KwPrint,
@@ -131,7 +132,7 @@ impl TokenKind {
             | Self::KwBlank | Self::KwField | Self::KwAlias | Self::KwToken | Self::KwPrec
             | Self::KwPrecLeft | Self::KwPrecRight | Self::KwPrecDynamic | Self::KwReserved
             | Self::KwTokenImmediate | Self::KwConcat | Self::KwRegexp | Self::KwInherit
-            | Self::KwOverride | Self::KwAppend | Self::KwPrint
+            | Self::KwImport | Self::KwOverride | Self::KwAppend | Self::KwPrint
         )
     }
 }
@@ -167,6 +168,7 @@ impl std::fmt::Display for TokenKind {
             Self::KwConcat => "'concat'",
             Self::KwRegexp => "'regexp'",
             Self::KwInherit => "'inherit'",
+            Self::KwImport => "'import'",
             Self::KwOverride => "'override'",
             Self::KwAppend => "'append'",
             Self::KwPrint => "'print'",
@@ -474,6 +476,7 @@ impl<'src> Lexer<'src> {
             "concat" => TokenKind::KwConcat,
             "regexp" => TokenKind::KwRegexp,
             "inherit" => TokenKind::KwInherit,
+            "import" => TokenKind::KwImport,
             "override" => TokenKind::KwOverride,
             "append" => TokenKind::KwAppend,
             "print" => TokenKind::KwPrint,

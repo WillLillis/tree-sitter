@@ -115,25 +115,25 @@ impl Span {
     }
 }
 
-pub struct Ast<'src> {
+pub struct Ast {
     pub nodes: Vec<Node>,
     pub root_items: Vec<NodeId>,
-    pub context: AstContext<'src>,
+    pub context: AstContext,
 }
 
 /// Immutable context data split from nodes so resolve can borrow `&mut nodes`
 /// while reading `&context`.
-pub struct AstContext<'src> {
+pub struct AstContext {
     pub grammar_config: Option<GrammarConfig>,
     pub fn_configs: Vec<FnConfig>,
     pub for_configs: Vec<ForConfig>,
     pub object_fields: Vec<(Span, NodeId)>,
     pub spans: Vec<Span>,
     pub children: Vec<NodeId>,
-    pub source: &'src str,
+    pub source: String,
 }
 
-impl AstContext<'_> {
+impl AstContext {
     #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
@@ -156,14 +156,21 @@ impl AstContext<'_> {
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         &self.children[range.start as usize..range.start as usize + range.len as usize]
     }
+    /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
     #[must_use]
-    pub const fn source(&self) -> &str {
-        self.source
+    pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
+        let children = self.child_slice(range);
+        debug_assert!(children.len() >= 2);
+        (children[0], children[1], &children[2..])
+    }
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
     }
     #[inline]
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
-        span.resolve(self.source)
+        span.resolve(&self.source)
     }
     #[inline]
     #[must_use]
@@ -172,9 +179,9 @@ impl AstContext<'_> {
     }
 }
 
-impl<'src> Ast<'src> {
+impl Ast {
     #[must_use]
-    pub fn new(source: &'src str) -> Self {
+    pub fn new(source: String) -> Self {
         let cap = source.len() / 30;
         let mut nodes = Vec::with_capacity(cap);
         let mut spans = Vec::with_capacity(cap);
@@ -260,8 +267,12 @@ impl<'src> Ast<'src> {
         self.context.get_object(range)
     }
     #[must_use]
-    pub const fn source(&self) -> &str {
-        self.context.source
+    pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
+        self.context.get_qualified_call(range)
+    }
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.context.source
     }
     #[inline]
     #[must_use]
@@ -322,9 +333,9 @@ pub enum Node {
         obj: NodeId,
         field: NodeId,
     },
-    RuleInline {
+    QualifiedAccess {
         obj: NodeId,
-        rule: NodeId,
+        member: NodeId,
     },
     Seq(ChildRange),
     Choice(ChildRange),
@@ -370,6 +381,17 @@ pub enum Node {
     Inherit {
         path: NodeId,
     },
+    /// `import("path.tsg")` expression - loads a helper file, returns import_t.
+    /// `module` is `None` after parsing, set to an index into `Vec<ImportedModule>`
+    /// by the import pre-pass.
+    Import {
+        path: NodeId,
+        module: Option<u8>,
+    },
+    /// `expr::name(args)` - function call through `::` access.
+    /// Children layout: `[obj, name, arg0, arg1, ...]` where obj is the
+    /// namespace value and name is the function identifier.
+    QualifiedCall(ChildRange),
     Append {
         left: NodeId,
         right: NodeId,
