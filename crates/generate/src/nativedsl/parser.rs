@@ -130,7 +130,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedString))
     }
 
-    /// Like `expect_ident`, but also accepts keywords (for field names, config keys).
+    /// Accept a name token (for object keys, config keys, field access members).
+    /// Identical to `expect_ident` but gives a different error message.
     fn expect_name(&mut self) -> Result<Span, ParseError> {
         let span = self.span();
         let kind = self.tokens[self.pos].kind;
@@ -890,7 +891,6 @@ pub enum ParseErrorKind {
     DuplicateObjectKey(String),
     MissingReturnType,
     ExpectedFunctionName,
-    KeywordAsIdent,
     DuplicateGrammarBlock,
     NestingTooDeep,
     TooManyChildren,
@@ -926,9 +926,6 @@ impl std::fmt::Display for ParseError {
             }
             ParseErrorKind::ExpectedFunctionName => {
                 write!(f, "only identifiers can be used as function names")
-            }
-            ParseErrorKind::KeywordAsIdent => {
-                write!(f, "keywords cannot be used as identifiers")
             }
             ParseErrorKind::DuplicateGrammarBlock => write!(f, "only one grammar block is allowed"),
             ParseErrorKind::NestingTooDeep => {
