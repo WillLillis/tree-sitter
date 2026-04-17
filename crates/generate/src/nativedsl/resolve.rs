@@ -382,7 +382,8 @@ fn resolve_children(
         | Node::Token(inner)
         | Node::TokenImmediate(inner)
         | Node::Neg(inner)
-        | Node::GrammarConfig(inner) => {
+        | Node::GrammarConfig(inner)
+        | Node::Print(inner) => {
             let inner = *inner;
             resolve_expr(nodes, ctx, names, inner, locals)
         }
@@ -420,7 +421,7 @@ fn resolve_children(
             resolve_expr(nodes, ctx, names, obj, locals)
         }
         // path is a StringLit, nothing to resolve
-        Node::Import { .. } => Ok(()),
+        Node::Import { .. } | Node::Inherit { .. } => Ok(()),
         Node::QualifiedCall(range) => {
             let (obj, _name, args) = ctx.get_qualified_call(*range);
             resolve_expr(nodes, ctx, names, obj, locals)?;

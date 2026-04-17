@@ -137,7 +137,6 @@ struct ModuleCtx<'ast> {
     fns: FxHashMap<&'ast str, NodeId>,
     modules: &'ast [super::Module],
     base_grammar: Option<&'ast InputGrammar>,
-    call_stack: Vec<(&'ast str, Span)>,
     import_evals: Vec<ImportEval<'ast>>,
 }
 
@@ -153,7 +152,6 @@ impl<'ast> ModuleCtx<'ast> {
             fns: collect_fns(ast),
             modules,
             base_grammar,
-            call_stack: Vec::new(),
             import_evals: Vec::new(),
         }
     }
@@ -161,7 +159,8 @@ impl<'ast> ModuleCtx<'ast> {
 
 struct Evaluator<'ast> {
     ctx: ModuleCtx<'ast>,
-    // Shared arenas - unchanged across module boundaries
+    // Shared across module boundaries
+    call_stack: Vec<(&'ast str, Span)>,
     values: Vec<Value<'ast>>,
     rules: Vec<ARule>,
     rule_children: Vec<RuleId>,
@@ -407,9 +406,9 @@ impl<'ast> Evaluator<'ast> {
                 fns: FxHashMap::default(),
                 modules,
                 base_grammar,
-                call_stack: Vec::new(),
                 import_evals: Vec::new(),
             },
+            call_stack: Vec::new(),
             values: Vec::with_capacity(cap),
             rules: Vec::with_capacity(cap),
             rule_children: Vec::with_capacity(cap),
@@ -1252,10 +1251,9 @@ impl<'ast> Evaluator<'ast> {
         arg_vals: &[ValueId],
         call_span: Span,
     ) -> Result<ValueId, LowerError> {
-        self.ctx.call_stack.push((name, call_span));
-        if self.ctx.call_stack.len() > MAX_CALL_DEPTH as usize {
+        self.call_stack.push((name, call_span));
+        if self.call_stack.len() > MAX_CALL_DEPTH as usize {
             let trace = self
-                .ctx
                 .call_stack
                 .iter()
                 .map(|(name, span)| (name.to_string(), *span))
@@ -1276,7 +1274,7 @@ impl<'ast> Evaluator<'ast> {
         }
         let result = self.eval_expr(body);
         self.pop_scope();
-        self.ctx.call_stack.pop();
+        self.call_stack.pop();
         result
     }
 
@@ -1362,7 +1360,6 @@ impl<'ast> Evaluator<'ast> {
             fns: import_fns,
             modules: &module.sub_modules,
             base_grammar: module.lowered.as_ref(),
-            call_stack: Vec::new(),
             import_evals: sub_evals,
         };
         let saved = std::mem::replace(&mut self.ctx, child);
@@ -1375,9 +1372,9 @@ impl<'ast> Evaluator<'ast> {
             self.bind(import_ast.node_text(params[i]), arg_val);
         }
 
-        self.ctx.call_stack.push((fn_name, call_span));
+        self.call_stack.push((fn_name, call_span));
         let result = self.eval_expr(body);
-        self.ctx.call_stack.pop();
+        self.call_stack.pop();
         self.pop_scope();
 
         // Restore parent, preserving any child eval changes
