@@ -745,7 +745,7 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_val(Value::List(sets)))
             }
             _ => Err(LowerError::new(
-                LowerErrorKind::InheritRuleNotFound(field.to_string()),
+                LowerErrorKind::ModuleMemberNotFound(field.to_string()),
                 span,
             )),
         }
@@ -896,7 +896,7 @@ impl<'ast> Evaluator<'ast> {
             Node::VarRef => Ok(self.lookup(ast.text(span)).unwrap()),
             Node::Inherit { module, .. } | Node::Import { module, .. } => {
                 let idx = module.expect("module index not set by loading pre-pass");
-                self.eval_import_module(idx, span)?;
+                self.eval_import_module(idx)?;
                 Ok(self.alloc_val(Value::Module(idx)))
             }
             Node::Append { left, right } => {
@@ -945,7 +945,7 @@ impl<'ast> Evaluator<'ast> {
                     }
                 } else {
                     Err(LowerError::new(
-                        LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
+                        LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
                         ast.span(member),
                     ))
                 }
@@ -1220,7 +1220,7 @@ impl<'ast> Evaluator<'ast> {
 
     /// Evaluate an imported module's top-level let bindings and register its fns.
     /// Called when `let h = import(...)` is first evaluated.
-    fn eval_import_module(&mut self, idx: u8, span: Span) -> Result<(), LowerError> {
+    fn eval_import_module(&mut self, idx: u8) -> Result<(), LowerError> {
         let idx = idx as usize;
         if idx < self.import_evals.len() {
             return Ok(()); // already evaluated
@@ -1762,9 +1762,9 @@ pub enum LowerErrorKind {
     MissingLanguageField,
     OverrideRuleNotFound(String),
     OverrideWithoutInherit,
-    InheritLoadError(String),
-    InheritCycle(Vec<std::path::PathBuf>),
-    InheritRuleNotFound(String),
+    ModuleLoadError(String),
+    ModuleCycle(Vec<std::path::PathBuf>),
+    ModuleMemberNotFound(String),
     ExpectedRuleName,
     ConfigFieldUnset,
     MultipleInherits,
@@ -1787,11 +1787,11 @@ impl std::fmt::Display for LowerError {
             LowerErrorKind::OverrideWithoutInherit => {
                 write!(f, "'override rule' requires a grammar with 'inherits'")
             }
-            LowerErrorKind::InheritLoadError(msg) => {
-                write!(f, "failed to load inherited grammar: {msg}")
+            LowerErrorKind::ModuleLoadError(msg) => {
+                write!(f, "failed to load module: {msg}")
             }
-            LowerErrorKind::InheritCycle(chain) => {
-                write!(f, "inheritance cycle detected: ")?;
+            LowerErrorKind::ModuleCycle(chain) => {
+                write!(f, "module cycle detected: ")?;
                 for (i, p) in chain.iter().enumerate() {
                     if i > 0 {
                         write!(f, " -> ")?;
@@ -1800,15 +1800,14 @@ impl std::fmt::Display for LowerError {
                 }
                 Ok(())
             }
-            LowerErrorKind::InheritRuleNotFound(n) => write!(
-                f,
-                "rule '{n}' not found in base grammar (use '.' for config fields)"
-            ),
+            LowerErrorKind::ModuleMemberNotFound(n) => {
+                write!(f, "member '{n}' not found in module")
+            }
             LowerErrorKind::ExpectedRuleName => {
                 write!(f, "expected a rule name reference")
             }
             LowerErrorKind::ConfigFieldUnset => {
-                write!(f, "config field is not set in the inherited grammar")
+                write!(f, "config field is not set in the base grammar")
             }
             LowerErrorKind::MultipleInherits => {
                 write!(f, "only one inherit() call is allowed per grammar")

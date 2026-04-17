@@ -77,7 +77,7 @@ fn load_module(
     // Validate items based on module kind
     match kind {
         ModuleKind::Grammar => validate_grammar(&ast)?,
-        ModuleKind::Helper => validate_import_items(&ast, Span::new(0, 0))?,
+        ModuleKind::Helper => validate_import_items(&ast)?,
     }
 
     // All child modules go into one list.
@@ -223,7 +223,7 @@ fn read_child_module(
     let full_path = module_dir.join(path_str);
     let canonical = dunce::canonicalize(&full_path).map_err(|e| {
         LowerError::new(
-            LowerErrorKind::InheritLoadError(format!(
+            LowerErrorKind::ModuleLoadError(format!(
                 "failed to resolve '{}': {e}",
                 full_path.display()
             )),
@@ -235,12 +235,12 @@ fn read_child_module(
     if ancestor_paths.iter().any(|p| p == &canonical) {
         let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
         chain.push(canonical);
-        return Err(LowerError::new(LowerErrorKind::InheritCycle(chain), span).into());
+        return Err(LowerError::new(LowerErrorKind::ModuleCycle(chain), span).into());
     }
 
     let content = std::fs::read_to_string(&full_path).map_err(|e| {
         LowerError::new(
-            LowerErrorKind::InheritLoadError(format!(
+            LowerErrorKind::ModuleLoadError(format!(
                 "failed to read '{}': {e}",
                 full_path.display()
             )),
@@ -288,7 +288,7 @@ fn load_inherit_child(
         Some("json") => {
             let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
-                    LowerErrorKind::InheritLoadError(format!("in '{}': {e}", canonical.display())),
+                    LowerErrorKind::ModuleLoadError(format!("in '{}': {e}", canonical.display())),
                     span,
                 )
             })?;
@@ -301,7 +301,7 @@ fn load_inherit_child(
         }
         _ => {
             return Err(LowerError::new(
-                LowerErrorKind::InheritLoadError(
+                LowerErrorKind::ModuleLoadError(
                     "unsupported file extension, expected .tsg or .json".to_string(),
                 ),
                 span,
@@ -371,7 +371,7 @@ fn load_import_children(
 
         let idx = u8::try_from(modules.len()).map_err(|_| {
             LowerError::new(
-                LowerErrorKind::InheritLoadError("too many modules (max 256)".to_string()),
+                LowerErrorKind::ModuleLoadError("too many modules (max 256)".to_string()),
                 span,
             )
         })?;
@@ -389,27 +389,34 @@ fn load_import_children(
 }
 
 /// Validate that an imported file only contains allowed items.
-fn validate_import_items(ast: &ast::Ast, reference_span: Span) -> Result<(), DslError> {
+fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             ast::Node::Let { .. } | ast::Node::Fn(_) | ast::Node::Print(_) => {}
             _ => {
                 return Err(LowerError::new(
-                    LowerErrorKind::InheritLoadError(
+                    LowerErrorKind::ModuleLoadError(
                         "imported files can only contain let, fn, and print items".to_string(),
                     ),
-                    reference_span,
+                    ast.span(item_id),
                 ))?;
             }
         }
     }
     if ast.context.grammar_config.is_some() {
+        // Find the Grammar node to get its span
+        let span = ast
+            .root_items
+            .iter()
+            .find(|&&id| matches!(ast.node(id), ast::Node::Grammar))
+            .map(|&id| ast.span(id))
+            .unwrap_or(Span::new(0, 0));
         return Err(LowerError::new(
-            LowerErrorKind::InheritLoadError(
+            LowerErrorKind::ModuleLoadError(
                 "imported files cannot contain a grammar block".to_string(),
             ),
-            reference_span,
+            span,
         ))?;
     }
     Ok(())
