@@ -192,18 +192,15 @@ fn resolve_type_annotation(ast: &Ast, id: NodeId) -> Result<Ty, TypeError> {
         Node::TypeListListRule => Ok(Ty::ListListRule),
         Node::TypeListListStr => Ok(Ty::ListListStr),
         Node::TypeListListInt => Ok(Ty::ListListInt),
-        Node::TypeVoid => Err(TypeError {
-            kind: TypeErrorKind::VoidTypeNotAllowed,
-            span: ast.span(id),
-        }),
-        Node::TypeSpread => Err(TypeError {
-            kind: TypeErrorKind::SpreadTypeNotAllowed,
-            span: ast.span(id),
-        }),
-        _ => Err(TypeError {
-            kind: TypeErrorKind::CannotInferType,
-            span: ast.span(id),
-        }),
+        Node::TypeVoid => Err(TypeError::new(
+            TypeErrorKind::VoidTypeNotAllowed,
+            ast.span(id),
+        )),
+        Node::TypeSpread => Err(TypeError::new(
+            TypeErrorKind::SpreadTypeNotAllowed,
+            ast.span(id),
+        )),
+        _ => Err(TypeError::new(TypeErrorKind::CannotInferType, ast.span(id))),
     }
 }
 
@@ -278,10 +275,10 @@ fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Resu
                 match declared {
                     Some(ty) if ty.is_list() => ty,
                     _ => {
-                        return Err(TypeError {
-                            kind: TypeErrorKind::EmptyListNeedsAnnotation,
-                            span: ast.span(*value),
-                        });
+                        return Err(TypeError::new(
+                            TypeErrorKind::EmptyListNeedsAnnotation,
+                            ast.span(*value),
+                        ));
                     }
                 }
             } else {
@@ -291,16 +288,16 @@ fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Resu
                 // let binding with a specific message; without this the
                 // for-expansion case would panic during lowering.
                 if inferred == Ty::Void {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::CannotBindVoid,
-                        span: ast.span(*value),
-                    });
+                    return Err(TypeError::new(
+                        TypeErrorKind::CannotBindVoid,
+                        ast.span(*value),
+                    ));
                 }
                 if inferred == Ty::Spread {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::CannotBindSpread,
-                        span: ast.span(*value),
-                    });
+                    return Err(TypeError::new(
+                        TypeErrorKind::CannotBindSpread,
+                        ast.span(*value),
+                    ));
                 }
                 if let Some(d) = declared
                     && !inferred.is_compatible(d)
@@ -346,10 +343,10 @@ fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Resu
             // call (void is nothing to print).
             let ty = type_of(ast, *arg, env)?;
             if ty == Ty::Void || ty == Ty::Spread {
-                return Err(TypeError {
-                    kind: TypeErrorKind::CannotPrintType(ty),
-                    span: ast.span(*arg),
-                });
+                return Err(TypeError::new(
+                    TypeErrorKind::CannotPrintType(ty),
+                    ast.span(*arg),
+                ));
             }
             Ok(())
         }
@@ -413,10 +410,10 @@ fn expect_name_ref<'ast>(
             }
             Ok(())
         }
-        _ => Err(TypeError {
-            kind: TypeErrorKind::ExpectedRuleName,
-            span: ast.span(id),
-        }),
+        _ => Err(TypeError::new(
+            TypeErrorKind::ExpectedRuleName,
+            ast.span(id),
+        )),
     }
 }
 
@@ -480,10 +477,10 @@ fn expect_reserved<'ast>(
     if ty == Ty::Object(InnerTy::ListRule) {
         return Ok(());
     }
-    Err(TypeError {
-        kind: TypeErrorKind::ExpectedReservedConfig,
-        span: ast.span(id),
-    })
+    Err(TypeError::new(
+        TypeErrorKind::ExpectedReservedConfig,
+        ast.span(id),
+    ))
 }
 
 fn expect_rule<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<(), TypeError> {
@@ -509,19 +506,18 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
         Node::GrammarConfig(inner) => {
             let inner_ty = type_of(ast, *inner, env)?;
             if !matches!(inner_ty, Ty::Module(_)) {
-                return Err(TypeError {
-                    kind: TypeErrorKind::QualifiedAccessOnInvalidType(inner_ty),
-                    span: ast.span(*inner),
-                });
+                return Err(TypeError::new(
+                    TypeErrorKind::QualifiedAccessOnInvalidType(inner_ty),
+                    ast.span(*inner),
+                ));
             }
             Ok(Ty::GrammarConfig)
         }
         Node::Ident => unreachable!(),
         Node::VarRef => {
             let name = ast.text(span);
-            env.get_var(name).ok_or_else(|| TypeError {
-                kind: TypeErrorKind::UnresolvedVariable(name.to_string()),
-                span,
+            env.get_var(name).ok_or_else(|| {
+                TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
             })
         }
         Node::Neg(inner) => {
@@ -537,10 +533,10 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             let obj_ty = type_of(ast, *obj, env)?;
             match obj_ty {
                 Ty::Module(idx) => type_of_import_access(ast, idx, *member, env),
-                _ => Err(TypeError {
-                    kind: TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
-                    span: ast.span(*obj),
-                }),
+                _ => Err(TypeError::new(
+                    TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
+                    ast.span(*obj),
+                )),
             }
         }
         Node::Object(range) => type_of_object(ast, *range, span, env),
@@ -549,10 +545,7 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             // Tuples are only valid as elements of for-loop lists.
             // They're checked structurally in check_for_expr.
             // If we reach here, it's a tuple in an invalid context.
-            Err(TypeError {
-                kind: TypeErrorKind::CannotInferType,
-                span,
-            })
+            Err(TypeError::new(TypeErrorKind::CannotInferType, span))
         }
         Node::Concat(range) => {
             for &part in ast.child_slice(*range) {
@@ -603,10 +596,10 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             let is_valid =
                 matches!(ast.node(*target), Node::RuleRef | Node::VarRef) || target_ty == Ty::Str;
             if !is_valid {
-                return Err(TypeError {
-                    kind: TypeErrorKind::InvalidAliasTarget(target_ty),
-                    span: ast.span(*target),
-                });
+                return Err(TypeError::new(
+                    TypeErrorKind::InvalidAliasTarget(target_ty),
+                    ast.span(*target),
+                ));
             }
             Ok(Ty::Rule)
         }
@@ -640,10 +633,7 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             type_of(ast, *arg, env)?;
             Ok(Ty::Void)
         }
-        _ => Err(TypeError {
-            kind: TypeErrorKind::CannotInferType,
-            span,
-        }),
+        _ => Err(TypeError::new(TypeErrorKind::CannotInferType, span)),
     }
 }
 
@@ -673,10 +663,10 @@ fn type_of_append<'ast>(
     match (lt, rt) {
         (Some(l), Some(r)) => {
             if !l.is_list() {
-                return Err(TypeError {
-                    kind: TypeErrorKind::AppendRequiresList(l),
-                    span: ast.span(left),
-                });
+                return Err(TypeError::new(
+                    TypeErrorKind::AppendRequiresList(l),
+                    ast.span(left),
+                ));
             }
             if !r.is_list() {
                 return Err(mismatch(l, r, ast.span(right)));
@@ -693,17 +683,14 @@ fn type_of_append<'ast>(
         }
         (Some(t), None) | (None, Some(t)) => {
             if !t.is_list() {
-                return Err(TypeError {
-                    kind: TypeErrorKind::AppendRequiresList(t),
-                    span,
-                });
+                return Err(TypeError::new(TypeErrorKind::AppendRequiresList(t), span));
             }
             Ok(t)
         }
-        (None, None) => Err(TypeError {
-            kind: TypeErrorKind::EmptyListNeedsAnnotation,
+        (None, None) => Err(TypeError::new(
+            TypeErrorKind::EmptyListNeedsAnnotation,
             span,
-        }),
+        )),
     }
 }
 
@@ -722,13 +709,13 @@ fn type_of_field_access<'ast>(
                 if let Some(fields) = env.get_object_fields(var_name)
                     && !fields.contains(&field_name)
                 {
-                    return Err(TypeError {
-                        kind: TypeErrorKind::FieldNotFound {
+                    return Err(TypeError::new(
+                        TypeErrorKind::FieldNotFound {
                             field: field_name.to_string(),
                             on_type: obj_ty,
                         },
-                        span: ast.span(field),
-                    });
+                        ast.span(field),
+                    ));
                 }
             }
             Ok(match inner {
@@ -744,15 +731,15 @@ fn type_of_field_access<'ast>(
             "conflicts" | "precedences" => Ok(Ty::ListListRule),
             "word" => Ok(Ty::Rule),
             "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
-            _ => Err(TypeError {
-                kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                span: ast.span(field),
-            }),
+            _ => Err(TypeError::new(
+                TypeErrorKind::UnknownConfigField(field_name.to_string()),
+                ast.span(field),
+            )),
         },
-        _ => Err(TypeError {
-            kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty),
-            span: ast.span(obj),
-        }),
+        _ => Err(TypeError::new(
+            TypeErrorKind::FieldAccessOnNonObject(obj_ty),
+            ast.span(obj),
+        )),
     }
 }
 
@@ -769,15 +756,15 @@ fn type_of_import_access(
     }
     if import_env.fns.contains_key(member_name) {
         // Accessing a function without calling it - not valid as a value
-        return Err(TypeError {
-            kind: TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
-            span: ast.span(member),
-        });
+        return Err(TypeError::new(
+            TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+            ast.span(member),
+        ));
     }
-    Err(TypeError {
-        kind: TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
-        span: ast.span(member),
-    })
+    Err(TypeError::new(
+        TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+        ast.span(member),
+    ))
 }
 
 fn type_of_qualified_call<'a>(
@@ -789,31 +776,30 @@ fn type_of_qualified_call<'a>(
     let (obj, name, args) = ast.get_qualified_call(range);
     let obj_ty = type_of(ast, obj, env)?;
     let Ty::Module(idx) = obj_ty else {
-        return Err(TypeError {
-            kind: TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
-            span: ast.span(obj),
-        });
+        return Err(TypeError::new(
+            TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
+            ast.span(obj),
+        ));
     };
     let fn_name = ast.node_text(name);
     let import_env = &env.modules[idx as usize];
     let Some(sig) = import_env.fns.get(fn_name) else {
-        return Err(TypeError {
-            kind: TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
-            span: ast.span(name),
-        });
+        return Err(TypeError::new(
+            TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
+            ast.span(name),
+        ));
     };
     // Check arg count before cloning params (avoids clone on error path)
     if args.len() != sig.params.len() {
-        return Err(TypeError {
-            kind: TypeErrorKind::ArgCountMismatch {
+        return Err(TypeError::new(
+            TypeErrorKind::ArgCountMismatch {
                 fn_name: fn_name.to_string(),
                 expected: sig.params.len(),
                 got: args.len(),
             },
             span,
-        });
+        ));
     }
-    // Clone sig data out before calling type_of (which borrows env mutably)
     let param_types: Vec<Ty> = sig.params.clone();
     let return_ty = sig.return_ty;
     for (i, &arg_id) in args.iter().enumerate() {
@@ -833,10 +819,7 @@ fn type_of_object<'ast>(
 ) -> Result<Ty, TypeError> {
     let fields = ast.get_object(range);
     if fields.is_empty() {
-        return Err(TypeError {
-            kind: TypeErrorKind::CannotInferType,
-            span,
-        });
+        return Err(TypeError::new(TypeErrorKind::CannotInferType, span));
     }
     let first_ty = type_of(ast, fields[0].1, env)?;
     let inner = match first_ty {
@@ -846,10 +829,10 @@ fn type_of_object<'ast>(
         Ty::ListRule => InnerTy::ListRule,
         Ty::ListStr => InnerTy::ListStr,
         _ => {
-            return Err(TypeError {
-                kind: TypeErrorKind::InvalidObjectValue(first_ty),
-                span: ast.span(fields[0].1),
-            });
+            return Err(TypeError::new(
+                TypeErrorKind::InvalidObjectValue(first_ty),
+                ast.span(fields[0].1),
+            ));
         }
     };
     for &(_, val_id) in &fields[1..] {
@@ -869,19 +852,19 @@ fn type_of_list<'ast>(
 ) -> Result<Ty, TypeError> {
     let items = ast.child_slice(range);
     if items.is_empty() {
-        return Err(TypeError {
-            kind: TypeErrorKind::EmptyListNeedsAnnotation,
+        return Err(TypeError::new(
+            TypeErrorKind::EmptyListNeedsAnnotation,
             span,
-        });
+        ));
     }
     let first = type_of(ast, items[0], env)?;
     for &item_id in &items[1..] {
         let ty = type_of(ast, item_id, env)?;
         if ty != first {
-            return Err(TypeError {
-                kind: TypeErrorKind::ListElementTypeMismatch { first, got: ty },
-                span: ast.span(item_id),
-            });
+            return Err(TypeError::new(
+                TypeErrorKind::ListElementTypeMismatch { first, got: ty },
+                ast.span(item_id),
+            ));
         }
     }
     match first {
@@ -891,10 +874,10 @@ fn type_of_list<'ast>(
         Ty::ListRule => Ok(Ty::ListListRule),
         Ty::ListStr => Ok(Ty::ListListStr),
         Ty::ListInt => Ok(Ty::ListListInt),
-        _ => Err(TypeError {
-            kind: TypeErrorKind::InvalidListElement,
-            span: ast.span(items[0]),
-        }),
+        _ => Err(TypeError::new(
+            TypeErrorKind::InvalidListElement,
+            ast.span(items[0]),
+        )),
     }
 }
 
@@ -906,22 +889,21 @@ fn type_of_call<'ast>(
     env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let fn_name = ast.node_text(name);
-    let sig = env.fns.get(fn_name).ok_or_else(|| TypeError {
-        kind: TypeErrorKind::UndefinedFunction(fn_name.to_string()),
-        span,
+    let sig = env.fns.get(fn_name).ok_or_else(|| {
+        TypeError::new(TypeErrorKind::UndefinedFunction(fn_name.to_string()), span)
     })?;
     let return_ty = sig.return_ty;
     let n_params = sig.params.len();
     let args = ast.child_slice(args);
     if args.len() != n_params {
-        return Err(TypeError {
-            kind: TypeErrorKind::ArgCountMismatch {
+        return Err(TypeError::new(
+            TypeErrorKind::ArgCountMismatch {
                 fn_name: fn_name.to_string(),
                 expected: n_params,
                 got: args.len(),
             },
             span,
-        });
+        ));
     }
     for (i, &arg_id) in args.iter().enumerate() {
         let arg_ty = type_of(ast, arg_id, env)?;
@@ -959,17 +941,17 @@ fn check_for_expr<'ast>(
 
     // Single binding over a flat list
     if config.bindings.len() != 1 {
-        return Err(TypeError {
-            kind: TypeErrorKind::ForRequiresTuples,
-            span: ast.span(config.iterable),
-        });
+        return Err(TypeError::new(
+            TypeErrorKind::ForRequiresTuples,
+            ast.span(config.iterable),
+        ));
     }
     let iter_ty = type_of(ast, config.iterable, env)?;
     if !iter_ty.is_list() {
-        return Err(TypeError {
-            kind: TypeErrorKind::ForRequiresList(iter_ty),
-            span: ast.span(config.iterable),
-        });
+        return Err(TypeError::new(
+            TypeErrorKind::ForRequiresList(iter_ty),
+            ast.span(config.iterable),
+        ));
     }
     let (name_span, ty_id) = &config.bindings[0];
     let declared = resolve_type_annotation(ast, *ty_id)?;
@@ -997,20 +979,20 @@ fn check_for_tuple_element<'ast>(
     scope: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     let Node::Tuple(range) = ast.node(item_id) else {
-        return Err(TypeError {
-            kind: TypeErrorKind::ForRequiresTuples,
-            span: ast.span(item_id),
-        });
+        return Err(TypeError::new(
+            TypeErrorKind::ForRequiresTuples,
+            ast.span(item_id),
+        ));
     };
     let elems = ast.child_slice(*range);
     if elems.len() != config.bindings.len() {
-        return Err(TypeError {
-            kind: TypeErrorKind::ForBindingCountMismatch {
+        return Err(TypeError::new(
+            TypeErrorKind::ForBindingCountMismatch {
                 bindings: config.bindings.len(),
                 tuple_elements: elems.len(),
             },
-            span: ast.span(item_id),
-        });
+            ast.span(item_id),
+        ));
     }
     // Pop and re-push scope vars for each tuple (last iteration's bindings win)
     for (i, &(name_span, ty_id)) in config.bindings.iter().enumerate() {
@@ -1027,10 +1009,7 @@ fn check_for_tuple_element<'ast>(
 // -- Helpers --
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
-    TypeError {
-        kind: TypeErrorKind::TypeMismatch { expected, got },
-        span,
-    }
+    TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
 }
 
 // -- Error types --
@@ -1039,6 +1018,12 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 pub struct TypeError {
     pub kind: TypeErrorKind,
     pub span: Span,
+}
+
+impl TypeError {
+    const fn new(kind: TypeErrorKind, span: Span) -> Self {
+        Self { kind, span }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -1095,12 +1080,11 @@ pub enum TypeErrorKind {
 
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use TypeErrorKind::*;
         match &self.kind {
-            TypeErrorKind::TypeMismatch { expected, got } => {
-                write!(f, "expected {expected}, got {got}")
-            }
-            TypeErrorKind::UndefinedFunction(n) => write!(f, "undefined function '{n}'"),
-            TypeErrorKind::ArgCountMismatch {
+            TypeMismatch { expected, got } => write!(f, "expected {expected}, got {got}"),
+            UndefinedFunction(n) => write!(f, "undefined function '{n}'"),
+            ArgCountMismatch {
                 fn_name,
                 expected,
                 got,
@@ -1108,86 +1092,66 @@ impl std::fmt::Display for TypeError {
                 f,
                 "fn '{fn_name}': expected {expected} arguments, got {got}"
             ),
-            TypeErrorKind::FieldNotFound { field, on_type } => {
-                write!(f, "no field '{field}' on {on_type}")
-            }
-            TypeErrorKind::FieldAccessOnNonObject(ty) => {
+            FieldNotFound { field, on_type } => write!(f, "no field '{field}' on {on_type}"),
+            FieldAccessOnNonObject(ty) => {
                 write!(f, "field access requires object or grammar_t, got {ty}")
             }
-            TypeErrorKind::ListElementTypeMismatch { first, got } => {
+            ListElementTypeMismatch { first, got } => {
                 write!(f, "list elements have inconsistent types: {first} vs {got}")
             }
-            TypeErrorKind::InvalidObjectValue(ty) => {
+            InvalidObjectValue(ty) => {
                 write!(f, "object values must be rule_t, str_t, or int_t, got {ty}")
             }
-            TypeErrorKind::InvalidListElement => {
-                write!(
-                    f,
-                    "list elements must be rule_t, str_t, int_t, or a list type"
-                )
-            }
-            TypeErrorKind::EmptyListNeedsAnnotation => {
-                write!(f, "empty list requires a type annotation")
-            }
-            TypeErrorKind::ForRequiresList(got) => {
-                write!(f, "for-expression requires a list, got {got}")
-            }
-            TypeErrorKind::ForRequiresTuples => {
-                write!(f, "for with multiple bindings requires a list of tuples")
-            }
-            TypeErrorKind::ForBindingCountMismatch {
+            InvalidListElement => write!(
+                f,
+                "list elements must be rule_t, str_t, int_t, or a list type"
+            ),
+            EmptyListNeedsAnnotation => write!(f, "empty list requires a type annotation"),
+            ForRequiresList(got) => write!(f, "for-expression requires a list, got {got}"),
+            ForRequiresTuples => write!(f, "for with multiple bindings requires a list of tuples"),
+            ForBindingCountMismatch {
                 bindings,
                 tuple_elements,
             } => write!(
                 f,
                 "for has {bindings} bindings but tuples have {tuple_elements} elements"
             ),
-            TypeErrorKind::ForBindingsNotTuple { bindings, got } => write!(
+            ForBindingsNotTuple { bindings, got } => write!(
                 f,
                 "for has {bindings} bindings but list elements are {got}, not tuples"
             ),
-            TypeErrorKind::UnresolvedVariable(n) => write!(f, "unresolved variable '{n}'"),
-            TypeErrorKind::AppendRequiresList(got) => {
-                write!(f, "append requires list arguments, got {got}")
-            }
-            TypeErrorKind::QualifiedAccessOnInvalidType(ty) => {
-                write!(f, "'::' requires module_t, got {ty}")
-            }
-            TypeErrorKind::UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
-            TypeErrorKind::InvalidAliasTarget(got) => {
+            UnresolvedVariable(n) => write!(f, "unresolved variable '{n}'"),
+            AppendRequiresList(got) => write!(f, "append requires list arguments, got {got}"),
+            QualifiedAccessOnInvalidType(ty) => write!(f, "'::' requires module_t, got {ty}"),
+            UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
+            InvalidAliasTarget(got) => {
                 write!(f, "alias target must be a name or string, got {got}")
             }
-            TypeErrorKind::ExpectedRuleName => write!(f, "expected a rule name"),
-            TypeErrorKind::ExpectedReservedConfig => {
+            ExpectedRuleName => write!(f, "expected a rule name"),
+            ExpectedReservedConfig => {
                 write!(f, "reserved config must be an object literal or inherited")
             }
-            TypeErrorKind::CannotInferType => write!(f, "cannot infer type of this expression"),
-            TypeErrorKind::VoidTypeNotAllowed => write!(
+            CannotInferType => write!(f, "cannot infer type of this expression"),
+            VoidTypeNotAllowed => write!(
                 f,
                 "void_t is an internal type and cannot be used as a type annotation"
             ),
-            TypeErrorKind::SpreadTypeNotAllowed => write!(
+            SpreadTypeNotAllowed => write!(
                 f,
                 "spread_t is an internal type and cannot be used as a type annotation"
             ),
-            TypeErrorKind::CannotBindVoid => write!(
+            CannotBindVoid => write!(
                 f,
                 "cannot bind 'print' to a variable: 'print' does not produce a value"
             ),
-            TypeErrorKind::CannotBindSpread => write!(
+            CannotBindSpread => write!(
                 f,
-                "cannot bind a for-loop expansion to a variable: for-loops are expanded inline into their enclosing list"
+                "cannot bind a for-loop expansion to a variable: for-loops are expanded inline"
             ),
-            TypeErrorKind::CannotPrintType(ty) => write!(f, "cannot print a value of type {ty}"),
-            TypeErrorKind::ImportMemberNotFound(name) => {
-                write!(f, "imported module has no member '{name}'")
-            }
-            TypeErrorKind::ImportFunctionNotFound(name) => {
-                write!(f, "imported module has no function '{name}'")
-            }
-            TypeErrorKind::QualifiedCallOnNonModule(ty) => {
-                write!(f, "'::' call requires module_t, got {ty}")
-            }
+            CannotPrintType(ty) => write!(f, "cannot print a value of type {ty}"),
+            ImportMemberNotFound(name) => write!(f, "imported module has no member '{name}'"),
+            ImportFunctionNotFound(name) => write!(f, "imported module has no function '{name}'"),
+            QualifiedCallOnNonModule(ty) => write!(f, "'::' call requires module_t, got {ty}"),
         }
     }
 }

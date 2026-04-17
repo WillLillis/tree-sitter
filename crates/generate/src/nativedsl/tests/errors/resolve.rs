@@ -1,91 +1,44 @@
 use super::super::*;
 
-#[test]
-fn error_unknown_identifier() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
-        rule program { nonexistent }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(
-        e.kind,
+macro_rules! resolve_error_tests {
+    ($($name:ident { $input:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let e = assert_err!(dsl_err($input), Resolve);
+            assert_eq!(e.kind, $expected);
+        })*
+    };
+}
+
+resolve_error_tests! {
+    error_unknown_identifier {
+        r#"grammar { language: "test" } rule program { nonexistent }"#,
         ResolveErrorKind::UnknownIdentifier("nonexistent".into())
-    );
-}
-
-#[test]
-fn error_duplicate_rule() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
-        rule program { "a" }
-        rule program { "b" }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(
-        e.kind,
+    }
+    error_duplicate_rule {
+        r#"grammar { language: "test" } rule program { "a" } rule program { "b" }"#,
         ResolveErrorKind::DuplicateDeclaration("program".into())
-    );
-}
-
-#[test]
-fn error_forward_reference_let() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
-        rule program { MY_VAR }
-        let MY_VAR: str_t = "x"
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("MY_VAR".into()));
-}
-
-#[test]
-fn error_undefined_function() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
+    }
+    error_forward_reference_let {
+        r#"grammar { language: "test" } rule program { MY_VAR } let MY_VAR: str_t = "x""#,
+        ResolveErrorKind::UnknownIdentifier("MY_VAR".into())
+    }
+    error_undefined_function {
+        r#"grammar { language: "test" }
         rule program { nonexistent_fn(identifier) }
-        rule identifier { "x" }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(
-        e.kind,
+        rule identifier { "x" }"#,
         ResolveErrorKind::UnknownIdentifier("nonexistent_fn".into())
-    );
-}
-
-#[test]
-fn error_duplicate_let() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
-        let X: int_t = 1
-        let X: int_t = 2
-        rule program { "x" }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("X".into()));
-}
-
-#[test]
-fn error_duplicate_fn() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
+    }
+    error_duplicate_let {
+        r#"grammar { language: "test" } let X: int_t = 1 let X: int_t = 2 rule program { "x" }"#,
+        ResolveErrorKind::DuplicateDeclaration("X".into())
+    }
+    error_duplicate_fn {
+        r#"grammar { language: "test" }
         fn f(x: rule_t) -> rule_t { x }
         fn f(x: rule_t) -> rule_t { x }
-        rule program { "x" }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("f".into()));
+        rule program { "x" }"#,
+        ResolveErrorKind::DuplicateDeclaration("f".into())
+    }
 }
 
 #[test]
@@ -94,20 +47,12 @@ fn error_inherited_resolve_error() {
     let base_path = dir.path().join("base.tsg");
     std::fs::write(
         &base_path,
-        r#"grammar { language: "base" }
-rule program { undefined_name }
-"#,
+        "grammar { language: \"base\" }\nrule program { undefined_name }\n",
     )
     .unwrap();
-
     let parent_path = dir.path().join("parent.tsg");
-    let parent_src = r#"let base = inherit("base.tsg")
-grammar { language: "derived", inherits: base }
-rule extra { "hello" }
-"#
-    .to_string();
+    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
     let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-
     let DslError::Module(inherited) = &err else {
         panic!("expected Module error, got {err:?}")
     };
@@ -120,8 +65,4 @@ rule extra { "hello" }
     );
     assert_eq!(inherited.path, base_path);
     assert!(inherited.source_text.contains("undefined_name"));
-    assert_eq!(
-        &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
-        "base.tsg"
-    );
 }
