@@ -141,7 +141,7 @@ impl GrammarSource {
             Self::Json(json) => json,
             #[cfg(feature = "nativedsl")]
             Self::Grammar(grammar) => {
-                serde_json::to_string_pretty(&nativedsl::lower::grammar_to_json(&grammar))
+                serde_json::to_string_pretty(&nativedsl::serialize::grammar_to_json(&grammar))
                     .expect("grammar JSON serialization should not fail")
             }
         }
@@ -300,8 +300,9 @@ where
         #[cfg(feature = "nativedsl")]
         GrammarSource::Grammar(mut grammar) => {
             parse_grammar::normalize_grammar(&mut grammar);
-            let json = serde_json::to_string_pretty(&nativedsl::lower::grammar_to_json(&grammar))
-                .expect("grammar JSON serialization should not fail");
+            let json =
+                serde_json::to_string_pretty(&nativedsl::serialize::grammar_to_json(&grammar))
+                    .expect("grammar JSON serialization should not fail");
             (*grammar, json)
         }
     };

@@ -45,7 +45,7 @@ pub(super) fn dsl_err(input: &str) -> DslError {
 pub(super) fn dsl_to_json(input: &str, path: &std::path::Path) -> (InputGrammar, String) {
     let mut grammar = parse_native_dsl(input, path).unwrap();
     crate::parse_grammar::normalize_grammar(&mut grammar);
-    let json = serde_json::to_string_pretty(&super::lower::grammar_to_json(&grammar))
+    let json = serde_json::to_string_pretty(&super::serialize::grammar_to_json(&grammar))
         .expect("grammar JSON serialization should not fail");
     (grammar, json)
 }
