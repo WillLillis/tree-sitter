@@ -321,11 +321,13 @@ fn delimited(item: rule_t) -> rule_t {
 
 #[test]
 fn error_import_member_not_found() {
-    let err = dsl_err(r#"
+    let err = dsl_err(
+        r#"
         let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
         rule program { h::nonexistent }
-    "#);
+    "#,
+    );
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
@@ -335,11 +337,13 @@ fn error_import_member_not_found() {
 
 #[test]
 fn error_import_function_not_found() {
-    let err = dsl_err(r#"
+    let err = dsl_err(
+        r#"
         let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
         rule program { h::nonexistent("x") }
-    "#);
+    "#,
+    );
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
@@ -349,11 +353,13 @@ fn error_import_function_not_found() {
 
 #[test]
 fn error_qualified_call_on_non_module() {
-    let err = dsl_err(r#"
+    let err = dsl_err(
+        r#"
         grammar { language: "test" }
         let x = { a: 1 }
         rule program { x::something("y") }
-    "#);
+    "#,
+    );
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
@@ -363,11 +369,13 @@ fn error_qualified_call_on_non_module() {
 
 #[test]
 fn error_import_wrong_arg_count() {
-    let err = dsl_err(r#"
+    let err = dsl_err(
+        r#"
         let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
         rule program { h::comma_sep1("a", "b") }
-    "#);
+    "#,
+    );
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
@@ -464,11 +472,13 @@ fn error_import_cycle() {
 
 #[test]
 fn error_import_bad_path() {
-    let err = dsl_err(r#"
+    let err = dsl_err(
+        r#"
         let h = import("nonexistent/helpers.tsg")
         grammar { language: "test" }
         rule program { "x" }
-    "#);
+    "#,
+    );
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
 }
@@ -602,11 +612,7 @@ fn import_empty_module() {
 fn import_value_in_config_extras() {
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join("ws.tsg");
-    std::fs::write(
-        &helper,
-        r#"let WS = [regexp(r"\s"), regexp(r"//[^\n]*")]"#,
-    )
-    .unwrap();
+    std::fs::write(&helper, r#"let WS = [regexp(r"\s"), regexp(r"//[^\n]*")]"#).unwrap();
 
     let input = format!(
         r#"
