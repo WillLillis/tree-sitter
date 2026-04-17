@@ -147,20 +147,16 @@ fn error_builtin_arg_count_display() {
 }
 
 #[test]
-fn error_keyword_as_ident() {
-    for src in [
-        r#"grammar { language: "test" } rule seq { "x" }"#,
-        r#"grammar { language: "test" } let token = "x" rule foo { "x" }"#,
-        r#"grammar { language: "test" } fn repeat(x: rule_t) -> rule_t { x } rule foo { "x" }"#,
-    ] {
-        let err = dsl_err(src);
-        let e = assert_err!(err, Parse);
-        assert_eq!(
-            e.kind,
-            ParseErrorKind::KeywordAsIdent,
-            "wrong error for: {src}"
-        );
-    }
+fn keywords_as_identifiers() {
+    // Keywords are contextual - they are valid as rule/let/fn names.
+    let g = dsl(r#"grammar { language: "test" } rule seq { "x" }"#);
+    assert_eq!(g.variables[0].name, "seq");
+    let g = dsl(r#"grammar { language: "test" } let token = "x" rule foo { token }"#);
+    assert_eq!(g.variables[0].name, "foo");
+    let g = dsl(
+        r#"grammar { language: "test" } fn repeat(x: rule_t) -> rule_t { x } rule foo { repeat("a") }"#,
+    );
+    assert_eq!(g.variables[0].name, "foo");
 }
 
 #[test]
@@ -215,15 +211,22 @@ fn error_nesting_too_deep() {
 
 #[test]
 fn error_print_as_expression_rejected() {
-    // `print` is only a top-level item for now, not an expression.
+    // print() in expression position parses successfully (contextual keywords)
+    // but is rejected by the typechecker since it returns void_t.
     let err = dsl_err(
         r#"
         grammar { language: "test" }
         rule program { seq(print("hi"), "x") }
     "#,
     );
-    let e = assert_err!(err, Parse);
-    assert_eq!(e.kind, ParseErrorKind::ExpectedExpression);
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::Rule,
+            got: Ty::Void
+        }
+    );
 }
 
 #[test]
@@ -235,9 +238,8 @@ fn error_let_rhs_print_rejected() {
         rule program { "x" }
     "#,
     );
-    // print isn't a valid expression, so we hit the parser first.
-    let e = assert_err!(err, Parse);
-    assert_eq!(e.kind, ParseErrorKind::ExpectedExpression);
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::CannotBindVoid);
 }
 
 #[test]

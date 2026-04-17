@@ -63,7 +63,82 @@ fn cpp_direct_prepare_grammar() {
     crate::prepare_grammar::prepare_grammar(&grammar).unwrap();
 }
 
-// ===== Vim grammar roundtrip (external grammars dir) =====
+// ===== External grammar roundtrips =====
+
+#[test]
+fn query_native_grammar_roundtrip() {
+    let grammars_dir = Path::new("/home/lillis/projects/grammars/tree-sitter-query");
+    let tsg_path = grammars_dir.join("grammar.tsg");
+    let js_json_path = grammars_dir.join("src/grammar.json");
+    let tsg_src = std::fs::read_to_string(&tsg_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", tsg_path.display()));
+    let js_json = std::fs::read_to_string(&js_json_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", js_json_path.display()));
+    let (_, native_json) = dsl_to_json(&tsg_src, &tsg_path);
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_grammar_eq(&native, &js);
+}
+
+#[test]
+fn rust_native_grammar_roundtrip() {
+    let grammars_dir = Path::new("/home/lillis/projects/grammars/tree-sitter-rust");
+    let tsg_path = grammars_dir.join("grammar.tsg");
+    let js_json_path = grammars_dir.join("src/grammar.json");
+    let tsg_src = std::fs::read_to_string(&tsg_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", tsg_path.display()));
+    let js_json = std::fs::read_to_string(&js_json_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", js_json_path.display()));
+    let (_, native_json) = dsl_to_json(&tsg_src, &tsg_path);
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_grammar_eq(&native, &js);
+}
+
+#[test]
+fn python_native_grammar_roundtrip() {
+    let grammars_dir = Path::new("/home/lillis/projects/grammars/tree-sitter-python");
+    let tsg_path = grammars_dir.join("grammar.tsg");
+    let js_json_path = grammars_dir.join("src/grammar.json");
+    let tsg_src = std::fs::read_to_string(&tsg_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", tsg_path.display()));
+    let js_json = std::fs::read_to_string(&js_json_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", js_json_path.display()));
+    let (_, native_json) = dsl_to_json(&tsg_src, &tsg_path);
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_grammar_eq(&native, &js);
+}
+
+#[test]
+fn go_native_grammar_roundtrip() {
+    let grammars_dir = Path::new("/home/lillis/projects/grammars/tree-sitter-go");
+    let tsg_path = grammars_dir.join("grammar.tsg");
+    let js_json_path = grammars_dir.join("src/grammar.json");
+    let tsg_src = std::fs::read_to_string(&tsg_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", tsg_path.display()));
+    let js_json = std::fs::read_to_string(&js_json_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", js_json_path.display()));
+    let (_, native_json) = dsl_to_json(&tsg_src, &tsg_path);
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_grammar_eq(&native, &js);
+}
+
+#[test]
+fn gomod_native_grammar_roundtrip() {
+    let grammars_dir = Path::new("/home/lillis/projects/grammars/tree-sitter-go-mod");
+    let tsg_path = grammars_dir.join("grammar.tsg");
+    let js_json_path = grammars_dir.join("src/grammar.json");
+    let tsg_src = std::fs::read_to_string(&tsg_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", tsg_path.display()));
+    let js_json = std::fs::read_to_string(&js_json_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", js_json_path.display()));
+    let (_, native_json) = dsl_to_json(&tsg_src, &tsg_path);
+    let native = crate::parse_grammar::parse_grammar(&native_json).unwrap();
+    let js = crate::parse_grammar::parse_grammar(&js_json).unwrap();
+    assert_grammar_eq(&native, &js);
+}
 
 #[test]
 fn vim_native_grammar_roundtrip() {
