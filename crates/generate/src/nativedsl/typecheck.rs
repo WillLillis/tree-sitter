@@ -51,6 +51,9 @@ pub enum Ty {
     /// Result of `inherit(...)` or `import(...)`: a loaded module namespace.
     /// Members accessed via `::`. The `u8` indexes into the module list.
     Module(u8),
+    /// Result of `grammar_config(module)`: the grammar config of a module.
+    /// Field access (`.extras`, `.word`, etc.) returns per-field types.
+    GrammarConfig,
     Spread,
     /// Result of `print(...)`: no value. Purely internal - users cannot
     /// annotate this type. Rejected anywhere a real value is expected.
@@ -99,6 +102,7 @@ impl std::fmt::Display for Ty {
             Self::ListListStr => f.write_str("list_list_str_t"),
             Self::ListListInt => f.write_str("list_list_int_t"),
             Self::Module(_) => f.write_str("module_t"),
+            Self::GrammarConfig => f.write_str("grammar_config_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Void => f.write_str("void_t"),
             Self::Object(inner) => write!(f, "object<{inner}>"),
@@ -502,6 +506,16 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             let idx = module.expect("module index not set by loading pre-pass");
             Ok(Ty::Module(idx))
         }
+        Node::GrammarConfig(inner) => {
+            let inner_ty = type_of(ast, *inner, env)?;
+            if !matches!(inner_ty, Ty::Module(_)) {
+                return Err(TypeError {
+                    kind: TypeErrorKind::QualifiedAccessOnInvalidType(inner_ty),
+                    span: ast.span(*inner),
+                });
+            }
+            Ok(Ty::GrammarConfig)
+        }
         Node::Ident => unreachable!(),
         Node::VarRef => {
             let name = ast.text(span);
@@ -725,7 +739,16 @@ fn type_of_field_access<'ast>(
                 InnerTy::ListStr => Ty::ListStr,
             })
         }
-        // Module values use :: for access, not . - this is caught at typecheck time
+        Ty::GrammarConfig => match field_name {
+            "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
+            "conflicts" | "precedences" => Ok(Ty::ListListRule),
+            "word" => Ok(Ty::Rule),
+            "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
+            _ => Err(TypeError {
+                kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
+                span: ast.span(field),
+            }),
+        },
         _ => Err(TypeError {
             kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty),
             span: ast.span(obj),
