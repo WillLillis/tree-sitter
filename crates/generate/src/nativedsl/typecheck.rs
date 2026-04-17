@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, ForId, Node, NodeId, Span};
+use super::ast::{Ast, ChildRange, ForId, Node, NodeId, Span};
 use super::scope_stack::ScopeStack;
 
 /// Types that can appear as homogeneous object field values.
@@ -49,6 +49,9 @@ pub enum Ty {
     ListListStr,
     ListListInt,
     Grammar,
+    /// Result of `import(...)`: a module namespace. Members accessed via `::`.
+    /// The `u8` is an index into the pipeline's `Vec<ImportedModule>`.
+    Import(u8),
     Spread,
     /// Result of `print(...)`: no value. Purely internal - users cannot
     /// annotate this type. Rejected anywhere a real value is expected.
@@ -97,6 +100,7 @@ impl std::fmt::Display for Ty {
             Self::ListListStr => f.write_str("list_list_str_t"),
             Self::ListListInt => f.write_str("list_list_int_t"),
             Self::Grammar => f.write_str("grammar_t"),
+            Self::Import(_) => f.write_str("import_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Void => f.write_str("void_t"),
             Self::Object(inner) => write!(f, "object<{inner}>"),
@@ -116,11 +120,14 @@ pub struct TypeEnv<'src> {
     pub fns: FxHashMap<&'src str, FnSig>,
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
+    /// Type environments of imported modules, indexed by `Ty::Import(idx)`.
+    pub modules: Vec<TypeEnv<'src>>,
 }
 
 impl<'src> TypeEnv<'src> {
     fn new() -> Self {
         Self {
+            modules: Vec::new(),
             vars: ScopeStack::new(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
@@ -172,7 +179,7 @@ impl std::ops::DerefMut for ScopeGuard<'_, '_> {
 
 // -- Type annotation resolution --
 
-fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
+fn resolve_type_annotation(ast: &Ast, id: NodeId) -> Result<Ty, TypeError> {
     match ast.node(id) {
         Node::TypeRule => Ok(Ty::Rule),
         Node::TypeStr => Ok(Ty::Str),
@@ -201,8 +208,15 @@ fn resolve_type_annotation(ast: &Ast<'_>, id: NodeId) -> Result<Ty, TypeError> {
 // -- Entry point --
 
 /// Run typechecking and return the type environment.
-pub fn check<'src>(ast: &'src Ast<'src>) -> Result<TypeEnv<'src>, TypeError> {
+///
+/// `modules` holds imported modules' type environments (indexed by
+/// `Ty::Import(idx)`), populated by the import pre-pass in `mod.rs`.
+pub fn check<'ast>(
+    ast: &'ast Ast,
+    modules: Vec<TypeEnv<'ast>>,
+) -> Result<TypeEnv<'ast>, TypeError> {
     let mut env = TypeEnv::new();
+    env.modules = modules;
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
@@ -228,11 +242,7 @@ pub fn check<'src>(ast: &'src Ast<'src>) -> Result<TypeEnv<'src>, TypeError> {
     Ok(env)
 }
 
-fn check_item<'src>(
-    ast: &'src Ast<'src>,
-    id: NodeId,
-    env: &mut TypeEnv<'src>,
-) -> Result<(), TypeError> {
+fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::Grammar => {
             let config = ast.context.grammar_config.as_ref().unwrap();
@@ -351,11 +361,11 @@ fn check_item<'src>(
 
 /// Check a list config field. For literal lists, checks each element with `check_elem`.
 /// For non-literal expressions, checks the overall type is a list type.
-fn expect_list<'src>(
-    ast: &'src Ast<'src>,
+fn expect_list<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
-    check_elem: fn(&'src Ast<'src>, NodeId, &mut TypeEnv<'src>) -> Result<(), TypeError>,
+    env: &mut TypeEnv<'ast>,
+    check_elem: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>) -> Result<(), TypeError>,
     accept_list_str: bool,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = ast.node(id) {
@@ -371,26 +381,26 @@ fn expect_list<'src>(
     Err(mismatch(Ty::ListRule, ty, ast.span(id)))
 }
 
-fn expect_rule_list<'src>(
-    ast: &'src Ast<'src>,
+fn expect_rule_list<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     expect_list(ast, id, env, expect_rule, true)
 }
 
-fn expect_name_list<'src>(
-    ast: &'src Ast<'src>,
+fn expect_name_list<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     expect_list(ast, id, env, expect_name_ref, false)
 }
 
-fn expect_name_ref<'src>(
-    ast: &'src Ast<'src>,
+fn expect_name_ref<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::RuleRef => Ok(()),
@@ -411,11 +421,11 @@ fn expect_name_ref<'src>(
 /// Check a `list_list_rule_t` config field. For literal lists-of-lists, validates
 /// each inner list element-wise with `check_inner`. For non-literal expressions,
 /// checks the overall type is `list_list_rule_t` (or a subtype thereof).
-fn expect_list_list<'src>(
-    ast: &'src Ast<'src>,
+fn expect_list_list<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
-    check_inner: fn(&'src Ast<'src>, NodeId, &mut TypeEnv<'src>) -> Result<(), TypeError>,
+    env: &mut TypeEnv<'ast>,
+    check_inner: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>) -> Result<(), TypeError>,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = ast.node(id) {
         for &child in ast.child_slice(*range) {
@@ -431,10 +441,10 @@ fn expect_list_list<'src>(
 }
 
 /// Inner element for `precedences`: a name ref or a string literal.
-fn expect_name_or_str<'src>(
-    ast: &'src Ast<'src>,
+fn expect_name_or_str<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     if matches!(ast.node(id), Node::StringLit | Node::RawStringLit { .. }) {
         return Ok(());
@@ -443,18 +453,18 @@ fn expect_name_or_str<'src>(
 }
 
 /// Check a `precedences` inner list: each element must be a name-ref or string literal.
-fn expect_precedence_group<'src>(
-    ast: &'src Ast<'src>,
+fn expect_precedence_group<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     expect_list(ast, id, env, expect_name_or_str, true)
 }
 
-fn expect_reserved<'src>(
-    ast: &'src Ast<'src>,
+fn expect_reserved<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = ast.node(id) {
@@ -474,11 +484,7 @@ fn expect_reserved<'src>(
     })
 }
 
-fn expect_rule<'src>(
-    ast: &'src Ast<'src>,
-    id: NodeId,
-    env: &mut TypeEnv<'src>,
-) -> Result<(), TypeError> {
+fn expect_rule<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<(), TypeError> {
     let ty = type_of(ast, id, env)?;
     if !ty.is_rule_like() {
         return Err(mismatch(Ty::Rule, ty, ast.span(id)));
@@ -488,10 +494,10 @@ fn expect_rule<'src>(
 
 // -- Type inference --
 
-fn type_of<'src>(
-    ast: &'src Ast<'src>,
+fn type_of<'ast>(
+    ast: &'ast Ast,
     id: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let span = ast.span(id);
     match ast.node(id) {
@@ -499,6 +505,10 @@ fn type_of<'src>(
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
         Node::RuleRef | Node::Blank => Ok(Ty::Rule),
         Node::Inherit { .. } => Ok(Ty::Grammar),
+        Node::Import { module, .. } => {
+            let idx = module.expect("import module index not set by pre-pass");
+            Ok(Ty::Import(idx))
+        }
         Node::Ident => unreachable!(),
         Node::VarRef => {
             let name = ast.text(span);
@@ -516,15 +526,16 @@ fn type_of<'src>(
         }
         Node::Append { left, right } => type_of_append(ast, *left, *right, span, env),
         Node::FieldAccess { obj, field } => type_of_field_access(ast, *obj, *field, env),
-        Node::RuleInline { obj, .. } => {
+        Node::QualifiedAccess { obj, member } => {
             let obj_ty = type_of(ast, *obj, env)?;
-            if obj_ty != Ty::Grammar {
-                return Err(TypeError {
-                    kind: TypeErrorKind::ConfigAccessOnNonGrammar(obj_ty),
+            match obj_ty {
+                Ty::Grammar => Ok(Ty::Rule),
+                Ty::Import(idx) => type_of_import_access(ast, idx, *member, env),
+                _ => Err(TypeError {
+                    kind: TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
                     span: ast.span(*obj),
-                });
+                }),
             }
-            Ok(Ty::Rule)
         }
         Node::Object(range) => type_of_object(ast, *range, span, env),
         Node::List(range) => type_of_list(ast, *range, span, env),
@@ -616,6 +627,13 @@ fn type_of<'src>(
             Ok(Ty::Spread)
         }
         Node::Call { name, args } => type_of_call(ast, *name, *args, span, env),
+        Node::QualifiedCall(range) => type_of_qualified_call(ast, *range, span, env),
+        // print() in expression position - returns Void which will be rejected
+        // by the caller (e.g. CannotBindVoid in let, type mismatch in seq/choice)
+        Node::Print(arg) => {
+            type_of(ast, *arg, env)?;
+            Ok(Ty::Void)
+        }
         _ => Err(TypeError {
             kind: TypeErrorKind::CannotInferType,
             span,
@@ -627,12 +645,12 @@ fn type_of<'src>(
 
 // -- type_of helpers (extracted from the main match) --
 
-fn type_of_append<'src>(
-    ast: &'src Ast<'src>,
+fn type_of_append<'ast>(
+    ast: &'ast Ast,
     left: NodeId,
     right: NodeId,
     span: Span,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let l_empty = matches!(ast.node(left), Node::List(r) if ast.child_slice(*r).is_empty());
     let r_empty = matches!(ast.node(right), Node::List(r) if ast.child_slice(*r).is_empty());
@@ -683,11 +701,11 @@ fn type_of_append<'src>(
     }
 }
 
-fn type_of_field_access<'src>(
-    ast: &'src Ast<'src>,
+fn type_of_field_access<'ast>(
+    ast: &'ast Ast,
     obj: NodeId,
     field: NodeId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let obj_ty = type_of(ast, obj, env)?;
     let field_name = ast.node_text(field);
@@ -732,11 +750,80 @@ fn type_of_field_access<'src>(
     }
 }
 
-fn type_of_object<'src>(
-    ast: &'src Ast<'src>,
+fn type_of_import_access(
+    ast: &Ast,
+    idx: u8,
+    member: NodeId,
+    env: &mut TypeEnv<'_>,
+) -> Result<Ty, TypeError> {
+    let member_name = ast.node_text(member);
+    let import_env = &env.modules[idx as usize];
+    if let Some(ty) = import_env.vars.get(member_name) {
+        return Ok(ty);
+    }
+    if import_env.fns.contains_key(member_name) {
+        // Accessing a function without calling it - not valid as a value
+        return Err(TypeError {
+            kind: TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+            span: ast.span(member),
+        });
+    }
+    Err(TypeError {
+        kind: TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+        span: ast.span(member),
+    })
+}
+
+fn type_of_qualified_call<'a>(
+    ast: &'a Ast,
+    range: ChildRange,
+    span: Span,
+    env: &mut TypeEnv<'a>,
+) -> Result<Ty, TypeError> {
+    let (obj, name, args) = ast.get_qualified_call(range);
+    let obj_ty = type_of(ast, obj, env)?;
+    let Ty::Import(idx) = obj_ty else {
+        return Err(TypeError {
+            kind: TypeErrorKind::QualifiedCallOnNonImport(obj_ty),
+            span: ast.span(obj),
+        });
+    };
+    let fn_name = ast.node_text(name);
+    let import_env = &env.modules[idx as usize];
+    let Some(sig) = import_env.fns.get(fn_name) else {
+        return Err(TypeError {
+            kind: TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
+            span: ast.span(name),
+        });
+    };
+    // Clone sig data out before calling type_of (which borrows env mutably)
+    let param_types: Vec<Ty> = sig.params.clone();
+    let return_ty = sig.return_ty;
+    let fn_name = fn_name.to_string();
+    if args.len() != param_types.len() {
+        return Err(TypeError {
+            kind: TypeErrorKind::ArgCountMismatch {
+                fn_name,
+                expected: param_types.len(),
+                got: args.len(),
+            },
+            span,
+        });
+    }
+    for (i, &arg_id) in args.iter().enumerate() {
+        let arg_ty = type_of(ast, arg_id, env)?;
+        if !arg_ty.is_compatible(param_types[i]) {
+            return Err(mismatch(param_types[i], arg_ty, ast.span(arg_id)));
+        }
+    }
+    Ok(return_ty)
+}
+
+fn type_of_object<'ast>(
+    ast: &'ast Ast,
     range: super::ast::ChildRange,
     span: Span,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let fields = ast.get_object(range);
     if fields.is_empty() {
@@ -768,11 +855,11 @@ fn type_of_object<'src>(
     Ok(Ty::Object(inner))
 }
 
-fn type_of_list<'src>(
-    ast: &'src Ast<'src>,
+fn type_of_list<'ast>(
+    ast: &'ast Ast,
     range: super::ast::ChildRange,
     span: Span,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let items = ast.child_slice(range);
     if items.is_empty() {
@@ -805,12 +892,12 @@ fn type_of_list<'src>(
     }
 }
 
-fn type_of_call<'src>(
-    ast: &'src Ast<'src>,
+fn type_of_call<'ast>(
+    ast: &'ast Ast,
     name: NodeId,
     args: super::ast::ChildRange,
     span: Span,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<Ty, TypeError> {
     let fn_name = ast.node_text(name);
     let sig = env.fns.get(fn_name).ok_or_else(|| TypeError {
@@ -842,10 +929,10 @@ fn type_of_call<'src>(
 
 // -- For-loop checking --
 
-fn check_for_expr<'src>(
-    ast: &'src Ast<'src>,
+fn check_for_expr<'ast>(
+    ast: &'ast Ast,
     for_idx: ForId,
-    env: &mut TypeEnv<'src>,
+    env: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     let config = ast.get_for(for_idx);
 
@@ -897,11 +984,11 @@ fn check_for_expr<'src>(
     expect_rule(ast, config.body, &mut scope)
 }
 
-fn check_for_tuple_element<'src>(
-    ast: &'src Ast<'src>,
+fn check_for_tuple_element<'ast>(
+    ast: &'ast Ast,
     item_id: NodeId,
     config: &super::ast::ForConfig,
-    scope: &mut TypeEnv<'src>,
+    scope: &mut TypeEnv<'ast>,
 ) -> Result<(), TypeError> {
     let Node::Tuple(range) = ast.node(item_id) else {
         return Err(TypeError {
@@ -984,7 +1071,7 @@ pub enum TypeErrorKind {
     },
     UnresolvedVariable(String),
     AppendRequiresList(Ty),
-    ConfigAccessOnNonGrammar(Ty),
+    QualifiedAccessOnInvalidType(Ty),
     UnknownConfigField(String),
     InvalidAliasTarget(Ty),
     ExpectedRuleName,
@@ -995,6 +1082,9 @@ pub enum TypeErrorKind {
     CannotBindVoid,
     CannotBindSpread,
     CannotPrintType(Ty),
+    ImportMemberNotFound(String),
+    ImportFunctionNotFound(String),
+    QualifiedCallOnNonImport(Ty),
 }
 
 impl std::fmt::Display for TypeError {
@@ -1054,8 +1144,8 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::AppendRequiresList(got) => {
                 write!(f, "append requires list arguments, got {got}")
             }
-            TypeErrorKind::ConfigAccessOnNonGrammar(ty) => {
-                write!(f, "'::' requires grammar_t, got {ty}")
+            TypeErrorKind::QualifiedAccessOnInvalidType(ty) => {
+                write!(f, "'::' requires grammar_t or import_t, got {ty}")
             }
             TypeErrorKind::UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
             TypeErrorKind::InvalidAliasTarget(got) => {
@@ -1083,6 +1173,15 @@ impl std::fmt::Display for TypeError {
                 "cannot bind a for-loop expansion to a variable: for-loops are expanded inline into their enclosing list"
             ),
             TypeErrorKind::CannotPrintType(ty) => write!(f, "cannot print a value of type {ty}"),
+            TypeErrorKind::ImportMemberNotFound(name) => {
+                write!(f, "imported module has no member '{name}'")
+            }
+            TypeErrorKind::ImportFunctionNotFound(name) => {
+                write!(f, "imported module has no function '{name}'")
+            }
+            TypeErrorKind::QualifiedCallOnNonImport(ty) => {
+                write!(f, "'::' call requires import_t, got {ty}")
+            }
         }
     }
 }

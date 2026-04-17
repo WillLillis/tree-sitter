@@ -19,18 +19,18 @@ use super::{
 
 const MAX_PARSE_DEPTH: u16 = 256;
 
-pub struct Parser<'src, 'tok, 'path> {
+pub struct Parser<'tok, 'path> {
     tokens: &'tok [Token],
     pos: usize,
     grammar_path: &'path Path,
-    pub ast: Ast<'src>,
+    pub ast: Ast,
     scratch: Vec<NodeId>,
     depth: u16,
 }
 
-impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
+impl<'tok, 'path> Parser<'tok, 'path> {
     #[must_use]
-    pub fn new(tokens: &'tok [Token], source: &'src str, grammar_path: &'path Path) -> Self {
+    pub fn new(tokens: &'tok [Token], source: String, grammar_path: &'path Path) -> Self {
         Self {
             tokens,
             pos: 0,
@@ -41,7 +41,7 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
         }
     }
 
-    pub fn parse(mut self) -> Result<Ast<'src>, ParseError> {
+    pub fn parse(mut self) -> Result<Ast, ParseError> {
         self.skip_comments();
         while !self.at_eof() {
             let id = self.parse_item()?;
@@ -65,6 +65,17 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
     }
     fn at(&self, kind: TokenKind) -> bool {
         self.tokens[self.pos].kind == kind
+    }
+
+    /// Check whether the next non-comment token after the current one is `kind`.
+    /// Safe without bounds check: the token stream always ends with `Eof`.
+    fn next_is(&self, kind: TokenKind) -> bool {
+        let mut i = self.pos + 1;
+        // SAFETY: token stream is terminated by Eof, so we cannot overrun.
+        while unsafe { self.tokens.get_unchecked(i) }.kind == TokenKind::Comment {
+            i += 1;
+        }
+        unsafe { self.tokens.get_unchecked(i) }.kind == kind
     }
 
     /// Advance past the current token, skipping any comments.
@@ -100,14 +111,18 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
         Ok(self.ast.push(Node::Ident, span))
     }
 
+    /// Accept an identifier or a keyword used as an identifier.
+    /// Keywords are contextual: `seq(...)` is a builtin call, but `seq` as a
+    /// bare name (e.g. a rule reference or binding name) is a valid identifier.
     fn expect_ident(&mut self) -> Result<Span, ParseError> {
-        self.eat(TokenKind::Ident).ok_or_else(|| {
-            if self.tokens[self.pos].kind.is_keyword() {
-                self.error(ParseErrorKind::KeywordAsIdent)
-            } else {
-                self.error(ParseErrorKind::ExpectedIdent)
-            }
-        })
+        let kind = self.tokens[self.pos].kind;
+        if kind == TokenKind::Ident || kind.is_keyword() {
+            let span = self.span();
+            self.advance_pos();
+            Ok(span)
+        } else {
+            Err(self.error(ParseErrorKind::ExpectedIdent))
+        }
     }
 
     fn expect_string(&mut self) -> Result<Span, ParseError> {
@@ -382,13 +397,21 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
 
     fn parse_primary(&mut self) -> Result<NodeId, ParseError> {
         let start = self.span();
+        // Builtin keywords are contextual: they act as keywords only when
+        // followed by `(` (or `{` for `for`). Otherwise they are identifiers
+        // so grammars can use names like `import`, `field`, etc. as rules.
+        let next_lparen = self.next_is(TokenKind::LParen);
         match &self.tokens[self.pos].kind {
-            TokenKind::KwSeq => self.parse_variadic(start, Node::Seq),
-            TokenKind::KwChoice => self.parse_variadic(start, Node::Choice),
-            TokenKind::KwRepeat => self.parse_unary(start, "repeat", Node::Repeat),
-            TokenKind::KwRepeat1 => self.parse_unary(start, "repeat1", Node::Repeat1),
-            TokenKind::KwOptional => self.parse_unary(start, "optional", Node::Optional),
-            TokenKind::KwBlank => {
+            TokenKind::KwSeq if next_lparen => self.parse_variadic(start, Node::Seq),
+            TokenKind::KwChoice if next_lparen => self.parse_variadic(start, Node::Choice),
+            TokenKind::KwRepeat if next_lparen => self.parse_unary(start, "repeat", Node::Repeat),
+            TokenKind::KwRepeat1 if next_lparen => {
+                self.parse_unary(start, "repeat1", Node::Repeat1)
+            }
+            TokenKind::KwOptional if next_lparen => {
+                self.parse_unary(start, "optional", Node::Optional)
+            }
+            TokenKind::KwBlank if next_lparen => {
                 self.advance_pos();
                 self.expect(TokenKind::LParen)?;
                 if !self.at(TokenKind::RParen) {
@@ -405,23 +428,29 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 let end = self.expect(TokenKind::RParen)?;
                 Ok(self.ast.push(Node::Blank, start.merge(end)))
             }
-            TokenKind::KwField => self.parse_field(start),
-            TokenKind::KwAlias => self.parse_alias(start),
-            TokenKind::KwToken => self.parse_unary(start, "token", Node::Token),
-            TokenKind::KwTokenImmediate => {
+            TokenKind::KwField if next_lparen => self.parse_field(start),
+            TokenKind::KwAlias if next_lparen => self.parse_alias(start),
+            TokenKind::KwToken if next_lparen => self.parse_unary(start, "token", Node::Token),
+            TokenKind::KwTokenImmediate if next_lparen => {
                 self.parse_unary(start, "token_immediate", Node::TokenImmediate)
             }
-            TokenKind::KwPrec => self.parse_prec(start, PrecVariant::Default),
-            TokenKind::KwPrecLeft => self.parse_prec(start, PrecVariant::Left),
-            TokenKind::KwPrecRight => self.parse_prec(start, PrecVariant::Right),
-            TokenKind::KwPrecDynamic => self.parse_prec(start, PrecVariant::Dynamic),
-            TokenKind::KwReserved => self.parse_reserved_expr(start),
-            TokenKind::KwConcat => self.parse_variadic(start, Node::Concat),
-            TokenKind::KwRegexp => self.parse_regexp(start),
-            TokenKind::KwInherit => self.parse_inherit(start),
-            TokenKind::KwAppend => self.parse_append(start),
+            TokenKind::KwPrec if next_lparen => self.parse_prec(start, PrecVariant::Default),
+            TokenKind::KwPrecLeft if next_lparen => self.parse_prec(start, PrecVariant::Left),
+            TokenKind::KwPrecRight if next_lparen => self.parse_prec(start, PrecVariant::Right),
+            TokenKind::KwPrecDynamic if next_lparen => {
+                self.parse_prec(start, PrecVariant::Dynamic)
+            }
+            TokenKind::KwReserved if next_lparen => self.parse_reserved_expr(start),
+            TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
+            TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
+            TokenKind::KwInherit if next_lparen => self.parse_inherit(start),
+            TokenKind::KwImport if next_lparen => self.parse_import(start),
+            TokenKind::KwAppend if next_lparen => self.parse_append(start),
+            TokenKind::KwPrint if next_lparen => self.parse_print_item(),
             TokenKind::KwFor => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
+            // Keyword used as identifier (e.g. `import` as a rule reference)
+            k if k.is_keyword() => self.parse_ident_expr(start),
             TokenKind::StringLit => {
                 self.advance_pos();
                 Ok(self
@@ -570,6 +599,22 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
             .push(Node::DynRegex { pattern, flags }, start.merge(end)))
     }
 
+    fn parse_import(&mut self, start: Span) -> Result<NodeId, ParseError> {
+        self.advance_pos();
+        self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count("import", 1, 0, start));
+        }
+        let path_span = self.expect_string()?;
+        let path = self.ast.push(
+            Node::StringLit,
+            Span::new(path_span.start + 1, path_span.end - 1),
+        );
+        self.expect_close_args("import", 1, start)?;
+        let end = self.expect(TokenKind::RParen)?;
+        Ok(self.ast.push(Node::Import { path, module: None }, start.merge(end)))
+    }
+
     fn parse_inherit(&mut self, start: Span) -> Result<NodeId, ParseError> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
@@ -629,10 +674,27 @@ impl<'src, 'tok, 'path> Parser<'src, 'tok, 'path> {
                 );
             } else if self.at(TokenKind::ColonColon) {
                 self.advance_pos();
-                let rule = self.expect_ident_node()?;
+                let member = self.expect_ident_node()?;
+                if self.at(TokenKind::LParen) {
+                    // h::fn_name(args) - qualified call
+                    self.advance_pos();
+                    let mut children = vec![id, member];
+                    let arg_ids =
+                        self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
+                    children.extend_from_slice(self.ast.child_slice(arg_ids));
+                    let end = self.expect(TokenKind::RParen)?;
+                    let range = self.ast.push_children(&children).map_err(|_| {
+                        self.error(ParseErrorKind::NestingTooDeep)
+                    })?;
+                    id = self.ast.push(
+                        Node::QualifiedCall(range),
+                        start.merge(end),
+                    );
+                    break;
+                }
                 id = self.ast.push(
-                    Node::RuleInline { obj: id, rule },
-                    start.merge(self.ast.span(rule)),
+                    Node::QualifiedAccess { obj: id, member },
+                    start.merge(self.ast.span(member)),
                 );
             } else if self.at(TokenKind::LParen) {
                 if !matches!(self.ast.node(id), Node::Ident) {
