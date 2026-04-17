@@ -183,12 +183,9 @@ pub fn lower_with_base(
     grammar_path: &Path,
     modules: &[super::Module],
 ) -> Result<InputGrammar, LowerError> {
-    let result = evaluate(ast, grammar_path, modules)?;
-    let mut base = modules
-        .iter()
-        .find_map(|m| m.lowered.clone())
-        .unwrap_or_default();
-    build_grammar(result, &mut base)
+    let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
+    let result = evaluate(ast, grammar_path, modules, base_grammar)?;
+    build_grammar(result, base_grammar)
 }
 
 /// Evaluate the AST, producing intermediate results.
@@ -196,8 +193,8 @@ fn evaluate(
     ast: &Ast,
     grammar_path: &Path,
     modules: &[super::Module],
+    base_grammar: Option<&InputGrammar>,
 ) -> Result<EvalResult, LowerError> {
-    let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
     let mut eval = Evaluator::new(ast, base_grammar, modules);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
@@ -295,60 +292,72 @@ fn evaluate(
     })
 }
 
-/// Assemble evaluated results into an `InputGrammar`, merging with the base.
-fn build_grammar(result: EvalResult, out: &mut InputGrammar) -> Result<InputGrammar, LowerError> {
-    out.name = result.language;
-
-    if !result.overrides.is_empty() && out.variables.is_empty() {
+/// Assemble evaluated results into an `InputGrammar`, optionally merging
+/// with an inherited base grammar.
+fn build_grammar(
+    result: EvalResult,
+    base: Option<&InputGrammar>,
+) -> Result<InputGrammar, LowerError> {
+    // Start with inherited rules (cloned), apply overrides, then append new rules.
+    let mut variables = if let Some(base) = base {
+        let mut vars = base.variables.clone();
+        for (name, rule, span) in result.overrides {
+            if let Some(var) = vars.iter_mut().find(|v| v.name == name) {
+                var.rule = rule;
+            } else {
+                return Err(LowerError::new(
+                    LowerErrorKind::OverrideRuleNotFound(name),
+                    span,
+                ));
+            }
+        }
+        vars
+    } else if !result.overrides.is_empty() {
         return Err(LowerError::new(
             LowerErrorKind::OverrideWithoutInherit,
             result.overrides[0].2,
         ));
-    }
-    for (name, rule, span) in result.overrides {
-        if let Some(var) = out.variables.iter_mut().find(|v| v.name == name) {
-            var.rule = rule;
-        } else {
-            return Err(LowerError::new(
-                LowerErrorKind::OverrideRuleNotFound(name),
-                span,
-            ));
-        }
-    }
+    } else {
+        Vec::new()
+    };
+
     for (name, rule) in result.rules {
-        out.variables.push(Variable {
+        variables.push(Variable {
             name,
             kind: VariableType::Named,
             rule,
         });
     }
 
-    if let Some(v) = result.extras {
-        out.extra_symbols = v;
-    }
-    if let Some(v) = result.externals {
-        out.external_tokens = v;
-    }
-    if let Some(v) = result.inline {
-        out.variables_to_inline = v;
-    }
-    if let Some(v) = result.supertypes {
-        out.supertype_symbols = v;
-    }
-    if let Some(v) = result.word {
-        out.word_token = Some(v);
-    }
-    if let Some(v) = result.conflicts {
-        out.expected_conflicts = v;
-    }
-    if let Some(v) = result.precedences {
-        out.precedence_orderings = v;
-    }
-    if let Some(v) = result.reserved {
-        out.reserved_words = v;
-    }
-
-    Ok(std::mem::take(out))
+    // Derived values override base; only clone base fields that aren't overridden.
+    Ok(InputGrammar {
+        name: result.language,
+        variables,
+        extra_symbols: result
+            .extras
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.extra_symbols.clone())),
+        expected_conflicts: result
+            .conflicts
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.expected_conflicts.clone())),
+        precedence_orderings: result
+            .precedences
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.precedence_orderings.clone())),
+        external_tokens: result
+            .externals
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.external_tokens.clone())),
+        variables_to_inline: result
+            .inline
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.variables_to_inline.clone())),
+        supertype_symbols: result
+            .supertypes
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.supertype_symbols.clone())),
+        word_token: result
+            .word
+            .or_else(|| base.and_then(|b| b.word_token.clone())),
+        reserved_words: result
+            .reserved
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.reserved_words.clone())),
+    })
 }
 
 impl<'ast> Evaluator<'ast> {
