@@ -28,7 +28,7 @@ pub enum PrecedenceEntry {
     Symbol(String),
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InputGrammar {
     pub name: String,
     pub variables: Vec<Variable>,
