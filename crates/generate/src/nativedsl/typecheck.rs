@@ -48,10 +48,9 @@ pub enum Ty {
     ListListRule,
     ListListStr,
     ListListInt,
-    Grammar,
-    /// Result of `import(...)`: a module namespace. Members accessed via `::`.
-    /// The `u8` is an index into the pipeline's `Vec<ImportedModule>`.
-    Import(u8),
+    /// Result of `inherit(...)` or `import(...)`: a loaded module namespace.
+    /// Members accessed via `::`. The `u8` indexes into the module list.
+    Module(u8),
     Spread,
     /// Result of `print(...)`: no value. Purely internal - users cannot
     /// annotate this type. Rejected anywhere a real value is expected.
@@ -99,8 +98,7 @@ impl std::fmt::Display for Ty {
             Self::ListListRule => f.write_str("list_list_rule_t"),
             Self::ListListStr => f.write_str("list_list_str_t"),
             Self::ListListInt => f.write_str("list_list_int_t"),
-            Self::Grammar => f.write_str("grammar_t"),
-            Self::Import(_) => f.write_str("import_t"),
+            Self::Module(_) => f.write_str("module_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Void => f.write_str("void_t"),
             Self::Object(inner) => write!(f, "object<{inner}>"),
@@ -120,7 +118,7 @@ pub struct TypeEnv<'src> {
     pub fns: FxHashMap<&'src str, FnSig>,
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
-    /// Type environments of imported modules, indexed by `Ty::Import(idx)`.
+    /// Type environments of imported modules, indexed by `Ty::Module(idx)`.
     pub modules: Vec<TypeEnv<'src>>,
 }
 
@@ -210,7 +208,7 @@ fn resolve_type_annotation(ast: &Ast, id: NodeId) -> Result<Ty, TypeError> {
 /// Run typechecking and return the type environment.
 ///
 /// `modules` holds imported modules' type environments (indexed by
-/// `Ty::Import(idx)`), populated by the import pre-pass in `mod.rs`.
+/// `Ty::Module(idx)`), populated by the import pre-pass in `mod.rs`.
 pub fn check<'ast>(
     ast: &'ast Ast,
     modules: Vec<TypeEnv<'ast>>,
@@ -494,20 +492,15 @@ fn expect_rule<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Res
 
 // -- Type inference --
 
-fn type_of<'ast>(
-    ast: &'ast Ast,
-    id: NodeId,
-    env: &mut TypeEnv<'ast>,
-) -> Result<Ty, TypeError> {
+fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<Ty, TypeError> {
     let span = ast.span(id);
     match ast.node(id) {
         Node::IntLit(_) => Ok(Ty::Int),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
         Node::RuleRef | Node::Blank => Ok(Ty::Rule),
-        Node::Inherit { .. } => Ok(Ty::Grammar),
-        Node::Import { module, .. } => {
-            let idx = module.expect("import module index not set by pre-pass");
-            Ok(Ty::Import(idx))
+        Node::Inherit { module, .. } | Node::Import { module, .. } => {
+            let idx = module.expect("module index not set by loading pre-pass");
+            Ok(Ty::Module(idx))
         }
         Node::Ident => unreachable!(),
         Node::VarRef => {
@@ -529,8 +522,7 @@ fn type_of<'ast>(
         Node::QualifiedAccess { obj, member } => {
             let obj_ty = type_of(ast, *obj, env)?;
             match obj_ty {
-                Ty::Grammar => Ok(Ty::Rule),
-                Ty::Import(idx) => type_of_import_access(ast, idx, *member, env),
+                Ty::Module(idx) => type_of_import_access(ast, idx, *member, env),
                 _ => Err(TypeError {
                     kind: TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
                     span: ast.span(*obj),
@@ -733,16 +725,7 @@ fn type_of_field_access<'ast>(
                 InnerTy::ListStr => Ty::ListStr,
             })
         }
-        Ty::Grammar => match field_name {
-            "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
-            "conflicts" | "precedences" => Ok(Ty::ListListRule),
-            "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
-            "word" => Ok(Ty::Rule),
-            _ => Err(TypeError {
-                kind: TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                span: ast.span(field),
-            }),
-        },
+        // Module values use :: for access, not . - this is caught at typecheck time
         _ => Err(TypeError {
             kind: TypeErrorKind::FieldAccessOnNonObject(obj_ty),
             span: ast.span(obj),
@@ -782,9 +765,9 @@ fn type_of_qualified_call<'a>(
 ) -> Result<Ty, TypeError> {
     let (obj, name, args) = ast.get_qualified_call(range);
     let obj_ty = type_of(ast, obj, env)?;
-    let Ty::Import(idx) = obj_ty else {
+    let Ty::Module(idx) = obj_ty else {
         return Err(TypeError {
-            kind: TypeErrorKind::QualifiedCallOnNonImport(obj_ty),
+            kind: TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
             span: ast.span(obj),
         });
     };
@@ -1084,7 +1067,7 @@ pub enum TypeErrorKind {
     CannotPrintType(Ty),
     ImportMemberNotFound(String),
     ImportFunctionNotFound(String),
-    QualifiedCallOnNonImport(Ty),
+    QualifiedCallOnNonModule(Ty),
 }
 
 impl std::fmt::Display for TypeError {
@@ -1145,7 +1128,7 @@ impl std::fmt::Display for TypeError {
                 write!(f, "append requires list arguments, got {got}")
             }
             TypeErrorKind::QualifiedAccessOnInvalidType(ty) => {
-                write!(f, "'::' requires grammar_t or import_t, got {ty}")
+                write!(f, "'::' requires module_t, got {ty}")
             }
             TypeErrorKind::UnknownConfigField(n) => write!(f, "unknown grammar config field '{n}'"),
             TypeErrorKind::InvalidAliasTarget(got) => {
@@ -1179,8 +1162,8 @@ impl std::fmt::Display for TypeError {
             TypeErrorKind::ImportFunctionNotFound(name) => {
                 write!(f, "imported module has no function '{name}'")
             }
-            TypeErrorKind::QualifiedCallOnNonImport(ty) => {
-                write!(f, "'::' call requires import_t, got {ty}")
+            TypeErrorKind::QualifiedCallOnNonModule(ty) => {
+                write!(f, "'::' call requires module_t, got {ty}")
             }
         }
     }
