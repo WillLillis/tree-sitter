@@ -23,6 +23,7 @@ mod bindings;
 mod combinators;
 mod config;
 mod errors;
+mod imports;
 mod inheritance;
 mod print;
 mod roundtrip;
