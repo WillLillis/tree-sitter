@@ -122,20 +122,35 @@ enum Value<'src> {
     List(Vec<ValueId>),
     Tuple(Vec<ValueId>),
     Grammar,
+    Import(u8),
 }
 
 const MAX_CALL_DEPTH: u16 = 64;
 
-struct Evaluator<'src> {
-    ast: &'src Ast<'src>,
-    values: Vec<Value<'src>>,
-    scopes: ScopeStack<'src, ValueId>, //Vec<FxHashMap<&'src str, ValueId>>,
-    fns: FxHashMap<&'src str, NodeId>,
+struct Evaluator<'ast> {
+    ast: &'ast Ast,
+    values: Vec<Value<'ast>>,
+    scopes: ScopeStack<'ast, ValueId>,
+    fns: FxHashMap<&'ast str, NodeId>,
     rules: Vec<ARule>,
     rule_children: Vec<RuleId>,
-    strings: StringPool<'src>,
-    base_grammar: Option<&'src InputGrammar>,
-    call_stack: Vec<(&'src str, Span)>,
+    strings: StringPool<'ast>,
+    base_grammar: Option<&'ast InputGrammar>,
+    call_stack: Vec<(&'ast str, Span)>,
+    /// Loaded import modules, indexed by `Value::Import(idx)`.
+    import_modules: &'ast [super::ImportedModule],
+    /// Evaluated state for each import module, populated when
+    /// `let h = import(...)` is first evaluated during lowering.
+    import_evals: Vec<ImportEval<'ast>>,
+}
+
+/// Evaluated state for a single imported module. Populated when the import
+/// is first encountered during lowering.
+struct ImportEval<'ast> {
+    /// Top-level let binding values from the imported file.
+    values: FxHashMap<&'ast str, ValueId>,
+    /// Function definitions from the imported file (name -> fn node in import AST).
+    fns: FxHashMap<&'ast str, NodeId>,
 }
 
 /// A `print(...)` statement captured during the item loop but rendered after
@@ -147,11 +162,12 @@ struct PendingPrint {
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(
-    ast: &Ast<'_>,
+    ast: &Ast,
     base_grammar: Option<InputGrammar>,
     grammar_path: &Path,
+    import_modules: &[super::ImportedModule],
 ) -> Result<InputGrammar, LowerError> {
-    let mut eval = Evaluator::new(ast, base_grammar.as_ref());
+    let mut eval = Evaluator::new(ast, base_grammar.as_ref(), import_modules);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
     // Prints are deferred to after all rules are lowered so `print(rule_name)`
@@ -306,8 +322,12 @@ pub fn lower_with_base(
     Ok(out)
 }
 
-impl<'src> Evaluator<'src> {
-    fn new(ast: &'src Ast<'src>, base_grammar: Option<&'src InputGrammar>) -> Self {
+impl<'ast> Evaluator<'ast> {
+    fn new(
+        ast: &'ast Ast,
+        base_grammar: Option<&'ast InputGrammar>,
+        import_modules: &'ast [super::ImportedModule],
+    ) -> Self {
         let cap = ast.nodes.len();
         Self {
             ast,
@@ -319,16 +339,18 @@ impl<'src> Evaluator<'src> {
             strings: StringPool::new(ast.source()),
             base_grammar,
             call_stack: Vec::new(),
+            import_modules,
+            import_evals: Vec::new(),
         }
     }
 
-    fn alloc_val(&mut self, val: Value<'src>) -> ValueId {
+    fn alloc_val(&mut self, val: Value<'ast>) -> ValueId {
         let id = ValueId(self.values.len() as u32);
         self.values.push(val);
         id
     }
 
-    fn get_val(&self, id: ValueId) -> &Value<'src> {
+    fn get_val(&self, id: ValueId) -> &Value<'ast> {
         &self.values[id.0 as usize]
     }
 
@@ -382,7 +404,7 @@ impl<'src> Evaluator<'src> {
     const fn expect_object(vid: ValueId) -> ObjectVal {
         ObjectVal(vid)
     }
-    fn object_fields(&self, v: ObjectVal) -> &FxHashMap<&'src str, ValueId> {
+    fn object_fields(&self, v: ObjectVal) -> &FxHashMap<&'ast str, ValueId> {
         let Value::Object(map) = self.get_val(v.0) else {
             unreachable!()
         };
@@ -412,7 +434,7 @@ impl<'src> Evaluator<'src> {
     }
 
     #[inline]
-    fn bind(&mut self, name: &'src str, val: ValueId) {
+    fn bind(&mut self, name: &'ast str, val: ValueId) {
         self.scopes.insert(name, val);
     }
 
@@ -438,7 +460,7 @@ impl<'src> Evaluator<'src> {
             .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
     }
 
-    fn get_fn_config(&self, fn_id: NodeId) -> &'src FnConfig {
+    fn get_fn_config(&self, fn_id: NodeId) -> &'ast FnConfig {
         match self.ast.node(fn_id) {
             Node::Fn(fn_idx) => self.ast.get_fn(*fn_idx),
             _ => unreachable!(),
@@ -813,7 +835,7 @@ impl<'src> Evaluator<'src> {
     }
 }
 
-impl<'src> Evaluator<'src> {
+impl<'ast> Evaluator<'ast> {
     fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
         let ast = self.ast;
         let span = ast.span(id);
@@ -843,6 +865,11 @@ impl<'src> Evaluator<'src> {
             // Guarded by super::resolve::resolve - all variable names validated
             Node::VarRef => Ok(self.lookup(ast.text(span)).unwrap()),
             Node::Inherit { .. } => Ok(self.alloc_val(Value::Grammar)),
+            Node::Import { module, .. } => {
+                let idx = module.expect("import module index not set");
+                self.eval_import_module(idx, span)?;
+                Ok(self.alloc_val(Value::Import(idx)))
+            }
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
                 let lv = self.eval_expr(left)?;
@@ -867,22 +894,39 @@ impl<'src> Evaluator<'src> {
                     _ => unreachable!(),
                 }
             }
-            Node::RuleInline { obj, rule } => {
-                let (obj, rule) = (*obj, *rule);
-                self.eval_expr(obj)?;
-                let rule_name = ast.node_text(rule);
-                // Guarded by super::typecheck::type_of (Node::RuleInline) - only
-                // reachable on Grammar values, which require an inherit() binding
-                let grammar = self.base_grammar.unwrap();
-                match grammar.variables.iter().find(|v| v.name == rule_name) {
-                    Some(var) => {
-                        let rid = self.import_rule(&var.rule);
-                        Ok(self.alloc_val(Value::Rule(rid)))
+            Node::QualifiedAccess { obj, member } => {
+                let (obj, member) = (*obj, *member);
+                let obj_val = self.eval_expr(obj)?;
+                let member_name = ast.node_text(member);
+                match self.get_val(obj_val) {
+                    Value::Grammar => {
+                        let grammar = self.base_grammar.unwrap();
+                        match grammar.variables.iter().find(|v| v.name == member_name) {
+                            Some(var) => {
+                                let rid = self.import_rule(&var.rule);
+                                Ok(self.alloc_val(Value::Rule(rid)))
+                            }
+                            None => Err(LowerError::new(
+                                LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
+                                ast.span(member),
+                            )),
+                        }
                     }
-                    None => Err(LowerError::new(
-                        LowerErrorKind::InheritRuleNotFound(rule_name.to_string()),
-                        ast.span(rule),
-                    )),
+                    Value::Import(idx) => {
+                        let idx = *idx as usize;
+                        let val = self.import_evals[idx]
+                            .values
+                            .get(member_name)
+                            .copied()
+                            .ok_or_else(|| {
+                                LowerError::new(
+                                    LowerErrorKind::InheritRuleNotFound(member_name.to_string()),
+                                    ast.span(member),
+                                )
+                            })?;
+                        Ok(val)
+                    }
+                    _ => unreachable!(), // guarded by typecheck
                 }
             }
             Node::Object(range) => {
@@ -936,6 +980,20 @@ impl<'src> Evaluator<'src> {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
                 self.eval_fn_call(ast.node_text(name), &arg_vals, span)
+            }
+            Node::QualifiedCall(range) => {
+                let (obj, name, args) = ast.get_qualified_call(*range);
+                let obj_val = self.eval_expr(obj)?;
+                let Value::Import(idx) = *self.get_val(obj_val) else {
+                    unreachable!() // guarded by typecheck
+                };
+                // Evaluate args in current AST context
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for &arg_id in args {
+                    arg_vals.push(self.eval_expr(arg_id)?);
+                }
+                let fn_name = ast.node_text(name);
+                self.eval_import_fn_call(idx, fn_name, &arg_vals, span)
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -1108,7 +1166,7 @@ impl<'src> Evaluator<'src> {
 
     fn eval_fn_call(
         &mut self,
-        name: &'src str,
+        name: &'ast str,
         arg_vals: &[ValueId],
         call_span: Span,
     ) -> Result<ValueId, LowerError> {
@@ -1136,6 +1194,113 @@ impl<'src> Evaluator<'src> {
         let result = self.eval_expr(body);
         self.pop_scope();
         self.call_stack.pop();
+        result
+    }
+
+    /// Evaluate an imported module's top-level let bindings and register its fns.
+    /// Called when `let h = import(...)` is first evaluated.
+    fn eval_import_module(&mut self, idx: u8, span: Span) -> Result<(), LowerError> {
+        let idx = idx as usize;
+        if idx < self.import_evals.len() {
+            return Ok(()); // already evaluated
+        }
+
+        let module = &self.import_modules[idx];
+        let import_ast = &module.ast;
+
+        // Collect fns from the imported file
+        let mut fns = FxHashMap::default();
+        for &item_id in &import_ast.root_items {
+            if let Node::Fn(fn_idx) = import_ast.node(item_id) {
+                let config = import_ast.get_fn(*fn_idx);
+                fns.insert(import_ast.node_text(config.name), item_id);
+            }
+        }
+
+        // Evaluate top-level let bindings by temporarily swapping to the import AST
+        let saved_ast = self.ast;
+        self.ast = import_ast;
+
+        // Register the import's fns so they can call each other during let evaluation
+        let saved_fns = std::mem::take(&mut self.fns);
+        self.fns = fns.clone();
+
+        self.push_scope();
+        let mut values = FxHashMap::default();
+        for &item_id in &import_ast.root_items {
+            if let Node::Let { name, value, .. } = import_ast.node(item_id) {
+                let val = self.eval_expr(*value)?;
+                let var_name = import_ast.node_text(*name);
+                self.bind(var_name, val);
+                values.insert(var_name, val);
+            }
+        }
+        self.pop_scope();
+
+        // Restore
+        self.fns = saved_fns;
+        self.ast = saved_ast;
+
+        // Pad import_evals if needed (for ordered evaluation)
+        while self.import_evals.len() < idx {
+            self.import_evals.push(ImportEval {
+                values: FxHashMap::default(),
+                fns: FxHashMap::default(),
+            });
+        }
+        self.import_evals.push(ImportEval { values, fns });
+        Ok(())
+    }
+
+    /// Call a function defined in an imported module.
+    fn eval_import_fn_call(
+        &mut self,
+        idx: u8,
+        fn_name: &'ast str,
+        arg_vals: &[ValueId],
+        call_span: Span,
+    ) -> Result<ValueId, LowerError> {
+        let idx = idx as usize;
+        let import_ast = &self.import_modules[idx].ast;
+
+        // Extract everything we need from import_evals before mutating self
+        let fn_node_id = self.import_evals[idx].fns[fn_name];
+        let fn_idx = match import_ast.node(fn_node_id) {
+            Node::Fn(fi) => *fi,
+            _ => unreachable!(),
+        };
+        let config = import_ast.get_fn(fn_idx);
+        let body = config.body;
+        let params: Vec<_> = config.params.iter().map(|p| p.name).collect();
+        let import_fns = self.import_evals[idx].fns.clone();
+        let import_values: Vec<_> = self.import_evals[idx].values.iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
+
+        // Swap to the import AST
+        let saved_ast = self.ast;
+        let saved_fns = std::mem::take(&mut self.fns);
+        self.ast = import_ast;
+        self.fns = import_fns;
+
+        self.push_scope();
+        // Bind the import's let values so the function body can reference them
+        for (var_name, val) in &import_values {
+            self.bind(var_name, *val);
+        }
+        // Bind arguments
+        for (i, &arg_val) in arg_vals.iter().enumerate() {
+            self.bind(import_ast.node_text(params[i]), arg_val);
+        }
+
+        self.call_stack.push((fn_name, call_span));
+        let result = self.eval_expr(body);
+        self.call_stack.pop();
+
+        self.pop_scope();
+        self.fns = saved_fns;
+        self.ast = saved_ast;
+
         result
     }
 
@@ -1234,6 +1399,11 @@ impl Evaluator<'_> {
                 });
             }
             Value::Grammar => w.push_str("<grammar>"),
+            Value::Import(idx) => {
+                w.push_str("<import:");
+                w.push_str(&self.import_modules[*idx as usize].path.display().to_string());
+                w.push('>');
+            }
         }
     }
 

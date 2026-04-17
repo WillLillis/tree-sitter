@@ -141,7 +141,7 @@ fn error_rule_inline_on_non_grammar() {
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
-        TypeErrorKind::ConfigAccessOnNonGrammar(Ty::Object(InnerTy::Int))
+        TypeErrorKind::QualifiedAccessOnInvalidType(Ty::Object(InnerTy::Int))
     );
 }
 

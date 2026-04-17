@@ -54,7 +54,7 @@ impl Locals<'_> {
         parent: None,
     };
 
-    fn contains(&self, ctx: &AstContext<'_>, name: &str) -> bool {
+    fn contains(&self, ctx: &AstContext, name: &str) -> bool {
         let found = match &self.scope {
             LocalScope::Empty => false,
             LocalScope::FnParams(params) => params.iter().any(|p| ctx.node_text(p.name) == name),
@@ -76,7 +76,7 @@ impl Locals<'_> {
 ///
 /// Returns [`ResolveError`] for duplicate declarations or unknown identifiers.
 pub fn resolve(
-    ast: &mut Ast<'_>,
+    ast: &mut Ast,
     base_rule_names: &[String],
     inherit_span: Option<Span>,
     grammar_path: &std::path::Path,
@@ -150,7 +150,7 @@ impl Names {
 ///
 /// Rules, let-bindings, functions, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
-fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names, ResolveError> {
+fn collect_names(ast: &Ast, grammar_path: &std::path::Path) -> Result<Names, ResolveError> {
     let mut names = Names {
         decls: FxHashMap::default(),
     };
@@ -230,7 +230,7 @@ fn collect_names(ast: &Ast<'_>, grammar_path: &std::path::Path) -> Result<Names,
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
-fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(), ResolveError> {
+fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> Result<(), ResolveError> {
     match ast.node(item_id) {
         Node::Grammar => {
             let ctx = &ast.context;
@@ -283,7 +283,7 @@ fn resolve_item(ast: &mut Ast<'_>, names: &Names, item_id: NodeId) -> Result<(),
 /// Resolve identifiers within a single expression.
 fn resolve_expr(
     nodes: &mut [Node],
-    ctx: &AstContext<'_>,
+    ctx: &AstContext,
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
@@ -348,7 +348,7 @@ fn resolve_expr(
 /// Resolve identifiers in children of a node (mechanical traversal).
 fn resolve_children(
     nodes: &mut [Node],
-    ctx: &AstContext<'_>,
+    ctx: &AstContext,
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
@@ -410,9 +410,24 @@ fn resolve_children(
             }
             Ok(())
         }
-        Node::FieldAccess { obj, .. } | Node::RuleInline { obj, .. } => {
+        Node::FieldAccess { obj, .. } => {
             let obj = *obj;
             resolve_expr(nodes, ctx, names, obj, locals)
+        }
+        Node::QualifiedAccess { obj, .. } => {
+            let obj = *obj;
+            resolve_expr(nodes, ctx, names, obj, locals)
+        }
+        // path is a StringLit, nothing to resolve
+        Node::Import { .. } => Ok(()),
+        Node::QualifiedCall(range) => {
+            let (obj, _name, args) = ctx.get_qualified_call(*range);
+            resolve_expr(nodes, ctx, names, obj, locals)?;
+            // name stays as Ident - it's a member of the import namespace
+            for &arg in args {
+                resolve_expr(nodes, ctx, names, arg, locals)?;
+            }
+            Ok(())
         }
         _ => Ok(()),
     }
