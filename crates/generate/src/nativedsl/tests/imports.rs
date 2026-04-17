@@ -648,11 +648,13 @@ fn import_keyword_as_rule_name() {
 
 #[test]
 fn import_call_depth_shared_across_modules() {
-    let err = dsl_err(r#"
+    let err = dsl_err(
+        r#"
         let h = import("import_helpers/recursive.tsg")
         grammar { language: "test" }
         rule program { h::recurse("x") }
-    "#);
+    "#,
+    );
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
 }
