@@ -68,10 +68,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     }
 
     /// Check whether the next non-comment token after the current one is `kind`.
-    /// Safe without bounds check: the token stream always ends with `Eof`.
     fn next_is(&self, kind: TokenKind) -> bool {
+        if self.at_eof() {
+            return false;
+        }
         let mut i = self.pos + 1;
-        // SAFETY: token stream is terminated by Eof, so we cannot overrun.
+        // SAFETY: token stream is terminated by Eof. Since pos is not at Eof
+        // (checked above), pos + 1 is at most the Eof position, and the loop
+        // stops when it hits any non-Comment (including Eof).
         while unsafe { self.tokens.get_unchecked(i) }.kind == TokenKind::Comment {
             i += 1;
         }

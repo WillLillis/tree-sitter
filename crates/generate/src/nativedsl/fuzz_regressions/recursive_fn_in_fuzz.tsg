@@ -1,0 +1,17 @@
+//
+fn comma_sep2(ite: rule) -> rule {seq(comma_sep2( "\""),)
+}
+
+rule sgh{ token(choice( comma_sep1( "" ),))
+}//
+
+fn comma_sep1(item: rule) -> rule {
+    seq(item, comma_sep1( "appe\\\\\\\\\\\\\\\\\\\\\\\nd\0!"),    )
+}
+
+rule _strn{
+  token(choice(
+     comma_sep1(    ".",
+),
+    ))
+}
