@@ -802,20 +802,20 @@ fn type_of_qualified_call<'a>(
             span: ast.span(name),
         });
     };
-    // Clone sig data out before calling type_of (which borrows env mutably)
-    let param_types: Vec<Ty> = sig.params.clone();
-    let return_ty = sig.return_ty;
-    let fn_name = fn_name.to_string();
-    if args.len() != param_types.len() {
+    // Check arg count before cloning params (avoids clone on error path)
+    if args.len() != sig.params.len() {
         return Err(TypeError {
             kind: TypeErrorKind::ArgCountMismatch {
-                fn_name,
-                expected: param_types.len(),
+                fn_name: fn_name.to_string(),
+                expected: sig.params.len(),
                 got: args.len(),
             },
             span,
         });
     }
+    // Clone sig data out before calling type_of (which borrows env mutably)
+    let param_types: Vec<Ty> = sig.params.clone();
+    let return_ty = sig.return_ty;
     for (i, &arg_id) in args.iter().enumerate() {
         let arg_ty = type_of(ast, arg_id, env)?;
         if !arg_ty.is_compatible(param_types[i]) {

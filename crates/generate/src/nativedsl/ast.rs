@@ -182,7 +182,9 @@ impl AstContext {
 impl Ast {
     #[must_use]
     pub fn new(source: String) -> Self {
-        let cap = source.len() / 30;
+        // Source length is validated < u32::MAX before parsing.
+        // Truncating to u32 lets LLVM prove capacity can't overflow.
+        let cap = (source.len() as u32 / 30) as usize;
         let mut nodes = Vec::with_capacity(cap);
         let mut spans = Vec::with_capacity(cap);
         nodes.push(Node::Unreachable);
