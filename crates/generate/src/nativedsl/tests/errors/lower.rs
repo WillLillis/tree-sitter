@@ -81,7 +81,7 @@ fn error_inherit_bad_path() {
     );
     let e = assert_err!(err, Lower);
     assert!(
-        matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("nonexistent"))
+        matches!(e.kind, LowerErrorKind::ModuleLoadError(ref msg) if msg.contains("nonexistent"))
     );
 }
 
@@ -101,7 +101,7 @@ fn error_inherit_bad_extension() {
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let e = assert_err!(err, Lower);
     assert!(
-        matches!(e.kind, LowerErrorKind::InheritLoadError(ref msg) if msg.contains("unsupported file extension"))
+        matches!(e.kind, LowerErrorKind::ModuleLoadError(ref msg) if msg.contains("unsupported file extension"))
     );
 }
 
@@ -145,8 +145,8 @@ fn error_inherit_cycle() {
     let DslError::Lower(e) = inner.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", inner.inner)
     };
-    let LowerErrorKind::InheritCycle(chain) = &e.kind else {
-        panic!("expected InheritCycle, got {:?}", e.kind)
+    let LowerErrorKind::ModuleCycle(chain) = &e.kind else {
+        panic!("expected ModuleCycle, got {:?}", e.kind)
     };
     let filenames: Vec<_> = chain
         .iter()
@@ -246,7 +246,7 @@ fn error_inherit_rule_not_found() {
     let e = assert_err!(err, Lower);
     assert_eq!(
         e.kind,
-        LowerErrorKind::InheritRuleNotFound("nonexistent_rule".into())
+        LowerErrorKind::ModuleMemberNotFound("nonexistent_rule".into())
     );
 }
 
