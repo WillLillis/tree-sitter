@@ -64,14 +64,14 @@ pub struct Note {
 #[derive(Clone, Debug, Serialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
-    InheritedFromHere,
+    ReferencedFromHere,
 }
 
 impl fmt::Display for NoteMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FirstDefinedHere => write!(f, "first defined here"),
-            Self::InheritedFromHere => write!(f, "inherited from here"),
+            Self::ReferencedFromHere => write!(f, "referenced from here"),
         }
     }
 }
@@ -380,10 +380,12 @@ pub enum Node {
     },
     Inherit {
         path: NodeId,
+        /// Module index, set by the loading pre-pass.
+        module: Option<u8>,
     },
-    /// `import("path.tsg")` expression - loads a helper file, returns import_t.
-    /// `module` is `None` after parsing, set to an index into `Vec<ImportedModule>`
-    /// by the import pre-pass.
+    /// `import("path.tsg")` expression - loads a helper file, returns module_t.
+    /// `module` is `None` after parsing, set to an index into `Vec<Module>`
+    /// by the loading pre-pass.
     Import {
         path: NodeId,
         module: Option<u8>,
