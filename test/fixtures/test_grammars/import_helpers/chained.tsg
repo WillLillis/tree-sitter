@@ -1,0 +1,9 @@
+// Helper with functions that call each other (intra-module calls)
+
+fn wrap(x: rule_t) -> rule_t {
+    seq("(", x, ")")
+}
+
+fn double_wrap(x: rule_t) -> rule_t {
+    wrap(seq(x, ",", x))
+}
