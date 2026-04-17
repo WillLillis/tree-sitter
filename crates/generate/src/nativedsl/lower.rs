@@ -41,20 +41,24 @@ impl<'src> StringPool<'src> {
     }
 
     fn intern_span(&mut self, span: Span, source: &'src str) -> Str {
-        let id = Str(NonZeroU32::new(self.entries.len() as u32).unwrap());
+        // Safety: entries always starts with one sentinel, so len() >= 1.
+        let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
         self.entries.push(StrEntry::Source(span, source));
         id
     }
 
     fn intern_owned(&mut self, s: String) -> Str {
-        let id = Str(NonZeroU32::new(self.entries.len() as u32).unwrap());
+        // Safety: entries always starts with one sentinel, so len() >= 1.
+        let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
         self.entries.push(StrEntry::Owned(s));
         id
     }
 
     #[inline]
     fn resolve(&self, id: Str) -> &str {
-        match &self.entries[id.0.get() as usize] {
+        // Safety: id was produced by intern_span/intern_owned which return
+        // sequential indices into self.entries.
+        match unsafe { self.entries.get_unchecked(id.0.get() as usize) } {
             StrEntry::Source(span, source) => span.resolve(source),
             StrEntry::Owned(s) => s,
             StrEntry::Unreachable => unreachable!(),
@@ -422,8 +426,11 @@ impl<'ast> Evaluator<'ast> {
         id
     }
 
+    #[inline]
     fn get_val(&self, id: ValueId) -> &Value<'ast> {
-        &self.values[id.0 as usize]
+        // Safety: id was produced by alloc_val which returns sequential indices
+        // into self.values. No ValueId can outlive the Evaluator.
+        unsafe { self.values.get_unchecked(id.0 as usize) }
     }
 
     // -- Typed value constructors and accessors --
@@ -521,6 +528,13 @@ impl<'ast> Evaluator<'ast> {
         id
     }
 
+    /// Get a rule by arena ID. All RuleIds are produced by alloc_rule.
+    #[inline]
+    fn get_rule(&self, id: RuleId) -> &ARule {
+        // Safety: id was produced by alloc_rule which returns sequential indices.
+        unsafe { self.rules.get_unchecked(id.0 as usize) }
+    }
+
     const fn children_start(&self) -> u32 {
         self.rule_children.len() as u32
     }
@@ -565,7 +579,7 @@ impl<'ast> Evaluator<'ast> {
 
     fn build_rule(&self, id: RuleId) -> Rule {
         let s = &self.strings;
-        match &self.rules[id.0 as usize] {
+        match self.get_rule(id) {
             ARule::Blank => Rule::Blank,
             ARule::String(sid) => Rule::String(s.to_string(*sid)),
             ARule::Pattern(p, f) => Rule::Pattern(
@@ -574,12 +588,14 @@ impl<'ast> Evaluator<'ast> {
             ),
             ARule::NamedSymbol(sid) => Rule::NamedSymbol(s.to_string(*sid)),
             ARule::Seq(start, len) | ARule::Choice(start, len) => {
-                let children: Vec<Rule> = self.rule_children
-                    [*start as usize..*start as usize + *len as usize]
+                let range = *start as usize..*start as usize + *len as usize;
+                // Safety: start and len are produced by children_start/children_range
+                // which track rule_children indices.
+                let children: Vec<Rule> = unsafe { self.rule_children.get_unchecked(range) }
                     .iter()
                     .map(|&id| self.build_rule(id))
                     .collect();
-                match &self.rules[id.0 as usize] {
+                match self.get_rule(id) {
                     ARule::Seq(..) => Rule::seq(children),
                     ARule::Choice(..) => Rule::choice(children),
                     _ => unreachable!(),
@@ -630,7 +646,7 @@ impl<'ast> Evaluator<'ast> {
             .iter()
             .map(|&v| {
                 let rid = self.rule_id(Self::expect_rule(v));
-                match &self.rules[rid.0 as usize] {
+                match self.get_rule(rid) {
                     ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
                     _ => unreachable!("expect_name_ref guarantees NamedSymbol"),
                 }
@@ -651,7 +667,7 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|&v| {
                         let rid = self.rule_id(Self::expect_rule(v));
-                        match &self.rules[rid.0 as usize] {
+                        match self.get_rule(rid) {
                             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
                             _ => unreachable!("expect_name_ref guarantees NamedSymbol"),
                         }
@@ -675,7 +691,7 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|&v| match *self.get_val(v) {
                         Value::Str(sid) => Ok(PrecedenceEntry::Name(self.strings.to_string(sid))),
-                        Value::Rule(rid) => match &self.rules[rid.0 as usize] {
+                        Value::Rule(rid) => match self.get_rule(rid) {
                             ARule::NamedSymbol(sid) => {
                                 Ok(PrecedenceEntry::Symbol(self.strings.to_string(*sid)))
                             }
@@ -690,7 +706,7 @@ impl<'ast> Evaluator<'ast> {
 
     fn eval_rule_name(&mut self, id: NodeId) -> Result<String, LowerError> {
         let rid = self.lower_to_rule(id)?;
-        match &self.rules[rid.0 as usize] {
+        match self.get_rule(rid) {
             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
             ARule::Blank => Err(LowerError::new(
                 LowerErrorKind::ConfigFieldUnset,
@@ -1195,7 +1211,7 @@ impl<'ast> Evaluator<'ast> {
                             Value::Rule(rid) => {
                                 // Guarded by super::typecheck::type_of (Node::Alias) -
                                 // InvalidAliasTarget rejects non-name/non-str targets
-                                let ARule::NamedSymbol(s) = &self.rules[rid.0 as usize] else {
+                                let ARule::NamedSymbol(s) = self.get_rule(*rid) else {
                                     unreachable!()
                                 };
                                 Ok(self.alloc_rule(ARule::Alias(*s, true, inner)))
@@ -1432,7 +1448,7 @@ impl Evaluator<'_> {
         let mut buf = String::new();
         // Top-level NamedSymbol expansion: look up the rule body and render it.
         if let Value::Rule(rid) = self.get_val(val_id)
-            && let ARule::NamedSymbol(sid) = &self.rules[rid.0 as usize]
+            && let ARule::NamedSymbol(sid) = self.get_rule(*rid)
             && let Some((_, body_rid)) = {
                 let name = self.strings.resolve(*sid);
                 rule_entries.iter().find(|(n, _)| *n == name).copied()
@@ -1495,7 +1511,7 @@ impl Evaluator<'_> {
     /// lines; otherwise everything is flat. `NamedSymbol`s render as just the
     /// name (no expansion; top-level expansion is handled by `emit_print`).
     fn write_rule(&self, w: &mut String, rid: RuleId, depth: u32) {
-        match &self.rules[rid.0 as usize] {
+        match self.get_rule(rid) {
             ARule::Blank => w.push_str("blank()"),
             ARule::String(s) => {
                 w.push('"');
@@ -1515,14 +1531,16 @@ impl Evaluator<'_> {
             }
             ARule::NamedSymbol(s) => w.push_str(self.strings.resolve(*s)),
             ARule::Seq(offset, len) | ARule::Choice(offset, len) => {
-                let name = match &self.rules[rid.0 as usize] {
+                let name = match self.get_rule(rid) {
                     ARule::Seq(..) => "seq",
                     ARule::Choice(..) => "choice",
                     _ => unreachable!(),
                 };
-                let start = *offset as usize;
-                let end = start + *len as usize;
-                let children: Vec<RuleId> = self.rule_children[start..end].to_vec();
+                let range = *offset as usize..*offset as usize + *len as usize;
+                // Safety: offset and len are produced by children_start/children_range
+                // which track rule_children indices.
+                let children: Vec<RuleId> =
+                    unsafe { self.rule_children.get_unchecked(range) }.to_vec();
                 w.push_str(name);
                 self.write_compound(w, '(', ')', &children, depth, |this, w, cid| {
                     this.write_rule(w, cid, depth + 1);
