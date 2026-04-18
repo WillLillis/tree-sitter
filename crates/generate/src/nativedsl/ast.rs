@@ -98,6 +98,7 @@ impl Span {
     }
 
     /// Strip the first and last byte (e.g. surrounding quotes).
+    /// Assumes the span covers at least 2 bytes.
     #[must_use]
     pub const fn strip_quotes(self) -> Self {
         Self {
