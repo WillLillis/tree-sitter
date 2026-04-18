@@ -120,6 +120,9 @@ pub(super) fn assert_grammar_eq(native: &InputGrammar, js: &InputGrammar) {
     if native.precedence_orderings != js.precedence_orderings {
         mismatches.push("CONFIG: precedences".into());
     }
+    if native.reserved_words != js.reserved_words {
+        mismatches.push("CONFIG: reserved".into());
+    }
     if !mismatches.is_empty() {
         mismatches.sort();
         panic!("{} issues:\n{}", mismatches.len(), mismatches.join("\n"));
@@ -186,7 +189,8 @@ fn bench_native_dsl_vim() {
 #[test]
 #[ignore = "benchmark"]
 fn bench_native_dsl_python() {
-    let path = std::path::PathBuf::from("/home/lillis/projects/grammars/tree-sitter-python/grammar.tsg");
+    let path =
+        std::path::PathBuf::from("/home/lillis/projects/grammars/tree-sitter-python/grammar.tsg");
     let source = std::fs::read_to_string(&path).unwrap();
     run_bench("Native DSL Python", || {
         parse_native_dsl(&source, &path).unwrap();
