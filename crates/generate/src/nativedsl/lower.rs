@@ -1699,6 +1699,13 @@ impl LowerError {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
+pub enum DisallowedItemKind {
+    Rule,
+    OverrideRule,
+    GrammarBlock,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum LowerErrorKind {
     MissingGrammarBlock,
     MissingLanguageField,
@@ -1719,8 +1726,7 @@ pub enum LowerErrorKind {
     ModuleUnsupportedExtension,
     JsonImportNotAllowed,
     ModuleTooMany,
-    ModuleDisallowedItem,
-    ModuleContainsGrammarBlock,
+    ModuleDisallowedItem(DisallowedItemKind),
     ModuleCycle(Vec<std::path::PathBuf>),
     ModuleMemberNotFound(String),
     ExpectedRuleName,
@@ -1752,12 +1758,13 @@ impl std::fmt::Display for LowerError {
                 write!(f, "JSON files can only be used with inherit(), not import()")
             }
             ModuleTooMany => write!(f, "too many modules (max 256)"),
-            ModuleDisallowedItem => write!(
-                f,
-                "imported files can only contain let, fn, and print items"
-            ),
-            ModuleContainsGrammarBlock => {
-                write!(f, "imported files cannot contain a grammar block")
+            ModuleDisallowedItem(kind) => {
+                let item = match kind {
+                    DisallowedItemKind::Rule => "rule",
+                    DisallowedItemKind::OverrideRule => "override rule",
+                    DisallowedItemKind::GrammarBlock => "grammar block",
+                };
+                write!(f, "imported files cannot contain a {item}")
             }
             ModuleCycle(chain) => {
                 write!(f, "module cycle detected: ")?;
