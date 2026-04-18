@@ -146,7 +146,13 @@ impl Names {
         source: &str,
     ) -> Result<(), ResolveError> {
         if let Some((_, first_span)) = self.decls.get(name) {
-            return Err(Self::duplicate_error(name, span, *first_span, grammar_path, source));
+            return Err(Self::duplicate_error(
+                name,
+                span,
+                *first_span,
+                grammar_path,
+                source,
+            ));
         }
         self.decls.insert(name.to_string(), (kind, span));
         Ok(())
