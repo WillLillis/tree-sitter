@@ -32,7 +32,7 @@ use crate::grammars::InputGrammar;
 use ast::Span;
 
 pub use lexer::{LexError, LexErrorKind};
-pub use lower::{LowerError, LowerErrorKind};
+pub use lower::{DisallowedItemKind, LowerError, LowerErrorKind};
 pub use parser::{ParseError, ParseErrorKind};
 pub use resolve::{ResolveError, ResolveErrorKind};
 pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
@@ -438,29 +438,18 @@ fn load_import_children(
 
 /// Validate that an imported file only contains allowed items.
 fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
-    use lower::{LowerError, LowerErrorKind};
+    use lower::{DisallowedItemKind, LowerError, LowerErrorKind};
     for &item_id in &ast.root_items {
-        match ast.node(item_id) {
-            ast::Node::Let { .. } | ast::Node::Fn(_) | ast::Node::Print(_) => {}
-            _ => {
-                return Err(LowerError::new(
-                    LowerErrorKind::ModuleDisallowedItem,
-                    ast.span(item_id),
-                ))?;
-            }
-        }
-    }
-    if ast.context.grammar_config.is_some() {
-        // Find the Grammar node to get its span
-        let span = ast
-            .root_items
-            .iter()
-            .find(|&&id| matches!(ast.node(id), ast::Node::Grammar))
-            .map(|&id| ast.span(id))
-            .unwrap_or(Span::new(0, 0));
+        let kind = match ast.node(item_id) {
+            ast::Node::Let { .. } | ast::Node::Fn(_) | ast::Node::Print(_) => continue,
+            ast::Node::Grammar => DisallowedItemKind::GrammarBlock,
+            ast::Node::Rule { .. } => DisallowedItemKind::Rule,
+            ast::Node::OverrideRule { .. } => DisallowedItemKind::OverrideRule,
+            _ => continue,
+        };
         return Err(LowerError::new(
-            LowerErrorKind::ModuleContainsGrammarBlock,
-            span,
+            LowerErrorKind::ModuleDisallowedItem(kind),
+            ast.span(item_id),
         ))?;
     }
     Ok(())
