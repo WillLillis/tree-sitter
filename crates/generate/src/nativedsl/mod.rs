@@ -353,6 +353,8 @@ pub struct Module {
 
 /// Walk ALL nodes in the AST for unresolved `import()` nodes, load each
 /// file via `load_module`, and set `Node::Import { module }` indices.
+/// Deduplicates: if the same file is imported multiple times, it is loaded
+/// once and all references share the same module index.
 fn load_import_children(
     ast: &mut ast::Ast,
     module_dir: &Path,
@@ -360,6 +362,9 @@ fn load_import_children(
     modules: &mut Vec<Module>,
 ) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
+
+    // Cache: canonical path -> module index, so duplicate imports share one load.
+    let mut loaded: rustc_hash::FxHashMap<PathBuf, u8> = rustc_hash::FxHashMap::default();
 
     // Scan all nodes (not just top-level lets) so imports/inherits in any
     // expression position are resolved (e.g. `extras: import("h.tsg")::EXTRAS`).
@@ -380,10 +385,26 @@ fn load_import_children(
         };
 
         let path_str = ast.node_text(import_path_id);
-        let child = load_child_module(path_str, module_dir, span, ancestor_paths, kind)?;
+        let canonical = dunce::canonicalize(module_dir.join(path_str)).map_err(|e| {
+            LowerError::new(
+                LowerErrorKind::ModuleResolveFailed {
+                    path: module_dir.join(path_str).display().to_string(),
+                    error: e.to_string(),
+                },
+                span,
+            )
+        })?;
 
-        let idx = u8::try_from(modules.len())
-            .map_err(|_| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
+        let idx = if let Some(&idx) = loaded.get(&canonical) {
+            idx
+        } else {
+            let child = load_child_module(path_str, module_dir, span, ancestor_paths, kind)?;
+            let idx = u8::try_from(modules.len())
+                .map_err(|_| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
+            loaded.insert(canonical, idx);
+            modules.push(child);
+            idx
+        };
 
         let new_node = match ast.node(node_id) {
             ast::Node::Import { .. } => ast::Node::Import {
@@ -398,7 +419,6 @@ fn load_import_children(
         };
         ast.nodes[node_id.index()] = new_node;
 
-        modules.push(child);
         i += 1;
     }
 
