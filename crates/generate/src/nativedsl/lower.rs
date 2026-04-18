@@ -1144,8 +1144,9 @@ impl<'ast> Evaluator<'ast> {
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
                 let is_seq = matches!(ast.node(id), Node::Seq(_));
-                let mut child_ids = Vec::with_capacity(ast.child_slice(*range).len());
-                for &member in ast.child_slice(*range) {
+                let children = ast.child_slice(*range);
+                let mut child_ids = Vec::with_capacity(children.len());
+                for &member in children {
                     if let Node::For(idx) = ast.node(member) {
                         child_ids.extend(self.eval_for_to_rules(ast.get_for(*idx))?);
                     } else {
