@@ -54,15 +54,34 @@ impl Locals<'_> {
         parent: None,
     };
 
+    /// Iterative walk + manual loops (instead of recursion + `.any()` closures)
+    /// to reduce register pressure in the inner loops.
     fn contains(&self, ctx: &AstContext, name: &str) -> bool {
-        let found = match &self.scope {
-            LocalScope::Empty => false,
-            LocalScope::FnParams(params) => params.iter().any(|p| ctx.node_text(p.name) == name),
-            LocalScope::ForBindings(bindings) => {
-                bindings.iter().any(|(span, _)| ctx.text(*span) == name)
+        let source = ctx.source();
+        let mut current = self;
+        loop {
+            match &current.scope {
+                LocalScope::Empty => {}
+                LocalScope::FnParams(params) => {
+                    for p in *params {
+                        if ctx.span(p.name).resolve(source) == name {
+                            return true;
+                        }
+                    }
+                }
+                LocalScope::ForBindings(bindings) => {
+                    for (span, _) in *bindings {
+                        if span.resolve(source) == name {
+                            return true;
+                        }
+                    }
+                }
             }
-        };
-        found || self.parent.is_some_and(|p| p.contains(ctx, name))
+            match current.parent {
+                Some(p) => current = p,
+                None => return false,
+            }
+        }
     }
 }
 
@@ -117,6 +136,7 @@ struct Names {
 }
 
 impl Names {
+    #[inline]
     fn insert(
         &mut self,
         name: &str,
@@ -126,19 +146,30 @@ impl Names {
         source: &str,
     ) -> Result<(), ResolveError> {
         if let Some((_, first_span)) = self.decls.get(name) {
-            return Err(ResolveError {
-                kind: ResolveErrorKind::DuplicateDeclaration(name.to_string()),
-                span,
-                note: Some(Box::new(Note {
-                    message: NoteMessage::FirstDefinedHere,
-                    span: *first_span,
-                    path: grammar_path.to_path_buf(),
-                    source: source.to_string(),
-                })),
-            });
+            return Err(Self::duplicate_error(name, span, *first_span, grammar_path, source));
         }
         self.decls.insert(name.to_string(), (kind, span));
         Ok(())
+    }
+
+    #[cold]
+    fn duplicate_error(
+        name: &str,
+        span: Span,
+        first_span: Span,
+        grammar_path: &std::path::Path,
+        source: &str,
+    ) -> ResolveError {
+        ResolveError {
+            kind: ResolveErrorKind::DuplicateDeclaration(name.to_string()),
+            span,
+            note: Some(Box::new(Note {
+                message: NoteMessage::FirstDefinedHere,
+                span: first_span,
+                path: grammar_path.to_path_buf(),
+                source: source.to_string(),
+            })),
+        }
     }
 
     fn get(&self, name: &str) -> Option<Decl> {
