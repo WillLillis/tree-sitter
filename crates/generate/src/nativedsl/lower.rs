@@ -119,11 +119,9 @@ enum Value<'src> {
     Int(i32),
     Str(Str),
     Rule(RuleId),
-    /// Boxed to keep the enum small (~16 bytes instead of ~64).
-    /// Object/List/Tuple are rare; Int/Str/Rule/Module dominate the arena.
-    Object(Box<FxHashMap<&'src str, ValueId>>),
-    List(Box<Vec<ValueId>>),
-    Tuple(Box<Vec<ValueId>>),
+    Object(FxHashMap<&'src str, ValueId>),
+    List(Vec<ValueId>),
+    Tuple(Vec<ValueId>),
     Module(u8),
     /// Grammar config accessor - lazily resolves fields on `.` access.
     GrammarConfig,
@@ -773,7 +771,7 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|g| self.import_names_as_list(g))
                     .collect();
-                Ok(self.alloc_val(Value::List(Box::new(vals))))
+                Ok(self.alloc_val(Value::List(vals)))
             }
             "word" => {
                 if let Some(name) = &grammar.word_token {
@@ -795,10 +793,10 @@ impl<'ast> Evaluator<'ast> {
                         let mut map = FxHashMap::default();
                         map.insert("name", name_val);
                         map.insert("words", words);
-                        self.alloc_val(Value::Object(Box::new(map)))
+                        self.alloc_val(Value::Object(map))
                     })
                     .collect();
-                Ok(self.alloc_val(Value::List(Box::new(sets))))
+                Ok(self.alloc_val(Value::List(sets)))
             }
             _ => Err(LowerError::new(
                 LowerErrorKind::ModuleMemberNotFound(field.to_string()),
@@ -815,7 +813,7 @@ impl<'ast> Evaluator<'ast> {
                 self.alloc_val(Value::Rule(rid))
             })
             .collect();
-        self.alloc_val(Value::List(Box::new(vals)))
+        self.alloc_val(Value::List(vals))
     }
 
     fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
@@ -827,7 +825,7 @@ impl<'ast> Evaluator<'ast> {
                 self.alloc_val(Value::Rule(rid))
             })
             .collect();
-        self.alloc_val(Value::List(Box::new(vals)))
+        self.alloc_val(Value::List(vals))
     }
 
     fn import_rule(&mut self, rule: &Rule) -> RuleId {
@@ -973,7 +971,7 @@ impl<'ast> Evaluator<'ast> {
                 let mut combined = Vec::with_capacity(li.len() + ri.len());
                 combined.extend_from_slice(li);
                 combined.extend_from_slice(ri);
-                Ok(self.alloc_val(Value::List(Box::new(combined))))
+                Ok(self.alloc_val(Value::List(combined)))
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
@@ -1026,7 +1024,7 @@ impl<'ast> Evaluator<'ast> {
                 for &(key_span, value_id) in fields {
                     map.insert(ast.text(key_span), self.eval_expr(value_id)?);
                 }
-                Ok(self.alloc_val(Value::Object(Box::new(map))))
+                Ok(self.alloc_val(Value::Object(map)))
             }
             Node::List(range) | Node::Tuple(range) => {
                 let items = ast.child_slice(*range);
@@ -1035,9 +1033,9 @@ impl<'ast> Evaluator<'ast> {
                     vals.push(self.eval_expr(item_id)?);
                 }
                 let val = if matches!(ast.node(id), Node::List(_)) {
-                    Value::List(Box::new(vals))
+                    Value::List(vals)
                 } else {
-                    Value::Tuple(Box::new(vals))
+                    Value::Tuple(vals)
                 };
                 Ok(self.alloc_val(val))
             }
@@ -1363,7 +1361,11 @@ impl<'ast> Evaluator<'ast> {
         let body = config.body;
         let params: Vec<_> = config.params.iter().map(|p| p.name).collect();
         let import_fns = import_eval.fns.clone();
-        let import_values: Vec<_> = import_eval.values.iter().map(|(&k, &v)| (k, v)).collect();
+        let import_values: Vec<_> = import_eval
+            .values
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
         let sub_evals = std::mem::take(&mut import_eval.sub_evals);
 
         let child = ModuleCtx {
@@ -1747,10 +1749,7 @@ impl std::fmt::Display for LowerError {
                 write!(f, "unsupported file extension, expected .tsg or .json")
             }
             JsonImportNotAllowed => {
-                write!(
-                    f,
-                    "JSON files can only be used with inherit(), not import()"
-                )
+                write!(f, "JSON files can only be used with inherit(), not import()")
             }
             ModuleTooMany => write!(f, "too many modules (max 256)"),
             ModuleDisallowedItem => write!(
