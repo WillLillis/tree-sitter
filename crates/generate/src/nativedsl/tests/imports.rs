@@ -406,7 +406,10 @@ fn error_import_disallowed_rule() {
     let DslError::Lower(e) = outer.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", outer.inner)
     };
-    assert_eq!(e.kind, LowerErrorKind::ModuleDisallowedItem);
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::Rule)
+    );
 }
 
 #[test]
@@ -432,7 +435,10 @@ fn error_import_disallowed_grammar_block() {
     let DslError::Lower(e) = outer.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", outer.inner)
     };
-    assert_eq!(e.kind, LowerErrorKind::ModuleDisallowedItem);
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::GrammarBlock)
+    );
 }
 
 #[test]
