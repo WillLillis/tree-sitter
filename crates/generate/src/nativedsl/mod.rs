@@ -52,14 +52,14 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> Result<InputGrammar
     parse_native_dsl_inner(input, grammar_path, &[])
 }
 
-enum ModuleKind {
+pub enum ModuleKind {
     /// Grammar file (root or inherited) - must have grammar block, may have rules.
     Grammar,
     /// Helper file (imported) - only let/fn/import allowed.
     Helper,
 }
 
-fn load_module(
+pub fn load_module(
     source: &str,
     path: &Path,
     kind: ModuleKind,
@@ -468,7 +468,7 @@ fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
 
 /// Recursively typecheck imported modules, producing type envs indexed
 /// to match the module indices in `Ty::Module(idx)`.
-fn typecheck_modules(modules: &[Module]) -> Result<Vec<typecheck::TypeEnv<'_>>, DslError> {
+pub fn typecheck_modules(modules: &[Module]) -> Result<Vec<typecheck::TypeEnv<'_>>, DslError> {
     modules
         .iter()
         .map(|m| {
