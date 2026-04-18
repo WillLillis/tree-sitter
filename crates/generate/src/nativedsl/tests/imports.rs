@@ -502,6 +502,34 @@ fn error_import_nested_error() {
     assert!(matches!(outer.inner.as_ref(), DslError::Lex(_)));
 }
 
+#[test]
+fn error_import_transitive_nested_error() {
+    // root -> middle.tsg -> bad.tsg (lex error)
+    // Error should be double-wrapped: Module(Module(Lex(...)))
+    let dir = tempfile::tempdir().unwrap();
+    let bad = dir.path().join("bad.tsg");
+    std::fs::write(&bad, "let x = @@@").unwrap();
+    let middle = dir.path().join("middle.tsg");
+    std::fs::write(
+        &middle,
+        format!("let h = import(\"{}\")", bad.display()),
+    )
+    .unwrap();
+
+    let input = format!(
+        r#"
+        let m = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ "x" }}
+    "#,
+        middle.display()
+    );
+    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    let outer = assert_err!(err, Module);
+    let inner = assert_err!(*outer.inner, Module);
+    assert!(matches!(inner.inner.as_ref(), DslError::Lex(_)));
+}
+
 // -- Edge cases --
 
 #[test]
