@@ -89,14 +89,15 @@ fn load_module(
     // Load inherited grammar (Grammar kind only, must happen before resolve).
     let base_rule_names = if matches!(kind, ModuleKind::Grammar) {
         let names = load_inherit_child(&ast, module_dir, ancestor_paths, &mut sub_modules)?;
-        // Tag the Inherit node with its module index (always 0 - first child)
         if let Some(inherit_id) = find_inherit_node(&ast) {
             let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
                 unreachable!()
             };
+            // Tag with the index it was pushed to (sub_modules.len() - 1).
+            let idx = u8::try_from(sub_modules.len() - 1).unwrap();
             ast.nodes[inherit_id.index()] = ast::Node::Inherit {
                 path: *p,
-                module: Some(0),
+                module: Some(idx),
             };
         }
         names
@@ -349,6 +350,13 @@ pub struct Module {
     /// For inherited grammar modules: the fully lowered grammar, needed
     /// for rule merging and config access. `None` for import-only modules.
     pub lowered: Option<InputGrammar>,
+}
+
+impl Module {
+    /// Whether this module is a grammar (inherited) rather than a helper (imported).
+    pub fn is_grammar(&self) -> bool {
+        self.lowered.is_some()
+    }
 }
 
 /// Walk ALL nodes in the AST for unresolved `import()` nodes, load each

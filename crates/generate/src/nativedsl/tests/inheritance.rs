@@ -240,3 +240,31 @@ fn append_concatenates_lists() {
         ])
     );
 }
+
+#[test]
+fn import_before_inherit_in_source_order() {
+    // Import appears before inherit in source order. The import gets a
+    // higher module index (assigned by node position during loading) but
+    // is evaluated first. This tests that module eval order doesn't
+    // corrupt the import_evals vec.
+    let g = dsl(r#"
+        let h = import("import_helpers/helpers.tsg")
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        rule new_rule { h::comma_sep1(identifier) }
+    "#);
+    assert_eq!(g.name, "derived");
+    assert_eq!(
+        *find_rule(&g, "new_rule"),
+        Rule::seq(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::choice(vec![
+                Rule::repeat(Rule::seq(vec![
+                    Rule::String(",".into()),
+                    Rule::NamedSymbol("identifier".into()),
+                ])),
+                Rule::Blank,
+            ]),
+        ])
+    );
+}
