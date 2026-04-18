@@ -174,8 +174,15 @@ impl AstContext {
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
         let children = self.child_slice(range);
-        debug_assert!(children.len() >= 2);
-        (children[0], children[1], &children[2..])
+        // SAFETY: QualifiedCall nodes are always constructed with [obj, name, ...args]
+        // by the parser, so len >= 2 is structurally guaranteed.
+        unsafe {
+            (
+                *children.get_unchecked(0),
+                *children.get_unchecked(1),
+                children.get_unchecked(2..),
+            )
+        }
     }
     #[inline]
     #[must_use]
