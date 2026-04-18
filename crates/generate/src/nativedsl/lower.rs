@@ -572,6 +572,7 @@ impl<'ast> Evaluator<'ast> {
             ),
             ARule::NamedSymbol(sid) => Rule::NamedSymbol(s.to_string(*sid)),
             ARule::Seq(start, len) | ARule::Choice(start, len) => {
+                let is_seq = matches!(self.get_rule(id), ARule::Seq(..));
                 let range = *start as usize..*start as usize + *len as usize;
                 // Safety: start and len are produced by children_start/children_range
                 // which track rule_children indices.
@@ -579,10 +580,10 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|&id| self.build_rule(id))
                     .collect();
-                match self.get_rule(id) {
-                    ARule::Seq(..) => Rule::seq(children),
-                    ARule::Choice(..) => Rule::choice(children),
-                    _ => unreachable!(),
+                if is_seq {
+                    Rule::seq(children)
+                } else {
+                    Rule::choice(children)
                 }
             }
             ARule::Repeat(inner) => Rule::repeat(self.build_rule(*inner)),
@@ -840,14 +841,15 @@ impl<'ast> Evaluator<'ast> {
                 self.alloc_rule(ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) | Rule::Seq(members) => {
+                let is_seq = matches!(rule, Rule::Seq(_));
                 let imported: Vec<RuleId> = members.iter().map(|m| self.import_rule(m)).collect();
                 let start = self.rule_children.len() as u32;
                 self.rule_children.extend_from_slice(&imported);
                 let len = imported.len() as u16;
-                match rule {
-                    Rule::Seq(_) => self.alloc_rule(ARule::Seq(start, len)),
-                    Rule::Choice(_) => self.alloc_rule(ARule::Choice(start, len)),
-                    _ => unreachable!(),
+                if is_seq {
+                    self.alloc_rule(ARule::Seq(start, len))
+                } else {
+                    self.alloc_rule(ARule::Choice(start, len))
                 }
             }
             Rule::Repeat(inner) => {
@@ -1136,6 +1138,7 @@ impl<'ast> Evaluator<'ast> {
         let ast = self.ctx.ast;
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
+                let is_seq = matches!(ast.node(id), Node::Seq(_));
                 let mut child_ids = Vec::with_capacity(ast.child_slice(*range).len());
                 for &member in ast.child_slice(*range) {
                     if let Node::For(idx) = ast.node(member) {
@@ -1147,11 +1150,12 @@ impl<'ast> Evaluator<'ast> {
                 let start = self.children_start();
                 self.rule_children.extend_from_slice(&child_ids);
                 let (offset, len) = self.children_range(start, ast.span(id))?;
-                Ok(self.alloc_rule(match ast.node(id) {
-                    Node::Seq(_) => ARule::Seq(offset, len),
-                    Node::Choice(_) => ARule::Choice(offset, len),
-                    _ => unreachable!(),
-                }))
+                let arule = if is_seq {
+                    ARule::Seq(offset, len)
+                } else {
+                    ARule::Choice(offset, len)
+                };
+                Ok(self.alloc_rule(arule))
             }
             Node::Repeat(inner) => {
                 let inner = self.lower_to_rule(*inner)?;
@@ -1215,19 +1219,23 @@ impl<'ast> Evaluator<'ast> {
                 let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
             }
-            Node::Prec { value, content }
-            | Node::PrecLeft { value, content }
-            | Node::PrecRight { value, content } => {
+            Node::Prec { value, content } => {
                 let vid = self.eval_expr(*value)?;
                 let prec = self.value_to_prec(vid);
                 let inner = self.lower_to_rule(*content)?;
-                let arule = match ast.node(id) {
-                    Node::Prec { .. } => ARule::Prec(prec, inner),
-                    Node::PrecLeft { .. } => ARule::PrecLeft(prec, inner),
-                    Node::PrecRight { .. } => ARule::PrecRight(prec, inner),
-                    _ => unreachable!(),
-                };
-                Ok(self.alloc_rule(arule))
+                Ok(self.alloc_rule(ARule::Prec(prec, inner)))
+            }
+            Node::PrecLeft { value, content } => {
+                let vid = self.eval_expr(*value)?;
+                let prec = self.value_to_prec(vid);
+                let inner = self.lower_to_rule(*content)?;
+                Ok(self.alloc_rule(ARule::PrecLeft(prec, inner)))
+            }
+            Node::PrecRight { value, content } => {
+                let vid = self.eval_expr(*value)?;
+                let prec = self.value_to_prec(vid);
+                let inner = self.lower_to_rule(*content)?;
+                Ok(self.alloc_rule(ARule::PrecRight(prec, inner)))
             }
             Node::PrecDynamic { value, content } => {
                 let vid = self.eval_expr(*value)?;
@@ -1513,10 +1521,10 @@ impl Evaluator<'_> {
             }
             ARule::NamedSymbol(s) => w.push_str(self.strings.resolve(*s)),
             ARule::Seq(offset, len) | ARule::Choice(offset, len) => {
-                let name = match self.get_rule(rid) {
-                    ARule::Seq(..) => "seq",
-                    ARule::Choice(..) => "choice",
-                    _ => unreachable!(),
+                let name = if matches!(self.get_rule(rid), ARule::Seq(..)) {
+                    "seq"
+                } else {
+                    "choice"
                 };
                 let range = *offset as usize..*offset as usize + *len as usize;
                 // Safety: offset and len are produced by children_start/children_range
