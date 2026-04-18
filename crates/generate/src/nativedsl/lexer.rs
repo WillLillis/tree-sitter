@@ -283,8 +283,7 @@ impl<'src> Lexer<'src> {
         let source = self.source;
         let mut pos = self.pos;
         // SAFETY: pos < source.len() checked by loop condition.
-        while pos < source.len()
-            && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_WHITESPACE)
+        while pos < source.len() && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_WHITESPACE)
         {
             pos += 1;
         }
@@ -341,6 +340,7 @@ impl<'src> Lexer<'src> {
     /// Scan a string literal. Token span will cover `"..."` including quotes.
     /// Uses memchr to skip normal characters, validates escapes inline.
     /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
+    /// `self.pos` is not advanced on error.
     fn lex_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
         let source = self.source;
         let mut pos = self.pos;
