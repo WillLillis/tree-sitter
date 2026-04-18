@@ -233,24 +233,26 @@ impl<'src> Lexer<'src> {
         // Source length is validated < u32::MAX by load_module before lexing.
         // Truncating to u32 lets LLVM prove the capacity can't overflow.
         let mut tokens = Vec::with_capacity((self.source.len() as u32 / 4) as usize);
+        let source = self.source;
         loop {
             self.skip_whitespace();
-            if self.pos >= self.source.len() {
+            let len = source.len();
+            if self.pos >= len {
                 tokens.push(Token {
                     kind: TokenKind::Eof,
                     span: Span::from_usize(self.pos, self.pos),
                 });
                 break;
             }
-            if self.pos + 1 < self.source.len()
-                && unsafe { *self.source.get_unchecked(self.pos) == b'/' }
-                && unsafe { *self.source.get_unchecked(self.pos + 1) == b'/' }
+            if self.pos + 1 < len
+                && unsafe { *source.get_unchecked(self.pos) == b'/' }
+                && unsafe { *source.get_unchecked(self.pos + 1) == b'/' }
             {
                 let start = self.pos;
                 self.pos += 2;
-                match memchr(b'\n', &self.source[self.pos..]) {
+                match memchr(b'\n', &source[self.pos..]) {
                     Some(offset) => self.pos += offset,
-                    None => self.pos = self.source.len(),
+                    None => self.pos = len,
                 }
                 tokens.push(Token {
                     kind: TokenKind::Comment,
@@ -273,13 +275,20 @@ impl<'src> Lexer<'src> {
         b
     }
 
+    /// Local `source`/`pos` pattern: caching `self.source` and `self.pos` into
+    /// locals prevents LLVM from reloading the fat pointer on every iteration
+    /// (writes to `self.pos` through `&mut self` would otherwise alias the
+    /// `self.source` slice).
     fn skip_whitespace(&mut self) {
-        while self.pos < self.source.len()
-            // SAFETY: pos < source.len() checked by loop condition.
-            && byte_is(unsafe { *self.source.get_unchecked(self.pos) }, CLASS_WHITESPACE)
+        let source = self.source;
+        let mut pos = self.pos;
+        // SAFETY: pos < source.len() checked by loop condition.
+        while pos < source.len()
+            && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_WHITESPACE)
         {
-            self.pos += 1;
+            pos += 1;
         }
+        self.pos = pos;
     }
 
     fn next_token(&mut self) -> Result<Token, LexError> {
@@ -331,50 +340,56 @@ impl<'src> Lexer<'src> {
 
     /// Scan a string literal. Token span will cover `"..."` including quotes.
     /// Uses memchr to skip normal characters, validates escapes inline.
+    /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
     fn lex_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
+        let source = self.source;
+        let mut pos = self.pos;
         loop {
-            // Fast-skip to the next interesting byte: " or \ or \n
-            match memchr2(b'"', b'\\', &self.source[self.pos..]) {
+            // Fast-skip to the next interesting byte: " or \
+            match memchr2(b'"', b'\\', &source[pos..]) {
                 None => {
                     return Err(LexError {
                         kind: LexErrorKind::UnterminatedString,
-                        span: Span::from_usize(start, self.source.len()),
+                        span: Span::from_usize(start, source.len()),
                     });
                 }
                 Some(offset) => {
                     // Check for newline in the skipped region
-                    if let Some(nl) = memchr(b'\n', &self.source[self.pos..self.pos + offset]) {
+                    if let Some(nl) = memchr(b'\n', &source[pos..pos + offset]) {
                         return Err(LexError {
                             kind: LexErrorKind::NewlineInString,
-                            span: Span::from_usize(start, self.pos + nl),
+                            span: Span::from_usize(start, pos + nl),
                         });
                     }
-                    self.pos += offset;
-                    match self.source[self.pos] {
+                    pos += offset;
+                    // SAFETY: memchr2 found a byte at this position, so pos < source.len().
+                    match unsafe { *source.get_unchecked(pos) } {
                         b'"' => {
-                            self.pos += 1;
+                            self.pos = pos + 1;
                             break;
                         }
                         b'\\' => {
-                            let esc_pos = self.pos;
-                            self.pos += 1;
-                            if self.pos >= self.source.len() {
+                            let esc_pos = pos;
+                            pos += 1;
+                            if pos >= source.len() {
                                 return Err(LexError {
                                     kind: LexErrorKind::UnterminatedEscape,
-                                    span: Span::from_usize(esc_pos, self.source.len()),
+                                    span: Span::from_usize(esc_pos, source.len()),
                                 });
                             }
-                            match self.source[self.pos] {
-                                b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => self.pos += 1,
+                            // SAFETY: pos < source.len() checked above.
+                            match unsafe { *source.get_unchecked(pos) } {
+                                b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
                                 other => {
                                     return Err(LexError {
                                         kind: LexErrorKind::InvalidEscape(other as char),
-                                        span: Span::from_usize(esc_pos, self.pos + 1),
+                                        span: Span::from_usize(esc_pos, pos + 1),
                                     });
                                 }
                             }
                         }
-                        _ => unreachable!(),
+                        // SAFETY: memchr2 only returns positions of b'"' or b'\\'.
+                        _ => unsafe { std::hint::unreachable_unchecked() },
                     }
                 }
             }
@@ -384,7 +399,9 @@ impl<'src> Lexer<'src> {
 
     /// Scan a raw string literal: r"...", r#"..."#, r##"..."##, etc.
     /// Called when we've already consumed `r` and peeked `"` or `#`.
+    /// See `skip_whitespace` for why `source` is cached as a local.
     fn lex_raw_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
+        let source = self.source;
         let mut hash_count: u8 = 0;
         while self.peek() == Some(b'#') {
             self.advance();
@@ -402,41 +419,47 @@ impl<'src> Lexer<'src> {
         self.advance(); // skip opening "
 
         // Scan for closing " followed by hash_count #'s
+        let mut pos = self.pos;
         loop {
-            match memchr(b'"', &self.source[self.pos..]) {
+            match memchr(b'"', &source[pos..]) {
                 None => {
                     return Err(LexError {
                         kind: LexErrorKind::UnterminatedRawString,
-                        span: Span::from_usize(start, self.source.len()),
+                        span: Span::from_usize(start, source.len()),
                     });
                 }
                 Some(offset) => {
-                    self.pos += offset + 1; // advance past the "
+                    pos += offset + 1; // advance past the "
                     // Check if followed by the right number of #'s
                     let mut found = 0u8;
+                    // SAFETY: pos < source.len() is checked by loop condition.
                     while found < hash_count
-                        && self.pos < self.source.len()
-                        && self.source[self.pos] == b'#'
+                        && pos < source.len()
+                        && unsafe { *source.get_unchecked(pos) } == b'#'
                     {
-                        self.pos += 1;
+                        pos += 1;
                         found += 1;
                     }
                     if found == hash_count {
-                        break; // found the closing delimiter
+                        break;
                     }
-                    // Not enough #'s, keep scanning
                 }
             }
         }
+        self.pos = pos;
         Ok(TokenKind::RawStringLit { hash_count })
     }
 
+    /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
     fn lex_int(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        while let Some(b'0'..=b'9') = self.peek() {
-            self.advance();
+        let source = self.source;
+        let mut pos = self.pos;
+        while pos < source.len() && source[pos].is_ascii_digit() {
+            pos += 1;
         }
+        self.pos = pos;
         // SAFETY: the slice contains only ASCII digits (b'0'..=b'9'), which are valid UTF-8.
-        let text = unsafe { std::str::from_utf8_unchecked(&self.source[start..self.pos]) };
+        let text = unsafe { std::str::from_utf8_unchecked(&source[start..pos]) };
         let value: i32 = text.parse().map_err(|_| LexError {
             kind: LexErrorKind::IntegerOverflow,
             span: Span::from_usize(start, self.pos),
@@ -444,13 +467,17 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::IntLit(value))
     }
 
+    /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
     fn lex_ident(&mut self, start: usize) -> Result<TokenKind, LexError> {
-        while self.pos < self.source.len()
-            // SAFETY: pos < source.len() checked by loop condition.
-            && byte_is(unsafe { *self.source.get_unchecked(self.pos) }, CLASS_IDENT_CONTINUE)
+        let source = self.source;
+        let mut pos = self.pos;
+        // SAFETY: pos < source.len() checked by loop condition.
+        while pos < source.len()
+            && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_IDENT_CONTINUE)
         {
-            self.pos += 1;
+            pos += 1;
         }
+        self.pos = pos;
         // SAFETY: the slice contains only ASCII ident chars (a-z, A-Z, 0-9, _), which are valid UTF-8.
         let text = unsafe { std::str::from_utf8_unchecked(&self.source[start..self.pos]) };
         if text == "r" && matches!(self.peek(), Some(b'"' | b'#')) {
