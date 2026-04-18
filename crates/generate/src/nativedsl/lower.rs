@@ -1716,6 +1716,7 @@ pub enum LowerErrorKind {
         error: crate::parse_grammar::ParseGrammarError,
     },
     ModuleUnsupportedExtension,
+    JsonImportNotAllowed,
     ModuleTooMany,
     ModuleDisallowedItem,
     ModuleContainsGrammarBlock,
@@ -1745,6 +1746,9 @@ impl std::fmt::Display for LowerError {
             ModuleJsonError { path, error } => write!(f, "failed to parse '{path}': {error}"),
             ModuleUnsupportedExtension => {
                 write!(f, "unsupported file extension, expected .tsg or .json")
+            }
+            JsonImportNotAllowed => {
+                write!(f, "JSON files can only be used with inherit(), not import()")
             }
             ModuleTooMany => write!(f, "too many modules (max 256)"),
             ModuleDisallowedItem => write!(

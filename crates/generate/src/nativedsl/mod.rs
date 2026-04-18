@@ -258,6 +258,9 @@ fn load_child_module(
                 lowered: Some(grammar),
             })
         }
+        Some("json") => {
+            Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into())
+        }
         _ => Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
     }
 }
