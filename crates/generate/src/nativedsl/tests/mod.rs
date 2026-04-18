@@ -428,3 +428,46 @@ fn bench_per_stage() {
     );
     eprintln!("Total:     {:>8?}", total);
 }
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_lower_only_cpp() {
+    let path = native_grammar_path("cpp_native");
+    let source = read_native_grammar("cpp_native");
+    let module = super::load_module(&source, &path, super::ModuleKind::Grammar, &[]).unwrap();
+    let n = 5000u32;
+    for _ in 0..10 {
+        std::hint::black_box(
+            super::lower::lower_with_base(&module.ast, &path, &module.sub_modules).unwrap(),
+        );
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(
+            super::lower::lower_with_base(&module.ast, &path, &module.sub_modules).unwrap(),
+        );
+    }
+    eprintln!("Lower C++ ({n} iters): {:?}/iter", start.elapsed() / n);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_lower_only_vim() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../grammars/tree-sitter-vim/grammar.tsg");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let module = super::load_module(&source, &path, super::ModuleKind::Grammar, &[]).unwrap();
+    let n = 5000u32;
+    for _ in 0..10 {
+        std::hint::black_box(
+            super::lower::lower_with_base(&module.ast, &path, &module.sub_modules).unwrap(),
+        );
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..n {
+        std::hint::black_box(
+            super::lower::lower_with_base(&module.ast, &path, &module.sub_modules).unwrap(),
+        );
+    }
+    eprintln!("Lower Vim ({n} iters): {:?}/iter", start.elapsed() / n);
+}
