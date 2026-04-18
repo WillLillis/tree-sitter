@@ -174,6 +174,27 @@ fn bench_native_dsl_cpp() {
 
 #[test]
 #[ignore = "benchmark"]
+fn bench_native_dsl_vim() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../grammars/tree-sitter-vim/grammar.tsg");
+    let source = std::fs::read_to_string(&path).unwrap();
+    run_bench("Native DSL Vim", || {
+        parse_native_dsl(&source, &path).unwrap();
+    });
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn bench_native_dsl_python() {
+    let path = std::path::PathBuf::from("/home/lillis/projects/grammars/tree-sitter-python/grammar.tsg");
+    let source = std::fs::read_to_string(&path).unwrap();
+    run_bench("Native DSL Python", || {
+        parse_native_dsl(&source, &path).unwrap();
+    });
+}
+
+#[test]
+#[ignore = "benchmark"]
 fn bench_json_parse_c() {
     let json = std::fs::read_to_string(test_grammars_dir().join("../grammars/c/src/grammar.json"))
         .unwrap();
