@@ -133,6 +133,7 @@ const MAX_CALL_DEPTH: u16 = 64;
 /// an imported module's scope.
 struct ModuleCtx<'ast> {
     ast: &'ast Ast,
+    path: &'ast Path,
     scopes: ScopeStack<'ast, ValueId>,
     fns: FxHashMap<&'ast str, NodeId>,
     modules: &'ast [super::Module],
@@ -143,14 +144,16 @@ struct ModuleCtx<'ast> {
 }
 
 impl<'ast> ModuleCtx<'ast> {
-    fn for_import(
+    fn for_child_module(
         ast: &'ast Ast,
+        path: &'ast Path,
         modules: &'ast [super::Module],
         base_grammar: Option<&'ast InputGrammar>,
     ) -> Self {
         let n = modules.len();
         Self {
             ast,
+            path,
             scopes: ScopeStack::new(),
             fns: collect_fns(ast),
             modules,
@@ -195,13 +198,6 @@ struct ImportEval<'ast> {
     sub_evals: Vec<Option<ImportEval<'ast>>>,
 }
 
-/// A `print(...)` statement captured during the item loop but rendered after
-/// all rules are lowered, so name references can be expanded into their bodies.
-struct PendingPrint {
-    value: ValueId,
-    span: Span,
-}
-
 /// Intermediate results from the evaluation phase, ready to be assembled
 /// into an `InputGrammar` once the base grammar can be moved out.
 struct EvalResult {
@@ -236,10 +232,9 @@ fn evaluate(
     modules: &[super::Module],
     base_grammar: Option<&InputGrammar>,
 ) -> Result<EvalResult, LowerError> {
-    let mut eval = Evaluator::new(ast, base_grammar, modules);
+    let mut eval = Evaluator::new(ast, grammar_path, base_grammar, modules);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
-    let mut pending_prints: Vec<PendingPrint> = Vec::new();
 
     // Register all functions first so forward references work
     eval.ctx.fns = collect_fns(ast);
@@ -259,18 +254,11 @@ fn evaluate(
                 override_entries.push((ast.node_text(*name), rule_id, ast.span(*name)));
             }
             Node::Print(arg) => {
-                let value = eval.eval_expr(*arg)?;
-                pending_prints.push(PendingPrint {
-                    value,
-                    span: ast.span(item_id),
-                });
+                let val = eval.eval_expr(*arg)?;
+                eval.emit_print(val, ast.span(item_id));
             }
             _ => unreachable!(),
         }
-    }
-
-    for p in &pending_prints {
-        eval.emit_print(p.value, p.span, grammar_path, &rule_entries);
     }
 
     let config = ast
@@ -399,6 +387,7 @@ fn build_grammar(
 impl<'ast> Evaluator<'ast> {
     fn new(
         ast: &'ast Ast,
+        path: &'ast Path,
         base_grammar: Option<&'ast InputGrammar>,
         modules: &'ast [super::Module],
     ) -> Self {
@@ -406,6 +395,7 @@ impl<'ast> Evaluator<'ast> {
         Self {
             ctx: ModuleCtx {
                 ast,
+                path,
                 scopes: ScopeStack::new(),
                 fns: FxHashMap::default(),
                 modules,
@@ -1302,7 +1292,7 @@ impl<'ast> Evaluator<'ast> {
         let modules = self.ctx.modules;
         let module = &modules[idx];
         let child =
-            ModuleCtx::for_import(&module.ast, &module.sub_modules, module.lowered.as_ref());
+            ModuleCtx::for_child_module(&module.ast, &module.path, &module.sub_modules, module.lowered.as_ref());
         let saved = std::mem::replace(&mut self.ctx, child);
 
         let result = self.eval_let_bindings();
@@ -1370,6 +1360,7 @@ impl<'ast> Evaluator<'ast> {
 
         let child = ModuleCtx {
             ast: import_ast,
+            path: &module.path,
             scopes: ScopeStack::new(),
             fns: import_fns,
             modules: &module.sub_modules,
@@ -1422,41 +1413,21 @@ impl<'ast> Evaluator<'ast> {
 
 // -- `print(...)` rendering ----------------------------------------------
 //
-// Debug output for the top-level `print` item. Write to stderr with a line
-// prefix, swallow any IO errors. Compound values (lists, objects, and rule
+// Debug output for `print(expr)`. Write to stderr with a path:line prefix,
+// swallow any IO errors. Compound values (lists, objects, and rule
 // combinators with children) break their direct children onto indented lines;
-// each child renders on a single line. Rules are fully traversed.
+// each child renders on a single line.
 
 impl Evaluator<'_> {
-    /// Format `val_id` and write it to stderr, prefixed with `path:line:`. IO
-    /// errors are ignored. If the value is a bare `NamedSymbol` (e.g. from
-    /// `print(my_rule)`), the rule body is expanded once so the user sees
-    /// what the rule lowered to; nested rule references remain as names.
-    fn emit_print(
-        &self,
-        val_id: ValueId,
-        item_span: Span,
-        grammar_path: &Path,
-        rule_entries: &[(&str, RuleId)],
-    ) {
+    /// Format `val_id` and write it to stderr, prefixed with `path:line:`.
+    fn emit_print(&self, val_id: ValueId, item_span: Span) {
         use std::io::Write as _;
         let line = offset_to_line(self.ctx.ast.source(), item_span.start as usize);
         let mut buf = String::new();
-        // Top-level NamedSymbol expansion: look up the rule body and render it.
-        if let Value::Rule(rid) = self.get_val(val_id)
-            && let ARule::NamedSymbol(sid) = self.get_rule(*rid)
-            && let Some((_, body_rid)) = {
-                let name = self.strings.resolve(*sid);
-                rule_entries.iter().find(|(n, _)| *n == name).copied()
-            }
-        {
-            self.write_rule(&mut buf, body_rid, 0);
-        } else {
-            self.write_value(&mut buf, val_id, 0);
-        }
+        self.write_value(&mut buf, val_id, 0);
         let stderr = std::io::stderr();
         let mut stderr = stderr.lock();
-        let _ = writeln!(stderr, "{}:{line}: {buf}", grammar_path.display());
+        let _ = writeln!(stderr, "{}:{line}: {buf}", self.ctx.path.display());
     }
 
     /// Write a value in compact form. Compound values at depth 0 break their
