@@ -137,7 +137,9 @@ struct ModuleCtx<'ast> {
     fns: FxHashMap<&'ast str, NodeId>,
     modules: &'ast [super::Module],
     base_grammar: Option<&'ast InputGrammar>,
-    import_evals: Vec<ImportEval<'ast>>,
+    /// Lazily populated as modules are first accessed. Pre-sized to
+    /// `modules.len()` so modules can be evaluated in any order.
+    import_evals: Vec<Option<ImportEval<'ast>>>,
 }
 
 impl<'ast> ModuleCtx<'ast> {
@@ -146,13 +148,14 @@ impl<'ast> ModuleCtx<'ast> {
         modules: &'ast [super::Module],
         base_grammar: Option<&'ast InputGrammar>,
     ) -> Self {
+        let n = modules.len();
         Self {
             ast,
             scopes: ScopeStack::new(),
             fns: collect_fns(ast),
             modules,
             base_grammar,
-            import_evals: Vec::new(),
+            import_evals: vec![None; n],
         }
     }
 }
@@ -181,6 +184,7 @@ fn collect_fns<'ast>(ast: &'ast Ast) -> FxHashMap<&'ast str, NodeId> {
 
 /// Evaluated state for a single imported module. Populated when the import
 /// is first encountered during lowering.
+#[derive(Clone)]
 struct ImportEval<'ast> {
     /// Top-level let binding values from the imported file.
     values: FxHashMap<&'ast str, ValueId>,
@@ -188,7 +192,7 @@ struct ImportEval<'ast> {
     fns: FxHashMap<&'ast str, NodeId>,
     /// Evaluated state for this module's own imports, needed when calling
     /// the module's functions (they may reference the module's imports).
-    sub_evals: Vec<ImportEval<'ast>>,
+    sub_evals: Vec<Option<ImportEval<'ast>>>,
 }
 
 /// A `print(...)` statement captured during the item loop but rendered after
@@ -406,7 +410,7 @@ impl<'ast> Evaluator<'ast> {
                 fns: FxHashMap::default(),
                 modules,
                 base_grammar,
-                import_evals: Vec::new(),
+                import_evals: vec![None; modules.len()],
             },
             call_stack: Vec::new(),
             values: Vec::with_capacity(cap),
@@ -990,7 +994,8 @@ impl<'ast> Evaluator<'ast> {
                 };
                 let idx = idx as usize;
                 // Check pre-evaluated let values first
-                if let Some(&val) = self.ctx.import_evals[idx].values.get(member_name) {
+                let eval = self.ctx.import_evals[idx].as_ref().unwrap();
+                if let Some(&val) = eval.values.get(member_name) {
                     Ok(val)
                 } else if let Some(grammar) = &self.ctx.base_grammar {
                     // For inherited grammar modules, fall back to rule bodies.
@@ -1289,7 +1294,7 @@ impl<'ast> Evaluator<'ast> {
     /// Evaluate an imported module's top-level let bindings and register its fns.
     fn eval_import_module(&mut self, idx: u8) -> Result<(), LowerError> {
         let idx = idx as usize;
-        if idx < self.ctx.import_evals.len() {
+        if self.ctx.import_evals[idx].is_some() {
             return Ok(());
         }
 
@@ -1306,8 +1311,7 @@ impl<'ast> Evaluator<'ast> {
         self.ctx = saved;
 
         let values = result?;
-        debug_assert_eq!(self.ctx.import_evals.len(), idx);
-        self.ctx.import_evals.push(ImportEval {
+        self.ctx.import_evals[idx] = Some(ImportEval {
             values,
             fns,
             sub_evals,
@@ -1346,7 +1350,8 @@ impl<'ast> Evaluator<'ast> {
         let import_ast = &module.ast;
 
         // Extract fn info before swapping context
-        let fn_node_id = self.ctx.import_evals[idx].fns[fn_name];
+        let import_eval = self.ctx.import_evals[idx].as_mut().unwrap();
+        let fn_node_id = import_eval.fns[fn_name];
         let fn_idx = match import_ast.node(fn_node_id) {
             Node::Fn(fi) => *fi,
             _ => unreachable!(),
@@ -1354,13 +1359,13 @@ impl<'ast> Evaluator<'ast> {
         let config = import_ast.get_fn(fn_idx);
         let body = config.body;
         let params: Vec<_> = config.params.iter().map(|p| p.name).collect();
-        let import_fns = self.ctx.import_evals[idx].fns.clone();
-        let import_values: Vec<_> = self.ctx.import_evals[idx]
+        let import_fns = import_eval.fns.clone();
+        let import_values: Vec<_> = import_eval
             .values
             .iter()
             .map(|(&k, &v)| (k, v))
             .collect();
-        let sub_evals = std::mem::take(&mut self.ctx.import_evals[idx].sub_evals);
+        let sub_evals = std::mem::take(&mut import_eval.sub_evals);
 
         let child = ModuleCtx {
             ast: import_ast,
@@ -1388,7 +1393,7 @@ impl<'ast> Evaluator<'ast> {
         // Restore parent, preserving any child eval changes
         let child_evals = std::mem::take(&mut self.ctx.import_evals);
         self.ctx = saved;
-        self.ctx.import_evals[idx].sub_evals = child_evals;
+        self.ctx.import_evals[idx].as_mut().unwrap().sub_evals = child_evals;
 
         result
     }
