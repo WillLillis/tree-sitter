@@ -18,7 +18,7 @@ use crate::rules::{Precedence, Rule};
 
 use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, Span};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Str(NonZeroU32);
 
 enum StrEntry<'src> {
@@ -71,10 +71,10 @@ impl<'src> StringPool<'src> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct RuleId(u32);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum APrec {
     Integer(i32),
     Name(Str),
@@ -99,7 +99,7 @@ enum ARule {
     Reserved(Str, RuleId),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct ValueId(u32);
 
 /// Typed wrappers around [`ValueId`] that guarantee the underlying value has
@@ -1297,8 +1297,12 @@ impl<'ast> Evaluator<'ast> {
 
         let modules = self.ctx.modules;
         let module = &modules[idx];
-        let child =
-            ModuleCtx::for_child_module(&module.ast, &module.path, &module.sub_modules, module.lowered.as_ref());
+        let child = ModuleCtx::for_child_module(
+            &module.ast,
+            &module.path,
+            &module.sub_modules,
+            module.lowered.as_ref(),
+        );
         let saved = std::mem::replace(&mut self.ctx, child);
 
         let result = self.eval_let_bindings();
@@ -1357,11 +1361,7 @@ impl<'ast> Evaluator<'ast> {
         let body = config.body;
         let params: Vec<_> = config.params.iter().map(|p| p.name).collect();
         let import_fns = import_eval.fns.clone();
-        let import_values: Vec<_> = import_eval
-            .values
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
+        let import_values: Vec<_> = import_eval.values.iter().map(|(&k, &v)| (k, v)).collect();
         let sub_evals = std::mem::take(&mut import_eval.sub_evals);
 
         let child = ModuleCtx {
@@ -1733,7 +1733,10 @@ impl std::fmt::Display for LowerError {
                 write!(f, "unsupported file extension, expected .tsg or .json")
             }
             JsonImportNotAllowed => {
-                write!(f, "JSON files can only be used with inherit(), not import()")
+                write!(
+                    f,
+                    "JSON files can only be used with inherit(), not import()"
+                )
             }
             ModuleTooMany => write!(f, "too many modules (max 256)"),
             ModuleDepthExceeded => {
