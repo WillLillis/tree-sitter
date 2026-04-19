@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, AstContext, Node, NodeId, Note, NoteMessage, Param, Span};
+use super::ast::{Ast, AstContext, Node, NodeArena, NodeId, Note, NoteMessage, Param, Span};
 
 /// Zero-allocation scope chain (linked list on stack, borrows from configs).
 struct Locals<'a> {
@@ -272,7 +272,7 @@ fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> Result<(), Res
             let ctx = &ast.context;
             // INVARIANT: set during grammar block parsing, always present here
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
-            let nodes = &mut ast.nodes;
+            let arena = &mut ast.arena;
             for id in [
                 grammar_config.inherits,
                 grammar_config.extras,
@@ -287,21 +287,21 @@ fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> Result<(), Res
             .into_iter()
             .flatten()
             {
-                resolve_expr(nodes, ctx, names, id, &Locals::EMPTY)?;
+                resolve_expr(arena, ctx, names, id, &Locals::EMPTY)?;
             }
             Ok(())
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
             let body = *body;
-            resolve_expr(&mut ast.nodes, &ast.context, names, body, &Locals::EMPTY)
+            resolve_expr(&mut ast.arena, &ast.context, names, body, &Locals::EMPTY)
         }
         Node::Let { value, .. } => {
             let value = *value;
-            resolve_expr(&mut ast.nodes, &ast.context, names, value, &Locals::EMPTY)
+            resolve_expr(&mut ast.arena, &ast.context, names, value, &Locals::EMPTY)
         }
         Node::Print(arg) => {
             let arg = *arg;
-            resolve_expr(&mut ast.nodes, &ast.context, names, arg, &Locals::EMPTY)
+            resolve_expr(&mut ast.arena, &ast.context, names, arg, &Locals::EMPTY)
         }
         Node::Fn(fn_idx) => {
             let fn_config = ast.context.get_fn(*fn_idx);
@@ -310,7 +310,7 @@ fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> Result<(), Res
                 scope: LocalScope::FnParams(&fn_config.params),
                 parent: None,
             };
-            resolve_expr(&mut ast.nodes, &ast.context, names, body, &locals)
+            resolve_expr(&mut ast.arena, &ast.context, names, body, &locals)
         }
         _ => Ok(()),
     }
@@ -318,22 +318,22 @@ fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> Result<(), Res
 
 /// Resolve identifiers within a single expression.
 fn resolve_expr(
-    nodes: &mut [Node],
+    arena: &mut NodeArena,
     ctx: &AstContext,
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
 ) -> Result<(), ResolveError> {
     // Handle Ident mutation first
-    if matches!(nodes[id.index()], Node::Ident) {
+    if matches!(*arena.get(id), Node::Ident) {
         let span = ctx.span(id);
         let name = ctx.text(span);
         if locals.contains(ctx, name) {
-            nodes[id.index()] = Node::VarRef;
+            arena.set(id, Node::VarRef);
         } else if let Some(decl) = names.get(name) {
             match decl {
-                Decl::Var => nodes[id.index()] = Node::VarRef,
-                Decl::Rule | Decl::Fn => nodes[id.index()] = Node::RuleRef,
+                Decl::Var => arena.set(id, Node::VarRef),
+                Decl::Rule | Decl::Fn => arena.set(id, Node::RuleRef),
             }
         } else {
             return Err(ResolveError {
@@ -347,68 +347,68 @@ fn resolve_expr(
 
     // Alias target: bare identifiers become RuleRef (named alias) unless
     // they refer to a local variable (VarRef for fn params / for bindings).
-    if let Node::Alias { content, target } = &nodes[id.index()] {
+    if let Node::Alias { content, target } = &*arena.get(id) {
         let (content, target) = (*content, *target);
-        resolve_expr(nodes, ctx, names, content, locals)?;
-        if matches!(nodes[target.index()], Node::Ident) {
+        resolve_expr(arena, ctx, names, content, locals)?;
+        if matches!(*arena.get(target), Node::Ident) {
             let name = ctx.text(ctx.span(target));
             if locals.contains(ctx, name) {
-                nodes[target.index()] = Node::VarRef;
+                arena.set(target, Node::VarRef);
             } else {
-                nodes[target.index()] = Node::RuleRef;
+                arena.set(target, Node::RuleRef);
             }
         } else {
-            resolve_expr(nodes, ctx, names, target, locals)?;
+            resolve_expr(arena, ctx, names, target, locals)?;
         }
         return Ok(());
     }
 
     // For expressions need extended locals
-    if let Node::For(for_idx) = &nodes[id.index()] {
+    if let Node::For(for_idx) = &*arena.get(id) {
         let config = ctx.get_for(*for_idx);
         let iterable = config.iterable;
         let body = config.body;
         let bindings = &config.bindings;
-        resolve_expr(nodes, ctx, names, iterable, locals)?;
+        resolve_expr(arena, ctx, names, iterable, locals)?;
         let inner = Locals {
             scope: LocalScope::ForBindings(bindings),
             parent: Some(locals),
         };
-        return resolve_expr(nodes, ctx, names, body, &inner);
+        return resolve_expr(arena, ctx, names, body, &inner);
     }
 
     // All remaining cases
-    resolve_children(nodes, ctx, names, id, locals)
+    resolve_children(arena, ctx, names, id, locals)
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
 fn resolve_children(
-    nodes: &mut [Node],
+    arena: &mut NodeArena,
     ctx: &AstContext,
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
 ) -> Result<(), ResolveError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
-    if let Some(range) = nodes[id.index()].child_range() {
+    if let Some(range) = arena.get(id).child_range() {
         for child in ctx.child_slice(range) {
-            resolve_expr(nodes, ctx, names, *child, locals)?;
+            resolve_expr(arena, ctx, names, *child, locals)?;
         }
         return Ok(());
     }
 
-    match &nodes[id.index()] {
+    match &*arena.get(id) {
         Node::Call { name, args } => {
             let (name, args) = (*name, *args);
-            resolve_expr(nodes, ctx, names, name, locals)?;
+            resolve_expr(arena, ctx, names, name, locals)?;
             for arg in ctx.child_slice(args) {
-                resolve_expr(nodes, ctx, names, *arg, locals)?;
+                resolve_expr(arena, ctx, names, *arg, locals)?;
             }
             Ok(())
         }
         &Node::Object(range) => {
             for field in ctx.get_object(range) {
-                resolve_expr(nodes, ctx, names, field.1, locals)?;
+                resolve_expr(arena, ctx, names, field.1, locals)?;
             }
             Ok(())
         }
@@ -421,49 +421,49 @@ fn resolve_children(
         | Node::GrammarConfig(inner)
         | Node::Print(inner) => {
             let inner = *inner;
-            resolve_expr(nodes, ctx, names, inner, locals)
+            resolve_expr(arena, ctx, names, inner, locals)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
             let content = *content;
-            resolve_expr(nodes, ctx, names, content, locals)
+            resolve_expr(arena, ctx, names, content, locals)
         }
         Node::Append { left, right } => {
             let (left, right) = (*left, *right);
-            resolve_expr(nodes, ctx, names, left, locals)?;
-            resolve_expr(nodes, ctx, names, right, locals)
+            resolve_expr(arena, ctx, names, left, locals)?;
+            resolve_expr(arena, ctx, names, right, locals)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content }
         | Node::PrecDynamic { value, content } => {
             let (value, content) = (*value, *content);
-            resolve_expr(nodes, ctx, names, value, locals)?;
-            resolve_expr(nodes, ctx, names, content, locals)
+            resolve_expr(arena, ctx, names, value, locals)?;
+            resolve_expr(arena, ctx, names, content, locals)
         }
         Node::DynRegex { pattern, flags } => {
             let (pattern, flags) = (*pattern, *flags);
-            resolve_expr(nodes, ctx, names, pattern, locals)?;
+            resolve_expr(arena, ctx, names, pattern, locals)?;
             if let Some(flags) = flags {
-                resolve_expr(nodes, ctx, names, flags, locals)?;
+                resolve_expr(arena, ctx, names, flags, locals)?;
             }
             Ok(())
         }
         Node::FieldAccess { obj, .. } => {
             let obj = *obj;
-            resolve_expr(nodes, ctx, names, obj, locals)
+            resolve_expr(arena, ctx, names, obj, locals)
         }
         Node::QualifiedAccess { obj, .. } => {
             let obj = *obj;
-            resolve_expr(nodes, ctx, names, obj, locals)
+            resolve_expr(arena, ctx, names, obj, locals)
         }
         // path is a StringLit, nothing to resolve
         Node::Import { .. } | Node::Inherit { .. } => Ok(()),
         Node::QualifiedCall(range) => {
             let (obj, _name, args) = ctx.get_qualified_call(*range);
-            resolve_expr(nodes, ctx, names, obj, locals)?;
+            resolve_expr(arena, ctx, names, obj, locals)?;
             // name stays as Ident - it's a member of the import namespace
             for &arg in args {
-                resolve_expr(nodes, ctx, names, arg, locals)?;
+                resolve_expr(arena, ctx, names, arg, locals)?;
             }
             Ok(())
         }

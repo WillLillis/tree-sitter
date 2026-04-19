@@ -18,13 +18,74 @@ impl fmt::Display for CapacityError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(pub NonZeroU32);
+pub struct NodeId(NonZeroU32);
 
 impl NodeId {
+    /// The first valid NodeId (index 1, after the sentinel).
+    pub const FIRST: Self = Self(unsafe { NonZeroU32::new_unchecked(1) });
+
     #[inline]
     #[must_use]
     pub const fn index(self) -> usize {
         self.0.get() as usize
+    }
+
+    /// Return the next NodeId (index + 1).
+    #[inline]
+    #[must_use]
+    pub const fn next(self) -> Self {
+        // SAFETY: self.0 >= 1, so self.0 + 1 >= 2, always non-zero.
+        Self(unsafe { NonZeroU32::new_unchecked(self.0.get() + 1) })
+    }
+}
+
+/// Arena for AST nodes. Hides the sentinel at index 0 and enforces
+/// [`NodeId`]-based access so callers can't accidentally index at 0
+/// or iterate from the wrong starting point.
+pub struct NodeArena {
+    nodes: Vec<Node>,
+}
+
+impl NodeArena {
+    #[must_use]
+    pub fn new(estimated_cap: usize) -> Self {
+        let mut nodes = Vec::with_capacity(estimated_cap);
+        nodes.push(Node::Unreachable);
+        Self { nodes }
+    }
+
+    pub fn push(&mut self, node: Node) -> NodeId {
+        let index = self.nodes.len() as u32;
+        // SAFETY: nodes[0] is always the Unreachable sentinel, so len() >= 1.
+        let id = NodeId(unsafe { NonZeroU32::new_unchecked(index) });
+        self.nodes.push(node);
+        id
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn get(&self, id: NodeId) -> &Node {
+        &self.nodes[id.index()]
+    }
+
+    #[inline]
+    pub fn set(&mut self, id: NodeId, node: Node) {
+        self.nodes[id.index()] = node;
+    }
+
+    /// Number of nodes (excluding sentinel).
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.nodes.len() - 1
+    }
+
+    /// Iterate all valid [`NodeId`]s.
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        (1..self.nodes.len()).map(|i| {
+            // SAFETY: i starts at 1, always non-zero.
+            NodeId(unsafe { NonZeroU32::new_unchecked(i as u32) })
+        })
     }
 }
 
@@ -127,13 +188,13 @@ impl Span {
 }
 
 pub struct Ast {
-    pub nodes: Vec<Node>,
+    pub arena: NodeArena,
     pub root_items: Vec<NodeId>,
     pub context: AstContext,
 }
 
-/// Immutable context data split from nodes so resolve can borrow `&mut nodes`
-/// while reading `&context`.
+/// Immutable context data split from nodes so resolve can borrow
+/// `&mut arena` while reading `&context`.
 pub struct AstContext {
     pub grammar_config: Option<GrammarConfig>,
     pub fn_configs: Vec<FnConfig>,
@@ -205,15 +266,13 @@ impl AstContext {
 impl Ast {
     #[must_use]
     pub fn new(source: String) -> Self {
-        // Source length is validated < u32::MAX before parsing.
-        // Truncating to u32 lets LLVM prove capacity can't overflow.
-        let cap = (source.len() as u32 / 30) as usize;
-        let mut nodes = Vec::with_capacity(cap);
+        let cap = source.len() / 30;
         let mut spans = Vec::with_capacity(cap);
-        nodes.push(Node::Unreachable);
+        // Sentinel span parallel to NodeArena's sentinel node at index 0.
+        // TODO: consider moving spans into NodeArena to co-locate these.
         spans.push(Span::new(0, 0));
         Self {
-            nodes,
+            arena: NodeArena::new(cap),
             root_items: Vec::new(),
             context: AstContext {
                 grammar_config: None,
@@ -229,11 +288,7 @@ impl Ast {
 
     #[inline]
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
-        let index = self.nodes.len() as u32;
-        // SAFETY: index is always >= 1 because the constructor pre-populates
-        // nodes[0] with a sentinel (Node::Unreachable).
-        let id = NodeId(unsafe { NonZeroU32::new_unchecked(index) });
-        self.nodes.push(node);
+        let id = self.arena.push(node);
         self.context.spans.push(span);
         id
     }
@@ -241,7 +296,7 @@ impl Ast {
     #[inline]
     #[must_use]
     pub fn node(&self, id: NodeId) -> &Node {
-        &self.nodes[id.index()]
+        self.arena.get(id)
     }
     #[inline]
     #[must_use]
