@@ -8,7 +8,7 @@ use std::{fmt, num::NonZeroU32, path::PathBuf};
 
 use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Clone, Copy)]
 pub struct CapacityError;
 
 impl fmt::Display for CapacityError {
@@ -17,7 +17,7 @@ impl fmt::Display for CapacityError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(NonZeroU32);
 
 impl NodeId {
@@ -107,7 +107,7 @@ impl NodeArena {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FnId(u32);
 
 impl FnId {
@@ -118,7 +118,7 @@ impl FnId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ForId(u32);
 
 impl ForId {
@@ -377,7 +377,7 @@ impl Ast {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ChildRange {
     pub start: u32,
     pub len: u16,
@@ -390,7 +390,7 @@ impl ChildRange {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Node {
     Grammar,
     Rule {
@@ -532,7 +532,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct GrammarConfig {
     pub language: Option<String>,
     pub inherits: Option<NodeId>,
@@ -546,7 +546,7 @@ pub struct GrammarConfig {
     pub reserved: Option<NodeId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FnConfig {
     pub name: NodeId,
     pub params: Vec<Param>,
@@ -554,13 +554,13 @@ pub struct FnConfig {
     pub body: NodeId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Param {
     pub name: NodeId,
     pub ty: NodeId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ForConfig {
     pub bindings: Vec<(Span, NodeId)>,
     pub iterable: NodeId,
