@@ -96,18 +96,17 @@ impl Locals<'_> {
 /// Returns [`ResolveError`] for duplicate declarations or unknown identifiers.
 pub fn resolve(
     ast: &mut Ast,
-    base_rule_names: &[String],
-    inherit_span: Option<Span>,
+    base: Option<(&crate::grammars::InputGrammar, Span)>,
     grammar_path: &std::path::Path,
 ) -> Result<(), ResolveError> {
     let mut names = collect_names(ast, grammar_path)?;
     // Register inherited rule names so they resolve to RuleRef.
     // Use the inherit statement's span so "first defined here" points there.
-    let inherit_span = inherit_span.unwrap_or(Span::new(0, 0));
-    for name in base_rule_names {
-        // Don't error on duplicates - derived rules intentionally shadow base rules
-        if names.get(name).is_none() {
-            names.decls.insert(name.clone(), (Decl::Rule, inherit_span));
+    if let Some((base_grammar, inherit_span)) = base {
+        for var in &base_grammar.variables {
+            if names.get(&var.name).is_none() {
+                names.decls.insert(var.name.clone(), (Decl::Rule, inherit_span));
+            }
         }
     }
     let n_items = ast.root_items.len();
