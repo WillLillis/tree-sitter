@@ -516,11 +516,7 @@ fn error_import_transitive_nested_error() {
     let bad = dir.path().join("bad.tsg");
     std::fs::write(&bad, "let x = @@@").unwrap();
     let middle = dir.path().join("middle.tsg");
-    std::fs::write(
-        &middle,
-        format!("let h = import(\"{}\")", bad.display()),
-    )
-    .unwrap();
+    std::fs::write(&middle, format!("let h = import(\"{}\")", bad.display())).unwrap();
 
     let input = format!(
         r#"
@@ -561,11 +557,13 @@ fn error_import_json_not_allowed() {
 
 #[test]
 fn error_import_member_not_found_value() {
-    let g_err = dsl_err(r#"
+    let g_err = dsl_err(
+        r#"
         let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
         rule program { h::NONEXISTENT }
-    "#);
+    "#,
+    );
     let e = assert_err!(g_err, Type);
     assert!(matches!(e.kind, TypeErrorKind::ImportMemberNotFound(_)));
 }
