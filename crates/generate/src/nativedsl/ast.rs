@@ -42,23 +42,30 @@ impl NodeId {
 /// Arena for AST nodes. Hides the sentinel at index 0 and enforces
 /// [`NodeId`]-based access so callers can't accidentally index at 0
 /// or iterate from the wrong starting point.
+/// Arena for AST nodes and their spans. Hides the sentinel at index 0
+/// and enforces [`NodeId`]-based access so callers can't accidentally
+/// index at 0 or iterate from the wrong starting point.
 pub struct NodeArena {
     nodes: Vec<Node>,
+    spans: Vec<Span>,
 }
 
 impl NodeArena {
     #[must_use]
     pub fn new(estimated_cap: usize) -> Self {
         let mut nodes = Vec::with_capacity(estimated_cap);
+        let mut spans = Vec::with_capacity(estimated_cap);
         nodes.push(Node::Unreachable);
-        Self { nodes }
+        spans.push(Span::new(0, 0));
+        Self { nodes, spans }
     }
 
-    pub fn push(&mut self, node: Node) -> NodeId {
+    pub fn push(&mut self, node: Node, span: Span) -> NodeId {
         let index = self.nodes.len() as u32;
         // SAFETY: nodes[0] is always the Unreachable sentinel, so len() >= 1.
         let id = NodeId(unsafe { NonZeroU32::new_unchecked(index) });
         self.nodes.push(node);
+        self.spans.push(span);
         id
     }
 
@@ -66,6 +73,12 @@ impl NodeArena {
     #[must_use]
     pub fn get(&self, id: NodeId) -> &Node {
         &self.nodes[id.index()]
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn span(&self, id: NodeId) -> Span {
+        self.spans[id.index()]
     }
 
     #[inline]
@@ -200,16 +213,16 @@ pub struct AstContext {
     pub fn_configs: Vec<FnConfig>,
     pub for_configs: Vec<ForConfig>,
     pub object_fields: Vec<(Span, NodeId)>,
-    pub spans: Vec<Span>,
     pub children: Vec<NodeId>,
     pub source: String,
 }
 
 impl AstContext {
+    /// Resolve a span to the source text it covers.
     #[inline]
     #[must_use]
-    pub fn span(&self, id: NodeId) -> Span {
-        self.spans[id.index()]
+    pub fn text(&self, span: Span) -> &str {
+        span.resolve(&self.source)
     }
     #[inline]
     #[must_use]
@@ -251,26 +264,12 @@ impl AstContext {
     pub fn source(&self) -> &str {
         &self.source
     }
-    #[inline]
-    #[must_use]
-    pub fn text(&self, span: Span) -> &str {
-        span.resolve(&self.source)
-    }
-    #[inline]
-    #[must_use]
-    pub fn node_text(&self, id: NodeId) -> &str {
-        self.text(self.span(id))
-    }
 }
 
 impl Ast {
     #[must_use]
     pub fn new(source: String) -> Self {
         let cap = source.len() / 30;
-        let mut spans = Vec::with_capacity(cap);
-        // Sentinel span parallel to NodeArena's sentinel node at index 0.
-        // TODO: consider moving spans into NodeArena to co-locate these.
-        spans.push(Span::new(0, 0));
         Self {
             arena: NodeArena::new(cap),
             root_items: Vec::new(),
@@ -279,7 +278,6 @@ impl Ast {
                 fn_configs: Vec::new(),
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
-                spans,
                 children: Vec::with_capacity(cap),
                 source,
             },
@@ -288,9 +286,7 @@ impl Ast {
 
     #[inline]
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
-        let id = self.arena.push(node);
-        self.context.spans.push(span);
-        id
+        self.arena.push(node, span)
     }
 
     #[inline]
@@ -301,7 +297,7 @@ impl Ast {
     #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
-        self.context.spans[id.index()]
+        self.arena.span(id)
     }
 
     pub fn push_fn(&mut self, config: FnConfig) -> FnId {
@@ -367,7 +363,7 @@ impl Ast {
     #[inline]
     #[must_use]
     pub fn node_text(&self, id: NodeId) -> &str {
-        self.context.node_text(id)
+        self.text(self.span(id))
     }
     #[inline]
     #[must_use]
