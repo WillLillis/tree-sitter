@@ -325,8 +325,13 @@ impl<'src> Lexer<'src> {
             b'0'..=b'9' => self.lex_int(start)?,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(start)?,
             _ => {
+                // Source is valid UTF-8; decode the full codepoint for the error.
+                // SAFETY: source originates from &str (Lexer::new takes &str).
+                let rest = unsafe { std::str::from_utf8_unchecked(&self.source[start..]) };
+                let ch = rest.chars().next().unwrap();
+                self.pos = start + ch.len_utf8();
                 return Err(LexError {
-                    kind: LexErrorKind::UnexpectedChar(b as char),
+                    kind: LexErrorKind::UnexpectedChar(ch),
                     span: Span::from_usize(start, self.pos),
                 });
             }
