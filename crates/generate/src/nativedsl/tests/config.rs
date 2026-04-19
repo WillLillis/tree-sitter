@@ -149,3 +149,10 @@ fn json_roundtrip() {
         assert_eq!(orig.name, re.name);
     }
 }
+
+#[test]
+fn empty_grammar() {
+    let g = dsl(r#"grammar { language: "empty" }"#);
+    assert_eq!(g.name, "empty");
+    assert!(g.variables.is_empty());
+}
