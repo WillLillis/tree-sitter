@@ -385,10 +385,14 @@ impl<'src> Lexer<'src> {
                             // SAFETY: pos < source.len() checked above.
                             match unsafe { *source.get_unchecked(pos) } {
                                 b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
-                                other => {
+                                _ => {
+                                    // SAFETY: source is valid UTF-8 (from &str).
+                                    let rest =
+                                        unsafe { std::str::from_utf8_unchecked(&source[pos..]) };
+                                    let ch = rest.chars().next().unwrap();
                                     return Err(LexError {
-                                        kind: LexErrorKind::InvalidEscape(other as char),
-                                        span: Span::from_usize(esc_pos, pos + 1),
+                                        kind: LexErrorKind::InvalidEscape(ch),
+                                        span: Span::from_usize(esc_pos, pos + ch.len_utf8()),
                                     });
                                 }
                             }
