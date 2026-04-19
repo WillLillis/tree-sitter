@@ -24,7 +24,6 @@ pub mod serialize;
 mod tests;
 pub mod typecheck;
 
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
@@ -101,10 +100,10 @@ pub fn load_module(
         };
         // Tag with the index it was pushed to (sub_modules.len() - 1).
         let idx = u8::try_from(sub_modules.len() - 1).unwrap();
-        ast.nodes[inherit_id.index()] = ast::Node::Inherit {
+        ast.arena.set(inherit_id, ast::Node::Inherit {
             path: *p,
             module: Some(idx),
-        };
+        });
     }
 
     let base_for_resolve = inherit_node.and_then(|id| {
@@ -384,9 +383,8 @@ fn load_import_children(
 
     // Scan all nodes (not just top-level lets) so imports/inherits in any
     // expression position are resolved (e.g. `extras: import("h.tsg")::EXTRAS`).
-    let mut i = 1; // skip index 0 (Unreachable sentinel)
-    while i < ast.nodes.len() {
-        let node_id = ast::NodeId(NonZeroU32::new(i as u32).unwrap());
+    let mut node_id = ast::NodeId::FIRST;
+    while node_id.index() <= ast.arena.len() {
         let (import_path_id, span, kind) = match ast.node(node_id) {
             ast::Node::Import { path, module: None } => {
                 (*path, ast.span(*path), ModuleKind::Helper)
@@ -395,7 +393,7 @@ fn load_import_children(
                 (*path, ast.span(*path), ModuleKind::Grammar)
             }
             _ => {
-                i += 1;
+                node_id = node_id.next();
                 continue;
             }
         };
@@ -433,9 +431,9 @@ fn load_import_children(
             },
             _ => unreachable!(),
         };
-        ast.nodes[node_id.index()] = new_node;
+        ast.arena.set(node_id, new_node);
 
-        i += 1;
+        node_id = node_id.next();
     }
 
     Ok(())
