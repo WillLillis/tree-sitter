@@ -1703,6 +1703,7 @@ pub enum LowerErrorKind {
     ModuleUnsupportedExtension,
     JsonImportNotAllowed,
     ModuleTooMany,
+    ModuleDepthExceeded,
     ModuleDisallowedItem(DisallowedItemKind),
     ModuleCycle(Vec<std::path::PathBuf>),
     ModuleMemberNotFound(String),
@@ -1735,6 +1736,10 @@ impl std::fmt::Display for LowerError {
                 write!(f, "JSON files can only be used with inherit(), not import()")
             }
             ModuleTooMany => write!(f, "too many modules (max 256)"),
+            ModuleDepthExceeded => {
+                use super::MAX_MODULE_DEPTH;
+                write!(f, "module import chain too deep (max {MAX_MODULE_DEPTH})")
+            }
             ModuleDisallowedItem(kind) => {
                 let item = match kind {
                     DisallowedItemKind::Rule => "rule",
