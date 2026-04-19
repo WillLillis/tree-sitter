@@ -26,13 +26,33 @@ pub enum InnerTy {
 
 impl std::fmt::Display for InnerTy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Rule => "rule_t",
-            Self::Str => "str_t",
-            Self::Int => "int_t",
-            Self::ListRule => "list_rule_t",
-            Self::ListStr => "list_str_t",
-        })
+        Ty::from(*self).fmt(f)
+    }
+}
+
+impl From<InnerTy> for Ty {
+    fn from(inner: InnerTy) -> Self {
+        match inner {
+            InnerTy::Rule => Self::Rule,
+            InnerTy::Str => Self::Str,
+            InnerTy::Int => Self::Int,
+            InnerTy::ListRule => Self::ListRule,
+            InnerTy::ListStr => Self::ListStr,
+        }
+    }
+}
+
+impl TryFrom<Ty> for InnerTy {
+    type Error = ();
+    fn try_from(ty: Ty) -> Result<Self, ()> {
+        match ty {
+            Ty::Rule => Ok(Self::Rule),
+            Ty::Str => Ok(Self::Str),
+            Ty::Int => Ok(Self::Int),
+            Ty::ListRule => Ok(Self::ListRule),
+            Ty::ListStr => Ok(Self::ListStr),
+            _ => Err(()),
+        }
     }
 }
 
@@ -727,13 +747,7 @@ fn type_of_field_access<'ast>(
                     ast.span(field),
                 ));
             }
-            Ok(match inner {
-                InnerTy::Rule => Ty::Rule,
-                InnerTy::Str => Ty::Str,
-                InnerTy::Int => Ty::Int,
-                InnerTy::ListRule => Ty::ListRule,
-                InnerTy::ListStr => Ty::ListStr,
-            })
+            Ok(Ty::from(inner))
         }
         Ty::GrammarConfig => match field_name {
             "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
@@ -831,19 +845,12 @@ fn type_of_object<'ast>(
         return Err(TypeError::new(TypeErrorKind::CannotInferType, span));
     }
     let first_ty = type_of(ast, fields[0].1, env)?;
-    let inner = match first_ty {
-        Ty::Rule => InnerTy::Rule,
-        Ty::Str => InnerTy::Str,
-        Ty::Int => InnerTy::Int,
-        Ty::ListRule => InnerTy::ListRule,
-        Ty::ListStr => InnerTy::ListStr,
-        _ => {
-            return Err(TypeError::new(
-                TypeErrorKind::InvalidObjectValue(first_ty),
-                ast.span(fields[0].1),
-            ));
-        }
-    };
+    let inner = InnerTy::try_from(first_ty).map_err(|()| {
+        TypeError::new(
+            TypeErrorKind::InvalidObjectValue(first_ty),
+            ast.span(fields[0].1),
+        )
+    })?;
     for &(_, val_id) in &fields[1..] {
         let ty = type_of(ast, val_id, env)?;
         if ty != first_ty {
