@@ -100,6 +100,11 @@ impl NodeArena {
             NodeId(unsafe { NonZeroU32::new_unchecked(i as u32) })
         })
     }
+
+    /// Iterate all `(NodeId, &Node)` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
+        self.node_ids().map(|id| (id, &self.nodes[id.index()]))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
