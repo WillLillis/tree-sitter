@@ -367,7 +367,7 @@ fn bench_per_stage() {
     let mut ast = super::parser::Parser::new(&tokens, source.clone(), &path)
         .parse()
         .unwrap();
-    super::validate_grammar(&ast).unwrap();
+    super::validate_grammar(&ast, super::find_inherit_node(&ast)).unwrap();
     // C grammar has no inheritance or imports
     let base_names: Vec<String> = Vec::new();
     let inherit_span = None;
