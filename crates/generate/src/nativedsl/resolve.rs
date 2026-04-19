@@ -56,7 +56,7 @@ impl Locals<'_> {
 
     /// Iterative walk + manual loops (instead of recursion + `.any()` closures)
     /// to reduce register pressure in the inner loops.
-    fn contains(&self, ctx: &AstContext, name: &str) -> bool {
+    fn contains(&self, arena: &NodeArena, ctx: &AstContext, name: &str) -> bool {
         let source = ctx.source();
         let mut current = self;
         loop {
@@ -64,7 +64,7 @@ impl Locals<'_> {
                 LocalScope::Empty => {}
                 LocalScope::FnParams(params) => {
                     for p in *params {
-                        if ctx.span(p.name).resolve(source) == name {
+                        if arena.span(p.name).resolve(source) == name {
                             return true;
                         }
                     }
@@ -326,9 +326,9 @@ fn resolve_expr(
 ) -> Result<(), ResolveError> {
     // Handle Ident mutation first
     if matches!(*arena.get(id), Node::Ident) {
-        let span = ctx.span(id);
+        let span = arena.span(id);
         let name = ctx.text(span);
-        if locals.contains(ctx, name) {
+        if locals.contains(arena, ctx, name) {
             arena.set(id, Node::VarRef);
         } else if let Some(decl) = names.get(name) {
             match decl {
@@ -351,8 +351,8 @@ fn resolve_expr(
         let (content, target) = (*content, *target);
         resolve_expr(arena, ctx, names, content, locals)?;
         if matches!(*arena.get(target), Node::Ident) {
-            let name = ctx.text(ctx.span(target));
-            if locals.contains(ctx, name) {
+            let name = ctx.text(arena.span(target));
+            if locals.contains(arena, ctx, name) {
                 arena.set(target, Node::VarRef);
             } else {
                 arena.set(target, Node::RuleRef);
