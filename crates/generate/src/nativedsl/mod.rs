@@ -94,16 +94,25 @@ pub fn load_module(
 
     // Load inherited grammar (Grammar kind only, must happen before resolve).
     if let Some(inherit_id) = inherit_node {
-        load_inherit_child(&ast, inherit_id, module_dir, ancestor_paths, &mut sub_modules)?;
+        load_inherit_child(
+            &ast,
+            inherit_id,
+            module_dir,
+            ancestor_paths,
+            &mut sub_modules,
+        )?;
         let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
             unreachable!()
         };
         // Tag with the index it was pushed to (sub_modules.len() - 1).
         let idx = u8::try_from(sub_modules.len() - 1).unwrap();
-        ast.arena.set(inherit_id, ast::Node::Inherit {
-            path: *p,
-            module: Some(idx),
-        });
+        ast.arena.set(
+            inherit_id,
+            ast::Node::Inherit {
+                path: *p,
+                module: Some(idx),
+            },
+        );
     }
 
     let base_for_resolve = inherit_node.and_then(|id| {
@@ -148,10 +157,7 @@ fn parse_native_dsl_inner(
 /// - At most one `inherit()` call
 /// - If `inherit()` exists, `inherits` must be set in grammar config
 /// - If `inherits` is set, it must trace to an `inherit()` call
-pub fn validate_grammar(
-    ast: &ast::Ast,
-    inherit_node: Option<ast::NodeId>,
-) -> Result<(), DslError> {
+pub fn validate_grammar(ast: &ast::Ast, inherit_node: Option<ast::NodeId>) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
     let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
@@ -265,9 +271,7 @@ fn load_child_module(
                 lowered: Some(grammar),
             })
         }
-        Some("json") => {
-            Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into())
-        }
+        Some("json") => Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into()),
         _ => Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
     }
 }
