@@ -156,3 +156,63 @@ fn empty_grammar() {
     assert_eq!(g.name, "empty");
     assert!(g.variables.is_empty());
 }
+
+#[test]
+fn config_word_with_conflicts() {
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            word: identifier,
+            conflicts: [[identifier, keyword]],
+        }
+        rule program { choice(identifier, keyword) }
+        rule identifier { regexp(r"[a-z]+") }
+        rule keyword { "if" }
+    "#);
+    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+    assert_eq!(g.expected_conflicts, vec![vec!["identifier", "keyword"]]);
+}
+
+#[test]
+fn config_extras_with_inline() {
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            extras: [_ws],
+            inline: [_ws],
+        }
+        rule program { "x" }
+        rule _ws { regexp(r"\s") }
+    "#);
+    assert_eq!(g.extra_symbols.len(), 1);
+    assert_eq!(g.variables_to_inline, vec!["_ws"]);
+}
+
+#[test]
+fn config_all_fields_at_once() {
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            extras: [regexp(r"\s")],
+            externals: [heredoc],
+            inline: [_inline],
+            supertypes: [_expr],
+            word: ident,
+            conflicts: [[ident, kw]],
+            precedences: [["+" , ident]],
+        }
+        rule program { choice(_expr, heredoc) }
+        rule _expr { choice(ident, kw) }
+        rule ident { regexp(r"[a-z]+") }
+        rule kw { "if" }
+        rule _inline { "x" }
+        rule heredoc { "<<" }
+    "#);
+    assert_eq!(g.extra_symbols.len(), 1);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(g.variables_to_inline, vec!["_inline"]);
+    assert_eq!(g.supertype_symbols, vec!["_expr"]);
+    assert_eq!(g.word_token.as_deref(), Some("ident"));
+    assert_eq!(g.expected_conflicts.len(), 1);
+    assert_eq!(g.precedence_orderings.len(), 1);
+}
