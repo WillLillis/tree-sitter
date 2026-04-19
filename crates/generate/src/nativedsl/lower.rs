@@ -324,10 +324,16 @@ fn build_grammar(
 ) -> Result<InputGrammar, LowerError> {
     // Start with inherited rules (cloned), apply overrides, then append new rules.
     let mut variables = if let Some(base) = base {
+        let name_index: FxHashMap<&str, usize> = base
+            .variables
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.name.as_str(), i))
+            .collect();
         let mut vars = base.variables.clone();
         for (name, rule, span) in result.overrides {
-            if let Some(var) = vars.iter_mut().find(|v| v.name == name) {
-                var.rule = rule;
+            if let Some(&idx) = name_index.get(name.as_str()) {
+                vars[idx].rule = rule;
             } else {
                 return Err(LowerError::new(
                     LowerErrorKind::OverrideRuleNotFound(name),
