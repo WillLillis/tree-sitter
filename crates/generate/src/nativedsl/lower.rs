@@ -397,7 +397,7 @@ impl<'ast> Evaluator<'ast> {
         base_grammar: Option<&'ast InputGrammar>,
         modules: &'ast [super::Module],
     ) -> Self {
-        let cap = ast.nodes.len();
+        let cap = ast.arena.len();
         Self {
             ctx: ModuleCtx {
                 ast,
