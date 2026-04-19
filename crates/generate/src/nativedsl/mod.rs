@@ -94,9 +94,8 @@ pub fn load_module(
     let mut sub_modules: Vec<Module> = Vec::new();
 
     // Load inherited grammar (Grammar kind only, must happen before resolve).
-    let base_rule_names = if let Some(inherit_id) = inherit_node {
-        let names =
-            load_inherit_child(&ast, inherit_id, module_dir, ancestor_paths, &mut sub_modules)?;
+    if let Some(inherit_id) = inherit_node {
+        load_inherit_child(&ast, inherit_id, module_dir, ancestor_paths, &mut sub_modules)?;
         let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
             unreachable!()
         };
@@ -106,14 +105,14 @@ pub fn load_module(
             path: *p,
             module: Some(idx),
         };
-        names
-    } else {
-        Vec::new()
-    };
+    }
 
-    let inherit_span = inherit_node.map(|id| ast.span(id));
+    let base_for_resolve = inherit_node.and_then(|id| {
+        let module = sub_modules.iter().find(|m| m.is_grammar())?;
+        Some((module.lowered.as_ref()?, ast.span(id)))
+    });
 
-    resolve::resolve(&mut ast, &base_rule_names, inherit_span, path)?;
+    resolve::resolve(&mut ast, base_for_resolve, path)?;
 
     // Load imports (after resolve so import nodes are identified).
     load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules)?;
@@ -315,15 +314,14 @@ fn read_child_module(
     Ok((content, canonical))
 }
 
-/// Load the inherited grammar as a child module. Tags the Inherit node with
-/// its module index and returns the base rule names for resolve.
+/// Load the inherited grammar as a child module and push it to the modules list.
 fn load_inherit_child(
     ast: &ast::Ast,
     inherit_id: ast::NodeId,
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
-) -> Result<Vec<String>, DslError> {
+) -> Result<(), DslError> {
     let ast::Node::Inherit { path, .. } = ast.node(inherit_id) else {
         unreachable!()
     };
@@ -338,14 +336,8 @@ fn load_inherit_child(
         ModuleKind::Grammar,
     )?;
 
-    let rule_names: Vec<String> = child_module
-        .lowered
-        .as_ref()
-        .map(|g| g.variables.iter().map(|v| v.name.clone()).collect())
-        .unwrap_or_default();
-
     modules.push(child_module);
-    Ok(rule_names)
+    Ok(())
 }
 
 /// Load import children. Tags each Import node with its module index.
