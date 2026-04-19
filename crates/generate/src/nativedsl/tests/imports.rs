@@ -536,6 +536,40 @@ fn error_import_transitive_nested_error() {
     assert!(matches!(inner.inner.as_ref(), DslError::Lex(_)));
 }
 
+#[test]
+fn error_import_json_not_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let json = dir.path().join("base.json");
+    std::fs::write(
+        &json,
+        r#"{"name":"test","rules":{"program":{"type":"BLANK"}}}"#,
+    )
+    .unwrap();
+
+    let input = format!(
+        r#"
+        let h = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ "x" }}
+    "#,
+        json.display()
+    );
+    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::JsonImportNotAllowed);
+}
+
+#[test]
+fn error_import_member_not_found_value() {
+    let g_err = dsl_err(r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::NONEXISTENT }
+    "#);
+    let e = assert_err!(g_err, Type);
+    assert!(matches!(e.kind, TypeErrorKind::ImportMemberNotFound(_)));
+}
+
 // -- Edge cases --
 
 #[test]
