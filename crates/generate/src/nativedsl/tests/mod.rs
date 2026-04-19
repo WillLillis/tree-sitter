@@ -369,8 +369,6 @@ fn bench_per_stage() {
         .unwrap();
     super::validate_grammar(&ast, super::find_inherit_node(&ast)).unwrap();
     // C grammar has no inheritance or imports
-    let base_names: Vec<String> = Vec::new();
-    let inherit_span = None;
 
     // Resolve
     let start = std::time::Instant::now();
@@ -378,11 +376,11 @@ fn bench_per_stage() {
         let mut a = super::parser::Parser::new(&tokens, source.clone(), &path)
             .parse()
             .unwrap();
-        super::resolve::resolve(&mut a, &base_names, inherit_span, &path).unwrap();
+        super::resolve::resolve(&mut a, None, &path).unwrap();
     }
     let resolve_time = start.elapsed() / n;
 
-    super::resolve::resolve(&mut ast, &base_names, inherit_span, &path).unwrap();
+    super::resolve::resolve(&mut ast, None, &path).unwrap();
 
     // Typecheck
     let start = std::time::Instant::now();
