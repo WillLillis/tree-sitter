@@ -273,8 +273,10 @@ fn load_child_module(
     }
 }
 
+const MAX_MODULE_DEPTH: usize = 256;
+
 /// Resolve the path for a child module, read its source, and handle
-/// cycle detection. Returns `(content, canonical_path)`.
+/// cycle/depth detection. Returns `(content, canonical_path)`.
 fn read_child_module(
     path_str: &str,
     module_dir: &Path,
@@ -282,6 +284,10 @@ fn read_child_module(
     ancestor_paths: &[PathBuf],
 ) -> Result<(String, PathBuf), DslError> {
     use lower::{LowerError, LowerErrorKind};
+
+    if ancestor_paths.len() >= MAX_MODULE_DEPTH {
+        return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
+    }
 
     let full_path = module_dir.join(path_str);
     let canonical = dunce::canonicalize(&full_path).map_err(|e| {
