@@ -105,7 +105,9 @@ pub fn resolve(
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
             if names.get(&var.name).is_none() {
-                names.decls.insert(var.name.clone(), (Decl::Rule, inherit_span));
+                names
+                    .decls
+                    .insert(var.name.clone(), (Decl::Rule, inherit_span));
             }
         }
     }
