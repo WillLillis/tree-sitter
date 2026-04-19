@@ -62,6 +62,10 @@ lex_error_tests! {
         r#"grammar { language: "test" } rule foo™ { "x" }"#,
         LexErrorKind::UnexpectedChar('™')
     }
+    error_non_ascii_escape {
+        "grammar { language: \"te\\ést\" } rule program { \"x\" }",
+        LexErrorKind::InvalidEscape('é')
+    }
 }
 
 #[test]
