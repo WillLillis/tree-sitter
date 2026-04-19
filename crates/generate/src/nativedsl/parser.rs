@@ -126,14 +126,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     /// Keywords are contextual: `seq(...)` is a builtin call, but `seq` as a
     /// bare name (e.g. a rule reference or binding name) is a valid identifier.
     fn expect_ident(&mut self) -> Result<Span, ParseError> {
-        let kind = self.tokens[self.pos].kind;
-        if kind == TokenKind::Ident || kind.is_keyword() {
-            let span = self.span();
-            self.advance_pos();
-            Ok(span)
-        } else {
-            Err(self.error(ParseErrorKind::ExpectedIdent))
-        }
+        self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)
     }
 
     fn expect_string(&mut self) -> Result<Span, ParseError> {
@@ -142,15 +135,18 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     }
 
     /// Accept a name token (for object keys, config keys, field access members).
-    /// Identical to `expect_ident` but gives a different error message.
     fn expect_name(&mut self) -> Result<Span, ParseError> {
-        let span = self.span();
+        self.expect_ident_or_kw(ParseErrorKind::ExpectedName)
+    }
+
+    fn expect_ident_or_kw(&mut self, err: ParseErrorKind) -> Result<Span, ParseError> {
         let kind = self.tokens[self.pos].kind;
         if kind == TokenKind::Ident || kind.is_keyword() {
+            let span = self.span();
             self.advance_pos();
             Ok(span)
         } else {
-            Err(self.error(ParseErrorKind::ExpectedName))
+            Err(self.error(err))
         }
     }
 
