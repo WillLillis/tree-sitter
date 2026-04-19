@@ -189,6 +189,34 @@ fn for_tuple_destructure() {
 }
 
 #[test]
+fn for_with_rule_items() {
+    let g = dsl(r#"grammar { language: "test" }
+        rule program {
+            choice(for (r: rule_t) in [seq("a", "b"), seq("c", "d")] { r })
+        }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::seq(vec![Rule::String("a".into()), Rule::String("b".into())]),
+            Rule::seq(vec![Rule::String("c".into()), Rule::String("d".into())]),
+        ])
+    );
+}
+
+#[test]
+fn for_empty_list() {
+    let g = dsl(r#"grammar { language: "test" }
+        let ops: list_str_t = []
+        rule program {
+            choice("fallback", for (s: str_t) in ops { s })
+        }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![Rule::String("fallback".into())])
+    );
+}
+
+#[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
         r#"grammar { language: "test" } fn f(x: rule_t) -> rule_t { f(x) } rule program { f("x") }"#,
