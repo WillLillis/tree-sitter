@@ -78,34 +78,40 @@ pub fn load_module(
     let mut ast = parser::Parser::new(&tokens, source.to_string(), path).parse()?;
 
     // Validate items based on module kind
-    match kind {
-        ModuleKind::Grammar => validate_grammar(&ast)?,
-        ModuleKind::Helper => validate_import_items(&ast)?,
-    }
+    let inherit_node = match kind {
+        ModuleKind::Grammar => {
+            let node = find_inherit_node(&ast);
+            validate_grammar(&ast, node)?;
+            node
+        }
+        ModuleKind::Helper => {
+            validate_import_items(&ast)?;
+            None
+        }
+    };
 
     // All child modules go into one list.
     let mut sub_modules: Vec<Module> = Vec::new();
 
     // Load inherited grammar (Grammar kind only, must happen before resolve).
-    let base_rule_names = if matches!(kind, ModuleKind::Grammar) {
-        let names = load_inherit_child(&ast, module_dir, ancestor_paths, &mut sub_modules)?;
-        if let Some(inherit_id) = find_inherit_node(&ast) {
-            let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
-                unreachable!()
-            };
-            // Tag with the index it was pushed to (sub_modules.len() - 1).
-            let idx = u8::try_from(sub_modules.len() - 1).unwrap();
-            ast.nodes[inherit_id.index()] = ast::Node::Inherit {
-                path: *p,
-                module: Some(idx),
-            };
-        }
+    let base_rule_names = if let Some(inherit_id) = inherit_node {
+        let names =
+            load_inherit_child(&ast, inherit_id, module_dir, ancestor_paths, &mut sub_modules)?;
+        let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
+            unreachable!()
+        };
+        // Tag with the index it was pushed to (sub_modules.len() - 1).
+        let idx = u8::try_from(sub_modules.len() - 1).unwrap();
+        ast.nodes[inherit_id.index()] = ast::Node::Inherit {
+            path: *p,
+            module: Some(idx),
+        };
         names
     } else {
         Vec::new()
     };
 
-    let inherit_span = find_inherit_node(&ast).map(|id| ast.span(id));
+    let inherit_span = inherit_node.map(|id| ast.span(id));
 
     resolve::resolve(&mut ast, &base_rule_names, inherit_span, path)?;
 
@@ -144,7 +150,10 @@ fn parse_native_dsl_inner(
 /// - At most one `inherit()` call
 /// - If `inherit()` exists, `inherits` must be set in grammar config
 /// - If `inherits` is set, it must trace to an `inherit()` call
-pub fn validate_grammar(ast: &ast::Ast) -> Result<(), DslError> {
+pub fn validate_grammar(
+    ast: &ast::Ast,
+    inherit_node: Option<ast::NodeId>,
+) -> Result<(), DslError> {
     use lower::{LowerError, LowerErrorKind};
 
     let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
@@ -177,7 +186,7 @@ pub fn validate_grammar(ast: &ast::Ast) -> Result<(), DslError> {
 
     // `inherits` in config but doesn't resolve to an inherit() call
     if let Some(id) = config_inherits
-        && find_inherit_node(ast).is_none()
+        && inherit_node.is_none()
     {
         Err(LowerError::new(
             LowerErrorKind::InheritsWithoutInherit,
@@ -310,13 +319,11 @@ fn read_child_module(
 /// its module index and returns the base rule names for resolve.
 fn load_inherit_child(
     ast: &ast::Ast,
+    inherit_id: ast::NodeId,
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
 ) -> Result<Vec<String>, DslError> {
-    let Some(inherit_id) = find_inherit_node(ast) else {
-        return Ok(Vec::new());
-    };
     let ast::Node::Inherit { path, .. } = ast.node(inherit_id) else {
         unreachable!()
     };
