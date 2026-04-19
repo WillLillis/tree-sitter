@@ -197,7 +197,7 @@ impl std::fmt::Display for TokenKind {
 }
 
 /// A token produced by the lexer, pairing a kind with its source span.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
