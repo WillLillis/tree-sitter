@@ -46,6 +46,22 @@ lex_error_tests! {
         r#"grammar { language: "test" } rule program { $ }"#,
         LexErrorKind::UnexpectedChar('$')
     }
+    error_non_ascii_latin {
+        r#"grammar { language: "test" } rule café { "x" }"#,
+        LexErrorKind::UnexpectedChar('é')
+    }
+    error_non_ascii_emoji {
+        r#"grammar { language: "test" } rule 🎉 { "x" }"#,
+        LexErrorKind::UnexpectedChar('🎉')
+    }
+    error_non_ascii_cjk {
+        r#"grammar { language: "test" } rule 名前 { "x" }"#,
+        LexErrorKind::UnexpectedChar('名')
+    }
+    error_non_ascii_after_ident {
+        r#"grammar { language: "test" } rule foo™ { "x" }"#,
+        LexErrorKind::UnexpectedChar('™')
+    }
 }
 
 #[test]
