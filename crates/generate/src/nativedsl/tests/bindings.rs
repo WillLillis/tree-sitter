@@ -249,6 +249,29 @@ fn for_var_shadows_fn_param() {
 }
 
 #[test]
+fn for_var_shadows_top_level_rule() {
+    let g = dsl(r#"grammar { language: "test" }
+        rule program { choice(for (program: str_t) in ["a", "b"] { program }) }"#);
+    // For-loop variable `program` should shadow the top-level rule `program`
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())])
+    );
+}
+
+#[test]
+fn for_var_shadows_let_binding() {
+    let g = dsl(r#"grammar { language: "test" }
+        let X: str_t = "shadowed"
+        rule program { choice(for (X: str_t) in ["a", "b"] { X }) }"#);
+    // For-loop variable `X` should shadow the let binding `X`
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())])
+    );
+}
+
+#[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
         r#"grammar { language: "test" } fn f(x: rule_t) -> rule_t { f(x) } rule program { f("x") }"#,

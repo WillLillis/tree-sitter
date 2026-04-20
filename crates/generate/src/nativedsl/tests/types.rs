@@ -1,5 +1,62 @@
 use super::*;
 
+// ===== str_t -> rule_t coercion in lists =====
+
+#[test]
+fn list_mixed_rule_and_str_coerces_to_list_rule() {
+    // String literals are str_t, rule refs are rule_t. A mixed list should
+    // coerce to list_rule_t since str_t is a subtype of rule_t.
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let items: list_rule_t = [program, "literal"]
+        rule program { choice(for (r: rule_t) in items { r }) }
+    "#);
+    assert_eq!(g.variables.len(), 1);
+}
+
+#[test]
+fn list_str_first_then_rule_coerces_to_list_rule() {
+    // First element str, second rule - should widen to list_rule_t
+    let g = dsl(r#"
+        grammar { language: "test" }
+        let items: list_rule_t = ["literal", program]
+        rule program { "x" }
+    "#);
+    assert_eq!(g.variables.len(), 1);
+}
+
+#[test]
+fn extras_mixed_rule_and_str() {
+    // extras is list_rule_t - should accept a mix of rule refs and strings
+    let g = dsl(r#"
+        grammar { language: "test", extras: [ws, "\n"] }
+        rule program { "x" }
+        rule ws { regexp(r"\s") }
+    "#);
+    assert_eq!(g.extra_symbols.len(), 2);
+}
+
+#[test]
+fn object_mixed_str_and_rule_values_coerces() {
+    // Object values with mixed str/rule should coerce field types
+    dsl(r#"
+        grammar { language: "test" }
+        let o = { a: program, b: "literal" }
+        rule program { o.a }
+    "#);
+}
+
+#[test]
+fn object_str_first_then_rule_coerces() {
+    dsl(r#"
+        grammar { language: "test" }
+        let o = { a: "literal", b: program }
+        rule program { o.b }
+    "#);
+}
+
+// ===== Integer and nested list types =====
+
 #[test]
 fn list_int_literal_infers_list_int() {
     dsl(r#"
