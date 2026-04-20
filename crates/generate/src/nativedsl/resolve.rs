@@ -250,42 +250,71 @@ fn collect_names<'a>(
         })
         .collect();
 
-    // Register identifiers from config fields that aren't already declared.
-    // In grammar.js, externals/inline/supertypes/word can reference names
-    // not declared as rules. We mirror that by pre-registering them.
-    // Only works for literal list expressions; arbitrary expressions
-    // (e.g. append(...)) are resolved normally.
-    if let Some(config) = &ctx.grammar_config {
-        let config_lists = [config.externals, config.inline, config.supertypes];
-        for list_id in config_lists.into_iter().flatten() {
-            if let Node::List(range) = arena.get(list_id) {
-                for &child in ctx.child_slice(*range) {
-                    if matches!(arena.get(child), Node::Ident) {
-                        let name = ctx.text(arena.span(child));
-                        if names.get(name).is_none() && !let_names.contains(name) {
-                            names.insert(
-                                name,
-                                Decl::Rule,
-                                arena.span(child),
-                                grammar_path,
-                                source,
-                            )?;
-                        }
+    // Pre-register external token names. Externals are the only config field
+    // that introduces names not declared as rules - they're provided by an
+    // external scanner. Other config fields (inline, supertypes, word, extras,
+    // conflicts) must reference rules declared in this file or inherited.
+    // We walk List and Append nodes to find bare identifiers.
+    if let Some(config) = &ctx.grammar_config
+        && let Some(ext_id) = config.externals
+    {
+        collect_external_names(
+            arena,
+            ctx,
+            ext_id,
+            &mut names,
+            &let_names,
+            grammar_path,
+            source,
+        )?;
+    }
+
+    Ok(names)
+}
+
+/// Recursively walk an externals expression to find bare identifiers that
+/// need pre-registration. Handles inline lists and `append()` calls.
+fn collect_external_names<'a>(
+    arena: &NodeArena,
+    ctx: &'a AstContext,
+    id: NodeId,
+    names: &mut Names<'a>,
+    let_names: &FxHashSet<&str>,
+    grammar_path: &Path,
+    source: &'a str,
+) -> ResolveResult<()> {
+    match arena.get(id) {
+        Node::List(range) => {
+            for &child in ctx.child_slice(*range) {
+                if matches!(arena.get(child), Node::Ident) {
+                    let name = ctx.text(arena.span(child));
+                    if names.get(name).is_none() && !let_names.contains(name) {
+                        names.insert(name, Decl::Rule, arena.span(child), grammar_path, source)?;
                     }
                 }
             }
         }
-        if let Some(word_id) = config.word
-            && matches!(arena.get(word_id), Node::Ident)
-        {
-            let name = ctx.text(arena.span(word_id));
-            if names.get(name).is_none() && !let_names.contains(name) {
-                names.insert(name, Decl::Rule, arena.span(word_id), grammar_path, source)?;
-            }
+        Node::Append { left, right } => {
+            collect_external_names(arena, ctx, *left, names, let_names, grammar_path, source)?;
+            collect_external_names(arena, ctx, *right, names, let_names, grammar_path, source)?;
+        }
+        // String literals in externals (e.g. externals: ["||"]) don't
+        // introduce names that need registration.
+        Node::StringLit | Node::RawStringLit { .. } => {}
+        // grammar_config(base).externals and field access chains resolve to
+        // inherited values whose names are already registered via base_grammar.
+        Node::GrammarConfig(_) | Node::FieldAccess { .. } => {}
+        // Variable references, function calls, etc. can't be followed
+        // statically to discover external token names.
+        _ => {
+            return Err(ResolveError {
+                kind: ResolveErrorKind::ExternalsNotInline,
+                span: arena.span(id),
+                note: None,
+            });
         }
     }
-
-    Ok(names)
+    Ok(())
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
@@ -504,6 +533,7 @@ pub struct ResolveError {
 pub enum ResolveErrorKind {
     DuplicateDeclaration(String),
     UnknownIdentifier(String),
+    ExternalsNotInline,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -513,6 +543,13 @@ impl std::fmt::Display for ResolveError {
                 write!(f, "duplicate declaration '{name}'")
             }
             ResolveErrorKind::UnknownIdentifier(name) => write!(f, "unknown identifier '{name}'"),
+            ResolveErrorKind::ExternalsNotInline => {
+                write!(
+                    f,
+                    "external tokens must be listed directly (e.g. `externals: [a, b]`), \
+                     not via variable references"
+                )
+            }
         }
     }
 }

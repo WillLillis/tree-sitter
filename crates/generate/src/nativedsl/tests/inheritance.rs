@@ -266,6 +266,35 @@ fn config_all_fields_access_and_append() {
 }
 
 #[test]
+fn externals_append_inherited_with_new_undeclared() {
+    // Append a new undeclared external to inherited externals
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar_full_config.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            externals: append(grammar_config(base).externals, [_eof_marker]),
+        }
+    "#);
+    // base has [heredoc], we add [_eof_marker]
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_inherited_directly() {
+    // grammar_config(base).externals used directly (no append)
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar_full_config.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            externals: grammar_config(base).externals,
+        }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+}
+
+#[test]
 fn inherit_from_json() {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("base.json");
