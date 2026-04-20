@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -147,8 +147,6 @@ pub struct TypeEnv<'src> {
     /// Type environments of imported modules, indexed by `Ty::Module(idx)`.
     #[expect(clippy::use_self, reason = "No `Self` for generics")]
     pub modules: Vec<TypeEnv<'src>>,
-    /// Spans of first declarations, for duplicate declaration errors.
-    decl_spans: FxHashMap<&'src str, Span>,
 }
 
 impl<'src> TypeEnv<'src> {
@@ -158,32 +156,7 @@ impl<'src> TypeEnv<'src> {
             vars: ScopeStack::new(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
-            decl_spans: FxHashMap::default(),
         }
-    }
-
-    /// Register a declaration, returning an error if the name is already declared.
-    fn declare(
-        &mut self,
-        name: &'src str,
-        span: Span,
-        grammar_path: &std::path::Path,
-        source: &str,
-    ) -> Result<(), TypeError> {
-        if let Some(&first_span) = self.decl_spans.get(name) {
-            return Err(TypeError::with_note(
-                TypeErrorKind::DuplicateDeclaration(name.to_string()),
-                span,
-                Note {
-                    message: super::NoteMessage::FirstDefinedHere,
-                    span: first_span,
-                    path: grammar_path.to_path_buf(),
-                    source: source.to_string(),
-                },
-            ));
-        }
-        self.decl_spans.insert(name, span);
-        Ok(())
     }
     #[inline]
     fn insert_var(&mut self, name: &'src str, ty: Ty) {
@@ -315,7 +288,7 @@ pub fn resolve_and_check<'ast>(
     // Use the inherit statement's span so "first defined here" points there.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
-            if env.decl_spans.get(var.name.as_str()).is_none() {
+            if !env.decl_spans.contains_key(var.name.as_str()) {
                 env.decl_spans.insert(&var.name, inherit_span);
                 env.decl_kinds.insert(&var.name, Decl::Rule);
             }
@@ -355,7 +328,7 @@ struct ResolveEnv<'src> {
     decl_kinds: FxHashMap<&'src str, Decl>,
 }
 
-impl<'src> ResolveEnv<'src> {
+impl ResolveEnv<'_> {
     fn get(&self, name: &str) -> Option<Decl> {
         self.decl_kinds.get(name).copied()
     }
@@ -432,17 +405,6 @@ fn collect_decls<'a>(
         }
     }
 
-    // Collect let binding names (not yet registered - they're added in phase 2
-    // to prevent forward references). We need them here to avoid pre-registering
-    // config identifiers that shadow let bindings.
-    let let_names: FxHashSet<&str> = root_items
-        .iter()
-        .filter_map(|&id| match arena.get(id) {
-            Node::Let { name, .. } => Some(ctx.text(arena.span(*name))),
-            _ => None,
-        })
-        .collect();
-
     // Pre-register external token names. Externals are the only config field
     // that introduces names not declared as rules - they're provided by an
     // external scanner.
@@ -454,7 +416,6 @@ fn collect_decls<'a>(
             ctx,
             ext_id,
             &mut env,
-            &let_names,
             root_items,
             grammar_path,
             source,
@@ -468,12 +429,14 @@ fn collect_decls<'a>(
 /// need pre-registration as external token names. Follows all expression
 /// forms: lists, appends, variable references (via let binding values),
 /// and any other compound expression.
+///
+/// Cycles are impossible: let bindings cannot forward-reference each other,
+/// so circular references are caught as `UnknownIdentifier` during resolution.
 fn collect_external_names_tc<'a>(
     arena: &NodeArena,
     ctx: &'a AstContext,
     id: NodeId,
     env: &mut ResolveEnv<'a>,
-    let_names: &FxHashSet<&str>,
     root_items: &[NodeId],
     grammar_path: &Path,
     source: &'a str,
@@ -489,7 +452,6 @@ fn collect_external_names_tc<'a>(
                     ctx,
                     value_id,
                     env,
-                    let_names,
                     root_items,
                     grammar_path,
                     source,
@@ -507,7 +469,6 @@ fn collect_external_names_tc<'a>(
                     ctx,
                     child,
                     env,
-                    let_names,
                     root_items,
                     grammar_path,
                     source,
@@ -516,34 +477,27 @@ fn collect_external_names_tc<'a>(
         }
         // Append: recurse into both arms.
         Node::Append { left, right } => {
-            collect_external_names_tc(
-                arena,
-                ctx,
-                *left,
-                env,
-                let_names,
-                root_items,
-                grammar_path,
-                source,
-            )?;
-            collect_external_names_tc(
-                arena,
-                ctx,
-                *right,
-                env,
-                let_names,
-                root_items,
-                grammar_path,
-                source,
-            )?;
+            collect_external_names_tc(arena, ctx, *left, env, root_items, grammar_path, source)?;
+            collect_external_names_tc(arena, ctx, *right, env, root_items, grammar_path, source)?;
         }
         // Literals don't introduce names.
-        Node::StringLit | Node::RawStringLit { .. } | Node::IntLit(_) | Node::Blank => {}
         // grammar_config(base).externals - inherited values already registered.
-        Node::GrammarConfig(_) | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
-        // Everything else (function calls, qualified calls, etc.) - skip.
-        // Names inside these will be resolved normally.
-        _ => {}
+        Node::StringLit
+        | Node::RawStringLit { .. }
+        | Node::IntLit(_)
+        | Node::Blank
+        | Node::GrammarConfig(_)
+        | Node::FieldAccess { .. }
+        | Node::QualifiedAccess { .. } => {}
+        // Anything else (function calls, for-loops, etc.) is not a valid
+        // externals expression. Externals must be a list literal, append,
+        // or variable reference.
+        _ => {
+            return Err(TypeError::new(
+                TypeErrorKind::InvalidExternalsExpression,
+                arena.span(id),
+            ));
+        }
     }
     Ok(())
 }
@@ -556,10 +510,10 @@ fn find_let_value(
     name: &str,
 ) -> Option<NodeId> {
     root_items.iter().find_map(|&item_id| {
-        if let Node::Let { name: n, value, .. } = arena.get(item_id) {
-            if ctx.text(arena.span(*n)) == name {
-                return Some(*value);
-            }
+        if let Node::Let { name: n, value, .. } = arena.get(item_id)
+            && ctx.text(arena.span(*n)) == name
+        {
+            return Some(*value);
         }
         None
     })
@@ -1671,6 +1625,7 @@ pub enum TypeErrorKind {
     QualifiedCallOnNonModule(Ty),
     DuplicateDeclaration(String),
     UnknownIdentifier(String),
+    InvalidExternalsExpression,
 }
 
 impl std::fmt::Display for TypeError {
@@ -1746,6 +1701,10 @@ impl std::fmt::Display for TypeError {
             QualifiedCallOnNonModule(ty) => write!(f, "'::' call requires module_t, got {ty}"),
             DuplicateDeclaration(name) => write!(f, "duplicate declaration '{name}'"),
             UnknownIdentifier(name) => write!(f, "unknown identifier '{name}'"),
+            InvalidExternalsExpression => write!(
+                f,
+                "externals must be a list literal, append(), or variable reference"
+            ),
         }
     }
 }
