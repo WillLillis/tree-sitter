@@ -7,12 +7,16 @@
 //! Subtyping: `str_t` is a subtype of `rule_t`, `list_str_t` is a subtype of
 //! `list_rule_t`, and `list_list_str_t` is a subtype of `list_list_rule_t`.
 
-use rustc_hash::FxHashMap;
+use std::path::Path;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, ChildRange, ForId, Node, NodeId, Span};
+use super::ast::{Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, Span};
 use super::scope_stack::ScopeStack;
+use super::{Note, NoteMessage};
+use crate::grammars::InputGrammar;
 
 /// Types that can appear as homogeneous object field values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -143,6 +147,8 @@ pub struct TypeEnv<'src> {
     /// Type environments of imported modules, indexed by `Ty::Module(idx)`.
     #[expect(clippy::use_self, reason = "No `Self` for generics")]
     pub modules: Vec<TypeEnv<'src>>,
+    /// Spans of first declarations, for duplicate declaration errors.
+    decl_spans: FxHashMap<&'src str, Span>,
 }
 
 impl<'src> TypeEnv<'src> {
@@ -152,7 +158,32 @@ impl<'src> TypeEnv<'src> {
             vars: ScopeStack::new(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
+            decl_spans: FxHashMap::default(),
         }
+    }
+
+    /// Register a declaration, returning an error if the name is already declared.
+    fn declare(
+        &mut self,
+        name: &'src str,
+        span: Span,
+        grammar_path: &std::path::Path,
+        source: &str,
+    ) -> Result<(), TypeError> {
+        if let Some(&first_span) = self.decl_spans.get(name) {
+            return Err(TypeError::with_note(
+                TypeErrorKind::DuplicateDeclaration(name.to_string()),
+                span,
+                Note {
+                    message: super::NoteMessage::FirstDefinedHere,
+                    span: first_span,
+                    path: grammar_path.to_path_buf(),
+                    source: source.to_string(),
+                },
+            ));
+        }
+        self.decl_spans.insert(name, span);
+        Ok(())
     }
     #[inline]
     fn insert_var(&mut self, name: &'src str, ty: Ty) {
@@ -195,6 +226,544 @@ impl<'src> std::ops::Deref for ScopeGuard<'_, 'src> {
 impl std::ops::DerefMut for ScopeGuard<'_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
+    }
+}
+
+// -- Name resolution --
+
+/// Zero-allocation scope chain (linked list on stack, borrows from configs).
+struct Locals<'a> {
+    scope: LocalScope<'a>,
+    #[expect(clippy::use_self, reason = "no Self with generics")]
+    parent: Option<&'a Locals<'a>>,
+}
+
+enum LocalScope<'a> {
+    Empty,
+    FnParams(&'a [Param]),
+    ForBindings(&'a [(Span, NodeId)]),
+}
+
+impl Locals<'_> {
+    const EMPTY: Locals<'static> = Locals {
+        scope: LocalScope::Empty,
+        parent: None,
+    };
+
+    /// Iterative walk + manual loops (instead of recursion + `.any()` closures)
+    /// to reduce register pressure in the inner loops.
+    fn contains(&self, arena: &NodeArena, ctx: &AstContext, name: &str) -> bool {
+        let source = ctx.source();
+        let mut current = self;
+        loop {
+            match &current.scope {
+                LocalScope::Empty => {}
+                LocalScope::FnParams(params) => {
+                    for p in *params {
+                        if arena.span(p.name).resolve(source) == name {
+                            return true;
+                        }
+                    }
+                }
+                LocalScope::ForBindings(bindings) => {
+                    for (span, _) in *bindings {
+                        if span.resolve(source) == name {
+                            return true;
+                        }
+                    }
+                }
+            }
+            match current.parent {
+                Some(p) => current = p,
+                None => return false,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Decl {
+    Rule,
+    Var,
+    Fn,
+}
+
+/// Run name resolution and type checking in a single function.
+///
+/// **Phase 1** (resolve): collects declarations, registers inherited names,
+/// and mutates `Node::Ident` nodes into `Node::RuleRef` / `Node::VarRef`.
+///
+/// **Phase 2** (typecheck): calls the existing `check()` function on the
+/// now-resolved AST.
+///
+/// # Errors
+///
+/// Returns [`TypeError`] for duplicate declarations, unknown identifiers,
+/// or any type error.
+pub fn resolve_and_check<'ast>(
+    ast: &'ast mut Ast,
+    modules: Vec<TypeEnv<'ast>>,
+    base: Option<(&'ast InputGrammar, Span)>,
+    grammar_path: &Path,
+) -> Result<TypeEnv<'ast>, TypeError> {
+    // -- Phase 1: Name resolution (mutates arena) --
+    // Split borrow: collect_decls borrows ast.context (for &str slices in decl_spans)
+    // but not ast.arena, so we can later mutably borrow ast.arena for resolve_item.
+    let mut env = collect_decls(&ast.arena, &ast.context, &ast.root_items, grammar_path)?;
+
+    // Register inherited rule names so they resolve to RuleRef.
+    // Use the inherit statement's span so "first defined here" points there.
+    if let Some((base_grammar, inherit_span)) = base {
+        for var in &base_grammar.variables {
+            if env.decl_spans.get(var.name.as_str()).is_none() {
+                env.decl_spans.insert(&var.name, inherit_span);
+                env.decl_kinds.insert(&var.name, Decl::Rule);
+            }
+        }
+    }
+
+    // Split borrow: env holds &str from ast.context.source (immutable),
+    // while resolve_item_tc mutates ast.arena. Access context and arena separately.
+    let n_items = ast.root_items.len();
+    for i in 0..n_items {
+        let item_id = ast.root_items[i];
+        // Register let bindings in order so forward references are caught
+        if let Node::Let { name, .. } = ast.arena.get(item_id) {
+            let name_text = ast.context.text(ast.arena.span(*name));
+            let span = ast.arena.span(item_id);
+            insert_decl(
+                &mut env,
+                name_text,
+                Decl::Var,
+                span,
+                grammar_path,
+                ast.context.source(),
+            )?;
+        }
+        resolve_item_tc(&mut ast.arena, &ast.context, &env, item_id)?;
+    }
+
+    // -- Phase 2: Type checking (reads ast immutably) --
+    check(ast, modules)
+}
+
+/// Intermediate resolve environment used during phase 1. Tracks both
+/// declaration spans (for duplicate checking) and declaration kinds
+/// (for Ident -> RuleRef/VarRef mutation).
+struct ResolveEnv<'src> {
+    decl_spans: FxHashMap<&'src str, Span>,
+    decl_kinds: FxHashMap<&'src str, Decl>,
+}
+
+impl<'src> ResolveEnv<'src> {
+    fn get(&self, name: &str) -> Option<Decl> {
+        self.decl_kinds.get(name).copied()
+    }
+}
+
+fn insert_decl<'src>(
+    env: &mut ResolveEnv<'src>,
+    name: &'src str,
+    kind: Decl,
+    span: Span,
+    grammar_path: &Path,
+    source: &str,
+) -> Result<(), TypeError> {
+    if let Some(&first_span) = env.decl_spans.get(name) {
+        return Err(TypeError::with_note(
+            TypeErrorKind::DuplicateDeclaration(name.to_string()),
+            span,
+            Note {
+                message: NoteMessage::FirstDefinedHere,
+                span: first_span,
+                path: grammar_path.to_path_buf(),
+                source: source.to_string(),
+            },
+        ));
+    }
+    env.decl_spans.insert(name, span);
+    env.decl_kinds.insert(name, kind);
+    Ok(())
+}
+
+/// Pass 1: scan top-level items and register all declared names.
+///
+/// Rules, let-bindings, functions, and external tokens in the grammar block
+/// all occupy the same namespace. Duplicate names are rejected.
+fn collect_decls<'a>(
+    arena: &NodeArena,
+    ctx: &'a AstContext,
+    root_items: &[NodeId],
+    grammar_path: &Path,
+) -> Result<ResolveEnv<'a>, TypeError> {
+    let mut env = ResolveEnv {
+        decl_spans: FxHashMap::default(),
+        decl_kinds: FxHashMap::default(),
+    };
+    let source = ctx.source();
+
+    // Register rules and fns upfront (forward references allowed).
+    // Let bindings are registered during pass 2 in item order (no forward references).
+    for &item_id in root_items {
+        let span = arena.span(item_id);
+        match arena.get(item_id) {
+            Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
+                insert_decl(
+                    &mut env,
+                    ctx.text(arena.span(*name)),
+                    Decl::Rule,
+                    span,
+                    grammar_path,
+                    source,
+                )?;
+            }
+            Node::Fn(fn_idx) => {
+                let config = ctx.get_fn(*fn_idx);
+                insert_decl(
+                    &mut env,
+                    ctx.text(arena.span(config.name)),
+                    Decl::Fn,
+                    span,
+                    grammar_path,
+                    source,
+                )?;
+            }
+            _ => {}
+        }
+    }
+
+    // Collect let binding names (not yet registered - they're added in phase 2
+    // to prevent forward references). We need them here to avoid pre-registering
+    // config identifiers that shadow let bindings.
+    let let_names: FxHashSet<&str> = root_items
+        .iter()
+        .filter_map(|&id| match arena.get(id) {
+            Node::Let { name, .. } => Some(ctx.text(arena.span(*name))),
+            _ => None,
+        })
+        .collect();
+
+    // Pre-register external token names. Externals are the only config field
+    // that introduces names not declared as rules - they're provided by an
+    // external scanner.
+    if let Some(config) = &ctx.grammar_config
+        && let Some(ext_id) = config.externals
+    {
+        collect_external_names_tc(
+            arena,
+            ctx,
+            ext_id,
+            &mut env,
+            &let_names,
+            root_items,
+            grammar_path,
+            source,
+        )?;
+    }
+
+    Ok(env)
+}
+
+/// Recursively walk an externals expression to find bare identifiers that
+/// need pre-registration as external token names. Follows all expression
+/// forms: lists, appends, variable references (via let binding values),
+/// and any other compound expression.
+fn collect_external_names_tc<'a>(
+    arena: &NodeArena,
+    ctx: &'a AstContext,
+    id: NodeId,
+    env: &mut ResolveEnv<'a>,
+    let_names: &FxHashSet<&str>,
+    root_items: &[NodeId],
+    grammar_path: &Path,
+    source: &'a str,
+) -> Result<(), TypeError> {
+    match arena.get(id) {
+        // Bare identifier: either a let binding (follow it) or an external token name.
+        Node::Ident => {
+            let name = ctx.text(arena.span(id));
+            if let Some(value_id) = find_let_value(arena, ctx, root_items, name) {
+                // It's a let binding - recurse into its value.
+                collect_external_names_tc(
+                    arena,
+                    ctx,
+                    value_id,
+                    env,
+                    let_names,
+                    root_items,
+                    grammar_path,
+                    source,
+                )?;
+            } else if env.get(name).is_none() {
+                // Unknown bare identifier - register as external token.
+                insert_decl(env, name, Decl::Rule, arena.span(id), grammar_path, source)?;
+            }
+        }
+        // List: scan children for identifiers.
+        Node::List(range) | Node::Seq(range) | Node::Choice(range) | Node::Tuple(range) => {
+            for &child in ctx.child_slice(*range) {
+                collect_external_names_tc(
+                    arena,
+                    ctx,
+                    child,
+                    env,
+                    let_names,
+                    root_items,
+                    grammar_path,
+                    source,
+                )?;
+            }
+        }
+        // Append: recurse into both arms.
+        Node::Append { left, right } => {
+            collect_external_names_tc(
+                arena,
+                ctx,
+                *left,
+                env,
+                let_names,
+                root_items,
+                grammar_path,
+                source,
+            )?;
+            collect_external_names_tc(
+                arena,
+                ctx,
+                *right,
+                env,
+                let_names,
+                root_items,
+                grammar_path,
+                source,
+            )?;
+        }
+        // Literals don't introduce names.
+        Node::StringLit | Node::RawStringLit { .. } | Node::IntLit(_) | Node::Blank => {}
+        // grammar_config(base).externals - inherited values already registered.
+        Node::GrammarConfig(_) | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
+        // Everything else (function calls, qualified calls, etc.) - skip.
+        // Names inside these will be resolved normally.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Find the value node of a let binding by name.
+fn find_let_value(
+    arena: &NodeArena,
+    ctx: &AstContext,
+    root_items: &[NodeId],
+    name: &str,
+) -> Option<NodeId> {
+    root_items.iter().find_map(|&item_id| {
+        if let Node::Let { name: n, value, .. } = arena.get(item_id) {
+            if ctx.text(arena.span(*n)) == name {
+                return Some(*value);
+            }
+        }
+        None
+    })
+}
+
+/// Pass 2: resolve identifiers within a single top-level item.
+fn resolve_item_tc(
+    arena: &mut NodeArena,
+    ctx: &AstContext,
+    env: &ResolveEnv,
+    item_id: NodeId,
+) -> Result<(), TypeError> {
+    match arena.get(item_id) {
+        Node::Grammar => {
+            // INVARIANT: set during grammar block parsing, always present here
+            let grammar_config = ctx.grammar_config.as_ref().unwrap();
+            for id in [
+                grammar_config.inherits,
+                grammar_config.extras,
+                grammar_config.externals,
+                grammar_config.inline,
+                grammar_config.supertypes,
+                grammar_config.word,
+                grammar_config.conflicts,
+                grammar_config.precedences,
+                grammar_config.reserved,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                resolve_expr_tc(arena, ctx, env, id, &Locals::EMPTY)?;
+            }
+            Ok(())
+        }
+        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
+            let body = *body;
+            resolve_expr_tc(arena, ctx, env, body, &Locals::EMPTY)
+        }
+        Node::Let { value, .. } => {
+            let value = *value;
+            resolve_expr_tc(arena, ctx, env, value, &Locals::EMPTY)
+        }
+        Node::Print(arg) => {
+            let arg = *arg;
+            resolve_expr_tc(arena, ctx, env, arg, &Locals::EMPTY)
+        }
+        Node::Fn(fn_idx) => {
+            let fn_config = ctx.get_fn(*fn_idx);
+            let body = fn_config.body;
+            let locals = Locals {
+                scope: LocalScope::FnParams(&fn_config.params),
+                parent: None,
+            };
+            resolve_expr_tc(arena, ctx, env, body, &locals)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Resolve identifiers within a single expression.
+fn resolve_expr_tc(
+    arena: &mut NodeArena,
+    ctx: &AstContext,
+    env: &ResolveEnv,
+    id: NodeId,
+    locals: &Locals<'_>,
+) -> Result<(), TypeError> {
+    // Handle Ident mutation first
+    if matches!(arena.get(id), Node::Ident) {
+        let span = arena.span(id);
+        let name = ctx.text(span);
+        if locals.contains(arena, ctx, name) {
+            arena.set(id, Node::VarRef);
+        } else if let Some(decl) = env.get(name) {
+            match decl {
+                Decl::Var => arena.set(id, Node::VarRef),
+                Decl::Rule | Decl::Fn => arena.set(id, Node::RuleRef),
+            }
+        } else {
+            return Err(TypeError::new(
+                TypeErrorKind::UnknownIdentifier(name.to_string()),
+                span,
+            ));
+        }
+        return Ok(());
+    }
+
+    // Alias target: bare identifiers become RuleRef (named alias) unless
+    // they refer to a local variable (VarRef for fn params / for bindings).
+    if let Node::Alias { content, target } = arena.get(id) {
+        let (content, target) = (*content, *target);
+        resolve_expr_tc(arena, ctx, env, content, locals)?;
+        if matches!(*arena.get(target), Node::Ident) {
+            let name = ctx.text(arena.span(target));
+            if locals.contains(arena, ctx, name) {
+                arena.set(target, Node::VarRef);
+            } else {
+                arena.set(target, Node::RuleRef);
+            }
+        } else {
+            resolve_expr_tc(arena, ctx, env, target, locals)?;
+        }
+        return Ok(());
+    }
+
+    // For expressions need extended locals
+    if let Node::For(for_idx) = arena.get(id) {
+        let config = ctx.get_for(*for_idx);
+        let iterable = config.iterable;
+        let body = config.body;
+        let bindings = &config.bindings;
+        resolve_expr_tc(arena, ctx, env, iterable, locals)?;
+        let inner = Locals {
+            scope: LocalScope::ForBindings(bindings),
+            parent: Some(locals),
+        };
+        return resolve_expr_tc(arena, ctx, env, body, &inner);
+    }
+
+    // All remaining cases
+    resolve_children_tc(arena, ctx, env, id, locals)
+}
+
+/// Resolve identifiers in children of a node (mechanical traversal).
+fn resolve_children_tc(
+    arena: &mut NodeArena,
+    ctx: &AstContext,
+    env: &ResolveEnv,
+    id: NodeId,
+    locals: &Locals<'_>,
+) -> Result<(), TypeError> {
+    // Variadic nodes: Seq, Choice, List, Tuple, Concat
+    if let Some(range) = arena.get(id).child_range() {
+        for child in ctx.child_slice(range) {
+            resolve_expr_tc(arena, ctx, env, *child, locals)?;
+        }
+        return Ok(());
+    }
+
+    match arena.get(id) {
+        Node::Call { name, args } => {
+            let (name, args) = (*name, *args);
+            resolve_expr_tc(arena, ctx, env, name, locals)?;
+            for arg in ctx.child_slice(args) {
+                resolve_expr_tc(arena, ctx, env, *arg, locals)?;
+            }
+            Ok(())
+        }
+        Node::Object(range) => {
+            for field in ctx.get_object(*range) {
+                resolve_expr_tc(arena, ctx, env, field.1, locals)?;
+            }
+            Ok(())
+        }
+        Node::Repeat(inner)
+        | Node::Repeat1(inner)
+        | Node::Optional(inner)
+        | Node::Token(inner)
+        | Node::TokenImmediate(inner)
+        | Node::Neg(inner)
+        | Node::GrammarConfig(inner)
+        | Node::Print(inner) => {
+            let inner = *inner;
+            resolve_expr_tc(arena, ctx, env, inner, locals)
+        }
+        Node::Field { content, .. } | Node::Reserved { content, .. } => {
+            let content = *content;
+            resolve_expr_tc(arena, ctx, env, content, locals)
+        }
+        Node::Append { left, right } => {
+            let (left, right) = (*left, *right);
+            resolve_expr_tc(arena, ctx, env, left, locals)?;
+            resolve_expr_tc(arena, ctx, env, right, locals)
+        }
+        Node::Prec { value, content }
+        | Node::PrecLeft { value, content }
+        | Node::PrecRight { value, content }
+        | Node::PrecDynamic { value, content } => {
+            let (value, content) = (*value, *content);
+            resolve_expr_tc(arena, ctx, env, value, locals)?;
+            resolve_expr_tc(arena, ctx, env, content, locals)
+        }
+        Node::DynRegex { pattern, flags } => {
+            let (pattern, flags) = (*pattern, *flags);
+            resolve_expr_tc(arena, ctx, env, pattern, locals)?;
+            if let Some(flags) = flags {
+                resolve_expr_tc(arena, ctx, env, flags, locals)?;
+            }
+            Ok(())
+        }
+        Node::FieldAccess { obj, .. } | Node::QualifiedAccess { obj, .. } => {
+            let obj = *obj;
+            resolve_expr_tc(arena, ctx, env, obj, locals)
+        }
+        Node::QualifiedCall(range) => {
+            let (obj, _name, args) = ctx.get_qualified_call(*range);
+            resolve_expr_tc(arena, ctx, env, obj, locals)?;
+            // name stays as Ident - it's a member of the import namespace
+            for &arg in args {
+                resolve_expr_tc(arena, ctx, env, arg, locals)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1033,11 +1602,24 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 pub struct TypeError {
     pub kind: TypeErrorKind,
     pub span: Span,
+    pub note: Option<Box<Note>>,
 }
 
 impl TypeError {
     const fn new(kind: TypeErrorKind, span: Span) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            note: None,
+        }
+    }
+
+    fn with_note(kind: TypeErrorKind, span: Span, note: Note) -> Self {
+        Self {
+            kind,
+            span,
+            note: Some(Box::new(note)),
+        }
     }
 }
 
@@ -1087,6 +1669,8 @@ pub enum TypeErrorKind {
     ImportMemberNotFound(String),
     ImportFunctionNotFound(String),
     QualifiedCallOnNonModule(Ty),
+    DuplicateDeclaration(String),
+    UnknownIdentifier(String),
 }
 
 impl std::fmt::Display for TypeError {
@@ -1160,6 +1744,8 @@ impl std::fmt::Display for TypeError {
             ImportMemberNotFound(name) => write!(f, "imported module has no member '{name}'"),
             ImportFunctionNotFound(name) => write!(f, "imported module has no function '{name}'"),
             QualifiedCallOnNonModule(ty) => write!(f, "'::' call requires module_t, got {ty}"),
+            DuplicateDeclaration(name) => write!(f, "duplicate declaration '{name}'"),
+            UnknownIdentifier(name) => write!(f, "unknown identifier '{name}'"),
         }
     }
 }
