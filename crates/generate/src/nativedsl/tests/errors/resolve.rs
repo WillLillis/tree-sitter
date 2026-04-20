@@ -3,7 +3,7 @@ use super::super::*;
 macro_rules! resolve_error_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
-            let e = assert_err!(dsl_err($input), Resolve);
+            let e = assert_err!(dsl_err($input), Type);
             assert_eq!(e.kind, $expected);
         })*
     };
@@ -12,32 +12,32 @@ macro_rules! resolve_error_tests {
 resolve_error_tests! {
     error_unknown_identifier {
         r#"grammar { language: "test" } rule program { nonexistent }"#,
-        ResolveErrorKind::UnknownIdentifier("nonexistent".into())
+        TypeErrorKind::UnknownIdentifier("nonexistent".into())
     }
     error_duplicate_rule {
         r#"grammar { language: "test" } rule program { "a" } rule program { "b" }"#,
-        ResolveErrorKind::DuplicateDeclaration("program".into())
+        TypeErrorKind::DuplicateDeclaration("program".into())
     }
     error_forward_reference_let {
         r#"grammar { language: "test" } rule program { MY_VAR } let MY_VAR: str_t = "x""#,
-        ResolveErrorKind::UnknownIdentifier("MY_VAR".into())
+        TypeErrorKind::UnknownIdentifier("MY_VAR".into())
     }
     error_undefined_function {
         r#"grammar { language: "test" }
         rule program { nonexistent_fn(identifier) }
         rule identifier { "x" }"#,
-        ResolveErrorKind::UnknownIdentifier("nonexistent_fn".into())
+        TypeErrorKind::UnknownIdentifier("nonexistent_fn".into())
     }
     error_duplicate_let {
         r#"grammar { language: "test" } let X: int_t = 1 let X: int_t = 2 rule program { "x" }"#,
-        ResolveErrorKind::DuplicateDeclaration("X".into())
+        TypeErrorKind::DuplicateDeclaration("X".into())
     }
     error_duplicate_fn {
         r#"grammar { language: "test" }
         fn f(x: rule_t) -> rule_t { x }
         fn f(x: rule_t) -> rule_t { x }
         rule program { "x" }"#,
-        ResolveErrorKind::DuplicateDeclaration("f".into())
+        TypeErrorKind::DuplicateDeclaration("f".into())
     }
 }
 
@@ -56,12 +56,12 @@ fn error_inherited_resolve_error() {
     let DslError::Module(inherited) = &err else {
         panic!("expected Module error, got {err:?}")
     };
-    let DslError::Resolve(resolve_err) = inherited.inner.as_ref() else {
-        panic!("expected Resolve error, got {:?}", inherited.inner)
+    let DslError::Type(type_err) = inherited.inner.as_ref() else {
+        panic!("expected Type error, got {:?}", inherited.inner)
     };
     assert_eq!(
-        resolve_err.kind,
-        ResolveErrorKind::UnknownIdentifier("undefined_name".to_string())
+        type_err.kind,
+        TypeErrorKind::UnknownIdentifier("undefined_name".to_string())
     );
     assert_eq!(inherited.path, base_path);
     assert!(inherited.source_text.contains("undefined_name"));
