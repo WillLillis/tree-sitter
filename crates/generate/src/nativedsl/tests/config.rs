@@ -309,15 +309,13 @@ fn externals_empty_list() {
 }
 
 #[test]
-fn error_externals_via_let_binding() {
-    // Can't resolve external names through a variable reference
-    let e = assert_err!(
-        dsl_err(r#"
-            let ext: list_rule_t = [heredoc]
-            grammar { language: "test", externals: ext }
-            rule program { "x" }
-        "#),
-        Resolve
-    );
-    assert_eq!(e.kind, ResolveErrorKind::ExternalsNotInline);
+fn externals_via_let_binding() {
+    // External names in let bindings are resolved by following the variable
+    // to its value expression during external name pre-registration.
+    let g = dsl(r#"
+        let ext: list_rule_t = [heredoc]
+        grammar { language: "test", externals: ext }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("heredoc".into())]);
 }

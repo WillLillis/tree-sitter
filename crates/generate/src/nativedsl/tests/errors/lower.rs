@@ -98,12 +98,12 @@ fn error_inherit_child_error() {
     let DslError::Module(inherited) = &err else {
         panic!("expected Module error, got {err:?}")
     };
-    let DslError::Resolve(resolve_err) = inherited.inner.as_ref() else {
-        panic!("expected Resolve error, got {:?}", inherited.inner)
+    let DslError::Type(type_err) = inherited.inner.as_ref() else {
+        panic!("expected Type error, got {:?}", inherited.inner)
     };
     assert_eq!(
-        resolve_err.kind,
-        ResolveErrorKind::UnknownIdentifier("bogus_ref".to_string())
+        type_err.kind,
+        TypeErrorKind::UnknownIdentifier("bogus_ref".to_string())
     );
     assert_eq!(inherited.path, base_path);
     assert!(inherited.source_text.contains("bogus_ref"));

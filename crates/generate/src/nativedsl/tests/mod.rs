@@ -5,8 +5,8 @@ use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
 use super::{
-    DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, ParseErrorKind,
-    ResolveErrorKind, Ty, TypeErrorKind, parse_native_dsl,
+    DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, ParseErrorKind, Ty,
+    TypeErrorKind, parse_native_dsl,
 };
 
 macro_rules! assert_err {
@@ -395,24 +395,19 @@ fn bench_per_stage() {
     super::validate_grammar(&ast, super::find_inherit_node(&ast)).unwrap();
     // C grammar has no inheritance or imports
 
-    // Resolve
+    // Resolve + Typecheck (merged)
     let start = std::time::Instant::now();
     for _ in 0..n {
         let mut a = super::parser::Parser::new(&tokens, source.clone(), &path)
             .parse()
             .unwrap();
-        super::resolve::resolve(&mut a, None, &path).unwrap();
+        std::hint::black_box(
+            super::typecheck::resolve_and_check(&mut a, Vec::new(), None, &path).unwrap(),
+        );
     }
-    let resolve_time = start.elapsed() / n;
+    let resolve_typecheck_time = start.elapsed() / n;
 
-    super::resolve::resolve(&mut ast, None, &path).unwrap();
-
-    // Typecheck
-    let start = std::time::Instant::now();
-    for _ in 0..n {
-        std::hint::black_box(super::typecheck::check(&ast, Vec::new()).unwrap());
-    }
-    let typecheck_time = start.elapsed() / n;
+    super::typecheck::resolve_and_check(&mut ast, Vec::new(), None, &path).unwrap();
 
     // Lower (C grammar has no base, so base is always None)
     // This includes: eval all expressions + build_rule (ARule→Rule conversion)
@@ -423,7 +418,7 @@ fn bench_per_stage() {
     }
     let lower_time = start.elapsed() / n;
 
-    let total = lex_time + parse_time + resolve_time + typecheck_time + lower_time;
+    let total = lex_time + parse_time + resolve_typecheck_time + lower_time;
     eprintln!(
         "Lex:       {lex_time:>8?} ({:.1}%)",
         lex_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
@@ -433,12 +428,8 @@ fn bench_per_stage() {
         parse_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
     eprintln!(
-        "Resolve:   {resolve_time:>8?} ({:.1}%)",
-        resolve_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
-    );
-    eprintln!(
-        "Typecheck: {typecheck_time:>8?} ({:.1}%)",
-        typecheck_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
+        "Resolve+TC:{resolve_typecheck_time:>8?} ({:.1}%)",
+        resolve_typecheck_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
     eprintln!(
         "Lower:     {lower_time:>8?} ({:.1}%)",
