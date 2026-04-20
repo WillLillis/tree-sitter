@@ -6,7 +6,7 @@ use crate::rules::{Precedence, Rule};
 
 use super::{
     DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, ParseErrorKind,
-    ResolveErrorKind, Ty, TypeErrorKind, ast, parse_native_dsl,
+    ResolveErrorKind, Ty, TypeErrorKind, parse_native_dsl,
 };
 
 macro_rules! assert_err {
@@ -33,12 +33,17 @@ pub(super) fn test_grammars_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/test_grammars")
 }
 
+/// Directory containing DSL-specific helper fixtures (inherit bases, import helpers).
+pub(super) fn test_fixtures_dir() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nativedsl/test_fixtures")
+}
+
 pub(super) fn dsl(input: &str) -> InputGrammar {
-    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap()
+    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap()
 }
 
 pub(super) fn dsl_err(input: &str) -> DslError {
-    parse_native_dsl(input, &test_grammars_dir().join("grammar.tsg")).unwrap_err()
+    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap_err()
 }
 
 /// Follows the same path as the CLI: `parse_native_dsl` -> normalize -> `grammar_to_json`.
@@ -50,8 +55,26 @@ pub(super) fn dsl_to_json(input: &str, path: &std::path::Path) -> (InputGrammar,
     (grammar, json)
 }
 
+/// Map a grammar name to its external repo path.
+/// These are local clones that won't exist in CI - roundtrip tests using
+/// these paths should be removed once the translations are upstreamed.
+/// TODO: REMOVE before PR - upstream translations to grammar repos first.
 pub(super) fn native_grammar_path(name: &str) -> std::path::PathBuf {
-    test_grammars_dir().join(name).join("grammar.tsg")
+    let grammars_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../grammars");
+    let repo = match name {
+        "c_native" => "tree-sitter-c",
+        "cpp_native" => "tree-sitter-cpp",
+        "javascript_native" => "tree-sitter-javascript",
+        "json_native" => "tree-sitter-json",
+        "query_native" => "tree-sitter-query",
+        "rust_native" => "tree-sitter-rust",
+        "python_native" => "tree-sitter-python",
+        "go_native" => "tree-sitter-go",
+        "gomod_native" => "tree-sitter-go-mod",
+        "vim_native" => "tree-sitter-vim",
+        other => panic!("unknown native grammar: {other}"),
+    };
+    grammars_dir.join(repo).join("grammar.tsg")
 }
 
 pub(super) fn read_native_grammar(name: &str) -> String {
@@ -89,7 +112,7 @@ pub(super) fn assert_grammar_eq(native: &InputGrammar, js: &InputGrammar) {
         match native_rules.get(name) {
             None => mismatches.push(format!("MISSING: {name}")),
             Some(native_rule) if native_rule != js_rule => {
-                mismatches.push(format!("MISMATCH: {name}"));
+                mismatches.push(format!("MISMATCH: {name}\n  JS:     {js_rule:?}\n  NATIVE: {native_rule:?}"));
             }
             _ => {}
         }
@@ -400,31 +423,26 @@ fn bench_per_stage() {
 
     let total = lex_time + parse_time + resolve_time + typecheck_time + lower_time;
     eprintln!(
-        "Lex:       {:>8?} ({:.1}%)",
-        lex_time,
+        "Lex:       {lex_time:>8?} ({:.1}%)",
         lex_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
     eprintln!(
-        "Parse:     {:>8?} ({:.1}%)",
-        parse_time,
+        "Parse:     {parse_time:>8?} ({:.1}%)",
         parse_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
     eprintln!(
-        "Resolve:   {:>8?} ({:.1}%)",
-        resolve_time,
+        "Resolve:   {resolve_time:>8?} ({:.1}%)",
         resolve_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
     eprintln!(
-        "Typecheck: {:>8?} ({:.1}%)",
-        typecheck_time,
+        "Typecheck: {typecheck_time:>8?} ({:.1}%)",
         typecheck_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
     eprintln!(
-        "Lower:     {:>8?} ({:.1}%)",
-        lower_time,
+        "Lower:     {lower_time:>8?} ({:.1}%)",
         lower_time.as_nanos() as f64 / total.as_nanos() as f64 * 100.0
     );
-    eprintln!("Total:     {:>8?}", total);
+    eprintln!("Total:     {total:>8?}");
 }
 
 #[test]

@@ -88,6 +88,11 @@ type_error_tests! {
         let x = base::bogus"#,
         TypeErrorKind::ImportMemberNotFound("bogus".into())
     }
+    error_grammar_config_unknown_field {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, extras: grammar_config(base).bogus }"#,
+        TypeErrorKind::UnknownConfigField("bogus".into())
+    }
     error_for_requires_list {
         r#"grammar { language: "test" }
         let x: int_t = 5
