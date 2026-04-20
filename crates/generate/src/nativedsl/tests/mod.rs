@@ -112,7 +112,9 @@ pub(super) fn assert_grammar_eq(native: &InputGrammar, js: &InputGrammar) {
         match native_rules.get(name) {
             None => mismatches.push(format!("MISSING: {name}")),
             Some(native_rule) if native_rule != js_rule => {
-                mismatches.push(format!("MISMATCH: {name}\n  JS:     {js_rule:?}\n  NATIVE: {native_rule:?}"));
+                mismatches.push(format!(
+                    "MISMATCH: {name}\n  JS:     {js_rule:?}\n  NATIVE: {native_rule:?}"
+                ));
             }
             _ => {}
         }
