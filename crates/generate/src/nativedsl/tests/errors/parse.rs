@@ -34,6 +34,10 @@ parse_error_tests! {
         r#"grammar { language: "test" } fn f(x: rule_t) { x } rule program { "x" }"#,
         ParseErrorKind::MissingReturnType
     }
+    error_missing_language_field {
+        r#"grammar { extras: [] } rule program { "x" }"#,
+        ParseErrorKind::MissingLanguageField
+    }
     error_multiple_grammar_blocks {
         r#"grammar { language: "first" }
         grammar { language: "second" }
@@ -111,47 +115,48 @@ fn error_builtin_arg_count_messages() {
             concat!(r#"grammar { language: "test" } rule foo { "#, $expr, " }")
         };
     }
-    let cases: &[(&str, &str, u8, usize)] = &[
-        (g!("blank(\"a\")"), "blank", 0, 1),
-        (g!("blank(\"a\", \"b\")"), "blank", 0, 2),
-        (g!("repeat()"), "repeat", 1, 0),
-        (g!("repeat1()"), "repeat1", 1, 0),
-        (g!("optional()"), "optional", 1, 0),
-        (g!("token()"), "token", 1, 0),
-        (g!("token_immediate()"), "token_immediate", 1, 0),
-        (g!("inherit()"), "inherit", 1, 0),
-        (g!(r#"repeat("a", "b")"#), "repeat", 1, 2),
-        (g!(r#"repeat1("a", "b")"#), "repeat1", 1, 2),
-        (g!(r#"optional("a", "b")"#), "optional", 1, 2),
-        (g!(r#"token("a", "b")"#), "token", 1, 2),
-        (g!(r#"token_immediate("a", "b")"#), "token_immediate", 1, 2),
-        (g!(r#"inherit("a", "b")"#), "inherit", 1, 2),
-        (g!("prec()"), "prec", 2, 0),
-        (g!("prec(1)"), "prec", 2, 1),
-        (g!("prec_left()"), "prec_left", 2, 0),
-        (g!("prec_left(1)"), "prec_left", 2, 1),
-        (g!("prec_right()"), "prec_right", 2, 0),
-        (g!("prec_right(1)"), "prec_right", 2, 1),
-        (g!("prec_dynamic()"), "prec_dynamic", 2, 0),
-        (g!("prec_dynamic(1)"), "prec_dynamic", 2, 1),
-        (g!("field()"), "field", 2, 0),
-        (g!("field(name)"), "field", 2, 1),
-        (g!("alias()"), "alias", 2, 0),
-        (g!(r#"alias("a")"#), "alias", 2, 1),
-        (g!("append()"), "append", 2, 0),
-        (g!(r#"append("a")"#), "append", 2, 1),
-        (g!("reserved()"), "reserved", 2, 0),
-        (g!(r#"reserved("ctx")"#), "reserved", 2, 1),
-        (g!(r#"prec(1, "a", "b")"#), "prec", 2, 3),
-        (g!(r#"prec_left(1, "a", "b")"#), "prec_left", 2, 3),
-        (g!(r#"prec_right(1, "a", "b")"#), "prec_right", 2, 3),
-        (g!(r#"prec_dynamic(1, "a", "b")"#), "prec_dynamic", 2, 3),
-        (g!(r#"field(name, "a", "b")"#), "field", 2, 3),
-        (g!(r#"alias("a", "b", "c")"#), "alias", 2, 3),
-        (g!(r#"append([1], [2], [3])"#), "append", 2, 3),
-        (g!(r#"reserved("ctx", "a", "b")"#), "reserved", 2, 3),
-        (g!("regexp()"), "regexp", 1, 0),
-        (g!(r#"regexp("a", "b", "c")"#), "regexp", 2, 3),
+    #[rustfmt::skip]
+    let cases: &[(&str, TokenKind, u8, usize)] = &[
+        (g!("blank(\"a\")"), TokenKind::KwBlank, 0, 1),
+        (g!("blank(\"a\", \"b\")"), TokenKind::KwBlank, 0, 2),
+        (g!("repeat()"), TokenKind::KwRepeat, 1, 0),
+        (g!("repeat1()"), TokenKind::KwRepeat1, 1, 0),
+        (g!("optional()"), TokenKind::KwOptional, 1, 0),
+        (g!("token()"), TokenKind::KwToken, 1, 0),
+        (g!("token_immediate()"), TokenKind::KwTokenImmediate, 1, 0),
+        (g!("inherit()"), TokenKind::KwInherit, 1, 0),
+        (g!(r#"repeat("a", "b")"#), TokenKind::KwRepeat, 1, 2),
+        (g!(r#"repeat1("a", "b")"#), TokenKind::KwRepeat1, 1, 2),
+        (g!(r#"optional("a", "b")"#), TokenKind::KwOptional, 1, 2),
+        (g!(r#"token("a", "b")"#), TokenKind::KwToken, 1, 2),
+        (g!(r#"token_immediate("a", "b")"#), TokenKind::KwTokenImmediate, 1, 2),
+        (g!(r#"inherit("a", "b")"#), TokenKind::KwInherit, 1, 2),
+        (g!("prec()"), TokenKind::KwPrec, 2, 0),
+        (g!("prec(1)"), TokenKind::KwPrec, 2, 1),
+        (g!("prec_left()"), TokenKind::KwPrecLeft, 2, 0),
+        (g!("prec_left(1)"), TokenKind::KwPrecLeft, 2, 1),
+        (g!("prec_right()"), TokenKind::KwPrecRight, 2, 0),
+        (g!("prec_right(1)"), TokenKind::KwPrecRight, 2, 1),
+        (g!("prec_dynamic()"), TokenKind::KwPrecDynamic, 2, 0),
+        (g!("prec_dynamic(1)"), TokenKind::KwPrecDynamic, 2, 1),
+        (g!("field()"), TokenKind::KwField, 2, 0),
+        (g!("field(name)"), TokenKind::KwField, 2, 1),
+        (g!("alias()"), TokenKind::KwAlias, 2, 0),
+        (g!(r#"alias("a")"#), TokenKind::KwAlias, 2, 1),
+        (g!("append()"), TokenKind::KwAppend, 2, 0),
+        (g!(r#"append("a")"#), TokenKind::KwAppend, 2, 1),
+        (g!("reserved()"), TokenKind::KwReserved, 2, 0),
+        (g!(r#"reserved("ctx")"#), TokenKind::KwReserved, 2, 1),
+        (g!(r#"prec(1, "a", "b")"#), TokenKind::KwPrec, 2, 3),
+        (g!(r#"prec_left(1, "a", "b")"#), TokenKind::KwPrecLeft, 2, 3),
+        (g!(r#"prec_right(1, "a", "b")"#), TokenKind::KwPrecRight, 2, 3),
+        (g!(r#"prec_dynamic(1, "a", "b")"#), TokenKind::KwPrecDynamic, 2, 3),
+        (g!(r#"field(name, "a", "b")"#), TokenKind::KwField, 2, 3),
+        (g!(r#"alias("a", "b", "c")"#), TokenKind::KwAlias, 2, 3),
+        (g!(r#"append([1], [2], [3])"#), TokenKind::KwAppend, 2, 3),
+        (g!(r#"reserved("ctx", "a", "b")"#), TokenKind::KwReserved, 2, 3),
+        (g!("regexp()"), TokenKind::KwRegexp, 1, 0),
+        (g!(r#"regexp("a", "b", "c")"#), TokenKind::KwRegexp, 2, 3),
     ];
     for &(src, name, expected, got) in cases {
         let e = assert_err!(dsl_err(src), Parse);
@@ -262,4 +267,26 @@ fn error_inherited_parse_error() {
         &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
         "base.tsg"
     );
+}
+
+#[test]
+fn error_inherited_missing_language() {
+    let dir = tempfile::tempdir().unwrap();
+    let base_path = dir.path().join("base.tsg");
+    std::fs::write(
+        &base_path,
+        "grammar { extras: [] }\nrule program { \"x\" }\n",
+    )
+    .unwrap();
+    let parent_path = dir.path().join("parent.tsg");
+    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
+    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
+    let DslError::Module(inherited) = &err else {
+        panic!("expected Module error, got {err:?}")
+    };
+    let DslError::Parse(parse_err) = inherited.inner.as_ref() else {
+        panic!("expected Parse error, got {:?}", inherited.inner)
+    };
+    assert_eq!(parse_err.kind, ParseErrorKind::MissingLanguageField);
+    assert_eq!(inherited.path, base_path);
 }

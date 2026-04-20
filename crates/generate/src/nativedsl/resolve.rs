@@ -12,28 +12,30 @@
 //!
 //! ## Pass 2: Identifier resolution ([`resolve_item`] / [`resolve_expr`])
 //!
-//! Walks every expression in the AST and replaces `Node::Ident` nodes with
-//! either:
+//! Walks every expression in the AST and replaces `Node::Ident` nodes in
+//! expression positions with either:
 //! - `Node::RuleRef` - the identifier refers to a grammar rule or function
 //! - `Node::VarRef` - the identifier refers to a `let` binding, function
 //!   parameter, or `for` loop variable
 //!
+//! Identifiers in defining positions (rule names, let binding names, function
+//! names, parameter names, object keys, field names) remain as `Node::Ident`.
+//!
 //! Local variables (function parameters and for-loop bindings) shadow
 //! top-level names. The scope chain is a zero-allocation linked list
 //! ([`Locals`]) that borrows directly from the function/for config data.
-//!
-//! ## Borrow splitting
-//!
-//! The resolve pass needs to mutate `Ast::nodes` (rewriting `Ident` to
-//! `RuleRef`/`VarRef`) while reading `AstContext` (for source text,
-//! function configs, etc.). This is why `resolve_expr` takes
-//! `(&mut [Node], &AstContext)` rather than `&mut Ast`.
 
-use rustc_hash::FxHashMap;
+use std::path::Path;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, AstContext, Node, NodeArena, NodeId, Note, NoteMessage, Param, Span};
+use super::{
+    Note, NoteMessage,
+    ast::{Ast, AstContext, Node, NodeArena, NodeId, Param, Span},
+};
+use crate::grammars::InputGrammar;
 
 /// Zero-allocation scope chain (linked list on stack, borrows from configs).
 struct Locals<'a> {
@@ -96,9 +98,9 @@ impl Locals<'_> {
 /// Returns [`ResolveError`] for duplicate declarations or unknown identifiers.
 pub fn resolve(
     ast: &mut Ast,
-    base: Option<(&crate::grammars::InputGrammar, Span)>,
-    grammar_path: &std::path::Path,
-) -> Result<(), ResolveError> {
+    base: Option<(&InputGrammar, Span)>,
+    grammar_path: &Path,
+) -> ResolveResult<()> {
     let mut names = collect_names(ast, grammar_path)?;
     // Register inherited rule names so they resolve to RuleRef.
     // Use the inherit statement's span so "first defined here" points there.
@@ -122,6 +124,7 @@ pub fn resolve(
         }
         resolve_item(ast, &names, item_id)?;
     }
+
     Ok(())
 }
 
@@ -143,17 +146,17 @@ impl Names {
         name: &str,
         kind: Decl,
         span: Span,
-        grammar_path: &std::path::Path,
+        grammar_path: &Path,
         source: &str,
-    ) -> Result<(), ResolveError> {
+    ) -> ResolveResult<()> {
         if let Some((_, first_span)) = self.decls.get(name) {
-            return Err(Self::duplicate_error(
+            Err(Self::duplicate_error(
                 name,
                 span,
                 *first_span,
                 grammar_path,
                 source,
-            ));
+            ))?;
         }
         self.decls.insert(name.to_string(), (kind, span));
         Ok(())
@@ -164,7 +167,7 @@ impl Names {
         name: &str,
         span: Span,
         first_span: Span,
-        grammar_path: &std::path::Path,
+        grammar_path: &Path,
         source: &str,
     ) -> ResolveError {
         ResolveError {
@@ -188,7 +191,7 @@ impl Names {
 ///
 /// Rules, let-bindings, functions, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
-fn collect_names(ast: &Ast, grammar_path: &std::path::Path) -> Result<Names, ResolveError> {
+fn collect_names(ast: &Ast, grammar_path: &Path) -> ResolveResult<Names> {
     let mut names = Names {
         decls: FxHashMap::default(),
     };
@@ -220,7 +223,7 @@ fn collect_names(ast: &Ast, grammar_path: &std::path::Path) -> Result<Names, Res
     // Collect let binding names (not yet registered - they're added in pass 2
     // to prevent forward references). We need them here to avoid pre-registering
     // config identifiers that shadow let bindings.
-    let let_names: rustc_hash::FxHashSet<&str> = ast
+    let let_names: FxHashSet<&str> = ast
         .root_items
         .iter()
         .filter_map(|&id| match ast.node(id) {
@@ -268,7 +271,7 @@ fn collect_names(ast: &Ast, grammar_path: &std::path::Path) -> Result<Names, Res
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
-fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> Result<(), ResolveError> {
+fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> ResolveResult<()> {
     match ast.node(item_id) {
         Node::Grammar => {
             let ctx = &ast.context;
@@ -325,9 +328,9 @@ fn resolve_expr(
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     // Handle Ident mutation first
-    if matches!(*arena.get(id), Node::Ident) {
+    if matches!(arena.get(id), Node::Ident) {
         let span = arena.span(id);
         let name = ctx.text(span);
         if locals.contains(arena, ctx, name) {
@@ -349,7 +352,7 @@ fn resolve_expr(
 
     // Alias target: bare identifiers become RuleRef (named alias) unless
     // they refer to a local variable (VarRef for fn params / for bindings).
-    if let Node::Alias { content, target } = &*arena.get(id) {
+    if let Node::Alias { content, target } = arena.get(id) {
         let (content, target) = (*content, *target);
         resolve_expr(arena, ctx, names, content, locals)?;
         if matches!(*arena.get(target), Node::Ident) {
@@ -366,7 +369,7 @@ fn resolve_expr(
     }
 
     // For expressions need extended locals
-    if let Node::For(for_idx) = &*arena.get(id) {
+    if let Node::For(for_idx) = arena.get(id) {
         let config = ctx.get_for(*for_idx);
         let iterable = config.iterable;
         let body = config.body;
@@ -390,7 +393,7 @@ fn resolve_children(
     names: &Names,
     id: NodeId,
     locals: &Locals<'_>,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
         for child in ctx.child_slice(range) {
@@ -399,7 +402,7 @@ fn resolve_children(
         return Ok(());
     }
 
-    match &*arena.get(id) {
+    match arena.get(id) {
         Node::Call { name, args } => {
             let (name, args) = (*name, *args);
             resolve_expr(arena, ctx, names, name, locals)?;
@@ -408,8 +411,8 @@ fn resolve_children(
             }
             Ok(())
         }
-        &Node::Object(range) => {
-            for field in ctx.get_object(range) {
+        Node::Object(range) => {
+            for field in ctx.get_object(*range) {
                 resolve_expr(arena, ctx, names, field.1, locals)?;
             }
             Ok(())
@@ -450,16 +453,10 @@ fn resolve_children(
             }
             Ok(())
         }
-        Node::FieldAccess { obj, .. } => {
+        Node::FieldAccess { obj, .. } | Node::QualifiedAccess { obj, .. } => {
             let obj = *obj;
             resolve_expr(arena, ctx, names, obj, locals)
         }
-        Node::QualifiedAccess { obj, .. } => {
-            let obj = *obj;
-            resolve_expr(arena, ctx, names, obj, locals)
-        }
-        // path is a StringLit, nothing to resolve
-        Node::Import { .. } | Node::Inherit { .. } => Ok(()),
         Node::QualifiedCall(range) => {
             let (obj, _name, args) = ctx.get_qualified_call(*range);
             resolve_expr(arena, ctx, names, obj, locals)?;
@@ -472,6 +469,8 @@ fn resolve_children(
         _ => Ok(()),
     }
 }
+
+pub type ResolveResult<T> = Result<T, ResolveError>;
 
 #[derive(Debug, Serialize, Error)]
 pub struct ResolveError {

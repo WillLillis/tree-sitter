@@ -8,6 +8,10 @@ fn comma_sep(item: rule_t) -> rule_t {
     optional(comma_sep1(item))
 }
 
+fn sep_by(separator: str_t, item: rule_t) -> rule_t {
+    seq(item, repeat(seq(separator, item)))
+}
+
 let PREC = { ADD: 1, MUL: 2 }
 
 let GREETING = "hello"

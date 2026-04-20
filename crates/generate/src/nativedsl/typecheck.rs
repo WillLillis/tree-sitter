@@ -130,8 +130,6 @@ impl std::fmt::Display for Ty {
     }
 }
 
-// -- Type environment --
-
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub return_ty: Ty,
@@ -143,6 +141,7 @@ pub struct TypeEnv<'src> {
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
     /// Type environments of imported modules, indexed by `Ty::Module(idx)`.
+    #[expect(clippy::use_self, reason = "No `Self` for generics")]
     pub modules: Vec<TypeEnv<'src>>,
 }
 
@@ -770,7 +769,7 @@ fn type_of_import_access(
     ast: &Ast,
     idx: u8,
     member: NodeId,
-    env: &mut TypeEnv<'_>,
+    env: &TypeEnv<'_>,
 ) -> Result<Ty, TypeError> {
     let member_name = ast.node_text(member);
     let import_env = &env.modules[idx as usize];
@@ -1072,10 +1071,6 @@ pub enum TypeErrorKind {
         bindings: usize,
         tuple_elements: usize,
     },
-    ForBindingsNotTuple {
-        bindings: usize,
-        got: Ty,
-    },
     UnresolvedVariable(String),
     AppendRequiresList(Ty),
     QualifiedAccessOnInvalidType(Ty),
@@ -1096,6 +1091,7 @@ pub enum TypeErrorKind {
 
 impl std::fmt::Display for TypeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[allow(clippy::enum_glob_use)] // locally scoped
         use TypeErrorKind::*;
         match &self.kind {
             TypeMismatch { expected, got } => write!(f, "expected {expected}, got {got}"),
@@ -1131,10 +1127,6 @@ impl std::fmt::Display for TypeError {
             } => write!(
                 f,
                 "for has {bindings} bindings but tuples have {tuple_elements} elements"
-            ),
-            ForBindingsNotTuple { bindings, got } => write!(
-                f,
-                "for has {bindings} bindings but list elements are {got}, not tuples"
             ),
             UnresolvedVariable(n) => write!(f, "unresolved variable '{n}'"),
             AppendRequiresList(got) => write!(f, "append requires list arguments, got {got}"),
