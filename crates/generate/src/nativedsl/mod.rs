@@ -17,7 +17,6 @@ pub mod diagnostic;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
-pub mod resolve;
 mod scope_stack;
 pub mod serialize;
 #[cfg(test)]
@@ -29,7 +28,6 @@ pub use diagnostic::NativeDslError;
 pub use lexer::{LexError, LexErrorKind};
 pub use lower::{DisallowedItemKind, LowerError, LowerErrorKind};
 pub use parser::{ParseError, ParseErrorKind};
-pub use resolve::{ResolveError, ResolveErrorKind};
 pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
 
 use std::path::{Path, PathBuf};
@@ -122,20 +120,19 @@ pub fn load_module(
         );
     }
 
-    let base_for_resolve = inherit_node.and_then(|id| {
+    // Load imports. Import nodes are identified by Node::Import { module: None }
+    // which is set by the parser - no resolve pass needed beforehand.
+    load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules)?;
+
+    // Resolve identifiers + typecheck. For Grammar modules, also lower.
+    let type_envs = typecheck_modules(&sub_modules)?;
+    let base = inherit_node.and_then(|id| {
         let module = sub_modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, ast.span(id)))
     });
+    let _ = typecheck::resolve_and_check(&mut ast, type_envs, base, path)?;
 
-    resolve::resolve(&mut ast, base_for_resolve, path)?;
-
-    // Load imports (after resolve so import nodes are identified).
-    load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules)?;
-
-    // For Grammar modules: typecheck and lower to produce InputGrammar.
     let lowered = if matches!(kind, ModuleKind::Grammar) {
-        let type_envs = typecheck_modules(&sub_modules)?;
-        let _ = typecheck::check(&ast, type_envs)?;
         Some(lower::lower_with_base(&ast, path, &sub_modules)?)
     } else {
         None
@@ -475,8 +472,6 @@ pub enum DslError {
     #[error(transparent)]
     Parse(#[from] ParseError),
     #[error(transparent)]
-    Resolve(#[from] ResolveError),
-    #[error(transparent)]
     Type(#[from] TypeError),
     #[error(transparent)]
     Lower(#[from] LowerError),
@@ -528,7 +523,6 @@ impl DslError {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
-            Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
             Self::Module(e) => e.reference_span,
@@ -550,7 +544,7 @@ impl DslError {
     pub fn note(&self) -> Option<&Note> {
         match self {
             Self::Parse(e) => e.note.as_deref(),
-            Self::Resolve(e) => e.note.as_deref(),
+            Self::Type(e) => e.note.as_deref(),
             Self::Lower(e) => e.note.as_deref(),
             Self::Module(e) => e.inner.note(),
             _ => None,
