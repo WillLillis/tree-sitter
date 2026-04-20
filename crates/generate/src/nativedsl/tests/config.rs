@@ -14,6 +14,7 @@ fn grammar_config_all_fields() {
         }
         rule program { _expression }
         rule _expression { "x" }
+        rule _statement { "s" }
         rule primary { "p" }
         rule arrow { "->" }
         rule comment { regexp(r"\/\/.*") }
@@ -215,4 +216,108 @@ fn config_all_fields_at_once() {
     assert_eq!(g.word_token.as_deref(), Some("ident"));
     assert_eq!(g.expected_conflicts.len(), 1);
     assert_eq!(g.precedence_orderings.len(), 1);
+}
+
+// ===== Externals resolution =====
+
+#[test]
+fn externals_inline_list() {
+    let g = dsl(r#"
+        grammar { language: "test", externals: [heredoc, _eof] }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_with_string_literals() {
+    // String literals in externals (anonymous tokens) don't need pre-registration
+    let g = dsl(r#"
+        grammar { language: "test", externals: [heredoc, "||"] }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_mixed_with_declared_rules() {
+    // Mix of undeclared externals and declared rules
+    let g = dsl(r#"
+        grammar { language: "test", externals: [heredoc, comment] }
+        rule program { "x" }
+        rule comment { regexp("//.*") }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_used_in_extras() {
+    // External token referenced in extras
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            externals: [_newline],
+            extras: [regexp(r"\s"), _newline],
+        }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(g.extra_symbols.len(), 2);
+}
+
+#[test]
+fn externals_used_in_rule_body() {
+    // External token referenced in a rule
+    let g = dsl(r#"
+        grammar { language: "test", externals: [heredoc] }
+        rule program { choice("x", heredoc) }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+}
+
+#[test]
+fn externals_used_in_conflicts() {
+    // External token referenced in conflicts
+    let g = dsl(r#"
+        grammar {
+            language: "test",
+            externals: [heredoc],
+            conflicts: [[program, heredoc]],
+        }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.expected_conflicts.len(), 1);
+}
+
+#[test]
+fn externals_append_inline_lists() {
+    // append() of two inline lists
+    let g = dsl(r#"
+        grammar { language: "test", externals: append([heredoc], [_eof]) }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_empty_list() {
+    let g = dsl(r#"
+        grammar { language: "test", externals: [] }
+        rule program { "x" }
+    "#);
+    assert!(g.external_tokens.is_empty());
+}
+
+#[test]
+fn error_externals_via_let_binding() {
+    // Can't resolve external names through a variable reference
+    let e = assert_err!(
+        dsl_err(r#"
+            let ext: list_rule_t = [heredoc]
+            grammar { language: "test", externals: ext }
+            rule program { "x" }
+        "#),
+        Resolve
+    );
+    assert_eq!(e.kind, ResolveErrorKind::ExternalsNotInline);
 }
