@@ -43,6 +43,7 @@ type_error_tests! {
     }
     error_rule_called_as_function {
         r#"grammar { language: "test", word: ident }
+        rule ident { regexp("[a-z]+") }
         rule program { ident("default", regexp("[a-z]+")) }"#,
         TypeErrorKind::UndefinedFunction("ident".into())
     }
