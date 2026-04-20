@@ -547,7 +547,7 @@ impl DslError {
             Self::Type(e) => e.note.as_deref(),
             Self::Lower(e) => e.note.as_deref(),
             Self::Module(e) => e.inner.note(),
-            _ => None,
+            Self::Lex(_) => None,
         }
     }
 }
