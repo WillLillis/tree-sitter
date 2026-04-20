@@ -393,13 +393,27 @@ fn externals_used_in_extras_via_let() {
 }
 
 #[test]
+fn externals_via_chained_let_with_append() {
+    // Intermediate let uses append, outer let references it
+    let g = dsl(r#"
+        let a: list_rule_t = [heredoc]
+        let b: list_rule_t = append(a, [_eof])
+        grammar { language: "test", externals: b }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
 fn error_externals_via_function_call() {
     let e = assert_err!(
-        dsl_err(r#"
+        dsl_err(
+            r#"
             fn mk_ext() -> list_rule_t { [heredoc] }
             grammar { language: "test", externals: mk_ext() }
             rule program { "x" }
-        "#),
+        "#
+        ),
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::InvalidExternalsExpression);
