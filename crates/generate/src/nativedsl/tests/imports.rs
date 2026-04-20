@@ -465,7 +465,7 @@ fn error_import_cycle() {
         DslError::Module(m) if {
             fn has_cycle(e: &DslError) -> bool {
                 match e {
-                    DslError::Lower(l) => matches!(l.kind, LowerErrorKind::ModuleCycle(_)),
+                    DslError::Lower(l) => matches!(l.kind, LowerErrorKind::ModuleCycle),
                     DslError::Module(m) => has_cycle(&m.inner),
                     _ => false,
                 }
@@ -586,6 +586,50 @@ fn import_function_receives_complex_expr() {
             pair.clone(),
             Rule::choice(vec![
                 Rule::repeat(Rule::seq(vec![Rule::String(",".into()), pair])),
+                Rule::Blank,
+            ]),
+        ])
+    );
+}
+
+#[test]
+fn import_function_receives_caller_let_binding() {
+    let g = dsl(r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        let SEP: str_t = ";"
+        rule program { h::sep_by(SEP, identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#);
+    let id = Rule::NamedSymbol("identifier".into());
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            id.clone(),
+            Rule::choice(vec![
+                Rule::repeat(Rule::seq(vec![Rule::String(";".into()), id])),
+                Rule::Blank,
+            ]),
+        ])
+    );
+}
+
+#[test]
+fn import_function_receives_object_field() {
+    let g = dsl(r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        let SEPS = { list: ",", stmt: ";" }
+        rule program { h::sep_by(SEPS.stmt, identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#);
+    let id = Rule::NamedSymbol("identifier".into());
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            id.clone(),
+            Rule::choice(vec![
+                Rule::repeat(Rule::seq(vec![Rule::String(";".into()), id])),
                 Rule::Blank,
             ]),
         ])

@@ -26,10 +26,6 @@ lower_error_tests! {
         r#"rule program { "x" }"#,
         LowerErrorKind::MissingGrammarBlock
     }
-    error_missing_language_field {
-        r#"grammar { extras: [] } rule program { "x" }"#,
-        LowerErrorKind::MissingLanguageField
-    }
     multiple_inherit_bindings_rejected {
         r#"let a = inherit("inherit_base/grammar.tsg")
         let b = inherit("inherit_base/grammar.tsg")
@@ -136,43 +132,22 @@ fn error_inherit_cycle() {
     .unwrap();
     let source = std::fs::read_to_string(&a_path).unwrap();
     let err = parse_native_dsl(&source, dir.path()).unwrap_err();
-    let outer = assert_err!(err, Module);
-    let DslError::Module(inner) = outer.inner.as_ref() else {
-        panic!("expected nested Module error, got {:?}", outer.inner)
-    };
-    let DslError::Lower(e) = inner.inner.as_ref() else {
-        panic!("expected Lower error, got {:?}", inner.inner)
-    };
-    let LowerErrorKind::ModuleCycle(chain) = &e.kind else {
-        panic!("expected ModuleCycle, got {:?}", e.kind)
-    };
-    let filenames: Vec<_> = chain
-        .iter()
-        .map(|p| p.file_name().unwrap().to_str().unwrap())
-        .collect();
-    assert_eq!(filenames, ["b.tsg", "a.tsg", "b.tsg"]);
-}
-
-#[test]
-fn error_inherited_lower_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(
-        &base_path,
-        "grammar { extras: [] }\nrule program { \"x\" }\n",
-    )
-    .unwrap();
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
-    };
-    let DslError::Lower(lower_err) = inherited.inner.as_ref() else {
-        panic!("expected Lower error, got {:?}", inherited.inner)
-    };
-    assert_eq!(lower_err.kind, LowerErrorKind::MissingLanguageField);
-    assert_eq!(inherited.path, base_path);
+    let mut chain = Vec::new();
+    let mut current: &DslError = &err;
+    loop {
+        match current {
+            DslError::Module(m) => {
+                chain.push(m.path.file_name().unwrap().to_str().unwrap().to_string());
+                current = &m.inner;
+            }
+            DslError::Lower(e) => {
+                assert!(matches!(e.kind, LowerErrorKind::ModuleCycle));
+                break;
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+    assert_eq!(chain, ["b.tsg", "a.tsg"]);
 }
 
 #[test]

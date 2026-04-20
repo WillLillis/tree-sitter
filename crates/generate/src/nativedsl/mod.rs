@@ -24,46 +24,53 @@ pub mod serialize;
 mod tests;
 pub mod typecheck;
 
-use std::path::{Path, PathBuf};
-
-use crate::grammars::InputGrammar;
-
-use ast::Span;
-
+// Re-export errors and inner types for downstream consumers
+pub use diagnostic::NativeDslError;
 pub use lexer::{LexError, LexErrorKind};
 pub use lower::{DisallowedItemKind, LowerError, LowerErrorKind};
 pub use parser::{ParseError, ParseErrorKind};
 pub use resolve::{ResolveError, ResolveErrorKind};
 pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
 
+use std::path::{Path, PathBuf};
+
+use crate::grammars::InputGrammar;
+
+use ast::{Ast, Node, NodeId, Span};
+use typecheck::TypeEnv;
+
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
 /// Parse a native DSL source file into an [`InputGrammar`].
 ///
-/// Runs the full pipeline: lex, parse, resolve, typecheck, lower.
-///
 /// # Errors
 ///
-/// Returns [`DslError`] if any pipeline stage fails. The error carries the
-/// source [`Span`] of the offending construct.
-pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> Result<InputGrammar, DslError> {
+/// Returns [`DslError`] if any pipeline stage fails.
+pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
     parse_native_dsl_inner(input, grammar_path, &[])
 }
 
+#[derive(Clone, Copy)]
 pub enum ModuleKind {
-    /// Grammar file (root or inherited) - must have grammar block, may have rules.
+    /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
-    /// Helper file (imported) - only let/fn/import allowed.
+    /// Helper file (imported). Only let/fn/import/print allowed.
     Helper,
 }
 
+/// Loads a tsg module, imported either via `import` or `inherit`
+///
+/// # Errors
+///
+/// Returns `Err` if the imported module isn't valid tsg source
 pub fn load_module(
     source: &str,
     path: &Path,
     kind: ModuleKind,
     ancestor_paths: &[PathBuf],
-) -> Result<Module, DslError> {
+) -> DslResult<Module> {
     if source.len() >= u32::MAX as usize {
         Err(LexError {
             kind: LexErrorKind::InputTooLarge,
@@ -101,16 +108,16 @@ pub fn load_module(
             ancestor_paths,
             &mut sub_modules,
         )?;
-        let ast::Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
+        let Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
             unreachable!()
         };
-        // Tag with the index it was pushed to (sub_modules.len() - 1).
-        let idx = u8::try_from(sub_modules.len() - 1).unwrap();
+        // Inherit is always the first child loaded into an empty sub_modules vec,
+        // so it always occupies index 0.
         ast.arena.set(
             inherit_id,
-            ast::Node::Inherit {
+            Node::Inherit {
                 path: *p,
-                module: Some(idx),
+                module: Some(0),
             },
         );
     }
@@ -146,30 +153,32 @@ fn parse_native_dsl_inner(
     input: &str,
     grammar_path: &Path,
     ancestor_paths: &[PathBuf],
-) -> Result<InputGrammar, DslError> {
+) -> DslResult<InputGrammar> {
     let module = load_module(input, grammar_path, ModuleKind::Grammar, ancestor_paths)?;
     Ok(module
         .lowered
         .expect("Grammar module always has lowered grammar"))
 }
 
-/// Validate that `inherit()` usage is consistent:
+/// Validate grammar module structure:
+/// - Grammar block must exist
 /// - At most one `inherit()` call
 /// - If `inherit()` exists, `inherits` must be set in grammar config
 /// - If `inherits` is set, it must trace to an `inherit()` call
-pub fn validate_grammar(ast: &ast::Ast, inherit_node: Option<ast::NodeId>) -> Result<(), DslError> {
-    use lower::{LowerError, LowerErrorKind};
-
+pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()> {
+    if ast.context.grammar_config.is_none() {
+        return Err(LowerError::new(LowerErrorKind::MissingGrammarBlock, Span::new(0, 0)).into());
+    }
     let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
 
     let direct_in_config =
-        config_inherits.is_some_and(|id| matches!(ast.node(id), ast::Node::Inherit { .. }));
+        config_inherits.is_some_and(|id| matches!(ast.node(id), Node::Inherit { .. }));
 
     // Find all inherit() calls in let bindings, error if more than one
     let mut inherit_let: Option<Span> = None;
     for &item_id in &ast.root_items {
-        if let ast::Node::Let { value, .. } = ast.node(item_id)
-            && matches!(ast.node(*value), ast::Node::Inherit { .. })
+        if let Node::Let { value, .. } = ast.node(item_id)
+            && matches!(ast.node(*value), Node::Inherit { .. })
         {
             if inherit_let.is_some() || direct_in_config {
                 Err(LowerError::new(
@@ -204,16 +213,16 @@ pub fn validate_grammar(ast: &ast::Ast, inherit_node: Option<ast::NodeId>) -> Re
 /// Resolve the `Inherit` node from the grammar config's `inherits` field,
 /// following variable references to let bindings if needed.
 #[must_use]
-pub fn find_inherit_node(ast: &ast::Ast) -> Option<ast::NodeId> {
+pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
     let inherits_id = ast.context.grammar_config.as_ref()?.inherits?;
     match ast.node(inherits_id) {
-        ast::Node::Inherit { .. } => Some(inherits_id),
-        ast::Node::Ident => {
+        Node::Inherit { .. } => Some(inherits_id),
+        Node::Ident => {
             let name = ast.text(ast.span(inherits_id));
             ast.root_items.iter().find_map(|&item_id| {
-                if let ast::Node::Let { name: n, value, .. } = ast.node(item_id)
+                if let Node::Let { name: n, value, .. } = ast.node(item_id)
                     && ast.text(ast.span(*n)) == name
-                    && matches!(ast.node(*value), ast::Node::Inherit { .. })
+                    && matches!(ast.node(*value), Node::Inherit { .. })
                 {
                     Some(*value)
                 } else {
@@ -225,19 +234,15 @@ pub fn find_inherit_node(ast: &ast::Ast) -> Option<ast::NodeId> {
     }
 }
 
-// -- Child module loading --
-
 /// Load a child module from a path string. Handles .tsg and .json extensions,
 /// cycle detection, and error wrapping.
 fn load_child_module(
     path_str: &str,
     module_dir: &Path,
-    span: ast::Span,
+    span: Span,
     ancestor_paths: &[PathBuf],
     kind: ModuleKind,
-) -> Result<Module, DslError> {
-    use lower::{LowerError, LowerErrorKind};
-
+) -> DslResult<Module> {
     let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
 
     let mut child_ancestors = ancestor_paths.to_vec();
@@ -265,7 +270,7 @@ fn load_child_module(
                 )
             })?;
             Ok(Module {
-                ast: ast::Ast::new(String::new()),
+                ast: Ast::new(String::new()),
                 path: canonical,
                 sub_modules: Vec::new(),
                 lowered: Some(grammar),
@@ -285,9 +290,7 @@ fn read_child_module(
     module_dir: &Path,
     span: Span,
     ancestor_paths: &[PathBuf],
-) -> Result<(String, PathBuf), DslError> {
-    use lower::{LowerError, LowerErrorKind};
-
+) -> DslResult<(String, PathBuf)> {
     if ancestor_paths.len() >= MAX_MODULE_DEPTH {
         return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
     }
@@ -305,9 +308,7 @@ fn read_child_module(
 
     // Cycle detection
     if ancestor_paths.iter().any(|p| p == &canonical) {
-        let mut chain: Vec<PathBuf> = ancestor_paths.to_vec();
-        chain.push(canonical);
-        return Err(LowerError::new(LowerErrorKind::ModuleCycle(chain), span).into());
+        Err(LowerError::new(LowerErrorKind::ModuleCycle, span))?;
     }
 
     let content = std::fs::read_to_string(&full_path).map_err(|e| {
@@ -325,13 +326,13 @@ fn read_child_module(
 
 /// Load the inherited grammar as a child module and push it to the modules list.
 fn load_inherit_child(
-    ast: &ast::Ast,
-    inherit_id: ast::NodeId,
+    ast: &Ast,
+    inherit_id: NodeId,
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
-) -> Result<(), DslError> {
-    let ast::Node::Inherit { path, .. } = ast.node(inherit_id) else {
+) -> DslResult<()> {
+    let Node::Inherit { path, .. } = ast.node(inherit_id) else {
         unreachable!()
     };
 
@@ -349,15 +350,13 @@ fn load_inherit_child(
     Ok(())
 }
 
-/// Load import children. Tags each Import node with its module index.
-
 /// A loaded and resolved module (imported or inherited), ready for
 /// typechecking and lowering.
 pub struct Module {
-    pub ast: ast::Ast,
+    pub ast: Ast,
     pub path: PathBuf,
     /// Child modules (imports within this module).
-    pub sub_modules: Vec<Module>,
+    pub sub_modules: Vec<Self>,
     /// For inherited grammar modules: the fully lowered grammar, needed
     /// for rule merging and config access. `None` for import-only modules.
     pub lowered: Option<InputGrammar>,
@@ -365,7 +364,8 @@ pub struct Module {
 
 impl Module {
     /// Whether this module is a grammar (inherited) rather than a helper (imported).
-    pub fn is_grammar(&self) -> bool {
+    #[must_use]
+    pub const fn is_grammar(&self) -> bool {
         self.lowered.is_some()
     }
 }
@@ -375,27 +375,21 @@ impl Module {
 /// Deduplicates: if the same file is imported multiple times, it is loaded
 /// once and all references share the same module index.
 fn load_import_children(
-    ast: &mut ast::Ast,
+    ast: &mut Ast,
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
 ) -> Result<(), DslError> {
-    use lower::{LowerError, LowerErrorKind};
-
     // Cache: canonical path -> module index, so duplicate imports share one load.
-    let mut loaded: rustc_hash::FxHashMap<PathBuf, u8> = rustc_hash::FxHashMap::default();
+    let mut loaded: FxHashMap<PathBuf, u8> = FxHashMap::default();
 
     // Scan all nodes (not just top-level lets) so imports/inherits in any
     // expression position are resolved (e.g. `extras: import("h.tsg")::EXTRAS`).
-    let mut node_id = ast::NodeId::FIRST;
+    let mut node_id = NodeId::FIRST;
     while node_id.index() <= ast.arena.len() {
         let (import_path_id, span, kind) = match ast.node(node_id) {
-            ast::Node::Import { path, module: None } => {
-                (*path, ast.span(*path), ModuleKind::Helper)
-            }
-            ast::Node::Inherit { path, module: None } => {
-                (*path, ast.span(*path), ModuleKind::Grammar)
-            }
+            Node::Import { path, module: None } => (*path, ast.span(*path), ModuleKind::Helper),
+            Node::Inherit { path, module: None } => (*path, ast.span(*path), ModuleKind::Grammar),
             _ => {
                 node_id = node_id.next();
                 continue;
@@ -425,11 +419,11 @@ fn load_import_children(
         };
 
         let new_node = match ast.node(node_id) {
-            ast::Node::Import { .. } => ast::Node::Import {
+            Node::Import { .. } => Node::Import {
                 path: import_path_id,
                 module: Some(idx),
             },
-            ast::Node::Inherit { .. } => ast::Node::Inherit {
+            Node::Inherit { .. } => Node::Inherit {
                 path: import_path_id,
                 module: Some(idx),
             },
@@ -444,17 +438,15 @@ fn load_import_children(
 }
 
 /// Validate that an imported file only contains allowed items.
-fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
-    use lower::{DisallowedItemKind, LowerError, LowerErrorKind};
+fn validate_import_items(ast: &Ast) -> DslResult<()> {
     for &item_id in &ast.root_items {
         let kind = match ast.node(item_id) {
-            ast::Node::Let { .. } | ast::Node::Fn(_) | ast::Node::Print(_) => continue,
-            ast::Node::Grammar => DisallowedItemKind::GrammarBlock,
-            ast::Node::Rule { .. } => DisallowedItemKind::Rule,
-            ast::Node::OverrideRule { .. } => DisallowedItemKind::OverrideRule,
+            Node::Grammar => DisallowedItemKind::GrammarBlock,
+            Node::Rule { .. } => DisallowedItemKind::Rule,
+            Node::OverrideRule { .. } => DisallowedItemKind::OverrideRule,
             _ => continue,
         };
-        return Err(LowerError::new(
+        Err(LowerError::new(
             LowerErrorKind::ModuleDisallowedItem(kind),
             ast.span(item_id),
         ))?;
@@ -464,7 +456,7 @@ fn validate_import_items(ast: &ast::Ast) -> Result<(), DslError> {
 
 /// Recursively typecheck imported modules, producing type envs indexed
 /// to match the module indices in `Ty::Module(idx)`.
-pub fn typecheck_modules(modules: &[Module]) -> Result<Vec<typecheck::TypeEnv<'_>>, DslError> {
+pub fn typecheck_modules(modules: &[Module]) -> DslResult<Vec<TypeEnv<'_>>> {
     modules
         .iter()
         .map(|m| {
@@ -473,6 +465,8 @@ pub fn typecheck_modules(modules: &[Module]) -> Result<Vec<typecheck::TypeEnv<'_
         })
         .collect()
 }
+
+pub type DslResult<T> = Result<T, DslError>;
 
 #[derive(Debug, Error, Serialize)]
 pub enum DslError {
@@ -502,7 +496,31 @@ pub struct ModuleError {
     pub reference_span: Span,
 }
 
-use ast::Note;
+/// Secondary annotation on an error, pointing to a related source location.
+#[derive(Clone, Debug, Serialize)]
+pub struct Note {
+    pub message: NoteMessage,
+    pub span: Span,
+    #[serde(skip)]
+    pub path: PathBuf,
+    #[serde(skip)]
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub enum NoteMessage {
+    FirstDefinedHere,
+    ReferencedFromHere,
+}
+
+impl std::fmt::Display for NoteMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FirstDefinedHere => write!(f, "first defined here"),
+            Self::ReferencedFromHere => write!(f, "referenced from here"),
+        }
+    }
+}
 
 impl DslError {
     #[must_use]
@@ -539,5 +557,3 @@ impl DslError {
         }
     }
 }
-
-pub use diagnostic::NativeDslError;
