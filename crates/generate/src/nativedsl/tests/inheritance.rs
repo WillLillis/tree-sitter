@@ -1,4 +1,5 @@
 use super::*;
+use crate::grammars::PrecedenceEntry;
 
 #[test]
 fn inherit_all_rules() {
@@ -211,15 +212,76 @@ fn config_access_extras() {
 }
 
 #[test]
-fn inherit_from_json() {
+fn config_all_fields_access_and_append() {
     let g = dsl(r#"
-        let base = inherit("../grammars/json/src/grammar.json")
-        grammar { language: "json_extended", inherits: base }
-        rule new_type { "null" }
+        let base = inherit("inherit_base/grammar_full_config.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            extras: grammar_config(base).extras,
+            externals: append(grammar_config(base).externals, [eof_marker]),
+            inline: grammar_config(base).inline,
+            supertypes: append(grammar_config(base).supertypes, [_statement]),
+            word: grammar_config(base).word,
+            conflicts: append(grammar_config(base).conflicts, [[keyword, _statement]]),
+            precedences: append(grammar_config(base).precedences, [["unary", "binary"]]),
+        }
+        rule _statement { "stmt" }
+        rule eof_marker { "EOF" }
     "#);
-    assert_eq!(g.name, "json_extended");
-    assert!(g.variables.iter().any(|v| v.name == "document"));
-    assert!(g.variables.iter().any(|v| v.name == "new_type"));
+    assert_eq!(
+        g.extra_symbols,
+        vec![Rule::Pattern("\\s".into(), String::new())]
+    );
+    assert_eq!(
+        g.external_tokens,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("eof_marker".into()),
+        ]
+    );
+    assert_eq!(g.variables_to_inline, vec!["_inline_rule"]);
+    assert_eq!(g.supertype_symbols, vec!["_expression", "_statement"]);
+    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+    assert_eq!(
+        g.expected_conflicts,
+        vec![
+            vec!["identifier".to_string(), "keyword".to_string()],
+            vec!["keyword".to_string(), "_statement".to_string()],
+        ]
+    );
+    assert_eq!(
+        g.precedence_orderings,
+        vec![
+            vec![
+                PrecedenceEntry::Name("member".into()),
+                PrecedenceEntry::Name("call".into()),
+            ],
+            vec![
+                PrecedenceEntry::Name("unary".into()),
+                PrecedenceEntry::Name("binary".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn inherit_from_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("base.json");
+    std::fs::write(
+        &json_path,
+        r#"{"name":"base_json","rules":{"program":{"type":"STRING","value":"x"}},"extras":[],"conflicts":[],"precedences":[],"externals":[],"inline":[],"supertypes":[]}"#,
+    )
+    .unwrap();
+    let input = format!(
+        "let base = inherit(\"{}\")\ngrammar {{ language: \"extended\", inherits: base }}\nrule new_rule {{ \"y\" }}",
+        json_path.display()
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert_eq!(g.name, "extended");
+    assert!(g.variables.iter().any(|v| v.name == "program"));
+    assert!(g.variables.iter().any(|v| v.name == "new_rule"));
 }
 
 #[test]
