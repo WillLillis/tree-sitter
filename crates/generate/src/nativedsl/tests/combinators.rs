@@ -117,18 +117,15 @@ fn concat_combinator() {
 
 #[test]
 fn prec_inside_token_immediate() {
-    let source = read_native_grammar("json_native");
-    let g = parse_native_dsl(&source, &native_grammar_path("json_native")).unwrap();
-    let string_content = g
-        .variables
-        .iter()
-        .find(|v| v.name == "string_content")
-        .unwrap();
-    if let Rule::Metadata { params, .. } = &string_content.rule {
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { token_immediate(prec(1, regexp("[a-z]+"))) }
+    "#);
+    if let Rule::Metadata { params, .. } = &g.variables[0].rule {
         assert_eq!(params.precedence, Precedence::Integer(1));
         assert!(params.is_token && params.is_main_token);
     } else {
-        panic!("expected Metadata, got {:?}", string_content.rule);
+        panic!("expected Metadata, got {:?}", g.variables[0].rule);
     }
 }
 

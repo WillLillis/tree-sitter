@@ -4,7 +4,7 @@
 //! config (grammar settings, fn/for configs) is in [`AstContext`], separate
 //! from nodes so later passes can mutate nodes while reading context.
 
-use std::{fmt, num::NonZeroU32, path::PathBuf};
+use std::{fmt, num::NonZeroU32};
 
 use serde::Serialize;
 
@@ -21,8 +21,8 @@ impl fmt::Display for CapacityError {
 pub struct NodeId(NonZeroU32);
 
 impl NodeId {
-    /// The first valid NodeId (index 1, after the sentinel).
-    pub const FIRST: Self = Self(unsafe { NonZeroU32::new_unchecked(1) });
+    /// The first valid `NodeId` (index 1, after the sentinel).
+    pub const FIRST: Self = Self(NonZeroU32::new(1).unwrap());
 
     #[inline]
     #[must_use]
@@ -30,7 +30,7 @@ impl NodeId {
         self.0.get() as usize
     }
 
-    /// Return the next NodeId (index + 1).
+    /// Return the next `NodeId` (index + 1).
     #[inline]
     #[must_use]
     pub const fn next(self) -> Self {
@@ -39,9 +39,6 @@ impl NodeId {
     }
 }
 
-/// Arena for AST nodes. Hides the sentinel at index 0 and enforces
-/// [`NodeId`]-based access so callers can't accidentally index at 0
-/// or iterate from the wrong starting point.
 /// Arena for AST nodes and their spans. Hides the sentinel at index 0
 /// and enforces [`NodeId`]-based access so callers can't accidentally
 /// index at 0 or iterate from the wrong starting point.
@@ -89,8 +86,15 @@ impl NodeArena {
     /// Number of nodes (excluding sentinel).
     #[inline]
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.nodes.len() - 1
+    }
+
+    /// Returns `true` if the arena contains no nodes (excluding sentinel).
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.nodes.len() == 1
     }
 
     /// Iterate all valid [`NodeId`]s.
@@ -126,32 +130,6 @@ impl ForId {
     #[must_use]
     pub const fn index(self) -> usize {
         self.0 as usize
-    }
-}
-
-/// Secondary annotation on an error, pointing to a related source location.
-#[derive(Clone, Debug, Serialize)]
-pub struct Note {
-    pub message: NoteMessage,
-    pub span: Span,
-    #[serde(skip)]
-    pub path: PathBuf,
-    #[serde(skip)]
-    pub source: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub enum NoteMessage {
-    FirstDefinedHere,
-    ReferencedFromHere,
-}
-
-impl fmt::Display for NoteMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FirstDefinedHere => write!(f, "first defined here"),
-            Self::ReferencedFromHere => write!(f, "referenced from here"),
-        }
     }
 }
 
@@ -256,6 +234,7 @@ impl AstContext {
         let children = self.child_slice(range);
         // SAFETY: QualifiedCall nodes are always constructed with [obj, name, ...args]
         // by the parser, so len >= 2 is structurally guaranteed.
+        debug_assert!(children.len() >= 2);
         unsafe {
             (
                 *children.get_unchecked(0),
@@ -334,42 +313,48 @@ impl Ast {
         Ok(ChildRange::new(start, len))
     }
 
-    // Delegating accessors used by all pipeline stages
     #[inline]
     #[must_use]
     pub fn get_fn(&self, id: FnId) -> &FnConfig {
         self.context.get_fn(id)
     }
+
     #[inline]
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         self.context.get_for(id)
     }
+
     #[inline]
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
         self.context.get_object(range)
     }
+
     #[inline]
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
         self.context.get_qualified_call(range)
     }
+
     #[inline]
     #[must_use]
     pub fn source(&self) -> &str {
         &self.context.source
     }
+
     #[inline]
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         self.context.text(span)
     }
+
     #[inline]
     #[must_use]
     pub fn node_text(&self, id: NodeId) -> &str {
         self.text(self.span(id))
     }
+
     #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
@@ -471,7 +456,7 @@ pub enum Node {
     },
     /// `grammar_config(module)` - returns the grammar config of a module as an object.
     GrammarConfig(NodeId),
-    /// `import("path.tsg")` expression - loads a helper file, returns module_t.
+    /// `import("path.tsg")` expression - loads a helper file, returns `module_t`.
     /// `module` is `None` after parsing, set to an index into `Vec<Module>`
     /// by the loading pre-pass.
     Import {
@@ -515,8 +500,12 @@ pub enum Node {
     /// `spread_t` annotation. Like `TypeVoid`, parseable but always rejected -
     /// `Ty::Spread` is an internal type produced only by for-loop expansions.
     TypeSpread,
+    /// Sentinel value occupying index 0 in the arena. Not part of the public API.
+    #[doc(hidden)]
     Unreachable,
 }
+
+const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl Node {
     /// Returns the child range for nodes that store plain `NodeId` children.

@@ -16,7 +16,8 @@ use crate::grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variab
 use crate::nativedsl::scope_stack::ScopeStack;
 use crate::rules::{Precedence, Rule};
 
-use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Note, Span};
+use super::Note;
+use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Span};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Str(NonZeroU32);
@@ -173,8 +174,8 @@ struct Evaluator<'ast> {
     strings: StringPool<'ast>,
 }
 
-/// Collect all `fn` definitions from an AST into a name -> NodeId map.
-fn collect_fns<'ast>(ast: &'ast Ast) -> FxHashMap<&'ast str, NodeId> {
+/// Collect all `fn` definitions from an AST into a name -> `NodeId` map.
+fn collect_fns(ast: &Ast) -> FxHashMap<&str, NodeId> {
     let mut fns = FxHashMap::default();
     for &item_id in &ast.root_items {
         if let Node::Fn(fn_idx) = ast.node(item_id) {
@@ -195,6 +196,7 @@ struct ImportEval<'ast> {
     fns: FxHashMap<&'ast str, NodeId>,
     /// Evaluated state for this module's own imports, needed when calling
     /// the module's functions (they may reference the module's imports).
+    #[expect(clippy::use_self, reason = "No `Self` for generics")]
     sub_evals: Vec<Option<ImportEval<'ast>>>,
 }
 
@@ -261,15 +263,10 @@ fn evaluate(
         }
     }
 
-    let config = ast
-        .context
-        .grammar_config
-        .as_ref()
-        .ok_or_else(|| LowerError::new(LowerErrorKind::MissingGrammarBlock, Span::new(0, 0)))?;
-    let language = config
-        .language
-        .as_ref()
-        .ok_or_else(|| LowerError::new(LowerErrorKind::MissingLanguageField, Span::new(0, 0)))?;
+    // grammar_config is guaranteed present by validate_grammar in mod.rs,
+    // language is guaranteed present by the parser (MissingLanguageField error).
+    let config = ast.context.grammar_config.as_ref().unwrap();
+    let language = config.language.as_ref().unwrap();
 
     let rules: Vec<(String, Rule)> = rule_entries
         .iter()
@@ -512,7 +509,7 @@ impl<'ast> Evaluator<'ast> {
         id
     }
 
-    /// Get a rule by arena ID. All RuleIds are produced by alloc_rule.
+    /// Get a rule by arena ID. All `RuleId`s are produced by `alloc_rule`.
     #[inline]
     fn get_rule(&self, id: RuleId) -> &ARule {
         // Safety: id was produced by alloc_rule which returns sequential indices.
@@ -766,6 +763,30 @@ impl<'ast> Evaluator<'ast> {
                     .expected_conflicts
                     .iter()
                     .map(|g| self.import_names_as_list(g))
+                    .collect();
+                Ok(self.alloc_val(Value::List(vals)))
+            }
+            "precedences" => {
+                let vals: Vec<ValueId> = grammar
+                    .precedence_orderings
+                    .iter()
+                    .map(|group| {
+                        let inner: Vec<ValueId> = group
+                            .iter()
+                            .map(|entry| match entry {
+                                PrecedenceEntry::Name(s) => {
+                                    let sid = self.strings.intern_owned(s.clone());
+                                    self.alloc_val(Value::Str(sid))
+                                }
+                                PrecedenceEntry::Symbol(s) => {
+                                    let sid = self.strings.intern_owned(s.clone());
+                                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
+                                    self.alloc_val(Value::Rule(rid))
+                                }
+                            })
+                            .collect();
+                        self.alloc_val(Value::List(inner))
+                    })
                     .collect();
                 Ok(self.alloc_val(Value::List(vals)))
             }
@@ -1685,7 +1706,6 @@ pub enum DisallowedItemKind {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum LowerErrorKind {
     MissingGrammarBlock,
-    MissingLanguageField,
     OverrideRuleNotFound(String),
     OverrideWithoutInherit,
     ModuleResolveFailed {
@@ -1705,7 +1725,7 @@ pub enum LowerErrorKind {
     ModuleTooMany,
     ModuleDepthExceeded,
     ModuleDisallowedItem(DisallowedItemKind),
-    ModuleCycle(Vec<std::path::PathBuf>),
+    ModuleCycle,
     ModuleMemberNotFound(String),
     ExpectedRuleName,
     ConfigFieldUnset,
@@ -1718,10 +1738,10 @@ pub enum LowerErrorKind {
 
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[allow(clippy::enum_glob_use)] // locally scoped
         use LowerErrorKind::*;
         match &self.kind {
             MissingGrammarBlock => write!(f, "missing grammar block"),
-            MissingLanguageField => write!(f, "grammar block missing 'language' field"),
             OverrideRuleNotFound(n) => write!(f, "override rule '{n}' not found in base grammar"),
             OverrideWithoutInherit => {
                 write!(f, "'override rule' requires a grammar with 'inherits'")
@@ -1751,16 +1771,7 @@ impl std::fmt::Display for LowerError {
                 };
                 write!(f, "imported files cannot contain a {item}")
             }
-            ModuleCycle(chain) => {
-                write!(f, "module cycle detected: ")?;
-                for (i, p) in chain.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " -> ")?;
-                    }
-                    write!(f, "{}", p.display())?;
-                }
-                Ok(())
-            }
+            ModuleCycle => write!(f, "module cycle detected"),
             ModuleMemberNotFound(n) => write!(f, "member '{n}' not found in module"),
             ExpectedRuleName => write!(f, "expected a rule name reference"),
             ConfigFieldUnset => write!(f, "config field is not set in the base grammar"),
