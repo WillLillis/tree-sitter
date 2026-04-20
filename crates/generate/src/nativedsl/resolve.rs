@@ -96,33 +96,42 @@ impl Locals<'_> {
 /// # Errors
 ///
 /// Returns [`ResolveError`] for duplicate declarations or unknown identifiers.
-pub fn resolve(
-    ast: &mut Ast,
-    base: Option<(&InputGrammar, Span)>,
+pub fn resolve<'a>(
+    ast: &'a mut Ast,
+    base: Option<(&'a InputGrammar, Span)>,
     grammar_path: &Path,
 ) -> ResolveResult<()> {
-    let mut names = collect_names(ast, grammar_path)?;
+    // Split borrow: collect_names borrows ast.context (for &str slices in Names)
+    // but not ast.arena, so we can later mutably borrow ast.arena for resolve_item.
+    // We pass the arena by-ref but its lifetime is not captured in Names.
+    let mut names = collect_names(&ast.arena, &ast.context, &ast.root_items, grammar_path)?;
     // Register inherited rule names so they resolve to RuleRef.
     // Use the inherit statement's span so "first defined here" points there.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
             if names.get(&var.name).is_none() {
-                names
-                    .decls
-                    .insert(var.name.clone(), (Decl::Rule, inherit_span));
+                names.decls.insert(&var.name, (Decl::Rule, inherit_span));
             }
         }
     }
+    // Split borrow: names holds &str from ast.context.source (immutable),
+    // while resolve_item mutates ast.arena. Access context and arena separately.
     let n_items = ast.root_items.len();
     for i in 0..n_items {
         let item_id = ast.root_items[i];
         // Register let bindings in order so forward references are caught
-        if let Node::Let { name, .. } = ast.node(item_id) {
-            let name_text = ast.node_text(*name);
-            let span = ast.span(item_id);
-            names.insert(name_text, Decl::Var, span, grammar_path, ast.source())?;
+        if let Node::Let { name, .. } = ast.arena.get(item_id) {
+            let name_text = ast.context.text(ast.arena.span(*name));
+            let span = ast.arena.span(item_id);
+            names.insert(
+                name_text,
+                Decl::Var,
+                span,
+                grammar_path,
+                ast.context.source(),
+            )?;
         }
-        resolve_item(ast, &names, item_id)?;
+        resolve_item(&mut ast.arena, &ast.context, &names, item_id)?;
     }
 
     Ok(())
@@ -135,15 +144,15 @@ enum Decl {
     Fn,
 }
 
-struct Names {
-    decls: FxHashMap<String, (Decl, Span)>,
+struct Names<'src> {
+    decls: FxHashMap<&'src str, (Decl, Span)>,
 }
 
-impl Names {
+impl<'src> Names<'src> {
     #[inline]
     fn insert(
         &mut self,
-        name: &str,
+        name: &'src str,
         kind: Decl,
         span: Span,
         grammar_path: &Path,
@@ -158,7 +167,7 @@ impl Names {
                 source,
             ))?;
         }
-        self.decls.insert(name.to_string(), (kind, span));
+        self.decls.insert(name, (kind, span));
         Ok(())
     }
 
@@ -191,25 +200,35 @@ impl Names {
 ///
 /// Rules, let-bindings, functions, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
-fn collect_names(ast: &Ast, grammar_path: &Path) -> ResolveResult<Names> {
+fn collect_names<'a>(
+    arena: &NodeArena,
+    ctx: &'a AstContext,
+    root_items: &[NodeId],
+    grammar_path: &Path,
+) -> ResolveResult<Names<'a>> {
     let mut names = Names {
         decls: FxHashMap::default(),
     };
-    let source = ast.source();
+    let source = ctx.source();
 
     // Register rules and fns upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
-    for i in 0..ast.root_items.len() {
-        let item_id = ast.root_items[i];
-        let span = ast.span(item_id);
-        match ast.node(item_id) {
+    for &item_id in root_items {
+        let span = arena.span(item_id);
+        match arena.get(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
-                names.insert(ast.node_text(*name), Decl::Rule, span, grammar_path, source)?;
+                names.insert(
+                    ctx.text(arena.span(*name)),
+                    Decl::Rule,
+                    span,
+                    grammar_path,
+                    source,
+                )?;
             }
             Node::Fn(fn_idx) => {
-                let config = ast.get_fn(*fn_idx);
+                let config = ctx.get_fn(*fn_idx);
                 names.insert(
-                    ast.node_text(config.name),
+                    ctx.text(arena.span(config.name)),
                     Decl::Fn,
                     span,
                     grammar_path,
@@ -223,11 +242,10 @@ fn collect_names(ast: &Ast, grammar_path: &Path) -> ResolveResult<Names> {
     // Collect let binding names (not yet registered - they're added in pass 2
     // to prevent forward references). We need them here to avoid pre-registering
     // config identifiers that shadow let bindings.
-    let let_names: FxHashSet<&str> = ast
-        .root_items
+    let let_names: FxHashSet<&str> = root_items
         .iter()
-        .filter_map(|&id| match ast.node(id) {
-            Node::Let { name, .. } => Some(ast.node_text(*name)),
+        .filter_map(|&id| match arena.get(id) {
+            Node::Let { name, .. } => Some(ctx.text(arena.span(*name))),
             _ => None,
         })
         .collect();
@@ -237,18 +255,18 @@ fn collect_names(ast: &Ast, grammar_path: &Path) -> ResolveResult<Names> {
     // not declared as rules. We mirror that by pre-registering them.
     // Only works for literal list expressions; arbitrary expressions
     // (e.g. append(...)) are resolved normally.
-    if let Some(config) = &ast.context.grammar_config {
+    if let Some(config) = &ctx.grammar_config {
         let config_lists = [config.externals, config.inline, config.supertypes];
         for list_id in config_lists.into_iter().flatten() {
-            if let Node::List(range) = ast.node(list_id) {
-                for &child in ast.child_slice(*range) {
-                    if matches!(ast.node(child), Node::Ident) {
-                        let name = ast.text(ast.span(child));
+            if let Node::List(range) = arena.get(list_id) {
+                for &child in ctx.child_slice(*range) {
+                    if matches!(arena.get(child), Node::Ident) {
+                        let name = ctx.text(arena.span(child));
                         if names.get(name).is_none() && !let_names.contains(name) {
                             names.insert(
                                 name,
                                 Decl::Rule,
-                                ast.span(child),
+                                arena.span(child),
                                 grammar_path,
                                 source,
                             )?;
@@ -258,11 +276,11 @@ fn collect_names(ast: &Ast, grammar_path: &Path) -> ResolveResult<Names> {
             }
         }
         if let Some(word_id) = config.word
-            && matches!(ast.node(word_id), Node::Ident)
+            && matches!(arena.get(word_id), Node::Ident)
         {
-            let name = ast.text(ast.span(word_id));
+            let name = ctx.text(arena.span(word_id));
             if names.get(name).is_none() && !let_names.contains(name) {
-                names.insert(name, Decl::Rule, ast.span(word_id), grammar_path, source)?;
+                names.insert(name, Decl::Rule, arena.span(word_id), grammar_path, source)?;
             }
         }
     }
@@ -271,13 +289,16 @@ fn collect_names(ast: &Ast, grammar_path: &Path) -> ResolveResult<Names> {
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
-fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> ResolveResult<()> {
-    match ast.node(item_id) {
+fn resolve_item(
+    arena: &mut NodeArena,
+    ctx: &AstContext,
+    names: &Names,
+    item_id: NodeId,
+) -> ResolveResult<()> {
+    match arena.get(item_id) {
         Node::Grammar => {
-            let ctx = &ast.context;
             // INVARIANT: set during grammar block parsing, always present here
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
-            let arena = &mut ast.arena;
             for id in [
                 grammar_config.inherits,
                 grammar_config.extras,
@@ -298,24 +319,24 @@ fn resolve_item(ast: &mut Ast, names: &Names, item_id: NodeId) -> ResolveResult<
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
             let body = *body;
-            resolve_expr(&mut ast.arena, &ast.context, names, body, &Locals::EMPTY)
+            resolve_expr(arena, ctx, names, body, &Locals::EMPTY)
         }
         Node::Let { value, .. } => {
             let value = *value;
-            resolve_expr(&mut ast.arena, &ast.context, names, value, &Locals::EMPTY)
+            resolve_expr(arena, ctx, names, value, &Locals::EMPTY)
         }
         Node::Print(arg) => {
             let arg = *arg;
-            resolve_expr(&mut ast.arena, &ast.context, names, arg, &Locals::EMPTY)
+            resolve_expr(arena, ctx, names, arg, &Locals::EMPTY)
         }
         Node::Fn(fn_idx) => {
-            let fn_config = ast.context.get_fn(*fn_idx);
+            let fn_config = ctx.get_fn(*fn_idx);
             let body = fn_config.body;
             let locals = Locals {
                 scope: LocalScope::FnParams(&fn_config.params),
                 parent: None,
             };
-            resolve_expr(&mut ast.arena, &ast.context, names, body, &locals)
+            resolve_expr(arena, ctx, names, body, &locals)
         }
         _ => Ok(()),
     }
