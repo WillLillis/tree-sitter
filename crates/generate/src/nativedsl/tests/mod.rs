@@ -5,8 +5,8 @@ use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
 use super::{
-    DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, ParseErrorKind, Ty,
-    TypeErrorKind, parse_native_dsl,
+    DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, NoteMessage,
+    ParseErrorKind, Ty, TypeErrorKind, parse_native_dsl,
 };
 
 macro_rules! assert_err {
