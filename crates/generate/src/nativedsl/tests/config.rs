@@ -140,7 +140,7 @@ fn json_roundtrip() {
         rule pair { seq(field(key, string), ":", field(value, string)) }
         rule string { regexp(r#""[^"]*""#) }
     "##;
-    let path = test_grammars_dir().join("grammar.tsg");
+    let path = test_fixtures_dir().join("grammar.tsg");
     let (grammar, json_str) = dsl_to_json(input, &path);
     let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
     assert_eq!(grammar.name, reparsed.name);

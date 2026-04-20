@@ -46,7 +46,7 @@ const BYTE_CLASS: [u8; 256] = {
     t
 };
 
-/// Classify a byte using the lookup table (no bounds check needed — table is 256 entries).
+/// Classify a byte using the lookup table.
 #[inline]
 fn byte_is(b: u8, class: u8) -> bool {
     // SAFETY: b is u8, BYTE_CLASS has 256 entries — every u8 is a valid index.
@@ -117,7 +117,6 @@ pub enum TokenKind {
     Lt,
     Gt,
 
-    /// A `//` line comment. Span covers from `//` to end of line (excluding `\n`).
     Comment,
 
     Eof,
@@ -229,14 +228,12 @@ impl<'src> Lexer<'src> {
     ///
     /// Returns [`LexError`] on unterminated strings, invalid escapes, or
     /// unexpected characters.
-    pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
-        // Source length is validated < u32::MAX by load_module before lexing.
-        // Truncating to u32 lets LLVM prove the capacity can't overflow.
-        let mut tokens = Vec::with_capacity((self.source.len() as u32 / 4) as usize);
+    pub fn tokenize(&mut self) -> LexResult<Vec<Token>> {
+        let mut tokens = Vec::with_capacity(self.source.len() / 4);
         let source = self.source;
+        let len = source.len();
         loop {
             self.skip_whitespace();
-            let len = source.len();
             if self.pos >= len {
                 tokens.push(Token {
                     kind: TokenKind::Eof,
@@ -275,11 +272,9 @@ impl<'src> Lexer<'src> {
         b
     }
 
-    /// Local `source`/`pos` pattern: caching `self.source` and `self.pos` into
-    /// locals prevents LLVM from reloading the fat pointer on every iteration
-    /// (writes to `self.pos` through `&mut self` would otherwise alias the
-    /// `self.source` slice).
     fn skip_whitespace(&mut self) {
+        // caching `self.source` and `self.pos` into locals prevents LLVM from
+        // reloading the fat pointer on every iteration
         let source = self.source;
         let mut pos = self.pos;
         // SAFETY: pos < source.len() checked by loop condition.
@@ -290,7 +285,7 @@ impl<'src> Lexer<'src> {
         self.pos = pos;
     }
 
-    fn next_token(&mut self) -> Result<Token, LexError> {
+    fn next_token(&mut self) -> LexResult<Token> {
         let start = self.pos;
         let b = self.advance();
         let kind = match b {
@@ -343,28 +338,26 @@ impl<'src> Lexer<'src> {
     }
 
     /// Scan a string literal. Token span will cover `"..."` including quotes.
-    /// Uses memchr to skip normal characters, validates escapes inline.
-    /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
     /// `self.pos` is not advanced on error.
-    fn lex_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
+    fn lex_string(&mut self, start: usize) -> LexResult<TokenKind> {
         let source = self.source;
         let mut pos = self.pos;
         loop {
             // Fast-skip to the next interesting byte: " or \
             match memchr2(b'"', b'\\', &source[pos..]) {
                 None => {
-                    return Err(LexError {
+                    Err(LexError {
                         kind: LexErrorKind::UnterminatedString,
                         span: Span::from_usize(start, source.len()),
-                    });
+                    })?;
                 }
                 Some(offset) => {
                     // Check for newline in the skipped region
                     if let Some(nl) = memchr(b'\n', &source[pos..pos + offset]) {
-                        return Err(LexError {
+                        Err(LexError {
                             kind: LexErrorKind::NewlineInString,
                             span: Span::from_usize(start, pos + nl),
-                        });
+                        })?;
                     }
                     pos += offset;
                     // SAFETY: memchr2 found a byte at this position, so pos < source.len().
@@ -377,10 +370,10 @@ impl<'src> Lexer<'src> {
                             let esc_pos = pos;
                             pos += 1;
                             if pos >= source.len() {
-                                return Err(LexError {
+                                Err(LexError {
                                     kind: LexErrorKind::UnterminatedEscape,
                                     span: Span::from_usize(esc_pos, source.len()),
-                                });
+                                })?;
                             }
                             // SAFETY: pos < source.len() checked above.
                             match unsafe { *source.get_unchecked(pos) } {
@@ -390,15 +383,15 @@ impl<'src> Lexer<'src> {
                                     let rest =
                                         unsafe { std::str::from_utf8_unchecked(&source[pos..]) };
                                     let ch = rest.chars().next().unwrap();
-                                    return Err(LexError {
+                                    Err(LexError {
                                         kind: LexErrorKind::InvalidEscape(ch),
                                         span: Span::from_usize(esc_pos, pos + ch.len_utf8()),
-                                    });
+                                    })?;
                                 }
                             }
                         }
                         // SAFETY: memchr2 only returns positions of b'"' or b'\\'.
-                        _ => unsafe { std::hint::unreachable_unchecked() },
+                        _ => unreachable!(),
                     }
                 }
             }
@@ -408,8 +401,7 @@ impl<'src> Lexer<'src> {
 
     /// Scan a raw string literal: r"...", r#"..."#, r##"..."##, etc.
     /// Called when we've already consumed `r` and peeked `"` or `#`.
-    /// See `skip_whitespace` for why `source` is cached as a local.
-    fn lex_raw_string(&mut self, start: usize) -> Result<TokenKind, LexError> {
+    fn lex_raw_string(&mut self, start: usize) -> LexResult<TokenKind> {
         let source = self.source;
         let mut hash_count: u8 = 0;
         while self.peek() == Some(b'#') {
@@ -420,10 +412,10 @@ impl<'src> Lexer<'src> {
             })?;
         }
         if self.peek() != Some(b'"') {
-            return Err(LexError {
+            Err(LexError {
                 kind: LexErrorKind::ExpectedRawStringQuote,
                 span: Span::from_usize(start, self.pos),
-            });
+            })?;
         }
         self.advance(); // skip opening "
 
@@ -459,8 +451,7 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::RawStringLit { hash_count })
     }
 
-    /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
-    fn lex_int(&mut self, start: usize) -> Result<TokenKind, LexError> {
+    fn lex_int(&mut self, start: usize) -> LexResult<TokenKind> {
         let source = self.source;
         let mut pos = self.pos;
         while pos < source.len() && source[pos].is_ascii_digit() {
@@ -476,7 +467,6 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::IntLit(value))
     }
 
-    /// See `skip_whitespace` for why `source`/`pos` are cached as locals.
     fn lex_ident(&mut self, start: usize) -> Result<TokenKind, LexError> {
         let source = self.source;
         let mut pos = self.pos;
@@ -526,6 +516,8 @@ impl<'src> Lexer<'src> {
         })
     }
 }
+
+pub type LexResult<T> = Result<T, LexError>;
 
 /// An error encountered during lexing, with the source span of the problem.
 #[derive(Debug, Serialize, Error)]

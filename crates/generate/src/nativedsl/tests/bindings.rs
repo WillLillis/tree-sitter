@@ -217,6 +217,38 @@ fn for_empty_list() {
 }
 
 #[test]
+fn fn_param_shadows_let_binding() {
+    let g = dsl(r#"grammar { language: "test" }
+        let X: str_t = "shadowed"
+        fn wrap(X: rule_t) -> rule_t { seq("(", X, ")") }
+        rule program { wrap(identifier) }
+        rule identifier { regexp("[a-z]+") }"#);
+    // Function parameter X should shadow the let binding X
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::seq(vec![
+            Rule::String("(".into()),
+            Rule::NamedSymbol("identifier".into()),
+            Rule::String(")".into()),
+        ])
+    );
+}
+
+#[test]
+fn for_var_shadows_fn_param() {
+    let g = dsl(r#"grammar { language: "test" }
+        fn make(item: str_t) -> rule_t {
+            choice(for (item: str_t) in ["a", "b"] { item })
+        }
+        rule program { make("ignored") }"#);
+    // For-loop variable `item` should shadow the fn parameter `item`
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into()),])
+    );
+}
+
+#[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
         r#"grammar { language: "test" } fn f(x: rule_t) -> rule_t { f(x) } rule program { f("x") }"#,
