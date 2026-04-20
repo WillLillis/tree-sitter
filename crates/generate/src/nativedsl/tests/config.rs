@@ -319,3 +319,88 @@ fn externals_via_let_binding() {
     "#);
     assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("heredoc".into())]);
 }
+
+#[test]
+fn externals_via_chained_let_bindings() {
+    // Two levels of let indirection: externals: b -> a -> [heredoc]
+    let g = dsl(r#"
+        let a: list_rule_t = [heredoc]
+        let b: list_rule_t = a
+        grammar { language: "test", externals: b }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("heredoc".into())]);
+}
+
+#[test]
+fn externals_via_let_with_append() {
+    // let binding with append inside
+    let g = dsl(r#"
+        let ext: list_rule_t = append([heredoc], [_eof])
+        grammar { language: "test", externals: ext }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_via_let_mixed_declared_and_undeclared() {
+    // Mix of a declared rule and an undeclared external in a let binding
+    let g = dsl(r#"
+        let ext: list_rule_t = [heredoc, comment]
+        grammar { language: "test", externals: ext }
+        rule program { "x" }
+        rule comment { regexp("//.*") }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_via_let_empty() {
+    let g = dsl(r#"
+        let ext: list_rule_t = []
+        grammar { language: "test", externals: ext }
+        rule program { "x" }
+    "#);
+    assert!(g.external_tokens.is_empty());
+}
+
+#[test]
+fn externals_via_append_let_and_inline() {
+    // append(let_binding, inline_list)
+    let g = dsl(r#"
+        let base_ext: list_rule_t = [heredoc]
+        grammar { language: "test", externals: append(base_ext, [_eof]) }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}
+
+#[test]
+fn externals_used_in_extras_via_let() {
+    // External declared via let, also used in extras
+    let g = dsl(r#"
+        let ext: list_rule_t = [_newline]
+        grammar {
+            language: "test",
+            externals: ext,
+            extras: [regexp(r"\s"), _newline],
+        }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(g.extra_symbols.len(), 2);
+}
+
+#[test]
+fn error_externals_via_function_call() {
+    let e = assert_err!(
+        dsl_err(r#"
+            fn mk_ext() -> list_rule_t { [heredoc] }
+            grammar { language: "test", externals: mk_ext() }
+            rule program { "x" }
+        "#),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::InvalidExternalsExpression);
+}
