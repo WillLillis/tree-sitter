@@ -1,8 +1,11 @@
-//! Type checker for the native grammar DSL.
+//! Name resolution and type checking for the native grammar DSL.
 //!
-//! Runs after name resolution and before lowering. Uses a simple flat type
-//! system with no generics - just concrete types for the values that grammar
-//! definitions actually use.
+//! Entry point is [`resolve_and_check`], which runs two phases:
+//! 1. Collect declarations and resolve identifiers (mutates the arena).
+//! 2. Type-check the resolved AST (reads immutably).
+//!
+//! Uses a simple flat type system with no generics - just concrete types for
+//! the values that grammar definitions actually use.
 //!
 //! Subtyping: `str_t` is a subtype of `rule_t`, `list_str_t` is a subtype of
 //! `list_rule_t`, and `list_list_str_t` is a subtype of `list_list_rule_t`.
@@ -280,22 +283,21 @@ pub fn resolve_and_check<'ast>(
     grammar_path: &Path,
 ) -> Result<TypeEnv<'ast>, TypeError> {
     // -- Phase 1: Name resolution (mutates arena) --
-    // Split borrow: collect_decls borrows ast.context (for &str slices in decl_spans)
+    // Split borrow: collect_decls borrows ast.context (for &str slices in decls)
     // but not ast.arena, so we can later mutably borrow ast.arena for resolve_item.
-    let mut env = collect_decls(&ast.arena, &ast.context, &ast.root_items, grammar_path)?;
+    let mut decls = collect_decls(&ast.arena, &ast.context, &ast.root_items, grammar_path)?;
 
     // Register inherited rule names so they resolve to RuleRef.
     // Use the inherit statement's span so "first defined here" points there.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
-            if !env.decl_spans.contains_key(var.name.as_str()) {
-                env.decl_spans.insert(&var.name, inherit_span);
-                env.decl_kinds.insert(&var.name, Decl::Rule);
+            if !decls.contains_key(var.name.as_str()) {
+                decls.insert(&var.name, (Decl::Rule, inherit_span));
             }
         }
     }
 
-    // Split borrow: env holds &str from ast.context.source (immutable),
+    // Split borrow: decls holds &str from ast.context.source (immutable),
     // while resolve_item_tc mutates ast.arena. Access context and arena separately.
     let n_items = ast.root_items.len();
     for i in 0..n_items {
@@ -305,7 +307,7 @@ pub fn resolve_and_check<'ast>(
             let name_text = ast.context.text(ast.arena.span(*name));
             let span = ast.arena.span(item_id);
             insert_decl(
-                &mut env,
+                &mut decls,
                 name_text,
                 Decl::Var,
                 span,
@@ -313,36 +315,27 @@ pub fn resolve_and_check<'ast>(
                 ast.context.source(),
             )?;
         }
-        resolve_item_tc(&mut ast.arena, &ast.context, &env, item_id)?;
+        resolve_item_tc(&mut ast.arena, &ast.context, &decls, item_id)?;
     }
 
     // -- Phase 2: Type checking (reads ast immutably) --
     check(ast, modules)
 }
 
-/// Intermediate resolve environment used during phase 1. Tracks both
-/// declaration spans (for duplicate checking) and declaration kinds
-/// (for Ident -> RuleRef/VarRef mutation).
-struct ResolveEnv<'src> {
-    decl_spans: FxHashMap<&'src str, Span>,
-    decl_kinds: FxHashMap<&'src str, Decl>,
-}
-
-impl ResolveEnv<'_> {
-    fn get(&self, name: &str) -> Option<Decl> {
-        self.decl_kinds.get(name).copied()
-    }
-}
+/// Intermediate resolve environment used during phase 1. Maps declaration
+/// names to their kind (for Ident -> RuleRef/VarRef mutation) and span
+/// (for duplicate checking / "first defined here" notes).
+type Decls<'src> = FxHashMap<&'src str, (Decl, Span)>;
 
 fn insert_decl<'src>(
-    env: &mut ResolveEnv<'src>,
+    decls: &mut Decls<'src>,
     name: &'src str,
     kind: Decl,
     span: Span,
     grammar_path: &Path,
     source: &str,
 ) -> Result<(), TypeError> {
-    if let Some(&first_span) = env.decl_spans.get(name) {
+    if let Some(&(_, first_span)) = decls.get(name) {
         return Err(TypeError::with_note(
             TypeErrorKind::DuplicateDeclaration(name.to_string()),
             span,
@@ -354,8 +347,7 @@ fn insert_decl<'src>(
             },
         ));
     }
-    env.decl_spans.insert(name, span);
-    env.decl_kinds.insert(name, kind);
+    decls.insert(name, (kind, span));
     Ok(())
 }
 
@@ -368,11 +360,8 @@ fn collect_decls<'a>(
     ctx: &'a AstContext,
     root_items: &[NodeId],
     grammar_path: &Path,
-) -> Result<ResolveEnv<'a>, TypeError> {
-    let mut env = ResolveEnv {
-        decl_spans: FxHashMap::default(),
-        decl_kinds: FxHashMap::default(),
-    };
+) -> Result<Decls<'a>, TypeError> {
+    let mut decls = Decls::default();
     let source = ctx.source();
 
     // Register rules and fns upfront (forward references allowed).
@@ -382,7 +371,7 @@ fn collect_decls<'a>(
         match arena.get(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
                 insert_decl(
-                    &mut env,
+                    &mut decls,
                     ctx.text(arena.span(*name)),
                     Decl::Rule,
                     span,
@@ -393,7 +382,7 @@ fn collect_decls<'a>(
             Node::Fn(fn_idx) => {
                 let config = ctx.get_fn(*fn_idx);
                 insert_decl(
-                    &mut env,
+                    &mut decls,
                     ctx.text(arena.span(config.name)),
                     Decl::Fn,
                     span,
@@ -415,14 +404,14 @@ fn collect_decls<'a>(
             arena,
             ctx,
             ext_id,
-            &mut env,
+            &mut decls,
             root_items,
             grammar_path,
             source,
         )?;
     }
 
-    Ok(env)
+    Ok(decls)
 }
 
 /// Recursively walk an externals expression to find bare identifiers that
@@ -436,7 +425,7 @@ fn collect_external_names_tc<'a>(
     arena: &NodeArena,
     ctx: &'a AstContext,
     id: NodeId,
-    env: &mut ResolveEnv<'a>,
+    decls: &mut Decls<'a>,
     root_items: &[NodeId],
     grammar_path: &Path,
     source: &'a str,
@@ -451,14 +440,21 @@ fn collect_external_names_tc<'a>(
                     arena,
                     ctx,
                     value_id,
-                    env,
+                    decls,
                     root_items,
                     grammar_path,
                     source,
                 )?;
-            } else if env.get(name).is_none() {
+            } else if !decls.contains_key(name) {
                 // Unknown bare identifier - register as external token.
-                insert_decl(env, name, Decl::Rule, arena.span(id), grammar_path, source)?;
+                insert_decl(
+                    decls,
+                    name,
+                    Decl::Rule,
+                    arena.span(id),
+                    grammar_path,
+                    source,
+                )?;
             }
         }
         // List: scan children for identifiers.
@@ -468,7 +464,7 @@ fn collect_external_names_tc<'a>(
                     arena,
                     ctx,
                     child,
-                    env,
+                    decls,
                     root_items,
                     grammar_path,
                     source,
@@ -477,8 +473,8 @@ fn collect_external_names_tc<'a>(
         }
         // Append: recurse into both arms.
         Node::Append { left, right } => {
-            collect_external_names_tc(arena, ctx, *left, env, root_items, grammar_path, source)?;
-            collect_external_names_tc(arena, ctx, *right, env, root_items, grammar_path, source)?;
+            collect_external_names_tc(arena, ctx, *left, decls, root_items, grammar_path, source)?;
+            collect_external_names_tc(arena, ctx, *right, decls, root_items, grammar_path, source)?;
         }
         // Literals don't introduce names.
         // grammar_config(base).externals - inherited values already registered.
@@ -523,7 +519,7 @@ fn find_let_value(
 fn resolve_item_tc(
     arena: &mut NodeArena,
     ctx: &AstContext,
-    env: &ResolveEnv,
+    decls: &Decls,
     item_id: NodeId,
 ) -> Result<(), TypeError> {
     match arena.get(item_id) {
@@ -544,21 +540,21 @@ fn resolve_item_tc(
             .into_iter()
             .flatten()
             {
-                resolve_expr_tc(arena, ctx, env, id, &Locals::EMPTY)?;
+                resolve_expr_tc(arena, ctx, decls, id, &Locals::EMPTY)?;
             }
             Ok(())
         }
         Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
             let body = *body;
-            resolve_expr_tc(arena, ctx, env, body, &Locals::EMPTY)
+            resolve_expr_tc(arena, ctx, decls, body, &Locals::EMPTY)
         }
         Node::Let { value, .. } => {
             let value = *value;
-            resolve_expr_tc(arena, ctx, env, value, &Locals::EMPTY)
+            resolve_expr_tc(arena, ctx, decls, value, &Locals::EMPTY)
         }
         Node::Print(arg) => {
             let arg = *arg;
-            resolve_expr_tc(arena, ctx, env, arg, &Locals::EMPTY)
+            resolve_expr_tc(arena, ctx, decls, arg, &Locals::EMPTY)
         }
         Node::Fn(fn_idx) => {
             let fn_config = ctx.get_fn(*fn_idx);
@@ -567,7 +563,7 @@ fn resolve_item_tc(
                 scope: LocalScope::FnParams(&fn_config.params),
                 parent: None,
             };
-            resolve_expr_tc(arena, ctx, env, body, &locals)
+            resolve_expr_tc(arena, ctx, decls, body, &locals)
         }
         _ => Ok(()),
     }
@@ -577,7 +573,7 @@ fn resolve_item_tc(
 fn resolve_expr_tc(
     arena: &mut NodeArena,
     ctx: &AstContext,
-    env: &ResolveEnv,
+    decls: &Decls,
     id: NodeId,
     locals: &Locals<'_>,
 ) -> Result<(), TypeError> {
@@ -587,7 +583,7 @@ fn resolve_expr_tc(
         let name = ctx.text(span);
         if locals.contains(arena, ctx, name) {
             arena.set(id, Node::VarRef);
-        } else if let Some(decl) = env.get(name) {
+        } else if let Some(&(decl, _)) = decls.get(name) {
             match decl {
                 Decl::Var => arena.set(id, Node::VarRef),
                 Decl::Rule | Decl::Fn => arena.set(id, Node::RuleRef),
@@ -603,9 +599,11 @@ fn resolve_expr_tc(
 
     // Alias target: bare identifiers become RuleRef (named alias) unless
     // they refer to a local variable (VarRef for fn params / for bindings).
+    // Targets don't require the name to be declared - they're just node names,
+    // same as grammar.js `alias($.x, $.undeclared_name)`.
     if let Node::Alias { content, target } = arena.get(id) {
         let (content, target) = (*content, *target);
-        resolve_expr_tc(arena, ctx, env, content, locals)?;
+        resolve_expr_tc(arena, ctx, decls, content, locals)?;
         if matches!(*arena.get(target), Node::Ident) {
             let name = ctx.text(arena.span(target));
             if locals.contains(arena, ctx, name) {
@@ -614,7 +612,7 @@ fn resolve_expr_tc(
                 arena.set(target, Node::RuleRef);
             }
         } else {
-            resolve_expr_tc(arena, ctx, env, target, locals)?;
+            resolve_expr_tc(arena, ctx, decls, target, locals)?;
         }
         return Ok(());
     }
@@ -625,30 +623,30 @@ fn resolve_expr_tc(
         let iterable = config.iterable;
         let body = config.body;
         let bindings = &config.bindings;
-        resolve_expr_tc(arena, ctx, env, iterable, locals)?;
+        resolve_expr_tc(arena, ctx, decls, iterable, locals)?;
         let inner = Locals {
             scope: LocalScope::ForBindings(bindings),
             parent: Some(locals),
         };
-        return resolve_expr_tc(arena, ctx, env, body, &inner);
+        return resolve_expr_tc(arena, ctx, decls, body, &inner);
     }
 
     // All remaining cases
-    resolve_children_tc(arena, ctx, env, id, locals)
+    resolve_children_tc(arena, ctx, decls, id, locals)
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
 fn resolve_children_tc(
     arena: &mut NodeArena,
     ctx: &AstContext,
-    env: &ResolveEnv,
+    decls: &Decls,
     id: NodeId,
     locals: &Locals<'_>,
 ) -> Result<(), TypeError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
         for child in ctx.child_slice(range) {
-            resolve_expr_tc(arena, ctx, env, *child, locals)?;
+            resolve_expr_tc(arena, ctx, decls, *child, locals)?;
         }
         return Ok(());
     }
@@ -656,15 +654,15 @@ fn resolve_children_tc(
     match arena.get(id) {
         Node::Call { name, args } => {
             let (name, args) = (*name, *args);
-            resolve_expr_tc(arena, ctx, env, name, locals)?;
+            resolve_expr_tc(arena, ctx, decls, name, locals)?;
             for arg in ctx.child_slice(args) {
-                resolve_expr_tc(arena, ctx, env, *arg, locals)?;
+                resolve_expr_tc(arena, ctx, decls, *arg, locals)?;
             }
             Ok(())
         }
         Node::Object(range) => {
             for field in ctx.get_object(*range) {
-                resolve_expr_tc(arena, ctx, env, field.1, locals)?;
+                resolve_expr_tc(arena, ctx, decls, field.1, locals)?;
             }
             Ok(())
         }
@@ -677,43 +675,43 @@ fn resolve_children_tc(
         | Node::GrammarConfig(inner)
         | Node::Print(inner) => {
             let inner = *inner;
-            resolve_expr_tc(arena, ctx, env, inner, locals)
+            resolve_expr_tc(arena, ctx, decls, inner, locals)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
             let content = *content;
-            resolve_expr_tc(arena, ctx, env, content, locals)
+            resolve_expr_tc(arena, ctx, decls, content, locals)
         }
         Node::Append { left, right } => {
             let (left, right) = (*left, *right);
-            resolve_expr_tc(arena, ctx, env, left, locals)?;
-            resolve_expr_tc(arena, ctx, env, right, locals)
+            resolve_expr_tc(arena, ctx, decls, left, locals)?;
+            resolve_expr_tc(arena, ctx, decls, right, locals)
         }
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content }
         | Node::PrecDynamic { value, content } => {
             let (value, content) = (*value, *content);
-            resolve_expr_tc(arena, ctx, env, value, locals)?;
-            resolve_expr_tc(arena, ctx, env, content, locals)
+            resolve_expr_tc(arena, ctx, decls, value, locals)?;
+            resolve_expr_tc(arena, ctx, decls, content, locals)
         }
         Node::DynRegex { pattern, flags } => {
             let (pattern, flags) = (*pattern, *flags);
-            resolve_expr_tc(arena, ctx, env, pattern, locals)?;
+            resolve_expr_tc(arena, ctx, decls, pattern, locals)?;
             if let Some(flags) = flags {
-                resolve_expr_tc(arena, ctx, env, flags, locals)?;
+                resolve_expr_tc(arena, ctx, decls, flags, locals)?;
             }
             Ok(())
         }
         Node::FieldAccess { obj, .. } | Node::QualifiedAccess { obj, .. } => {
             let obj = *obj;
-            resolve_expr_tc(arena, ctx, env, obj, locals)
+            resolve_expr_tc(arena, ctx, decls, obj, locals)
         }
         Node::QualifiedCall(range) => {
             let (obj, _name, args) = ctx.get_qualified_call(*range);
-            resolve_expr_tc(arena, ctx, env, obj, locals)?;
+            resolve_expr_tc(arena, ctx, decls, obj, locals)?;
             // name stays as Ident - it's a member of the import namespace
             for &arg in args {
-                resolve_expr_tc(arena, ctx, env, arg, locals)?;
+                resolve_expr_tc(arena, ctx, decls, arg, locals)?;
             }
             Ok(())
         }
@@ -1300,9 +1298,8 @@ fn type_of_import_access(
         return Ok(ty);
     }
     if import_env.fns.contains_key(member_name) {
-        // Accessing a function without calling it - not valid as a value
         return Err(TypeError::new(
-            TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+            TypeErrorKind::ImportFunctionUsedAsValue(member_name.to_string()),
             ast.span(member),
         ));
     }
@@ -1366,19 +1363,24 @@ fn type_of_object<'ast>(
     if fields.is_empty() {
         return Err(TypeError::new(TypeErrorKind::CannotInferType, span));
     }
-    let first_ty = type_of(ast, fields[0].1, env)?;
-    let inner = InnerTy::try_from(first_ty).map_err(|()| {
+    let mut widest = type_of(ast, fields[0].1, env)?;
+    for &(_, val_id) in &fields[1..] {
+        let ty = type_of(ast, val_id, env)?;
+        if ty == widest || ty.is_compatible(widest) {
+            // ty equals or is a subtype of widest - no change needed
+        } else if widest.is_compatible(ty) {
+            // widest is a subtype of ty - promote to the wider type
+            widest = ty;
+        } else {
+            return Err(mismatch(widest, ty, ast.span(val_id)));
+        }
+    }
+    let inner = InnerTy::try_from(widest).map_err(|()| {
         TypeError::new(
-            TypeErrorKind::InvalidObjectValue(first_ty),
+            TypeErrorKind::InvalidObjectValue(widest),
             ast.span(fields[0].1),
         )
     })?;
-    for &(_, val_id) in &fields[1..] {
-        let ty = type_of(ast, val_id, env)?;
-        if ty != first_ty {
-            return Err(mismatch(first_ty, ty, ast.span(val_id)));
-        }
-    }
     Ok(Ty::Object(inner))
 }
 
@@ -1395,19 +1397,27 @@ fn type_of_list<'ast>(
             span,
         ));
     }
-    let first = type_of(ast, items[0], env)?;
+    let mut widest = type_of(ast, items[0], env)?;
     for &item_id in &items[1..] {
         let ty = type_of(ast, item_id, env)?;
-        if ty != first {
+        if ty == widest || ty.is_compatible(widest) {
+            // ty equals or is a subtype of widest - no change needed
+        } else if widest.is_compatible(ty) {
+            // widest is a subtype of ty - promote to the wider type
+            widest = ty;
+        } else {
             return Err(TypeError::new(
-                TypeErrorKind::ListElementTypeMismatch { first, got: ty },
+                TypeErrorKind::ListElementTypeMismatch {
+                    first: widest,
+                    got: ty,
+                },
                 ast.span(item_id),
             ));
         }
     }
-    match first {
+    match widest {
         Ty::Str => Ok(Ty::ListStr),
-        _ if first.is_rule_like() => Ok(Ty::ListRule),
+        _ if widest.is_rule_like() => Ok(Ty::ListRule),
         Ty::Int => Ok(Ty::ListInt),
         Ty::ListRule => Ok(Ty::ListListRule),
         Ty::ListStr => Ok(Ty::ListListStr),
@@ -1621,6 +1631,7 @@ pub enum TypeErrorKind {
     CannotBindSpread,
     CannotPrintType(Ty),
     ImportMemberNotFound(String),
+    ImportFunctionUsedAsValue(String),
     ImportFunctionNotFound(String),
     QualifiedCallOnNonModule(Ty),
     DuplicateDeclaration(String),
@@ -1697,6 +1708,12 @@ impl std::fmt::Display for TypeError {
             ),
             CannotPrintType(ty) => write!(f, "cannot print a value of type {ty}"),
             ImportMemberNotFound(name) => write!(f, "imported module has no member '{name}'"),
+            ImportFunctionUsedAsValue(name) => {
+                write!(
+                    f,
+                    "'{name}' is a function, not a value; call it with {name}()"
+                )
+            }
             ImportFunctionNotFound(name) => write!(f, "imported module has no function '{name}'"),
             QualifiedCallOnNonModule(ty) => write!(f, "'::' call requires module_t, got {ty}"),
             DuplicateDeclaration(name) => write!(f, "duplicate declaration '{name}'"),

@@ -1,14 +1,13 @@
 //! Native DSL front-end for tree-sitter grammar definitions.
 //!
-//! This module implements a five-stage pipeline that compiles `.tsg` source
+//! This module implements a four-stage pipeline that compiles `.tsg` source
 //! files into the same [`InputGrammar`] representation produced by parsing
 //! `grammar.json`:
 //!
 //! 1. **Lexing** ([`lexer`]) - tokenizes source text into a flat `Vec<Token>`.
 //! 2. **Parsing** ([`parser`]) - builds an arena-based AST from the token stream.
-//! 3. **Name resolution** ([`resolve`]) - resolves identifiers to rule/variable references.
-//! 4. **Type checking** ([`typecheck`]) - validates types across expressions and function calls.
-//! 5. **Lowering** ([`lower`]) - evaluates the AST into an [`InputGrammar`].
+//! 3. **Resolve + type checking** ([`typecheck`]) - resolves identifiers and validates types.
+//! 4. **Lowering** ([`lower`]) - evaluates the AST into an [`InputGrammar`].
 //!
 //! Each stage produces structured, serializable errors that carry source spans.
 
@@ -97,7 +96,7 @@ pub fn load_module(
     // All child modules go into one list.
     let mut sub_modules: Vec<Module> = Vec::new();
 
-    // Load inherited grammar (Grammar kind only, must happen before resolve).
+    // Load inherited grammar (Grammar kind only, must happen before typecheck).
     if let Some(inherit_id) = inherit_node {
         load_inherit_child(
             &ast,
@@ -121,7 +120,7 @@ pub fn load_module(
     }
 
     // Load imports. Import nodes are identified by Node::Import { module: None }
-    // which is set by the parser - no resolve pass needed beforehand.
+    // which is set by the parser.
     load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules)?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
@@ -502,7 +501,7 @@ pub struct Note {
     pub source: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,
