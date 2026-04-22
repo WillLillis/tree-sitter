@@ -65,6 +65,14 @@ resolve_error_tests! {
         rule program { "x" }"#,
         TypeErrorKind::InvalidExternalsExpression
     }
+    // Self-referential let in externals - should not stack overflow,
+    // caught as UnresolvedVariable during phase 2 resolution.
+    error_self_referential_let_in_externals {
+        r#"let C = C
+        grammar { language: "test", externals: [C] }
+        rule program { "x" }"#,
+        TypeErrorKind::UnresolvedVariable("C".into())
+    }
 }
 
 #[test]

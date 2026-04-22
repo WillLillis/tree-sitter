@@ -467,7 +467,7 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::IntLit(value))
     }
 
-    fn lex_ident(&mut self, start: usize) -> Result<TokenKind, LexError> {
+    fn lex_ident(&mut self, start: usize) -> LexResult<TokenKind> {
         let source = self.source;
         let mut pos = self.pos;
         // SAFETY: pos < source.len() checked by loop condition.
