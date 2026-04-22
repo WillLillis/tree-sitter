@@ -18,6 +18,11 @@ use thiserror::Error;
 
 use super::ast::{Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, Span};
 use super::scope_stack::ScopeStack;
+
+/// Function pointer type for element/inner checkers passed to `expect_list` and
+/// `expect_list_list`. Checks a single node against the type environment.
+type CheckFn<'ast> =
+    fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>;
 use super::{Note, NoteMessage};
 use crate::grammars::InputGrammar;
 
@@ -907,7 +912,7 @@ fn expect_list<'ast>(
     id: NodeId,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
-    check_elem: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>,
+    check_elem: CheckFn<'ast>,
     accept_list_str: bool,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = ast.node(id) {
@@ -971,7 +976,7 @@ fn expect_list_list<'ast>(
     id: NodeId,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
-    check_inner: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>,
+    check_inner: CheckFn<'ast>,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = ast.node(id) {
         for &child in ast.child_slice(*range) {
