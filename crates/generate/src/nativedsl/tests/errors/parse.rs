@@ -30,6 +30,14 @@ parse_error_tests! {
         r#"grammar { language: "test" } let x: foo = "y" rule program { "x" }"#,
         ParseErrorKind::UnknownType("foo".into())
     }
+    error_void_t_not_allowed {
+        r#"grammar { language: "test" } let x: void_t = "y" rule program { "x" }"#,
+        ParseErrorKind::InternalTypeNotAllowed(Ty::Void)
+    }
+    error_spread_t_not_allowed {
+        r#"grammar { language: "test" } let x: spread_t = "y" rule program { "x" }"#,
+        ParseErrorKind::InternalTypeNotAllowed(Ty::Spread)
+    }
     error_missing_return_type {
         r#"grammar { language: "test" } fn f(x: rule_t) { x } rule program { "x" }"#,
         ParseErrorKind::MissingReturnType
