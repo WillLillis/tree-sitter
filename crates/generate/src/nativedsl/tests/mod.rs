@@ -402,12 +402,12 @@ fn bench_per_stage() {
             .parse()
             .unwrap();
         std::hint::black_box(
-            super::typecheck::resolve_and_check(&mut a, Vec::new(), None, &path).unwrap(),
+            super::typecheck::resolve_and_check(&mut a, &[], None, &path).unwrap(),
         );
     }
     let resolve_typecheck_time = start.elapsed() / n;
 
-    super::typecheck::resolve_and_check(&mut ast, Vec::new(), None, &path).unwrap();
+    super::typecheck::resolve_and_check(&mut ast, &[], None, &path).unwrap();
 
     // Lower (C grammar has no base, so base is always None)
     // This includes: eval all expressions + build_rule (ARule→Rule conversion)
@@ -443,7 +443,7 @@ fn bench_per_stage() {
 fn bench_lower_only_cpp() {
     let path = native_grammar_path("cpp_native");
     let source = read_native_grammar("cpp_native");
-    let module = super::load_module(&source, &path, super::ModuleKind::Grammar, &[]).unwrap();
+    let module = super::load_module(&source, &path, super::ModuleKind::Grammar, &[], &mut 0).unwrap();
     let n = 5000u32;
     for _ in 0..10 {
         std::hint::black_box(
@@ -465,7 +465,7 @@ fn bench_lower_only_vim() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../grammars/tree-sitter-vim/grammar.tsg");
     let source = std::fs::read_to_string(&path).unwrap();
-    let module = super::load_module(&source, &path, super::ModuleKind::Grammar, &[]).unwrap();
+    let module = super::load_module(&source, &path, super::ModuleKind::Grammar, &[], &mut 0).unwrap();
     let n = 5000u32;
     for _ in 0..10 {
         std::hint::black_box(

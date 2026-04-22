@@ -147,15 +147,11 @@ pub struct TypeEnv<'src> {
     pub fns: FxHashMap<&'src str, FnSig>,
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
-    /// Type environments of imported modules, indexed by `Ty::Module(idx)`.
-    #[expect(clippy::use_self, reason = "No `Self` for generics")]
-    pub modules: Vec<TypeEnv<'src>>,
 }
 
 impl<'src> TypeEnv<'src> {
     fn new() -> Self {
         Self {
-            modules: Vec::new(),
             vars: ScopeStack::new(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
@@ -278,7 +274,7 @@ enum Decl {
 /// or any type error.
 pub fn resolve_and_check<'ast>(
     ast: &'ast mut Ast,
-    modules: Vec<TypeEnv<'ast>>,
+    modules: &[Option<TypeEnv<'ast>>],
     base: Option<(&'ast InputGrammar, Span)>,
     grammar_path: &Path,
 ) -> Result<TypeEnv<'ast>, TypeError> {
@@ -752,10 +748,9 @@ fn resolve_type_annotation(ast: &Ast, id: NodeId) -> Result<Ty, TypeError> {
 /// `Ty::Module(idx)`), populated by the import pre-pass in `mod.rs`.
 pub fn check<'ast>(
     ast: &'ast Ast,
-    modules: Vec<TypeEnv<'ast>>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<TypeEnv<'ast>, TypeError> {
     let mut env = TypeEnv::new();
-    env.modules = modules;
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
@@ -776,32 +771,37 @@ pub fn check<'ast>(
         }
     }
     for &item_id in &ast.root_items {
-        check_item(ast, item_id, &mut env)?;
+        check_item(ast, item_id, &mut env, modules)?;
     }
     Ok(env)
 }
 
-fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<(), TypeError> {
+fn check_item<'ast>(
+    ast: &'ast Ast,
+    id: NodeId,
+    env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
+) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::Grammar => {
             let config = ast.context.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_rule_list(ast, id, env)?;
+                expect_rule_list(ast, id, env, modules)?;
             }
             for id in [config.inline, config.supertypes].into_iter().flatten() {
-                expect_name_list(ast, id, env)?;
+                expect_name_list(ast, id, env, modules)?;
             }
             if let Some(id) = config.conflicts {
-                expect_list_list(ast, id, env, expect_name_list)?;
+                expect_list_list(ast, id, env, modules, expect_name_list)?;
             }
             if let Some(id) = config.precedences {
-                expect_list_list(ast, id, env, expect_precedence_group)?;
+                expect_list_list(ast, id, env, modules, expect_precedence_group)?;
             }
             if let Some(id) = config.word {
-                expect_name_ref(ast, id, env)?;
+                expect_name_ref(ast, id, env, modules)?;
             }
             if let Some(id) = config.reserved {
-                expect_reserved(ast, id, env)?;
+                expect_reserved(ast, id, env, modules)?;
             }
             Ok(())
         }
@@ -822,7 +822,7 @@ fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Resu
                     }
                 }
             } else {
-                let inferred = type_of(ast, *value, env)?;
+                let inferred = type_of(ast, *value, env, modules)?;
                 // `print(...)` and `for (...) { ... }` yield non-storable types
                 // (`void_t` and for-expansion respectively). Reject them at the
                 // let binding with a specific message; without this the
@@ -870,18 +870,20 @@ fn check_item<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Resu
                 let ty = scope.fns[fn_name].params[i];
                 scope.insert_var(ast.node_text(config.params[i].name), ty);
             }
-            let body_ty = type_of(ast, config.body, &mut scope)?;
+            let body_ty = type_of(ast, config.body, &mut scope, modules)?;
             if !body_ty.is_compatible(return_ty) {
                 return Err(mismatch(return_ty, body_ty, ast.span(config.body)));
             }
             Ok(())
         }
-        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => expect_rule(ast, *body, env),
+        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
+            expect_rule(ast, *body, env, modules)
+        }
         Node::Print(arg) => {
             // The argument can have any concrete type, but not a for-expansion
             // (which doesn't produce a standalone value) or another `print`
             // call (void is nothing to print).
-            let ty = type_of(ast, *arg, env)?;
+            let ty = type_of(ast, *arg, env, modules)?;
             if ty == Ty::Void || ty == Ty::Spread {
                 return Err(TypeError::new(
                     TypeErrorKind::CannotPrintType(ty),
@@ -904,16 +906,17 @@ fn expect_list<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    check_elem: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>) -> Result<(), TypeError>,
+    modules: &[Option<TypeEnv<'ast>>],
+    check_elem: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>,
     accept_list_str: bool,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = ast.node(id) {
         for &child in ast.child_slice(*range) {
-            check_elem(ast, child, env)?;
+            check_elem(ast, child, env, modules)?;
         }
         return Ok(());
     }
-    let ty = type_of(ast, id, env)?;
+    let ty = type_of(ast, id, env, modules)?;
     if ty == Ty::ListRule || (accept_list_str && ty == Ty::ListStr) {
         return Ok(());
     }
@@ -924,27 +927,30 @@ fn expect_rule_list<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
-    expect_list(ast, id, env, expect_rule, true)
+    expect_list(ast, id, env, modules, expect_rule, true)
 }
 
 fn expect_name_list<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
-    expect_list(ast, id, env, expect_name_ref, false)
+    expect_list(ast, id, env, modules, expect_name_ref, false)
 }
 
 fn expect_name_ref<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::RuleRef => Ok(()),
         Node::VarRef | Node::FieldAccess { .. } => {
-            let ty = type_of(ast, id, env)?;
+            let ty = type_of(ast, id, env, modules)?;
             if ty != Ty::Rule {
                 return Err(mismatch(Ty::Rule, ty, ast.span(id)));
             }
@@ -964,15 +970,16 @@ fn expect_list_list<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    check_inner: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>) -> Result<(), TypeError>,
+    modules: &[Option<TypeEnv<'ast>>],
+    check_inner: fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = ast.node(id) {
         for &child in ast.child_slice(*range) {
-            check_inner(ast, child, env)?;
+            check_inner(ast, child, env, modules)?;
         }
         return Ok(());
     }
-    let ty = type_of(ast, id, env)?;
+    let ty = type_of(ast, id, env, modules)?;
     if ty == Ty::ListListRule || ty == Ty::ListListStr {
         return Ok(());
     }
@@ -984,11 +991,12 @@ fn expect_name_or_str<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
     if matches!(ast.node(id), Node::StringLit | Node::RawStringLit { .. }) {
         return Ok(());
     }
-    expect_name_ref(ast, id, env)
+    expect_name_ref(ast, id, env, modules)
 }
 
 /// Check a `precedences` inner list: each element must be a name-ref or string literal.
@@ -996,24 +1004,26 @@ fn expect_precedence_group<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
-    expect_list(ast, id, env, expect_name_or_str, true)
+    expect_list(ast, id, env, modules, expect_name_or_str, true)
 }
 
 fn expect_reserved<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = ast.node(id) {
         for &(_, val_id) in ast.get_object(*range) {
-            expect_rule_list(ast, val_id, env)?;
+            expect_rule_list(ast, val_id, env, modules)?;
         }
         return Ok(());
     }
     // Non-literal: must be inherited (base.reserved -> Object(ListRule))
-    let ty = type_of(ast, id, env)?;
+    let ty = type_of(ast, id, env, modules)?;
     if ty == Ty::Object(InnerTy::ListRule) {
         return Ok(());
     }
@@ -1023,8 +1033,13 @@ fn expect_reserved<'ast>(
     ))
 }
 
-fn expect_rule<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<(), TypeError> {
-    let ty = type_of(ast, id, env)?;
+fn expect_rule<'ast>(
+    ast: &'ast Ast,
+    id: NodeId,
+    env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
+) -> Result<(), TypeError> {
+    let ty = type_of(ast, id, env, modules)?;
     if !ty.is_rule_like() {
         return Err(mismatch(Ty::Rule, ty, ast.span(id)));
     }
@@ -1033,7 +1048,12 @@ fn expect_rule<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Res
 
 // -- Type inference --
 
-fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<Ty, TypeError> {
+fn type_of<'ast>(
+    ast: &'ast Ast,
+    id: NodeId,
+    env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
+) -> Result<Ty, TypeError> {
     let span = ast.span(id);
     match ast.node(id) {
         Node::IntLit(_) => Ok(Ty::Int),
@@ -1044,7 +1064,7 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             Ok(Ty::Module(idx))
         }
         Node::GrammarConfig(inner) => {
-            let inner_ty = type_of(ast, *inner, env)?;
+            let inner_ty = type_of(ast, *inner, env, modules)?;
             if !matches!(inner_ty, Ty::Module(_)) {
                 return Err(TypeError::new(
                     TypeErrorKind::QualifiedAccessOnInvalidType(inner_ty),
@@ -1061,26 +1081,26 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             })
         }
         Node::Neg(inner) => {
-            let ty = type_of(ast, *inner, env)?;
+            let ty = type_of(ast, *inner, env, modules)?;
             if ty != Ty::Int {
                 return Err(mismatch(Ty::Int, ty, span));
             }
             Ok(Ty::Int)
         }
-        Node::Append { left, right } => type_of_append(ast, *left, *right, span, env),
-        Node::FieldAccess { obj, field } => type_of_field_access(ast, *obj, *field, env),
+        Node::Append { left, right } => type_of_append(ast, *left, *right, span, env, modules),
+        Node::FieldAccess { obj, field } => type_of_field_access(ast, *obj, *field, env, modules),
         Node::QualifiedAccess { obj, member } => {
-            let obj_ty = type_of(ast, *obj, env)?;
+            let obj_ty = type_of(ast, *obj, env, modules)?;
             match obj_ty {
-                Ty::Module(idx) => type_of_import_access(ast, idx, *member, env),
+                Ty::Module(idx) => type_of_import_access(ast, idx, *member, modules),
                 _ => Err(TypeError::new(
                     TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
                     ast.span(*obj),
                 )),
             }
         }
-        Node::Object(range) => type_of_object(ast, *range, span, env),
-        Node::List(range) => type_of_list(ast, *range, span, env),
+        Node::Object(range) => type_of_object(ast, *range, span, env, modules),
+        Node::List(range) => type_of_list(ast, *range, span, env, modules),
         Node::Tuple(_) => {
             // Tuples are only valid as elements of for-loop lists.
             // They're checked structurally in check_for_expr.
@@ -1089,7 +1109,7 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
         }
         Node::Concat(range) => {
             for &part in ast.child_slice(*range) {
-                let ty = type_of(ast, part, env)?;
+                let ty = type_of(ast, part, env, modules)?;
                 if ty != Ty::Str {
                     return Err(mismatch(Ty::Str, ty, ast.span(part)));
                 }
@@ -1097,12 +1117,12 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
             Ok(Ty::Str)
         }
         Node::DynRegex { pattern, flags } => {
-            let pt = type_of(ast, *pattern, env)?;
+            let pt = type_of(ast, *pattern, env, modules)?;
             if pt != Ty::Str {
                 return Err(mismatch(Ty::Str, pt, ast.span(*pattern)));
             }
             if let Some(fid) = flags {
-                let ft = type_of(ast, *fid, env)?;
+                let ft = type_of(ast, *fid, env, modules)?;
                 if ft != Ty::Str {
                     return Err(mismatch(Ty::Str, ft, ast.span(*fid)));
                 }
@@ -1111,7 +1131,7 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
         }
         Node::Seq(range) | Node::Choice(range) => {
             for &member in ast.child_slice(*range) {
-                let ty = type_of(ast, member, env)?;
+                let ty = type_of(ast, member, env, modules)?;
                 if ty != Ty::Spread && !ty.is_rule_like() {
                     return Err(mismatch(Ty::Rule, ty, ast.span(member)));
                 }
@@ -1123,16 +1143,16 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
         | Node::Optional(inner)
         | Node::Token(inner)
         | Node::TokenImmediate(inner) => {
-            expect_rule(ast, *inner, env)?;
+            expect_rule(ast, *inner, env, modules)?;
             Ok(Ty::Rule)
         }
         Node::Field { content, .. } | Node::Reserved { content, .. } => {
-            expect_rule(ast, *content, env)?;
+            expect_rule(ast, *content, env, modules)?;
             Ok(Ty::Rule)
         }
         Node::Alias { content, target } => {
-            expect_rule(ast, *content, env)?;
-            let target_ty = type_of(ast, *target, env)?;
+            expect_rule(ast, *content, env, modules)?;
+            let target_ty = type_of(ast, *target, env, modules)?;
             let is_valid =
                 matches!(ast.node(*target), Node::RuleRef | Node::VarRef) || target_ty == Ty::Str;
             if !is_valid {
@@ -1146,31 +1166,31 @@ fn type_of<'ast>(ast: &'ast Ast, id: NodeId, env: &mut TypeEnv<'ast>) -> Result<
         Node::Prec { value, content }
         | Node::PrecLeft { value, content }
         | Node::PrecRight { value, content } => {
-            let vt = type_of(ast, *value, env)?;
+            let vt = type_of(ast, *value, env, modules)?;
             if vt != Ty::Int && vt != Ty::Str {
                 return Err(mismatch(Ty::Int, vt, ast.span(*value)));
             }
-            expect_rule(ast, *content, env)?;
+            expect_rule(ast, *content, env, modules)?;
             Ok(Ty::Rule)
         }
         Node::PrecDynamic { value, content } => {
-            let vt = type_of(ast, *value, env)?;
+            let vt = type_of(ast, *value, env, modules)?;
             if vt != Ty::Int {
                 return Err(mismatch(Ty::Int, vt, ast.span(*value)));
             }
-            expect_rule(ast, *content, env)?;
+            expect_rule(ast, *content, env, modules)?;
             Ok(Ty::Rule)
         }
         Node::For(for_idx) => {
-            check_for_expr(ast, *for_idx, env)?;
+            check_for_expr(ast, *for_idx, env, modules)?;
             Ok(Ty::Spread)
         }
-        Node::Call { name, args } => type_of_call(ast, *name, *args, span, env),
-        Node::QualifiedCall(range) => type_of_qualified_call(ast, *range, span, env),
+        Node::Call { name, args } => type_of_call(ast, *name, *args, span, env, modules),
+        Node::QualifiedCall(range) => type_of_qualified_call(ast, *range, span, env, modules),
         // print() in expression position - returns Void which will be rejected
         // by the caller (e.g. CannotBindVoid in let, type mismatch in seq/choice)
         Node::Print(arg) => {
-            type_of(ast, *arg, env)?;
+            type_of(ast, *arg, env, modules)?;
             Ok(Ty::Void)
         }
         _ => Err(TypeError::new(TypeErrorKind::CannotInferType, span)),
@@ -1187,18 +1207,19 @@ fn type_of_append<'ast>(
     right: NodeId,
     span: Span,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
     let l_empty = matches!(ast.node(left), Node::List(r) if ast.child_slice(*r).is_empty());
     let r_empty = matches!(ast.node(right), Node::List(r) if ast.child_slice(*r).is_empty());
     let lt = if l_empty {
         None
     } else {
-        Some(type_of(ast, left, env)?)
+        Some(type_of(ast, left, env, modules)?)
     };
     let rt = if r_empty {
         None
     } else {
-        Some(type_of(ast, right, env)?)
+        Some(type_of(ast, right, env, modules)?)
     };
     match (lt, rt) {
         (Some(l), Some(r)) => {
@@ -1239,8 +1260,9 @@ fn type_of_field_access<'ast>(
     obj: NodeId,
     field: NodeId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
-    let obj_ty = type_of(ast, obj, env)?;
+    let obj_ty = type_of(ast, obj, env, modules)?;
     let field_name = ast.node_text(field);
     match obj_ty {
         Ty::Object(inner) => {
@@ -1290,10 +1312,12 @@ fn type_of_import_access(
     ast: &Ast,
     idx: u8,
     member: NodeId,
-    env: &TypeEnv<'_>,
+    modules: &[Option<TypeEnv<'_>>],
 ) -> Result<Ty, TypeError> {
     let member_name = ast.node_text(member);
-    let import_env = &env.modules[idx as usize];
+    // Safe: idx was assigned during loading and typecheck_modules populates
+    // the table before any module that references it is checked.
+    let import_env = modules[idx as usize].as_ref().unwrap();
     if let Some(ty) = import_env.vars.get(member_name) {
         return Ok(ty);
     }
@@ -1314,9 +1338,10 @@ fn type_of_qualified_call<'a>(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'a>,
+    modules: &[Option<TypeEnv<'a>>],
 ) -> Result<Ty, TypeError> {
     let (obj, name, args) = ast.get_qualified_call(range);
-    let obj_ty = type_of(ast, obj, env)?;
+    let obj_ty = type_of(ast, obj, env, modules)?;
     let Ty::Module(idx) = obj_ty else {
         return Err(TypeError::new(
             TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
@@ -1324,7 +1349,7 @@ fn type_of_qualified_call<'a>(
         ));
     };
     let fn_name = ast.node_text(name);
-    let import_env = &env.modules[idx as usize];
+    let import_env = modules[idx as usize].as_ref().unwrap();
     let Some(sig) = import_env.fns.get(fn_name) else {
         return Err(TypeError::new(
             TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
@@ -1345,7 +1370,7 @@ fn type_of_qualified_call<'a>(
     let param_types: Vec<Ty> = sig.params.clone();
     let return_ty = sig.return_ty;
     for (i, &arg_id) in args.iter().enumerate() {
-        let arg_ty = type_of(ast, arg_id, env)?;
+        let arg_ty = type_of(ast, arg_id, env, modules)?;
         if !arg_ty.is_compatible(param_types[i]) {
             return Err(mismatch(param_types[i], arg_ty, ast.span(arg_id)));
         }
@@ -1358,14 +1383,15 @@ fn type_of_object<'ast>(
     range: super::ast::ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
     let fields = ast.get_object(range);
     if fields.is_empty() {
         return Err(TypeError::new(TypeErrorKind::CannotInferType, span));
     }
-    let mut widest = type_of(ast, fields[0].1, env)?;
+    let mut widest = type_of(ast, fields[0].1, env, modules)?;
     for &(_, val_id) in &fields[1..] {
-        let ty = type_of(ast, val_id, env)?;
+        let ty = type_of(ast, val_id, env, modules)?;
         if ty == widest || ty.is_compatible(widest) {
             // ty equals or is a subtype of widest - no change needed
         } else if widest.is_compatible(ty) {
@@ -1389,6 +1415,7 @@ fn type_of_list<'ast>(
     range: super::ast::ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
     let items = ast.child_slice(range);
     if items.is_empty() {
@@ -1397,9 +1424,9 @@ fn type_of_list<'ast>(
             span,
         ));
     }
-    let mut widest = type_of(ast, items[0], env)?;
+    let mut widest = type_of(ast, items[0], env, modules)?;
     for &item_id in &items[1..] {
-        let ty = type_of(ast, item_id, env)?;
+        let ty = type_of(ast, item_id, env, modules)?;
         if ty == widest || ty.is_compatible(widest) {
             // ty equals or is a subtype of widest - no change needed
         } else if widest.is_compatible(ty) {
@@ -1435,6 +1462,7 @@ fn type_of_call<'ast>(
     args: super::ast::ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
     let fn_name = ast.node_text(name);
     let sig = env.fns.get(fn_name).ok_or_else(|| {
@@ -1454,7 +1482,7 @@ fn type_of_call<'ast>(
         ));
     }
     for (i, &arg_id) in args.iter().enumerate() {
-        let arg_ty = type_of(ast, arg_id, env)?;
+        let arg_ty = type_of(ast, arg_id, env, modules)?;
         let param_ty = env.fns[fn_name].params[i];
         if !arg_ty.is_compatible(param_ty) {
             return Err(mismatch(param_ty, arg_ty, ast.span(arg_id)));
@@ -1469,6 +1497,7 @@ fn check_for_expr<'ast>(
     ast: &'ast Ast,
     for_idx: ForId,
     env: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
     let config = ast.get_for(for_idx);
 
@@ -1481,9 +1510,9 @@ fn check_for_expr<'ast>(
         if has_tuples {
             let mut scope = env.scoped();
             for &item_id in items {
-                check_for_tuple_element(ast, item_id, config, &mut scope)?;
+                check_for_tuple_element(ast, item_id, config, &mut scope, modules)?;
             }
-            return expect_rule(ast, config.body, &mut scope);
+            return expect_rule(ast, config.body, &mut scope, modules);
         }
     }
 
@@ -1494,7 +1523,7 @@ fn check_for_expr<'ast>(
             ast.span(config.iterable),
         ));
     }
-    let iter_ty = type_of(ast, config.iterable, env)?;
+    let iter_ty = type_of(ast, config.iterable, env, modules)?;
     if !iter_ty.is_list() {
         return Err(TypeError::new(
             TypeErrorKind::ForRequiresList(iter_ty),
@@ -1517,7 +1546,7 @@ fn check_for_expr<'ast>(
     }
     let mut scope = env.scoped();
     scope.insert_var(ast.text(*name_span), declared);
-    expect_rule(ast, config.body, &mut scope)
+    expect_rule(ast, config.body, &mut scope, modules)
 }
 
 fn check_for_tuple_element<'ast>(
@@ -1525,6 +1554,7 @@ fn check_for_tuple_element<'ast>(
     item_id: NodeId,
     config: &super::ast::ForConfig,
     scope: &mut TypeEnv<'ast>,
+    modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
     let Node::Tuple(range) = ast.node(item_id) else {
         return Err(TypeError::new(
@@ -1545,7 +1575,7 @@ fn check_for_tuple_element<'ast>(
     // Pop and re-push scope vars for each tuple (last iteration's bindings win)
     for (i, &(name_span, ty_id)) in config.bindings.iter().enumerate() {
         let declared = resolve_type_annotation(ast, ty_id)?;
-        let actual = type_of(ast, elems[i], scope)?;
+        let actual = type_of(ast, elems[i], scope, modules)?;
         if !actual.is_compatible(declared) {
             return Err(mismatch(declared, actual, name_span));
         }
