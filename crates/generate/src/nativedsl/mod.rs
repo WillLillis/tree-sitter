@@ -25,7 +25,7 @@ pub mod typecheck;
 // Re-export errors and inner types for downstream consumers
 pub use diagnostic::NativeDslError;
 pub use lexer::{LexError, LexErrorKind};
-pub use lower::{DisallowedItemKind, LowerError, LowerErrorKind};
+pub use lower::{DisallowedItemKind, LowerError, LowerErrorKind, LowerResult};
 pub use parser::{ParseError, ParseErrorKind};
 pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
 
