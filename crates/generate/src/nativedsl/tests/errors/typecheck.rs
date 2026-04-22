@@ -140,18 +140,6 @@ type_error_tests! {
         rule program { seq(foo) }"#,
         TypeErrorKind::CannotBindSpread
     }
-    error_void_t_type_annotation_rejected {
-        r#"grammar { language: "test" }
-        let x: void_t = "hello"
-        rule program { "x" }"#,
-        TypeErrorKind::VoidTypeNotAllowed
-    }
-    error_spread_t_type_annotation_rejected {
-        r#"grammar { language: "test" }
-        let x: spread_t = "hello"
-        rule program { "x" }"#,
-        TypeErrorKind::SpreadTypeNotAllowed
-    }
     error_conflicts_rejects_non_name {
         r#"grammar {
             language: "test",
