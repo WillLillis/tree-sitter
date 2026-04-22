@@ -55,6 +55,15 @@ fn object_str_first_then_rule_coerces() {
     "#);
 }
 
+#[test]
+fn obj_str_compatible_with_obj_rule_annotation() {
+    dsl(r#"
+        grammar { language: "test" }
+        let o: obj_t<rule_t> = { a: "x", b: "y" }
+        rule program { o.a }
+    "#);
+}
+
 // ===== Integer and nested list types =====
 
 #[test]
@@ -147,6 +156,15 @@ fn obj_t_list_rule_annotation() {
         rule program { choice(for (r: rule_t) in o.items { r }) }
         rule a { "a" }
         rule b { "b" }
+    "#);
+}
+
+#[test]
+fn obj_t_str_annotation() {
+    dsl(r#"
+        grammar { language: "test" }
+        let aliases: obj_t<str_t> = { open: "<", close: ">" }
+        rule program { seq(aliases.open, aliases.close) }
     "#);
 }
 
