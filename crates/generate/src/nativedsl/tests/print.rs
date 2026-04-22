@@ -25,7 +25,7 @@ fn print_accepts_rule_ref() {
 fn print_accepts_list() {
     dsl(r#"
         grammar { language: "test" }
-        let extras: list_rule_t = [regexp(r"\s"), comment]
+        let extras: list_t<rule_t> = [regexp(r"\s"), comment]
         print(extras)
         rule program { "x" }
         rule comment { "//" }

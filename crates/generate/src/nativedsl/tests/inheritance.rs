@@ -62,7 +62,7 @@ fn inherit_config_append_extras() {
 #[test]
 fn config_expr_let_binding() {
     let g = dsl(r#"
-        let my_extras: list_rule_t = [regexp(r"\s"), comment]
+        let my_extras: list_t<rule_t> = [regexp(r"\s"), comment]
         grammar {
             language: "test",
             extras: my_extras,
@@ -317,9 +317,9 @@ fn inherit_from_json() {
 fn append_concatenates_lists() {
     let g = dsl(r#"
         grammar { language: "test" }
-        let a: list_str_t = ["x", "y"]
-        let b: list_str_t = ["z"]
-        let c: list_str_t = append(a, b)
+        let a: list_t<str_t> = ["x", "y"]
+        let b: list_t<str_t> = ["z"]
+        let c: list_t<str_t> = append(a, b)
         rule program { choice(for (s: str_t) in c { s }) }
     "#);
     assert_eq!(
