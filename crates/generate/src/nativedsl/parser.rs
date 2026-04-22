@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use std::path::Path;
 
+use super::typecheck::Ty;
 use super::{
     Note, NoteMessage,
     ast::{Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, Span},
@@ -361,20 +362,28 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         Ok(self.ast.push(Node::Fn(fn_idx), start.merge(end)))
     }
 
-    fn parse_type(&mut self) -> ParseResult<NodeId> {
+    fn parse_type(&mut self) -> ParseResult<Ty> {
         if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ast.text(id_span) {
-                "rule_t" => Ok(self.ast.push(Node::TypeRule, id_span)),
-                "str_t" => Ok(self.ast.push(Node::TypeStr, id_span)),
-                "int_t" => Ok(self.ast.push(Node::TypeInt, id_span)),
-                "list_rule_t" => Ok(self.ast.push(Node::TypeListRule, id_span)),
-                "list_str_t" => Ok(self.ast.push(Node::TypeListStr, id_span)),
-                "list_int_t" => Ok(self.ast.push(Node::TypeListInt, id_span)),
-                "list_list_rule_t" => Ok(self.ast.push(Node::TypeListListRule, id_span)),
-                "list_list_str_t" => Ok(self.ast.push(Node::TypeListListStr, id_span)),
-                "list_list_int_t" => Ok(self.ast.push(Node::TypeListListInt, id_span)),
-                "void_t" => Ok(self.ast.push(Node::TypeVoid, id_span)),
-                "spread_t" => Ok(self.ast.push(Node::TypeSpread, id_span)),
+                "rule_t" => Ok(Ty::Rule),
+                "str_t" => Ok(Ty::Str),
+                "int_t" => Ok(Ty::Int),
+                "list_rule_t" => Ok(Ty::ListRule),
+                "list_str_t" => Ok(Ty::ListStr),
+                "list_int_t" => Ok(Ty::ListInt),
+                "list_list_rule_t" => Ok(Ty::ListListRule),
+                "list_list_str_t" => Ok(Ty::ListListStr),
+                "list_list_int_t" => Ok(Ty::ListListInt),
+                "void_t" => Err(ParseError {
+                    kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
+                    span: id_span,
+                    note: None,
+                }),
+                "spread_t" => Err(ParseError {
+                    kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
+                    span: id_span,
+                    note: None,
+                }),
                 _ => Err(ParseError {
                     kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
                     span: id_span,
@@ -898,6 +907,7 @@ pub enum ParseErrorKind {
     ExpectedType,
     ExpectedItem,
     UnknownType(String),
+    InternalTypeNotAllowed(Ty),
     UnknownGrammarField(String),
     DuplicateGrammarField(String),
     DuplicateObjectKey(String),
@@ -929,6 +939,12 @@ impl std::fmt::Display for ParseError {
                 write!(f, "expected 'grammar', 'rule', 'let', 'fn', or 'print'")
             }
             ParseErrorKind::UnknownType(n) => write!(f, "unknown type '{n}'"),
+            ParseErrorKind::InternalTypeNotAllowed(ty) => {
+                write!(
+                    f,
+                    "{ty} is an internal type and cannot be used as a type annotation"
+                )
+            }
             ParseErrorKind::UnknownGrammarField(n) => write!(f, "unknown grammar field '{n}'"),
             ParseErrorKind::DuplicateGrammarField(n) => {
                 write!(f, "duplicate grammar field '{n}'")

@@ -8,6 +8,8 @@ use std::{fmt, num::NonZeroU32};
 
 use serde::Serialize;
 
+use super::typecheck::Ty;
+
 #[derive(Clone, Copy)]
 pub struct CapacityError;
 
@@ -388,7 +390,7 @@ pub enum Node {
     },
     Let {
         name: NodeId,
-        ty: Option<NodeId>,
+        ty: Option<Ty>,
         value: NodeId,
     },
     Fn(FnId),
@@ -485,21 +487,6 @@ pub enum Node {
     /// `Ty::Void` from typecheck - only valid as a top-level item, never
     /// inside an expression that expects a value.
     Print(NodeId),
-    TypeRule,
-    TypeStr,
-    TypeInt,
-    TypeListRule,
-    TypeListStr,
-    TypeListInt,
-    TypeListListRule,
-    TypeListListStr,
-    TypeListListInt,
-    /// `void_t` annotation. Parseable so users get a clear error message
-    /// instead of "unknown type"; always rejected by `resolve_type_annotation`.
-    TypeVoid,
-    /// `spread_t` annotation. Like `TypeVoid`, parseable but always rejected -
-    /// `Ty::Spread` is an internal type produced only by for-loop expansions.
-    TypeSpread,
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
     #[doc(hidden)]
     Unreachable,
@@ -539,19 +526,19 @@ pub struct GrammarConfig {
 pub struct FnConfig {
     pub name: NodeId,
     pub params: Vec<Param>,
-    pub return_ty: NodeId,
+    pub return_ty: Ty,
     pub body: NodeId,
 }
 
 #[derive(Clone)]
 pub struct Param {
     pub name: NodeId,
-    pub ty: NodeId,
+    pub ty: Ty,
 }
 
 #[derive(Clone)]
 pub struct ForConfig {
-    pub bindings: Vec<(Span, NodeId)>,
+    pub bindings: Vec<(Span, Ty)>,
     pub iterable: NodeId,
     pub body: NodeId,
 }
