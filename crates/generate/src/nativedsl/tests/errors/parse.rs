@@ -38,6 +38,18 @@ parse_error_tests! {
         r#"grammar { language: "test" } let x: spread_t = "y" rule program { "x" }"#,
         ParseErrorKind::InternalTypeNotAllowed(Ty::Spread)
     }
+    error_list_of_module_rejected {
+        r#"grammar { language: "test" } let x: list_t<module_t> = [] rule program { "x" }"#,
+        ParseErrorKind::ListInnerType(Ty::AnyModule)
+    }
+    error_obj_of_module_rejected {
+        r#"grammar { language: "test" } let x: obj_t<module_t> = { a: 1 } rule program { "x" }"#,
+        ParseErrorKind::ObjectInnerType(Ty::AnyModule)
+    }
+    error_list_triple_nesting_rejected {
+        r#"grammar { language: "test" } let x: list_t<list_t<list_t<rule_t>>> = [] rule program { "x" }"#,
+        ParseErrorKind::ListInnerType(Ty::ListListRule)
+    }
     error_missing_return_type {
         r#"grammar { language: "test" } fn f(x: rule_t) { x } rule program { "x" }"#,
         ParseErrorKind::MissingReturnType

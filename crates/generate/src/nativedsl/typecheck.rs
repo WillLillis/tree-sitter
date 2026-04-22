@@ -95,6 +95,9 @@ pub enum Ty {
     /// Result of `inherit(...)` or `import(...)`: a loaded module namespace.
     /// Members accessed via `::`. The `u8` indexes into the module list.
     Module(u8),
+    /// User-facing module type annotation (`module_t`). Matches any
+    /// concrete `Module(idx)` via `is_compatible`.
+    AnyModule,
     /// Result of `grammar_config(module)`: the grammar config of a module.
     /// Field access (`.extras`, `.word`, etc.) returns per-field types.
     GrammarConfig,
@@ -130,6 +133,7 @@ impl Ty {
             || (self == Self::Str && expected == Self::Rule)
             || (self == Self::ListStr && expected == Self::ListRule)
             || (self == Self::ListListStr && expected == Self::ListListRule)
+            || (matches!(self, Self::Module(_)) && expected == Self::AnyModule)
     }
 }
 
@@ -145,7 +149,7 @@ impl std::fmt::Display for Ty {
             Self::ListListRule => f.write_str("list_t<list_t<rule_t>>"),
             Self::ListListStr => f.write_str("list_t<list_t<str_t>>"),
             Self::ListListInt => f.write_str("list_t<list_t<int_t>>"),
-            Self::Module(_) => f.write_str("module_t"),
+            Self::Module(_) | Self::AnyModule => f.write_str("module_t"),
             Self::GrammarConfig => f.write_str("grammar_config_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Void => f.write_str("void_t"),
