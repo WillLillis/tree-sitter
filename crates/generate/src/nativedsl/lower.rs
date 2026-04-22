@@ -225,7 +225,7 @@ pub fn lower_with_base(
     grammar_path: &Path,
     modules: &[super::Module],
     root_global_id: u8,
-) -> Result<InputGrammar, LowerError> {
+) -> LowerResult<InputGrammar> {
     let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
     let result = evaluate(ast, grammar_path, modules, base_grammar, root_global_id)?;
     build_grammar(result, base_grammar)
@@ -238,7 +238,7 @@ fn evaluate(
     modules: &[super::Module],
     base_grammar: Option<&InputGrammar>,
     root_global_id: u8,
-) -> Result<EvalResult, LowerError> {
+) -> LowerResult<EvalResult> {
     let (module_infos, module_fns) = build_module_table(ast, grammar_path, base_grammar, modules);
     let n = module_infos.len();
     let mut eval = Evaluator {
@@ -332,10 +332,7 @@ fn evaluate(
 
 /// Assemble evaluated results into an `InputGrammar`, optionally merging
 /// with an inherited base grammar.
-fn build_grammar(
-    result: EvalResult,
-    base: Option<&InputGrammar>,
-) -> Result<InputGrammar, LowerError> {
+fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult<InputGrammar> {
     // Start with inherited rules (cloned), apply overrides, then append new rules.
     let mut variables = if let Some(base) = base {
         let name_index: FxHashMap<&str, usize> = base
@@ -374,33 +371,26 @@ fn build_grammar(
     }
 
     // Derived values override base; only clone base fields that aren't overridden.
+    fn inherit<T: Clone>(
+        overridden: Option<Vec<T>>,
+        base: Option<&InputGrammar>,
+        field: fn(&InputGrammar) -> &Vec<T>,
+    ) -> Vec<T> {
+        overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).clone()))
+    }
     Ok(InputGrammar {
         name: result.language,
         variables,
-        extra_symbols: result
-            .extras
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.extra_symbols.clone())),
-        expected_conflicts: result
-            .conflicts
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.expected_conflicts.clone())),
-        precedence_orderings: result
-            .precedences
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.precedence_orderings.clone())),
-        external_tokens: result
-            .externals
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.external_tokens.clone())),
-        variables_to_inline: result
-            .inline
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.variables_to_inline.clone())),
-        supertype_symbols: result
-            .supertypes
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.supertype_symbols.clone())),
+        extra_symbols: inherit(result.extras, base, |b| &b.extra_symbols),
+        expected_conflicts: inherit(result.conflicts, base, |b| &b.expected_conflicts),
+        precedence_orderings: inherit(result.precedences, base, |b| &b.precedence_orderings),
+        external_tokens: inherit(result.externals, base, |b| &b.external_tokens),
+        variables_to_inline: inherit(result.inline, base, |b| &b.variables_to_inline),
+        supertype_symbols: inherit(result.supertypes, base, |b| &b.supertype_symbols),
         word_token: result
             .word
             .or_else(|| base.and_then(|b| b.word_token.clone())),
-        reserved_words: result
-            .reserved
-            .unwrap_or_else(|| base.map_or_else(Vec::new, |b| b.reserved_words.clone())),
+        reserved_words: inherit(result.reserved, base, |b| &b.reserved_words),
     })
 }
 
@@ -416,7 +406,12 @@ impl<'ast> Evaluator<'ast> {
     }
 
     #[inline]
-    const fn module_idx(&self, global_id: u8) -> usize {
+    fn module_idx(&self, global_id: u8) -> usize {
+        debug_assert!(
+            global_id as usize >= self.base_id,
+            "global_id {global_id} is below base_id {}",
+            self.base_id
+        );
         global_id as usize - self.base_id
     }
 
@@ -527,7 +522,7 @@ impl<'ast> Evaluator<'ast> {
         self.rule_children.len() as u32
     }
 
-    fn children_range(&self, start: u32, span: Span) -> Result<(u32, u16), LowerError> {
+    fn children_range(&self, start: u32, span: Span) -> LowerResult<(u32, u16)> {
         let count = self.rule_children.len() as u32 - start;
         u16::try_from(count)
             .map(|len| (start, len))
@@ -622,46 +617,36 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn eval_rule_list(&mut self, id: NodeId) -> Result<Vec<Rule>, LowerError> {
+    fn eval_rule_list(&mut self, id: NodeId) -> LowerResult<Vec<Rule>> {
         let vid = self.eval_expr(id)?;
         let items = self.list_items(Self::expect_list(vid));
         Ok(items.iter().map(|&v| self.value_to_owned_rule(v)).collect())
     }
 
-    fn eval_name_list(&mut self, id: NodeId) -> Result<Vec<String>, LowerError> {
+    fn rule_name_string(&self, v: ValueId) -> String {
+        let rid = self.rule_id(Self::expect_rule(v));
+        let ARule::NamedSymbol(sid) = self.get_rule(rid) else {
+            unreachable!("expect_name_ref guarantees NamedSymbol")
+        };
+        self.strings.to_string(*sid)
+    }
+
+    fn eval_name_list(&mut self, id: NodeId) -> LowerResult<Vec<String>> {
         let vid = self.eval_expr(id)?;
         let items = self.list_items(Self::expect_list(vid));
-        items
-            .iter()
-            .map(|&v| {
-                let rid = self.rule_id(Self::expect_rule(v));
-                match self.get_rule(rid) {
-                    ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-                    _ => unreachable!("expect_name_ref guarantees NamedSymbol"),
-                }
-            })
-            .collect()
+        Ok(items.iter().map(|&v| self.rule_name_string(v)).collect())
     }
 
     /// Evaluate a `conflicts` expression into `Vec<Vec<String>>`. Each inner
     /// element must evaluate to a named rule reference.
-    fn eval_conflicts(&mut self, id: NodeId) -> Result<Vec<Vec<String>>, LowerError> {
+    fn eval_conflicts(&mut self, id: NodeId) -> LowerResult<Vec<Vec<String>>> {
         let vid = self.eval_expr(id)?;
         let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
             .map(|&group_vid| {
                 let inner = self.list_items(Self::expect_list(group_vid));
-                inner
-                    .iter()
-                    .map(|&v| {
-                        let rid = self.rule_id(Self::expect_rule(v));
-                        match self.get_rule(rid) {
-                            ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
-                            _ => unreachable!("expect_name_ref guarantees NamedSymbol"),
-                        }
-                    })
-                    .collect()
+                Ok(inner.iter().map(|&v| self.rule_name_string(v)).collect())
             })
             .collect()
     }
@@ -669,7 +654,7 @@ impl<'ast> Evaluator<'ast> {
     /// Evaluate a `precedences` expression into `Vec<Vec<PrecedenceEntry>>`.
     /// Each inner element is either a string literal (`PrecedenceEntry::Name`)
     /// or a named rule reference (`PrecedenceEntry::Symbol`).
-    fn eval_precedences(&mut self, id: NodeId) -> Result<Vec<Vec<PrecedenceEntry>>, LowerError> {
+    fn eval_precedences(&mut self, id: NodeId) -> LowerResult<Vec<Vec<PrecedenceEntry>>> {
         let vid = self.eval_expr(id)?;
         let outer = self.list_items(Self::expect_list(vid));
         outer
@@ -680,12 +665,7 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|&v| match *self.get_val(v) {
                         Value::Str(sid) => Ok(PrecedenceEntry::Name(self.strings.to_string(sid))),
-                        Value::Rule(rid) => match self.get_rule(rid) {
-                            ARule::NamedSymbol(sid) => {
-                                Ok(PrecedenceEntry::Symbol(self.strings.to_string(*sid)))
-                            }
-                            _ => unreachable!(),
-                        },
+                        Value::Rule(_) => Ok(PrecedenceEntry::Symbol(self.rule_name_string(v))),
                         _ => unreachable!(),
                     })
                     .collect()
@@ -693,7 +673,7 @@ impl<'ast> Evaluator<'ast> {
             .collect()
     }
 
-    fn eval_rule_name(&mut self, id: NodeId) -> Result<String, LowerError> {
+    fn eval_rule_name(&mut self, id: NodeId) -> LowerResult<String> {
         let rid = self.lower_to_rule(id)?;
         match self.get_rule(rid) {
             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
@@ -711,7 +691,7 @@ impl<'ast> Evaluator<'ast> {
     /// Evaluate the `reserved` config expression into `Vec<ReservedWordContext<Rule>>`.
     /// Accepts either an object literal `{ name: [words] }` or an expression
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
-    fn eval_reserved(&mut self, id: NodeId) -> Result<Vec<ReservedWordContext<Rule>>, LowerError> {
+    fn eval_reserved(&mut self, id: NodeId) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
         let ast = self.ast();
         // Object literal: each field is a named word set
         if let Node::Object(range) = ast.node(id) {
@@ -754,11 +734,7 @@ impl<'ast> Evaluator<'ast> {
 
     /// Import a config field from the base grammar as a DSL value.
     /// Returns an error if the field name is not a known config field.
-    fn import_config_field_or_err(
-        &mut self,
-        field: &str,
-        span: Span,
-    ) -> Result<ValueId, LowerError> {
+    fn import_config_field_or_err(&mut self, field: &str, span: Span) -> LowerResult<ValueId> {
         let grammar = self.modules[self.current_module].base_grammar.unwrap();
         match field {
             "extras" => Ok(self.import_rules_as_list(&grammar.extra_symbols)),
@@ -871,9 +847,14 @@ impl<'ast> Evaluator<'ast> {
             Rule::Choice(members) | Rule::Seq(members) => {
                 let is_seq = matches!(rule, Rule::Seq(_));
                 let imported: Vec<RuleId> = members.iter().map(|m| self.import_rule(m)).collect();
-                let start = self.rule_children.len() as u32;
+                let start = self.children_start();
                 self.rule_children.extend_from_slice(&imported);
-                let len = imported.len() as u16;
+                let count = self.rule_children.len() as u32 - start;
+                debug_assert!(
+                    u16::try_from(count).is_ok(),
+                    "inherited rule has too many children"
+                );
+                let len = count as u16;
                 if is_seq {
                     self.alloc_rule(ARule::Seq(start, len))
                 } else {
@@ -945,7 +926,7 @@ impl<'ast> Evaluator<'ast> {
 }
 
 impl<'ast> Evaluator<'ast> {
-    fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
+    fn eval_expr(&mut self, id: NodeId) -> LowerResult<ValueId> {
         let ast = self.ast();
         let span = ast.span(id);
         match ast.node(id) {
@@ -1115,7 +1096,7 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
+    fn lower_to_rule(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let ast = self.ast();
         match ast.node(id) {
             Node::RuleRef => {
@@ -1164,12 +1145,16 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
+    fn eval_combinator(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let ast = self.ast();
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
                 let is_seq = matches!(ast.node(id), Node::Seq(_));
                 let children = ast.child_slice(*range);
+                // Collect into a temporary Vec before pushing to rule_children.
+                // We can't push directly because nested combinators (e.g.
+                // seq inside choice) also push their children to rule_children
+                // during lower_to_rule. The parent's children must go after.
                 let mut child_ids = Vec::with_capacity(children.len());
                 for &member in children {
                     if let Node::For(idx) = ast.node(member) {
@@ -1250,23 +1235,19 @@ impl<'ast> Evaluator<'ast> {
                 let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
             }
-            Node::Prec { value, content } => {
+            Node::Prec { value, content }
+            | Node::PrecLeft { value, content }
+            | Node::PrecRight { value, content } => {
+                let node = ast.node(id);
                 let vid = self.eval_expr(*value)?;
                 let prec = self.value_to_prec(vid);
                 let inner = self.lower_to_rule(*content)?;
-                Ok(self.alloc_rule(ARule::Prec(prec, inner)))
-            }
-            Node::PrecLeft { value, content } => {
-                let vid = self.eval_expr(*value)?;
-                let prec = self.value_to_prec(vid);
-                let inner = self.lower_to_rule(*content)?;
-                Ok(self.alloc_rule(ARule::PrecLeft(prec, inner)))
-            }
-            Node::PrecRight { value, content } => {
-                let vid = self.eval_expr(*value)?;
-                let prec = self.value_to_prec(vid);
-                let inner = self.lower_to_rule(*content)?;
-                Ok(self.alloc_rule(ARule::PrecRight(prec, inner)))
+                let ctor = match node {
+                    Node::Prec { .. } => ARule::Prec,
+                    Node::PrecLeft { .. } => ARule::PrecLeft,
+                    _ => ARule::PrecRight,
+                };
+                Ok(self.alloc_rule(ctor(prec, inner)))
             }
             Node::PrecDynamic { value, content } => {
                 let vid = self.eval_expr(*value)?;
@@ -1284,7 +1265,7 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn push_call(&mut self, name: &'ast str, span: Span) -> Result<(), LowerError> {
+    fn push_call(&mut self, name: &'ast str, span: Span) -> LowerResult<()> {
         self.call_stack.push((name, span));
         if self.call_stack.len() > MAX_CALL_DEPTH as usize {
             let trace = self
@@ -1305,7 +1286,7 @@ impl<'ast> Evaluator<'ast> {
         name: &'ast str,
         arg_vals: &[ValueId],
         call_span: Span,
-    ) -> Result<ValueId, LowerError> {
+    ) -> LowerResult<ValueId> {
         self.push_call(name, call_span)?;
         // Guarded by super::typecheck::check_call_args - validates function exists
         let &fn_id = self.module_fns[self.current_module].get(name).unwrap();
@@ -1323,7 +1304,7 @@ impl<'ast> Evaluator<'ast> {
     }
 
     /// Lazily evaluate an imported module's top-level let bindings.
-    fn eval_import_module(&mut self, table_id: usize) -> Result<(), LowerError> {
+    fn eval_import_module(&mut self, table_id: usize) -> LowerResult<()> {
         if self.module_values[table_id].is_some() {
             return Ok(());
         }
@@ -1342,7 +1323,7 @@ impl<'ast> Evaluator<'ast> {
     }
 
     /// Evaluate top-level let bindings in the current module context.
-    fn eval_let_bindings(&mut self) -> Result<FxHashMap<&'ast str, ValueId>, LowerError> {
+    fn eval_let_bindings(&mut self) -> LowerResult<FxHashMap<&'ast str, ValueId>> {
         let n = self.ast().root_items.len();
         self.push_scope();
         let mut values = FxHashMap::default();
@@ -1367,7 +1348,7 @@ impl<'ast> Evaluator<'ast> {
         fn_name: &'ast str,
         arg_vals: &[ValueId],
         call_span: Span,
-    ) -> Result<ValueId, LowerError> {
+    ) -> LowerResult<ValueId> {
         let import_ast = self.modules[table_id].ast;
         let fn_node_id = self.module_fns[table_id][fn_name];
         let fn_idx = match import_ast.node(fn_node_id) {
@@ -1376,6 +1357,8 @@ impl<'ast> Evaluator<'ast> {
         };
         let body = import_ast.get_fn(fn_idx).body;
         let n_params = import_ast.get_fn(fn_idx).params.len();
+
+        self.push_call(fn_name, call_span)?;
 
         let saved_module = self.current_module;
         let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
@@ -1393,7 +1376,6 @@ impl<'ast> Evaluator<'ast> {
             self.scopes.insert(param_name, arg_vals[i]);
         }
 
-        self.push_call(fn_name, call_span)?;
         let result = self.eval_expr(body);
         self.call_stack.pop();
         self.pop_scope();
@@ -1403,7 +1385,7 @@ impl<'ast> Evaluator<'ast> {
         result
     }
 
-    fn eval_for_to_rules(&mut self, config: &ForConfig) -> Result<Vec<RuleId>, LowerError> {
+    fn eval_for_to_rules(&mut self, config: &ForConfig) -> LowerResult<Vec<RuleId>> {
         let iter_vid = self.eval_expr(config.iterable)?;
         let n_items = self.list_items(Self::expect_list(iter_vid)).len();
         let mut results = Vec::with_capacity(n_items);
@@ -1662,6 +1644,8 @@ fn unescape_string(raw: &str) -> String {
     }
     result
 }
+
+pub type LowerResult<T> = Result<T, LowerError>;
 
 #[derive(Debug, Serialize, Error)]
 pub struct LowerError {
