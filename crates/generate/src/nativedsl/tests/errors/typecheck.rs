@@ -30,7 +30,7 @@ type_error_tests! {
     error_append_non_list {
         r#"grammar { language: "test" }
         let a: str_t = "x"
-        let b: list_str_t = ["y"]
+        let b: list_t<str_t> = ["y"]
         let c = append(a, b)
         rule program { "x" }"#,
         TypeErrorKind::AppendRequiresList(Ty::Str)
@@ -150,13 +150,13 @@ type_error_tests! {
     }
     error_int_literal_assigned_to_list_rule {
         r#"grammar { language: "test" }
-        let x: list_rule_t = [1, 2]
+        let x: list_t<rule_t> = [1, 2]
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::ListRule, got: Ty::ListInt }
     }
     error_flat_list_assigned_to_list_list_rule {
         r#"grammar { language: "test" }
-        let x: list_list_rule_t = [a, b]
+        let x: list_t<list_t<rule_t>> = [a, b]
         rule program { "x" }
         rule a { "a" }
         rule b { "b" }"#,
@@ -164,20 +164,21 @@ type_error_tests! {
     }
     error_for_bindings_not_tuple {
         r#"grammar { language: "test" }
-        let items: list_rule_t = [identifier]
+        let items: list_t<rule_t> = [identifier]
         rule identifier { regexp("[a-z]+") }
         rule program { seq(for (a: rule_t, b: rule_t) in items { a }) }"#,
         TypeErrorKind::ForRequiresTuples
     }
     error_invalid_object_value {
         r#"grammar { language: "test" }
-        let x = { a: [1, 2] }
+        let inner = { a: 1 }
+        let x = { nested: inner }
         rule program { "x" }"#,
-        TypeErrorKind::InvalidObjectValue(Ty::ListInt)
+        TypeErrorKind::InvalidObjectValue(Ty::Object(InnerTy::Int))
     }
     error_invalid_list_element {
         r#"grammar { language: "test" }
-        let inner: list_list_rule_t = [[a]]
+        let inner: list_t<list_t<rule_t>> = [[a]]
         let x = [inner]
         rule program { "x" }
         rule a { "a" }"#,
@@ -191,7 +192,7 @@ type_error_tests! {
     }
     error_for_requires_tuples {
         r#"grammar { language: "test" }
-        let items: list_str_t = ["a", "b"]
+        let items: list_t<str_t> = ["a", "b"]
         rule program { choice(for (a: str_t, b: str_t) in items { a }) }"#,
         TypeErrorKind::ForRequiresTuples
     }

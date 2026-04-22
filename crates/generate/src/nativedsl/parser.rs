@@ -9,6 +9,8 @@ use thiserror::Error;
 
 use std::path::Path;
 
+use crate::nativedsl::InnerTy;
+
 use super::typecheck::Ty;
 use super::{
     Note, NoteMessage,
@@ -368,12 +370,80 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 "rule_t" => Ok(Ty::Rule),
                 "str_t" => Ok(Ty::Str),
                 "int_t" => Ok(Ty::Int),
-                "list_rule_t" => Ok(Ty::ListRule),
-                "list_str_t" => Ok(Ty::ListStr),
-                "list_int_t" => Ok(Ty::ListInt),
-                "list_list_rule_t" => Ok(Ty::ListListRule),
-                "list_list_str_t" => Ok(Ty::ListListStr),
-                "list_list_int_t" => Ok(Ty::ListListInt),
+                "module_t" => todo!(),
+                "list_t" => {
+                    self.expect(TokenKind::Lt)?;
+                    let inner_ty = self.parse_type()?;
+                    let ty = match inner_ty {
+                        Ty::Rule => Ok(Ty::ListRule),
+                        Ty::Str => Ok(Ty::ListStr),
+                        Ty::Int => Ok(Ty::ListInt),
+                        Ty::ListRule => Ok(Ty::ListListRule),
+                        Ty::ListStr => Ok(Ty::ListListStr),
+                        Ty::ListInt => Ok(Ty::ListListInt),
+                        // Prevent arbitrary nesting
+                        Ty::ListListRule
+                        | Ty::ListListStr
+                        | Ty::ListListInt
+                        | Ty::Object(_)
+                        // It doesn't make sense to have more than one of this type
+                        | Ty::GrammarConfig => Err(ParseError {
+                            kind: ParseErrorKind::ListInnerType(inner_ty),
+                            span: id_span,
+                            note: None,
+                        }),
+                        Ty::Module(_) => todo!(), // need to address this
+                        Ty::Spread => Err(ParseError {
+                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
+                            span: id_span,
+                            note: None,
+                        }),
+                        Ty::Void => Err(ParseError {
+                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
+                            span: id_span,
+                            note: None,
+                        }),
+                    };
+                    self.expect(TokenKind::Gt)?;
+                    Ok(ty?)
+                }
+                "obj_t" => {
+                    self.expect(TokenKind::Lt)?;
+                    let inner_ty = self.parse_type()?;
+                    let ty = match inner_ty {
+                        Ty::Rule => Ok(Ty::Object(InnerTy::Rule)),
+                        Ty::Str => Ok(Ty::Object(InnerTy::Str)),
+                        Ty::Int => Ok(Ty::Object(InnerTy::Int)),
+                        Ty::ListRule => Ok(Ty::Object(InnerTy::ListRule)),
+                        Ty::ListStr => Ok(Ty::Object(InnerTy::ListStr)),
+                        Ty::ListInt => Ok(Ty::Object(InnerTy::ListInt)),
+                        Ty::ListListRule => Ok(Ty::Object(InnerTy::ListListRule)),
+                        Ty::ListListStr => Ok(Ty::Object(InnerTy::ListListStr)),
+                        Ty::ListListInt => Ok(Ty::Object(InnerTy::ListListInt)),
+                        // Prevent arbitrary nesting
+                        Ty::Object(_)
+                        // It doesn't make sense to have more than one of this type
+                        | Ty::GrammarConfig => Err(ParseError {
+                            kind: ParseErrorKind::ObjectInnerType(inner_ty),
+                            span: id_span,
+                            note: None,
+                        }),
+                        Ty::Module(_) => todo!(), // need to address this
+                        Ty::Spread => Err(ParseError {
+                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
+                            span: id_span,
+                            note: None,
+                        }),
+                        Ty::Void => Err(ParseError {
+                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
+                            span: id_span,
+                            note: None,
+                        }),
+                    };
+                    self.expect(TokenKind::Gt)?;
+                    Ok(ty?)
+                }
+                "grammar_config_t" => Ok(Ty::GrammarConfig),
                 "void_t" => Err(ParseError {
                     kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
                     span: id_span,
@@ -908,6 +978,8 @@ pub enum ParseErrorKind {
     ExpectedItem,
     UnknownType(String),
     InternalTypeNotAllowed(Ty),
+    ListInnerType(Ty),
+    ObjectInnerType(Ty),
     UnknownGrammarField(String),
     DuplicateGrammarField(String),
     DuplicateObjectKey(String),
@@ -939,6 +1011,12 @@ impl std::fmt::Display for ParseError {
                 write!(f, "expected 'grammar', 'rule', 'let', 'fn', or 'print'")
             }
             ParseErrorKind::UnknownType(n) => write!(f, "unknown type '{n}'"),
+            ParseErrorKind::ListInnerType(ty) => {
+                write!(f, "{ty} cannot be stored inside a list")
+            }
+            ParseErrorKind::ObjectInnerType(ty) => {
+                write!(f, "{ty} cannot be stored inside an object")
+            }
             ParseErrorKind::InternalTypeNotAllowed(ty) => {
                 write!(
                     f,
