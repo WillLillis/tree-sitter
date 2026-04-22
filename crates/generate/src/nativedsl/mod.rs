@@ -70,9 +70,9 @@ pub fn load_module(
     next_global_id: &mut u8,
 ) -> DslResult<Module> {
     let global_id = *next_global_id;
-    *next_global_id = next_global_id.checked_add(1).ok_or_else(|| {
-        LowerError::new(LowerErrorKind::ModuleTooMany, Span::new(0, 0))
-    })?;
+    *next_global_id = next_global_id
+        .checked_add(1)
+        .ok_or_else(|| LowerError::new(LowerErrorKind::ModuleTooMany, Span::new(0, 0)))?;
 
     if source.len() >= u32::MAX as usize {
         Err(LexError {
@@ -105,8 +105,12 @@ pub fn load_module(
     // Load inherited grammar (Grammar kind only, must happen before typecheck).
     if let Some(inherit_id) = inherit_node {
         let child_gid = load_inherit_child(
-            &ast, inherit_id, module_dir, ancestor_paths,
-            &mut sub_modules, next_global_id,
+            &ast,
+            inherit_id,
+            module_dir,
+            ancestor_paths,
+            &mut sub_modules,
+            next_global_id,
         )?;
         let Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
             unreachable!()
@@ -122,7 +126,13 @@ pub fn load_module(
 
     // Load imports. Import nodes are identified by Node::Import { module: None }
     // which is set by the parser.
-    load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules, next_global_id)?;
+    load_import_children(
+        &mut ast,
+        module_dir,
+        ancestor_paths,
+        &mut sub_modules,
+        next_global_id,
+    )?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
     let mut type_envs: Vec<Option<TypeEnv<'_>>> = (0..*next_global_id).map(|_| None).collect();
@@ -134,7 +144,7 @@ pub fn load_module(
     let _ = typecheck::resolve_and_check(&mut ast, &type_envs, base, path)?;
 
     let lowered = if matches!(kind, ModuleKind::Grammar) {
-        Some(lower::lower_with_base(&ast, path, &sub_modules)?)
+        Some(lower::lower_with_base(&ast, path, &sub_modules, global_id)?)
     } else {
         None
     };
@@ -153,7 +163,13 @@ fn parse_native_dsl_inner(
     grammar_path: &Path,
     ancestor_paths: &[PathBuf],
 ) -> DslResult<InputGrammar> {
-    let module = load_module(input, grammar_path, ModuleKind::Grammar, ancestor_paths, &mut 0)?;
+    let module = load_module(
+        input,
+        grammar_path,
+        ModuleKind::Grammar,
+        ancestor_paths,
+        &mut 0,
+    )?;
     Ok(module
         .lowered
         .expect("Grammar module always has lowered grammar"))
@@ -250,23 +266,21 @@ fn load_child_module(
 
     let ext = canonical.extension().and_then(|e| e.to_str());
     match ext {
-        Some("tsg") => {
-            load_module(&content, &canonical, kind, &child_ancestors, next_global_id)
-                .map_err(|inner| {
-                    ModuleError {
-                        inner: Box::new(inner),
-                        source_text: content,
-                        path: canonical,
-                        reference_span: span,
-                    }
-                    .into()
-                })
-        }
+        Some("tsg") => load_module(&content, &canonical, kind, &child_ancestors, next_global_id)
+            .map_err(|inner| {
+                ModuleError {
+                    inner: Box::new(inner),
+                    source_text: content,
+                    path: canonical,
+                    reference_span: span,
+                }
+                .into()
+            }),
         Some("json") if matches!(kind, ModuleKind::Grammar) => {
             let gid = *next_global_id;
-            *next_global_id = next_global_id.checked_add(1).ok_or_else(|| {
-                LowerError::new(LowerErrorKind::ModuleTooMany, span)
-            })?;
+            *next_global_id = next_global_id
+                .checked_add(1)
+                .ok_or_else(|| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
             let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
                     LowerErrorKind::ModuleJsonError {
@@ -348,8 +362,12 @@ fn load_inherit_child(
     let path_str = ast.node_text(*path);
     let span = ast.span(*path);
     let child_module = load_child_module(
-        path_str, module_dir, span, ancestor_paths,
-        ModuleKind::Grammar, next_global_id,
+        path_str,
+        module_dir,
+        span,
+        ancestor_paths,
+        ModuleKind::Grammar,
+        next_global_id,
     )?;
 
     let gid = child_module.global_id;
@@ -421,7 +439,12 @@ fn load_import_children(
             idx
         } else {
             let child = load_child_module(
-                path_str, module_dir, span, ancestor_paths, kind, next_global_id,
+                path_str,
+                module_dir,
+                span,
+                ancestor_paths,
+                kind,
+                next_global_id,
             )?;
             let idx = child.global_id;
             loaded.insert(canonical, idx);

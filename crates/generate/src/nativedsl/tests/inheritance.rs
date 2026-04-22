@@ -333,11 +333,27 @@ fn append_concatenates_lists() {
 }
 
 #[test]
+fn inherit_from_grammar_that_imports() {
+    // The base grammar itself imports a helper. This exercises the offset-based
+    // module table: the base has global_id > 0 and its import has global_id > 1,
+    // so the base's evaluator must use base_id to offset table indices.
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar_with_import.tsg")
+        grammar { language: "derived", inherits: base }
+        rule extra { "extra" }
+    "#);
+    assert_eq!(g.name, "derived");
+    // Inherited rule from base uses the imported helper function
+    assert!(rule_names(&g).contains(&"program"));
+    assert!(rule_names(&g).contains(&"extra"));
+}
+
+#[test]
 fn import_before_inherit_in_source_order() {
     // Import appears before inherit in source order. The import gets a
     // higher module index (assigned by node position during loading) but
     // is evaluated first. This tests that module eval order doesn't
-    // corrupt the import_evals vec.
+    // corrupt the module values table.
     let g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
         let base = inherit("inherit_base/grammar.tsg")
