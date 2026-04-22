@@ -5,10 +5,10 @@ use super::*;
 #[test]
 fn list_mixed_rule_and_str_coerces_to_list_rule() {
     // String literals are str_t, rule refs are rule_t. A mixed list should
-    // coerce to list_rule_t since str_t is a subtype of rule_t.
+    // coerce to list_t<rule_t> since str_t is a subtype of rule_t.
     let g = dsl(r#"
         grammar { language: "test" }
-        let items: list_rule_t = [program, "literal"]
+        let items: list_t<rule_t> = [program, "literal"]
         rule program { choice(for (r: rule_t) in items { r }) }
     "#);
     assert_eq!(g.variables.len(), 1);
@@ -16,10 +16,10 @@ fn list_mixed_rule_and_str_coerces_to_list_rule() {
 
 #[test]
 fn list_str_first_then_rule_coerces_to_list_rule() {
-    // First element str, second rule - should widen to list_rule_t
+    // First element str, second rule - should widen to list_t<rule_t>
     let g = dsl(r#"
         grammar { language: "test" }
-        let items: list_rule_t = ["literal", program]
+        let items: list_t<rule_t> = ["literal", program]
         rule program { "x" }
     "#);
     assert_eq!(g.variables.len(), 1);
@@ -27,7 +27,7 @@ fn list_str_first_then_rule_coerces_to_list_rule() {
 
 #[test]
 fn extras_mixed_rule_and_str() {
-    // extras is list_rule_t - should accept a mix of rule refs and strings
+    // extras is list_t<rule_t> - should accept a mix of rule refs and strings
     let g = dsl(r#"
         grammar { language: "test", extras: [ws, "\n"] }
         rule program { "x" }
@@ -61,7 +61,7 @@ fn object_str_first_then_rule_coerces() {
 fn list_int_literal_infers_list_int() {
     dsl(r#"
         grammar { language: "test" }
-        let nums: list_int_t = [1, 2, 3]
+        let nums: list_t<int_t> = [1, 2, 3]
         rule program { "x" }
     "#);
 }
@@ -70,7 +70,7 @@ fn list_int_literal_infers_list_int() {
 fn list_list_rule_literal_infers_list_list_rule() {
     dsl(r#"
         grammar { language: "test" }
-        let pairs: list_list_rule_t = [[a, b], [c]]
+        let pairs: list_t<list_t<rule_t>> = [[a, b], [c]]
         rule program { "x" }
         rule a { "a" }
         rule b { "b" }
@@ -82,7 +82,7 @@ fn list_list_rule_literal_infers_list_list_rule() {
 fn list_list_str_subtype_of_list_list_rule() {
     dsl(r#"
         grammar { language: "test" }
-        let groups: list_list_rule_t = [["a", "b"], ["c"]]
+        let groups: list_t<list_t<rule_t>> = [["a", "b"], ["c"]]
         rule program { "x" }
     "#);
 }
@@ -91,7 +91,7 @@ fn list_list_str_subtype_of_list_list_rule() {
 fn list_list_int_literal_infers_list_list_int() {
     dsl(r#"
         grammar { language: "test" }
-        let nested: list_list_int_t = [[1], [2, 3]]
+        let nested: list_t<list_t<int_t>> = [[1], [2, 3]]
         rule program { "x" }
     "#);
 }
@@ -100,8 +100,8 @@ fn list_list_int_literal_infers_list_list_int() {
 fn for_over_list_list_rule_yields_list_rule() {
     dsl(r#"
         grammar { language: "test" }
-        let groups: list_list_rule_t = [[a], [b]]
-        rule program { choice(for (inner: list_rule_t) in groups { seq(for (r: rule_t) in inner { r }) }) }
+        let groups: list_t<list_t<rule_t>> = [[a], [b]]
+        rule program { choice(for (inner: list_t<rule_t>) in groups { seq(for (r: rule_t) in inner { r }) }) }
         rule a { "a" }
         rule b { "b" }
     "#);
