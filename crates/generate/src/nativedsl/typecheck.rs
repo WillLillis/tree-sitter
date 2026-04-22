@@ -34,6 +34,10 @@ pub enum InnerTy {
     Int,
     ListRule,
     ListStr,
+    ListInt,
+    ListListRule,
+    ListListStr,
+    ListListInt,
 }
 
 impl std::fmt::Display for InnerTy {
@@ -50,6 +54,10 @@ impl From<InnerTy> for Ty {
             InnerTy::Int => Self::Int,
             InnerTy::ListRule => Self::ListRule,
             InnerTy::ListStr => Self::ListStr,
+            InnerTy::ListInt => Self::ListInt,
+            InnerTy::ListListRule => Self::ListListRule,
+            InnerTy::ListListStr => Self::ListListStr,
+            InnerTy::ListListInt => Self::ListListInt,
         }
     }
 }
@@ -63,6 +71,10 @@ impl TryFrom<Ty> for InnerTy {
             Ty::Int => Ok(Self::Int),
             Ty::ListRule => Ok(Self::ListRule),
             Ty::ListStr => Ok(Self::ListStr),
+            Ty::ListInt => Ok(Self::ListInt),
+            Ty::ListListRule => Ok(Self::ListListRule),
+            Ty::ListListStr => Ok(Self::ListListStr),
+            Ty::ListListInt => Ok(Self::ListListInt),
             _ => Err(()),
         }
     }
@@ -127,17 +139,17 @@ impl std::fmt::Display for Ty {
             Self::Rule => f.write_str("rule_t"),
             Self::Str => f.write_str("str_t"),
             Self::Int => f.write_str("int_t"),
-            Self::ListRule => f.write_str("list_rule_t"),
-            Self::ListStr => f.write_str("list_str_t"),
-            Self::ListInt => f.write_str("list_int_t"),
-            Self::ListListRule => f.write_str("list_list_rule_t"),
-            Self::ListListStr => f.write_str("list_list_str_t"),
-            Self::ListListInt => f.write_str("list_list_int_t"),
+            Self::ListRule => f.write_str("list_t<rule_t>"),
+            Self::ListStr => f.write_str("list_t<str_t>"),
+            Self::ListInt => f.write_str("list_t<int_t>"),
+            Self::ListListRule => f.write_str("list_t<list_t<rule_t>>"),
+            Self::ListListStr => f.write_str("list_t<list_t<str_t>>"),
+            Self::ListListInt => f.write_str("list_t<list_t<int_t>>"),
             Self::Module(_) => f.write_str("module_t"),
             Self::GrammarConfig => f.write_str("grammar_config_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Void => f.write_str("void_t"),
-            Self::Object(inner) => write!(f, "object<{inner}>"),
+            Self::Object(inner) => write!(f, "obj_t<{inner}>"),
         }
     }
 }
@@ -719,8 +731,6 @@ fn resolve_children_tc(
         _ => Ok(()),
     }
 }
-
-// -- Entry point --
 
 /// Run typechecking and return the type environment.
 ///
