@@ -224,9 +224,10 @@ pub fn lower_with_base(
     ast: &Ast,
     grammar_path: &Path,
     modules: &[super::Module],
+    root_global_id: u8,
 ) -> Result<InputGrammar, LowerError> {
     let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
-    let result = evaluate(ast, grammar_path, modules, base_grammar)?;
+    let result = evaluate(ast, grammar_path, modules, base_grammar, root_global_id)?;
     build_grammar(result, base_grammar)
 }
 
@@ -236,6 +237,7 @@ fn evaluate(
     grammar_path: &Path,
     modules: &[super::Module],
     base_grammar: Option<&InputGrammar>,
+    root_global_id: u8,
 ) -> Result<EvalResult, LowerError> {
     let (module_infos, module_fns) = build_module_table(ast, grammar_path, base_grammar, modules);
     let n = module_infos.len();
@@ -243,7 +245,7 @@ fn evaluate(
         modules: module_infos,
         module_fns,
         module_values: vec![None; n],
-        base_id: 0,
+        base_id: root_global_id as usize,
         current_module: 0,
         scopes: ScopeStack::new(),
         call_stack: Vec::new(),
@@ -403,8 +405,6 @@ fn build_grammar(
 }
 
 impl<'ast> Evaluator<'ast> {
-    // -- Flat module table accessors --
-
     #[inline]
     fn ast(&self) -> &'ast Ast {
         self.modules[self.current_module].ast
@@ -416,7 +416,7 @@ impl<'ast> Evaluator<'ast> {
     }
 
     #[inline]
-    fn module_idx(&self, global_id: u8) -> usize {
+    const fn module_idx(&self, global_id: u8) -> usize {
         global_id as usize - self.base_id
     }
 
@@ -1284,13 +1284,8 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn eval_fn_call(
-        &mut self,
-        name: &'ast str,
-        arg_vals: &[ValueId],
-        call_span: Span,
-    ) -> Result<ValueId, LowerError> {
-        self.call_stack.push((name, call_span));
+    fn push_call(&mut self, name: &'ast str, span: Span) -> Result<(), LowerError> {
+        self.call_stack.push((name, span));
         if self.call_stack.len() > MAX_CALL_DEPTH as usize {
             let trace = self
                 .call_stack
@@ -1299,9 +1294,19 @@ impl<'ast> Evaluator<'ast> {
                 .collect();
             return Err(LowerError::new(
                 LowerErrorKind::CallDepthExceeded(trace),
-                call_span,
+                span,
             ));
         }
+        Ok(())
+    }
+
+    fn eval_fn_call(
+        &mut self,
+        name: &'ast str,
+        arg_vals: &[ValueId],
+        call_span: Span,
+    ) -> Result<ValueId, LowerError> {
+        self.push_call(name, call_span)?;
         // Guarded by super::typecheck::check_call_args - validates function exists
         let &fn_id = self.module_fns[self.current_module].get(name).unwrap();
         let config = self.get_fn_config(fn_id);
@@ -1338,10 +1343,11 @@ impl<'ast> Evaluator<'ast> {
 
     /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> Result<FxHashMap<&'ast str, ValueId>, LowerError> {
-        let items: Vec<NodeId> = self.ast().root_items.clone();
+        let n = self.ast().root_items.len();
         self.push_scope();
         let mut values = FxHashMap::default();
-        for item_id in items {
+        for i in 0..n {
+            let item_id = self.ast().root_items[i];
             if let Node::Let { name, value, .. } = self.ast().node(item_id) {
                 let (name, value) = (*name, *value);
                 let val = self.eval_expr(value)?;
@@ -1368,31 +1374,26 @@ impl<'ast> Evaluator<'ast> {
             Node::Fn(fi) => *fi,
             _ => unreachable!(),
         };
-        let config = import_ast.get_fn(fn_idx);
-        let body = config.body;
-        let params: Vec<NodeId> = config.params.iter().map(|p| p.name).collect();
+        let body = import_ast.get_fn(fn_idx).body;
+        let n_params = import_ast.get_fn(fn_idx).params.len();
 
         let saved_module = self.current_module;
         let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
         self.current_module = table_id;
 
         self.push_scope();
-        // Bind import's let values. Collect first to avoid borrow conflict
-        // between self.module_values and self.scopes.
-        let values: Vec<(&'ast str, ValueId)> = self.module_values[table_id]
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
-        for (name, val) in values {
+        // Bind import's let values. Direct field access allows split borrowing
+        // of self.module_values (immutable) and self.scopes (mutable).
+        for (&name, &val) in self.module_values[table_id].as_ref().unwrap() {
             self.scopes.insert(name, val);
         }
-        for (i, &arg_val) in arg_vals.iter().enumerate() {
-            self.scopes.insert(import_ast.node_text(params[i]), arg_val);
+        #[expect(clippy::needless_range_loop, reason = "i has two uses")]
+        for i in 0..n_params {
+            let param_name = import_ast.node_text(import_ast.get_fn(fn_idx).params[i].name);
+            self.scopes.insert(param_name, arg_vals[i]);
         }
 
-        self.call_stack.push((fn_name, call_span));
+        self.push_call(fn_name, call_span)?;
         let result = self.eval_expr(body);
         self.call_stack.pop();
         self.pop_scope();
