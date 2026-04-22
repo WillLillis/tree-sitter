@@ -42,7 +42,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
-    pub fn parse(mut self) -> Result<Ast, ParseError> {
+    pub fn parse(mut self) -> ParseResult<Ast> {
         self.skip_comments();
         while !self.at_eof() {
             let id = self.parse_item()?;
@@ -128,21 +128,21 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     /// Accept an identifier or a keyword used as an identifier.
     /// Keywords are contextual: `seq(...)` is a builtin call, but `seq` as a
     /// bare name (e.g. a rule reference or binding name) is a valid identifier.
-    fn expect_ident(&mut self) -> Result<Span, ParseError> {
+    fn expect_ident(&mut self) -> ParseResult<Span> {
         self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)
     }
 
-    fn expect_string(&mut self) -> Result<Span, ParseError> {
+    fn expect_string(&mut self) -> ParseResult<Span> {
         self.eat(TokenKind::StringLit)
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedString))
     }
 
     /// Accept a name token (for object keys, config keys, field access members).
-    fn expect_name(&mut self) -> Result<Span, ParseError> {
+    fn expect_name(&mut self) -> ParseResult<Span> {
         self.expect_ident_or_kw(ParseErrorKind::ExpectedName)
     }
 
-    fn expect_ident_or_kw(&mut self, err: ParseErrorKind) -> Result<Span, ParseError> {
+    fn expect_ident_or_kw(&mut self, err: ParseErrorKind) -> ParseResult<Span> {
         let kind = self.tokens[self.pos].kind;
         if kind == TokenKind::Ident || kind.is_keyword() {
             let span = self.span();
@@ -155,11 +155,30 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     #[cold]
     fn error(&self, kind: ParseErrorKind) -> ParseError {
+        Self::error_at(kind, self.span())
+    }
+
+    #[cold]
+    const fn error_at(kind: ParseErrorKind, span: Span) -> ParseError {
         ParseError {
             kind,
-            span: self.span(),
+            span,
             note: None,
         }
+    }
+
+    #[cold]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "matches Note's Option<Box<Note>> field"
+    )]
+    fn first_defined_note(&self, span: Span) -> Option<Box<Note>> {
+        Some(Box::new(Note {
+            message: NoteMessage::FirstDefinedHere,
+            span,
+            path: self.grammar_path.to_path_buf(),
+            source: self.ast.source().to_string(),
+        }))
     }
 
     #[cold]
@@ -231,12 +250,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             Err(ParseError {
                 kind: ParseErrorKind::DuplicateGrammarBlock,
                 span: start,
-                note: Some(Box::new(Note {
-                    message: NoteMessage::FirstDefinedHere,
-                    span: first_span,
-                    path: self.grammar_path.to_path_buf(),
-                    source: self.ast.source().to_string(),
-                })),
+                note: self.first_defined_note(first_span),
             })?;
         }
         self.expect(TokenKind::LBrace)?;
@@ -266,12 +280,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 Err(ParseError {
                     kind: ParseErrorKind::DuplicateGrammarField(key.to_string()),
                     span: key_span,
-                    note: Some(Box::new(Note {
-                        message: NoteMessage::FirstDefinedHere,
-                        span: first_span,
-                        path: self.grammar_path.to_path_buf(),
-                        source: self.ast.source().to_string(),
-                    })),
+                    note: self.first_defined_note(first_span),
                 })?;
             }
             seen[field as usize] = Some(key_span);
@@ -323,7 +332,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let start = self.expect(TokenKind::KwLet)?;
         let name = self.expect_ident_node()?;
         let ty = if self.eat(TokenKind::Colon).is_some() {
-            Some(self.parse_type()?)
+            Some(self.parse_type()?.0)
         } else {
             None
         };
@@ -344,14 +353,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             this.expect(TokenKind::Colon)?;
             Ok(Param {
                 name: pname,
-                ty: this.parse_type()?,
+                ty: this.parse_type()?.0,
             })
         })?;
         self.expect(TokenKind::RParen)?;
         if self.eat(TokenKind::Arrow).is_none() {
             return Err(self.error(ParseErrorKind::MissingReturnType));
         }
-        let return_ty = self.parse_type()?;
+        let return_ty = self.parse_type()?.0;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
@@ -364,16 +373,16 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         Ok(self.ast.push(Node::Fn(fn_idx), start.merge(end)))
     }
 
-    fn parse_type(&mut self) -> ParseResult<Ty> {
+    fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
         if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ast.text(id_span) {
-                "rule_t" => Ok(Ty::Rule),
-                "str_t" => Ok(Ty::Str),
-                "int_t" => Ok(Ty::Int),
-                "module_t" => Ok(Ty::AnyModule),
+                "rule_t" => Ok((Ty::Rule, id_span)),
+                "str_t" => Ok((Ty::Str, id_span)),
+                "int_t" => Ok((Ty::Int, id_span)),
+                "module_t" => Ok((Ty::AnyModule, id_span)),
                 "list_t" => {
                     self.expect(TokenKind::Lt)?;
-                    let inner_ty = self.parse_type()?;
+                    let (inner_ty, inner_span) = self.parse_type()?;
                     let ty = match inner_ty {
                         Ty::Rule => Ok(Ty::ListRule),
                         Ty::Str => Ok(Ty::ListStr),
@@ -381,71 +390,31 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         Ty::ListRule => Ok(Ty::ListListRule),
                         Ty::ListStr => Ok(Ty::ListListStr),
                         Ty::ListInt => Ok(Ty::ListListInt),
-                        // Prevent arbitrary nesting
-                        Ty::ListListRule
-                        | Ty::ListListStr
-                        | Ty::ListListInt
-                        | Ty::Object(_)
-                        // It doesn't make sense to have more than one of this type
-                        | Ty::AnyModule
-                        | Ty::Module(_)
-                        | Ty::GrammarConfig => Err(ParseError {
+                        // All other types (too-deep nesting, objects, modules,
+                        // internal types) are rejected as list elements.
+                        _ => Err(ParseError {
                             kind: ParseErrorKind::ListInnerType(inner_ty),
-                            span: id_span,
-                            note: None,
-                        }),
-                        Ty::Spread => Err(ParseError {
-                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
-                            span: id_span,
-                            note: None,
-                        }),
-                        Ty::Void => Err(ParseError {
-                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
-                            span: id_span,
+                            span: inner_span,
                             note: None,
                         }),
                     };
-                    self.expect(TokenKind::Gt)?;
-                    Ok(ty?)
+                    let gt = self.expect(TokenKind::Gt)?;
+                    Ok((ty?, id_span.merge(gt)))
                 }
                 "obj_t" => {
                     self.expect(TokenKind::Lt)?;
-                    let inner_ty = self.parse_type()?;
-                    let ty = match inner_ty {
-                        Ty::Rule => Ok(Ty::Object(InnerTy::Rule)),
-                        Ty::Str => Ok(Ty::Object(InnerTy::Str)),
-                        Ty::Int => Ok(Ty::Object(InnerTy::Int)),
-                        Ty::ListRule => Ok(Ty::Object(InnerTy::ListRule)),
-                        Ty::ListStr => Ok(Ty::Object(InnerTy::ListStr)),
-                        Ty::ListInt => Ok(Ty::Object(InnerTy::ListInt)),
-                        Ty::ListListRule => Ok(Ty::Object(InnerTy::ListListRule)),
-                        Ty::ListListStr => Ok(Ty::Object(InnerTy::ListListStr)),
-                        Ty::ListListInt => Ok(Ty::Object(InnerTy::ListListInt)),
-                        // Prevent arbitrary nesting
-                        Ty::Object(_)
-                        | Ty::AnyModule
-                        | Ty::Module(_)
-                        // It doesn't make sense to have more than one of this type
-                        | Ty::GrammarConfig => Err(ParseError {
+                    let (inner_ty, inner_span) = self.parse_type()?;
+                    let ty = InnerTy::try_from(inner_ty)
+                        .map(Ty::Object)
+                        .map_err(|()| ParseError {
                             kind: ParseErrorKind::ObjectInnerType(inner_ty),
-                            span: id_span,
+                            span: inner_span,
                             note: None,
-                        }),
-                        Ty::Spread => Err(ParseError {
-                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
-                            span: id_span,
-                            note: None,
-                        }),
-                        Ty::Void => Err(ParseError {
-                            kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
-                            span: id_span,
-                            note: None,
-                        }),
-                    };
-                    self.expect(TokenKind::Gt)?;
-                    Ok(ty?)
+                        });
+                    let gt = self.expect(TokenKind::Gt)?;
+                    Ok((ty?, id_span.merge(gt)))
                 }
-                "grammar_config_t" => Ok(Ty::GrammarConfig),
+                "grammar_config_t" => Ok((Ty::GrammarConfig, id_span)),
                 "void_t" => Err(ParseError {
                     kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
                     span: id_span,
@@ -538,8 +507,18 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwReserved if next_lparen => self.parse_reserved_expr(start),
             TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
-            TokenKind::KwInherit if next_lparen => self.parse_inherit(start),
-            TokenKind::KwImport if next_lparen => self.parse_import(start),
+            TokenKind::KwInherit if next_lparen => {
+                self.parse_module_path(start, TokenKind::KwInherit, |p| Node::Inherit {
+                    path: p,
+                    module: None,
+                })
+            }
+            TokenKind::KwImport if next_lparen => {
+                self.parse_module_path(start, TokenKind::KwImport, |p| Node::Import {
+                    path: p,
+                    module: None,
+                })
+            }
             TokenKind::KwAppend if next_lparen => self.parse_append(start),
             TokenKind::KwPrint if next_lparen => self.parse_print_item(),
             TokenKind::KwGrammarConfig if next_lparen => {
@@ -684,34 +663,22 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             .push(Node::DynRegex { pattern, flags }, start.merge(end)))
     }
 
-    fn parse_import(&mut self, start: Span) -> ParseResult<NodeId> {
+    fn parse_module_path(
+        &mut self,
+        start: Span,
+        kw: TokenKind,
+        make_node: fn(NodeId) -> Node,
+    ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count(TokenKind::KwImport, 1, 0, start));
+            return Err(self.err_arg_count(kw, 1, 0, start));
         }
         let path_span = self.expect_string()?;
         let path = self.ast.push(Node::StringLit, path_span.strip_quotes());
-        self.expect_close_args(TokenKind::KwImport, 1, start)?;
+        self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self
-            .ast
-            .push(Node::Import { path, module: None }, start.merge(end)))
-    }
-
-    fn parse_inherit(&mut self, start: Span) -> ParseResult<NodeId> {
-        self.advance_pos();
-        self.expect(TokenKind::LParen)?;
-        if self.at(TokenKind::RParen) {
-            return Err(self.err_arg_count(TokenKind::KwInherit, 1, 0, start));
-        }
-        let path_span = self.expect_string()?;
-        let path = self.ast.push(Node::StringLit, path_span.strip_quotes());
-        self.expect_close_args(TokenKind::KwInherit, 1, start)?;
-        let end = self.expect(TokenKind::RParen)?;
-        Ok(self
-            .ast
-            .push(Node::Inherit { path, module: None }, start.merge(end)))
+        Ok(self.ast.push(make_node(path), start.merge(end)))
     }
 
     fn parse_append(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -727,7 +694,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
             let name = this.expect_ident()?;
             this.expect(TokenKind::Colon)?;
-            Ok((name, this.parse_type()?))
+            Ok((name, this.parse_type()?.0))
         })?;
         self.expect(TokenKind::RParen)?;
         self.expect(TokenKind::KwIn)?;
@@ -830,12 +797,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 return Err(ParseError {
                     kind: ParseErrorKind::DuplicateObjectKey(key.to_string()),
                     span,
-                    note: Some(Box::new(Note {
-                        message: NoteMessage::FirstDefinedHere,
-                        span: first_span,
-                        path: self.grammar_path.to_path_buf(),
-                        source: self.ast.source().to_string(),
-                    })),
+                    note: self.first_defined_note(first_span),
                 });
             }
             seen.insert(key, span);
@@ -857,7 +819,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         &mut self,
         close: TokenKind,
         mut parse_item: impl FnMut(&mut Self) -> ParseResult<NodeId>,
-    ) -> Result<ChildRange, ParseError> {
+    ) -> ParseResult<ChildRange> {
         let saved = self.scratch.len();
         loop {
             if self.at(close) {

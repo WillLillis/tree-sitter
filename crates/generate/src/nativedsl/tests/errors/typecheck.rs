@@ -47,6 +47,12 @@ type_error_tests! {
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::AnyModule, got: Ty::Str }
     }
+    error_grammar_config_t_annotation_mismatch {
+        r#"grammar { language: "test" }
+        let X: grammar_config_t = "not_a_config"
+        rule program { "x" }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::GrammarConfig, got: Ty::Str }
+    }
     error_rule_called_as_function {
         r#"grammar { language: "test", word: ident }
         rule ident { regexp("[a-z]+") }
