@@ -1,0 +1,11 @@
+// J
+grammar {
+    language: "languageaspvitcr",  externals: [
+_ator,nC,Ciln,    C,C,S,_ator,n,
+    C  ,C,S,_jsild,
+ ],
+word: idr,
+}
+
+// -
+let C =C

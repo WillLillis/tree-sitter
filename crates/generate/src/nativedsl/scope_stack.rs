@@ -35,6 +35,7 @@ impl<'src, V: Copy> ScopeStack<'src, V> {
 
     #[inline]
     pub fn pop(&mut self) {
+        debug_assert!(self.scopes.len() > 1, "cannot pop the base scope");
         self.scopes.pop();
     }
 }

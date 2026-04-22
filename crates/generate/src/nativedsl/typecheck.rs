@@ -4,11 +4,12 @@
 //! 1. Collect declarations and resolve identifiers (mutates the arena).
 //! 2. Type-check the resolved AST (reads immutably).
 //!
-//! Uses a simple flat type system with no generics - just concrete types for
-//! the values that grammar definitions actually use.
+//! Uses a flat type system with shallow generics (`list_t<T>`, `obj_t<T>`)
+//! for the values that grammar definitions actually use.
 //!
-//! Subtyping: `str_t` is a subtype of `rule_t`, `list_str_t` is a subtype of
-//! `list_rule_t`, and `list_list_str_t` is a subtype of `list_list_rule_t`.
+//! Subtyping: `str_t` is a subtype of `rule_t`, `list_t<str_t>` is a subtype
+//! of `list_t<rule_t>`, and `list_t<list_t<str_t>>` is a subtype of
+//! `list_t<list_t<rule_t>>`.
 
 use std::path::Path;
 
@@ -134,6 +135,18 @@ impl Ty {
             || (self == Self::ListStr && expected == Self::ListRule)
             || (self == Self::ListListStr && expected == Self::ListListRule)
             || (matches!(self, Self::Module(_)) && expected == Self::AnyModule)
+            || matches!(
+                (self, expected),
+                (Self::Object(InnerTy::Str), Self::Object(InnerTy::Rule))
+                    | (
+                        Self::Object(InnerTy::ListStr),
+                        Self::Object(InnerTy::ListRule)
+                    )
+                    | (
+                        Self::Object(InnerTy::ListListStr),
+                        Self::Object(InnerTy::ListListRule)
+                    )
+            )
     }
 }
 
@@ -452,6 +465,13 @@ fn collect_external_names_tc<'a>(
         Node::Ident => {
             let name = ctx.text(arena.span(id));
             if let Some(value_id) = find_let_value(arena, ctx, root_items, name) {
+                // Self-referential let (e.g. `let C = C`) - skip without registering.
+                // Phase 2 will catch this as UnknownIdentifier.
+                if matches!(arena.get(value_id), Node::Ident)
+                    && ctx.text(arena.span(value_id)) == name
+                {
+                    return Ok(());
+                }
                 // It's a let binding - recurse into its value.
                 collect_external_names_tc(
                     arena,
@@ -1187,8 +1207,6 @@ fn type_of<'ast>(
     }
 }
 
-// -- For-loop checking --
-
 // -- type_of helpers (extracted from the main match) --
 
 fn type_of_append<'ast>(
@@ -1346,7 +1364,6 @@ fn type_of_qualified_call<'a>(
             ast.span(name),
         ));
     };
-    // Check arg count before cloning params (avoids clone on error path)
     if args.len() != sig.params.len() {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
@@ -1357,12 +1374,13 @@ fn type_of_qualified_call<'a>(
             span,
         ));
     }
-    let param_types: Vec<Ty> = sig.params.clone();
     let return_ty = sig.return_ty;
+    let params = &sig.params;
     for (i, &arg_id) in args.iter().enumerate() {
+        let expected = params[i];
         let arg_ty = type_of(ast, arg_id, env, modules)?;
-        if !arg_ty.is_compatible(param_types[i]) {
-            return Err(mismatch(param_types[i], arg_ty, ast.span(arg_id)));
+        if !arg_ty.is_compatible(expected) {
+            return Err(mismatch(expected, arg_ty, ast.span(arg_id)));
         }
     }
     Ok(return_ty)
@@ -1672,7 +1690,10 @@ impl std::fmt::Display for TypeError {
             ),
             FieldNotFound { field, on_type } => write!(f, "no field '{field}' on {on_type}"),
             FieldAccessOnNonObject(ty) => {
-                write!(f, "field access requires object or grammar_t, got {ty}")
+                write!(
+                    f,
+                    "field access requires obj_t or grammar_config_t, got {ty}"
+                )
             }
             ListElementTypeMismatch { first, got } => {
                 write!(f, "list elements have inconsistent types: {first} vs {got}")
