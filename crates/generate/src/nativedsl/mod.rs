@@ -67,7 +67,13 @@ pub fn load_module(
     path: &Path,
     kind: ModuleKind,
     ancestor_paths: &[PathBuf],
+    next_global_id: &mut u8,
 ) -> DslResult<Module> {
+    let global_id = *next_global_id;
+    *next_global_id = next_global_id.checked_add(1).ok_or_else(|| {
+        LowerError::new(LowerErrorKind::ModuleTooMany, Span::new(0, 0))
+    })?;
+
     if source.len() >= u32::MAX as usize {
         Err(LexError {
             kind: LexErrorKind::InputTooLarge,
@@ -98,38 +104,34 @@ pub fn load_module(
 
     // Load inherited grammar (Grammar kind only, must happen before typecheck).
     if let Some(inherit_id) = inherit_node {
-        load_inherit_child(
-            &ast,
-            inherit_id,
-            module_dir,
-            ancestor_paths,
-            &mut sub_modules,
+        let child_gid = load_inherit_child(
+            &ast, inherit_id, module_dir, ancestor_paths,
+            &mut sub_modules, next_global_id,
         )?;
         let Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
             unreachable!()
         };
-        // Inherit is always the first child loaded into an empty sub_modules vec,
-        // so it always occupies index 0.
         ast.arena.set(
             inherit_id,
             Node::Inherit {
                 path: *p,
-                module: Some(0),
+                module: Some(child_gid),
             },
         );
     }
 
     // Load imports. Import nodes are identified by Node::Import { module: None }
     // which is set by the parser.
-    load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules)?;
+    load_import_children(&mut ast, module_dir, ancestor_paths, &mut sub_modules, next_global_id)?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
-    let type_envs = typecheck_modules(&sub_modules)?;
+    let mut type_envs: Vec<Option<TypeEnv<'_>>> = (0..*next_global_id).map(|_| None).collect();
+    typecheck_modules(&sub_modules, &mut type_envs)?;
     let base = inherit_node.and_then(|id| {
         let module = sub_modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, ast.span(id)))
     });
-    let _ = typecheck::resolve_and_check(&mut ast, type_envs, base, path)?;
+    let _ = typecheck::resolve_and_check(&mut ast, &type_envs, base, path)?;
 
     let lowered = if matches!(kind, ModuleKind::Grammar) {
         Some(lower::lower_with_base(&ast, path, &sub_modules)?)
@@ -142,6 +144,7 @@ pub fn load_module(
         path: path.to_path_buf(),
         sub_modules,
         lowered,
+        global_id,
     })
 }
 
@@ -150,7 +153,7 @@ fn parse_native_dsl_inner(
     grammar_path: &Path,
     ancestor_paths: &[PathBuf],
 ) -> DslResult<InputGrammar> {
-    let module = load_module(input, grammar_path, ModuleKind::Grammar, ancestor_paths)?;
+    let module = load_module(input, grammar_path, ModuleKind::Grammar, ancestor_paths, &mut 0)?;
     Ok(module
         .lowered
         .expect("Grammar module always has lowered grammar"))
@@ -238,6 +241,7 @@ fn load_child_module(
     span: Span,
     ancestor_paths: &[PathBuf],
     kind: ModuleKind,
+    next_global_id: &mut u8,
 ) -> DslResult<Module> {
     let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
 
@@ -246,16 +250,23 @@ fn load_child_module(
 
     let ext = canonical.extension().and_then(|e| e.to_str());
     match ext {
-        Some("tsg") => load_module(&content, &canonical, kind, &child_ancestors).map_err(|inner| {
-            ModuleError {
-                inner: Box::new(inner),
-                source_text: content,
-                path: canonical,
-                reference_span: span,
-            }
-            .into()
-        }),
+        Some("tsg") => {
+            load_module(&content, &canonical, kind, &child_ancestors, next_global_id)
+                .map_err(|inner| {
+                    ModuleError {
+                        inner: Box::new(inner),
+                        source_text: content,
+                        path: canonical,
+                        reference_span: span,
+                    }
+                    .into()
+                })
+        }
         Some("json") if matches!(kind, ModuleKind::Grammar) => {
+            let gid = *next_global_id;
+            *next_global_id = next_global_id.checked_add(1).ok_or_else(|| {
+                LowerError::new(LowerErrorKind::ModuleTooMany, span)
+            })?;
             let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
                     LowerErrorKind::ModuleJsonError {
@@ -270,6 +281,7 @@ fn load_child_module(
                 path: canonical,
                 sub_modules: Vec::new(),
                 lowered: Some(grammar),
+                global_id: gid,
             })
         }
         Some("json") => Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into()),
@@ -327,7 +339,8 @@ fn load_inherit_child(
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
-) -> DslResult<()> {
+    next_global_id: &mut u8,
+) -> DslResult<u8> {
     let Node::Inherit { path, .. } = ast.node(inherit_id) else {
         unreachable!()
     };
@@ -335,15 +348,13 @@ fn load_inherit_child(
     let path_str = ast.node_text(*path);
     let span = ast.span(*path);
     let child_module = load_child_module(
-        path_str,
-        module_dir,
-        span,
-        ancestor_paths,
-        ModuleKind::Grammar,
+        path_str, module_dir, span, ancestor_paths,
+        ModuleKind::Grammar, next_global_id,
     )?;
 
+    let gid = child_module.global_id;
     modules.push(child_module);
-    Ok(())
+    Ok(gid)
 }
 
 /// A loaded and resolved module (imported or inherited), ready for
@@ -356,6 +367,8 @@ pub struct Module {
     /// For inherited grammar modules: the fully lowered grammar, needed
     /// for rule merging and config access. `None` for import-only modules.
     pub lowered: Option<InputGrammar>,
+    /// Unique ID across the entire module tree, assigned during loading.
+    pub global_id: u8,
 }
 
 impl Module {
@@ -375,8 +388,9 @@ fn load_import_children(
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
+    next_global_id: &mut u8,
 ) -> Result<(), DslError> {
-    // Cache: canonical path -> module index, so duplicate imports share one load.
+    // Cache: canonical path -> global module ID, so duplicate imports share one load.
     let mut loaded: FxHashMap<PathBuf, u8> = FxHashMap::default();
 
     // Scan all nodes (not just top-level lets) so imports/inherits in any
@@ -406,9 +420,10 @@ fn load_import_children(
         let idx = if let Some(&idx) = loaded.get(&canonical) {
             idx
         } else {
-            let child = load_child_module(path_str, module_dir, span, ancestor_paths, kind)?;
-            let idx = u8::try_from(modules.len())
-                .map_err(|_| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
+            let child = load_child_module(
+                path_str, module_dir, span, ancestor_paths, kind, next_global_id,
+            )?;
+            let idx = child.global_id;
             loaded.insert(canonical, idx);
             modules.push(child);
             idx
@@ -450,16 +465,18 @@ fn validate_import_items(ast: &Ast) -> DslResult<()> {
     Ok(())
 }
 
-/// Recursively typecheck imported modules, producing type envs indexed
-/// to match the module indices in `Ty::Module(idx)`.
-pub fn typecheck_modules(modules: &[Module]) -> DslResult<Vec<TypeEnv<'_>>> {
-    modules
-        .iter()
-        .map(|m| {
-            let sub_envs = typecheck_modules(&m.sub_modules)?;
-            Ok(typecheck::check(&m.ast, sub_envs)?)
-        })
-        .collect()
+/// Recursively typecheck imported modules, writing each module's type env
+/// into `table` at the slot corresponding to its `global_id`.
+pub fn typecheck_modules<'m>(
+    modules: &'m [Module],
+    table: &mut Vec<Option<TypeEnv<'m>>>,
+) -> DslResult<()> {
+    for m in modules {
+        typecheck_modules(&m.sub_modules, table)?;
+        let env = typecheck::check(&m.ast, table)?;
+        table[m.global_id as usize] = Some(env);
+    }
+    Ok(())
 }
 
 pub type DslResult<T> = Result<T, DslError>;
