@@ -206,7 +206,7 @@ fn for_with_rule_items() {
 #[test]
 fn for_empty_list() {
     let g = dsl(r#"grammar { language: "test" }
-        let ops: list_str_t = []
+        let ops: list_t<str_t> = []
         rule program {
             choice("fallback", for (s: str_t) in ops { s })
         }"#);
