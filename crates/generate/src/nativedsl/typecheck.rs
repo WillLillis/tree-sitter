@@ -218,7 +218,7 @@ struct Locals<'a> {
 enum LocalScope<'a> {
     Empty,
     FnParams(&'a [Param]),
-    ForBindings(&'a [(Span, NodeId)]),
+    ForBindings(&'a [(Span, Ty)]),
 }
 
 impl Locals<'_> {
@@ -720,31 +720,6 @@ fn resolve_children_tc(
     }
 }
 
-// -- Type annotation resolution --
-
-fn resolve_type_annotation(ast: &Ast, id: NodeId) -> Result<Ty, TypeError> {
-    match ast.node(id) {
-        Node::TypeRule => Ok(Ty::Rule),
-        Node::TypeStr => Ok(Ty::Str),
-        Node::TypeInt => Ok(Ty::Int),
-        Node::TypeListRule => Ok(Ty::ListRule),
-        Node::TypeListStr => Ok(Ty::ListStr),
-        Node::TypeListInt => Ok(Ty::ListInt),
-        Node::TypeListListRule => Ok(Ty::ListListRule),
-        Node::TypeListListStr => Ok(Ty::ListListStr),
-        Node::TypeListListInt => Ok(Ty::ListListInt),
-        Node::TypeVoid => Err(TypeError::new(
-            TypeErrorKind::VoidTypeNotAllowed,
-            ast.span(id),
-        )),
-        Node::TypeSpread => Err(TypeError::new(
-            TypeErrorKind::SpreadTypeNotAllowed,
-            ast.span(id),
-        )),
-        _ => Err(TypeError::new(TypeErrorKind::CannotInferType, ast.span(id))),
-    }
-}
-
 // -- Entry point --
 
 /// Run typechecking and return the type environment.
@@ -763,12 +738,8 @@ pub fn check<'ast>(
             }
             Node::Fn(fn_idx) => {
                 let config = ast.get_fn(*fn_idx);
-                let params: Vec<Ty> = config
-                    .params
-                    .iter()
-                    .map(|p| resolve_type_annotation(ast, p.ty))
-                    .collect::<Result<_, _>>()?;
-                let return_ty = resolve_type_annotation(ast, config.return_ty)?;
+                let params: Vec<Ty> = config.params.iter().map(|p| p.ty).collect();
+                let return_ty = config.return_ty;
                 env.fns
                     .insert(ast.node_text(config.name), FnSig { params, return_ty });
             }
@@ -812,7 +783,7 @@ fn check_item<'ast>(
         }
         Node::Let { name, ty, value } => {
             let var_name = ast.node_text(*name);
-            let declared = ty.map(|t| resolve_type_annotation(ast, t)).transpose()?;
+            let declared = *ty;
             // Empty list: type comes from annotation, not inference
             let is_empty_list =
                 matches!(ast.node(*value), Node::List(r) if ast.child_slice(*r).is_empty());
@@ -1535,8 +1506,7 @@ fn check_for_expr<'ast>(
             ast.span(config.iterable),
         ));
     }
-    let (name_span, ty_id) = &config.bindings[0];
-    let declared = resolve_type_annotation(ast, *ty_id)?;
+    let (name_span, declared_ty) = config.bindings[0];
     let elem_ty = match iter_ty {
         Ty::ListRule => Ty::Rule,
         Ty::ListStr => Ty::Str,
@@ -1546,11 +1516,11 @@ fn check_for_expr<'ast>(
         Ty::ListListInt => Ty::ListInt,
         _ => unreachable!(),
     };
-    if !elem_ty.is_compatible(declared) {
-        return Err(mismatch(declared, elem_ty, *name_span));
+    if !elem_ty.is_compatible(declared_ty) {
+        return Err(mismatch(declared_ty, elem_ty, name_span));
     }
     let mut scope = env.scoped();
-    scope.insert_var(ast.text(*name_span), declared);
+    scope.insert_var(ast.text(name_span), declared_ty);
     expect_rule(ast, config.body, &mut scope, modules)
 }
 
@@ -1578,13 +1548,12 @@ fn check_for_tuple_element<'ast>(
         ));
     }
     // Pop and re-push scope vars for each tuple (last iteration's bindings win)
-    for (i, &(name_span, ty_id)) in config.bindings.iter().enumerate() {
-        let declared = resolve_type_annotation(ast, ty_id)?;
+    for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
         let actual = type_of(ast, elems[i], scope, modules)?;
-        if !actual.is_compatible(declared) {
-            return Err(mismatch(declared, actual, name_span));
+        if !actual.is_compatible(declared_ty) {
+            return Err(mismatch(declared_ty, actual, name_span));
         }
-        scope.insert_var(ast.text(name_span), declared);
+        scope.insert_var(ast.text(name_span), declared_ty);
     }
     Ok(())
 }
@@ -1660,8 +1629,6 @@ pub enum TypeErrorKind {
     ExpectedRuleName,
     ExpectedReservedConfig,
     CannotInferType,
-    VoidTypeNotAllowed,
-    SpreadTypeNotAllowed,
     CannotBindVoid,
     CannotBindSpread,
     CannotPrintType(Ty),
@@ -1725,14 +1692,6 @@ impl std::fmt::Display for TypeError {
                 write!(f, "reserved config must be an object literal or inherited")
             }
             CannotInferType => write!(f, "cannot infer type of this expression"),
-            VoidTypeNotAllowed => write!(
-                f,
-                "void_t is an internal type and cannot be used as a type annotation"
-            ),
-            SpreadTypeNotAllowed => write!(
-                f,
-                "spread_t is an internal type and cannot be used as a type annotation"
-            ),
             CannotBindVoid => write!(
                 f,
                 "cannot bind 'print' to a variable: 'print' does not produce a value"
