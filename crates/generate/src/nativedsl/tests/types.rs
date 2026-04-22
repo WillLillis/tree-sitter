@@ -106,3 +106,57 @@ fn for_over_list_list_rule_yields_list_rule() {
         rule b { "b" }
     "#);
 }
+
+// ===== module_t annotation =====
+
+#[test]
+fn module_t_annotation() {
+    dsl(r#"
+        let h: module_t = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::comma_sep1(identifier) }
+        rule identifier { regexp("[a-z]+") }
+    "#);
+}
+
+// ===== obj_t annotation =====
+
+#[test]
+fn obj_t_int_annotation() {
+    dsl(r#"
+        grammar { language: "test" }
+        let PREC: obj_t<int_t> = { ADD: 1, MUL: 2 }
+        rule program { prec(PREC.ADD, "x") }
+    "#);
+}
+
+#[test]
+fn obj_t_rule_annotation() {
+    dsl(r#"
+        grammar { language: "test" }
+        let o: obj_t<rule_t> = { a: program, b: "literal" }
+        rule program { o.a }
+    "#);
+}
+
+#[test]
+fn obj_t_list_rule_annotation() {
+    dsl(r#"
+        grammar { language: "test" }
+        let o: obj_t<list_t<rule_t>> = { items: [a, b] }
+        rule program { choice(for (r: rule_t) in o.items { r }) }
+        rule a { "a" }
+        rule b { "b" }
+    "#);
+}
+
+// ===== grammar_config_t annotation =====
+
+#[test]
+fn grammar_config_t_annotation() {
+    dsl(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        let cfg: grammar_config_t = grammar_config(base)
+        grammar { language: "derived", inherits: base, word: cfg.word }
+    "#);
+}
