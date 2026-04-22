@@ -130,42 +130,24 @@ enum Value<'src> {
 
 const MAX_CALL_DEPTH: u16 = 64;
 
-/// Per-module evaluation context. Swapped as a unit when entering/leaving
-/// an imported module's scope.
-struct ModuleCtx<'ast> {
+/// Flat entry for one module in the evaluator's module table.
+struct ModuleInfo<'ast> {
     ast: &'ast Ast,
     path: &'ast Path,
-    scopes: ScopeStack<'ast, ValueId>,
-    fns: FxHashMap<&'ast str, NodeId>,
-    modules: &'ast [super::Module],
     base_grammar: Option<&'ast InputGrammar>,
-    /// Lazily populated as modules are first accessed. Pre-sized to
-    /// `modules.len()` so modules can be evaluated in any order.
-    import_evals: Vec<Option<ImportEval<'ast>>>,
-}
-
-impl<'ast> ModuleCtx<'ast> {
-    fn for_child_module(
-        ast: &'ast Ast,
-        path: &'ast Path,
-        modules: &'ast [super::Module],
-        base_grammar: Option<&'ast InputGrammar>,
-    ) -> Self {
-        let n = modules.len();
-        Self {
-            ast,
-            path,
-            scopes: ScopeStack::new(),
-            fns: collect_fns(ast),
-            modules,
-            base_grammar,
-            import_evals: vec![None; n],
-        }
-    }
 }
 
 struct Evaluator<'ast> {
-    ctx: ModuleCtx<'ast>,
+    // Flat module table (immutable after construction)
+    modules: Vec<ModuleInfo<'ast>>,
+    module_fns: Vec<FxHashMap<&'ast str, NodeId>>,
+    // Per-module let binding values (lazily populated on first access)
+    module_values: Vec<Option<FxHashMap<&'ast str, ValueId>>>,
+    // Offset: table index = global_id - base_id
+    base_id: usize,
+    // Current execution state
+    current_module: usize,
+    scopes: ScopeStack<'ast, ValueId>,
     // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span)>,
     values: Vec<Value<'ast>>,
@@ -186,20 +168,6 @@ fn collect_fns(ast: &Ast) -> FxHashMap<&str, NodeId> {
     fns
 }
 
-/// Evaluated state for a single imported module. Populated when the import
-/// is first encountered during lowering.
-#[derive(Clone)]
-struct ImportEval<'ast> {
-    /// Top-level let binding values from the imported file.
-    values: FxHashMap<&'ast str, ValueId>,
-    /// Function definitions from the imported file (name -> fn node in import AST).
-    fns: FxHashMap<&'ast str, NodeId>,
-    /// Evaluated state for this module's own imports, needed when calling
-    /// the module's functions (they may reference the module's imports).
-    #[expect(clippy::use_self, reason = "No `Self` for generics")]
-    sub_evals: Vec<Option<ImportEval<'ast>>>,
-}
-
 /// Intermediate results from the evaluation phase, ready to be assembled
 /// into an `InputGrammar` once the base grammar can be moved out.
 struct EvalResult {
@@ -214,6 +182,41 @@ struct EvalResult {
     conflicts: Option<Vec<Vec<String>>>,
     precedences: Option<Vec<Vec<PrecedenceEntry>>>,
     reserved: Option<Vec<ReservedWordContext<Rule>>>,
+}
+
+/// Build a flat module table from a module and its descendants. The root
+/// module is placed at index 0; children follow in depth-first pre-order.
+fn build_module_table<'ast>(
+    root_ast: &'ast Ast,
+    root_path: &'ast Path,
+    root_base_grammar: Option<&'ast InputGrammar>,
+    sub_modules: &'ast [super::Module],
+) -> (Vec<ModuleInfo<'ast>>, Vec<FxHashMap<&'ast str, NodeId>>) {
+    let mut infos = vec![ModuleInfo {
+        ast: root_ast,
+        path: root_path,
+        base_grammar: root_base_grammar,
+    }];
+    let mut fns = vec![collect_fns(root_ast)];
+
+    fn add_children<'a>(
+        modules: &'a [super::Module],
+        infos: &mut Vec<ModuleInfo<'a>>,
+        fns: &mut Vec<FxHashMap<&'a str, NodeId>>,
+    ) {
+        for m in modules {
+            infos.push(ModuleInfo {
+                ast: &m.ast,
+                path: &m.path,
+                base_grammar: m.lowered.as_ref(),
+            });
+            fns.push(collect_fns(&m.ast));
+            add_children(&m.sub_modules, infos, fns);
+        }
+    }
+
+    add_children(sub_modules, &mut infos, &mut fns);
+    (infos, fns)
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
@@ -234,12 +237,24 @@ fn evaluate(
     modules: &[super::Module],
     base_grammar: Option<&InputGrammar>,
 ) -> Result<EvalResult, LowerError> {
-    let mut eval = Evaluator::new(ast, grammar_path, base_grammar, modules);
+    let (module_infos, module_fns) = build_module_table(ast, grammar_path, base_grammar, modules);
+    let n = module_infos.len();
+    let mut eval = Evaluator {
+        modules: module_infos,
+        module_fns,
+        module_values: vec![None; n],
+        base_id: 0,
+        current_module: 0,
+        scopes: ScopeStack::new(),
+        call_stack: Vec::new(),
+        values: Vec::with_capacity(ast.arena.len()),
+        rules: Vec::with_capacity(ast.arena.len()),
+        rule_children: Vec::with_capacity(ast.arena.len()),
+        strings: StringPool::new(),
+    };
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
-    // Register all functions first so forward references work
-    eval.ctx.fns = collect_fns(ast);
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Grammar | Node::Fn(_) => {}
@@ -388,29 +403,21 @@ fn build_grammar(
 }
 
 impl<'ast> Evaluator<'ast> {
-    fn new(
-        ast: &'ast Ast,
-        path: &'ast Path,
-        base_grammar: Option<&'ast InputGrammar>,
-        modules: &'ast [super::Module],
-    ) -> Self {
-        let cap = ast.arena.len();
-        Self {
-            ctx: ModuleCtx {
-                ast,
-                path,
-                scopes: ScopeStack::new(),
-                fns: FxHashMap::default(),
-                modules,
-                base_grammar,
-                import_evals: vec![None; modules.len()],
-            },
-            call_stack: Vec::new(),
-            values: Vec::with_capacity(cap),
-            rules: Vec::with_capacity(cap),
-            rule_children: Vec::with_capacity(cap),
-            strings: StringPool::new(),
-        }
+    // -- Flat module table accessors --
+
+    #[inline]
+    fn ast(&self) -> &'ast Ast {
+        self.modules[self.current_module].ast
+    }
+
+    #[inline]
+    fn path(&self) -> &'ast Path {
+        self.modules[self.current_module].path
+    }
+
+    #[inline]
+    fn module_idx(&self, global_id: u8) -> usize {
+        global_id as usize - self.base_id
     }
 
     fn alloc_val(&mut self, val: Value<'ast>) -> ValueId {
@@ -485,22 +492,22 @@ impl<'ast> Evaluator<'ast> {
 
     #[inline]
     fn push_scope(&mut self) {
-        self.ctx.scopes.push();
+        self.scopes.push();
     }
 
     #[inline]
     fn pop_scope(&mut self) {
-        self.ctx.scopes.pop();
+        self.scopes.pop();
     }
 
     #[inline]
     fn bind(&mut self, name: &'ast str, val: ValueId) {
-        self.ctx.scopes.insert(name, val);
+        self.scopes.insert(name, val);
     }
 
     #[inline]
     fn lookup(&self, name: &str) -> Option<ValueId> {
-        self.ctx.scopes.get(name)
+        self.scopes.get(name)
     }
 
     fn alloc_rule(&mut self, rule: ARule) -> RuleId {
@@ -528,19 +535,19 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn get_fn_config(&self, fn_id: NodeId) -> &'ast FnConfig {
-        match self.ctx.ast.node(fn_id) {
-            Node::Fn(fn_idx) => self.ctx.ast.get_fn(*fn_idx),
+        match self.ast().node(fn_id) {
+            Node::Fn(fn_idx) => self.ast().get_fn(*fn_idx),
             _ => unreachable!(),
         }
     }
 
     /// Intern a span using the current module's source text.
     fn intern_span(&mut self, span: Span) -> Str {
-        self.strings.intern_span(span, self.ctx.ast.source())
+        self.strings.intern_span(span, self.ast().source())
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
-        let raw = self.ctx.ast.text(span);
+        let raw = self.ast().text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
             self.strings.intern_owned(unescape_string(raw))
         } else {
@@ -692,11 +699,11 @@ impl<'ast> Evaluator<'ast> {
             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
             ARule::Blank => Err(LowerError::new(
                 LowerErrorKind::ConfigFieldUnset,
-                self.ctx.ast.span(id),
+                self.ast().span(id),
             )),
             _ => Err(LowerError::new(
                 LowerErrorKind::ExpectedRuleName,
-                self.ctx.ast.span(id),
+                self.ast().span(id),
             )),
         }
     }
@@ -705,7 +712,7 @@ impl<'ast> Evaluator<'ast> {
     /// Accepts either an object literal `{ name: [words] }` or an expression
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
     fn eval_reserved(&mut self, id: NodeId) -> Result<Vec<ReservedWordContext<Rule>>, LowerError> {
-        let ast = self.ctx.ast;
+        let ast = self.ast();
         // Object literal: each field is a named word set
         if let Node::Object(range) = ast.node(id) {
             return ast
@@ -752,7 +759,7 @@ impl<'ast> Evaluator<'ast> {
         field: &str,
         span: Span,
     ) -> Result<ValueId, LowerError> {
-        let grammar = self.ctx.base_grammar.unwrap();
+        let grammar = self.modules[self.current_module].base_grammar.unwrap();
         match field {
             "extras" => Ok(self.import_rules_as_list(&grammar.extra_symbols)),
             "externals" => Ok(self.import_rules_as_list(&grammar.external_tokens)),
@@ -939,7 +946,7 @@ impl<'ast> Evaluator<'ast> {
 
 impl<'ast> Evaluator<'ast> {
     fn eval_expr(&mut self, id: NodeId) -> Result<ValueId, LowerError> {
-        let ast = self.ctx.ast;
+        let ast = self.ast();
         let span = ast.span(id);
         match ast.node(id) {
             Node::IntLit(n) => Ok(self.alloc_val(Value::Int(*n))),
@@ -974,9 +981,10 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_val(Value::GrammarConfig))
             }
             Node::Inherit { module, .. } | Node::Import { module, .. } => {
-                let idx = module.expect("module index not set by loading pre-pass");
-                self.eval_import_module(idx)?;
-                Ok(self.alloc_val(Value::Module(idx)))
+                let global_id = module.expect("module index not set by loading pre-pass");
+                let table_id = self.module_idx(global_id);
+                self.eval_import_module(table_id)?;
+                Ok(self.alloc_val(Value::Module(table_id as u8)))
             }
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
@@ -1009,12 +1017,12 @@ impl<'ast> Evaluator<'ast> {
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                let idx = idx as usize;
+                let table_id = idx as usize;
                 // Check pre-evaluated let values first
-                let eval = self.ctx.import_evals[idx].as_ref().unwrap();
-                if let Some(&val) = eval.values.get(member_name) {
+                let values = self.module_values[table_id].as_ref().unwrap();
+                if let Some(&val) = values.get(member_name) {
                     Ok(val)
-                } else if let Some(grammar) = &self.ctx.base_grammar {
+                } else if let Some(grammar) = self.modules[table_id].base_grammar {
                     // For inherited grammar modules, fall back to rule bodies.
                     // Config fields are accessed via grammar_config() builtin.
                     match grammar.variables.iter().find(|v| v.name == member_name) {
@@ -1098,7 +1106,7 @@ impl<'ast> Evaluator<'ast> {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
                 let fn_name = ast.node_text(name);
-                self.eval_import_fn_call(idx, fn_name, &arg_vals, span)
+                self.eval_import_fn_call(idx as usize, fn_name, &arg_vals, span)
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -1108,7 +1116,7 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn lower_to_rule(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
-        let ast = self.ctx.ast;
+        let ast = self.ast();
         match ast.node(id) {
             Node::RuleRef => {
                 let sid = self.intern_span(ast.span(id));
@@ -1157,7 +1165,7 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn eval_combinator(&mut self, id: NodeId) -> Result<RuleId, LowerError> {
-        let ast = self.ctx.ast;
+        let ast = self.ast();
         match ast.node(id) {
             Node::Seq(range) | Node::Choice(range) => {
                 let is_seq = matches!(ast.node(id), Node::Seq(_));
@@ -1295,13 +1303,13 @@ impl<'ast> Evaluator<'ast> {
             ));
         }
         // Guarded by super::typecheck::check_call_args - validates function exists
-        let &fn_id = self.ctx.fns.get(name).unwrap();
+        let &fn_id = self.module_fns[self.current_module].get(name).unwrap();
         let config = self.get_fn_config(fn_id);
         let body = config.body;
         self.push_scope();
         for (i, &arg_val) in arg_vals.iter().enumerate() {
             let param_name = self.get_fn_config(fn_id).params[i].name;
-            self.bind(self.ctx.ast.node_text(param_name), arg_val);
+            self.bind(self.ast().node_text(param_name), arg_val);
         }
         let result = self.eval_expr(body);
         self.pop_scope();
@@ -1309,47 +1317,35 @@ impl<'ast> Evaluator<'ast> {
         result
     }
 
-    /// Evaluate an imported module's top-level let bindings and register its fns.
-    fn eval_import_module(&mut self, idx: u8) -> Result<(), LowerError> {
-        let idx = idx as usize;
-        if self.ctx.import_evals[idx].is_some() {
+    /// Lazily evaluate an imported module's top-level let bindings.
+    fn eval_import_module(&mut self, table_id: usize) -> Result<(), LowerError> {
+        if self.module_values[table_id].is_some() {
             return Ok(());
         }
 
-        let modules = self.ctx.modules;
-        let module = &modules[idx];
-        let child = ModuleCtx::for_child_module(
-            &module.ast,
-            &module.path,
-            &module.sub_modules,
-            module.lowered.as_ref(),
-        );
-        let saved = std::mem::replace(&mut self.ctx, child);
+        let saved_module = self.current_module;
+        let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
+        self.current_module = table_id;
 
         let result = self.eval_let_bindings();
 
-        let sub_evals = std::mem::take(&mut self.ctx.import_evals);
-        let fns = std::mem::take(&mut self.ctx.fns);
-        self.ctx = saved;
+        self.current_module = saved_module;
+        self.scopes = saved_scopes;
 
-        let values = result?;
-        self.ctx.import_evals[idx] = Some(ImportEval {
-            values,
-            fns,
-            sub_evals,
-        });
+        self.module_values[table_id] = Some(result?);
         Ok(())
     }
 
     /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> Result<FxHashMap<&'ast str, ValueId>, LowerError> {
-        let ast = self.ctx.ast;
+        let items: Vec<NodeId> = self.ast().root_items.clone();
         self.push_scope();
         let mut values = FxHashMap::default();
-        for &item_id in &ast.root_items {
-            if let Node::Let { name, value, .. } = ast.node(item_id) {
-                let val = self.eval_expr(*value)?;
-                let var_name = ast.node_text(*name);
+        for item_id in items {
+            if let Node::Let { name, value, .. } = self.ast().node(item_id) {
+                let (name, value) = (*name, *value);
+                let val = self.eval_expr(value)?;
+                let var_name = self.ast().node_text(name);
                 self.bind(var_name, val);
                 values.insert(var_name, val);
             }
@@ -1361,47 +1357,39 @@ impl<'ast> Evaluator<'ast> {
     /// Call a function defined in an imported module.
     fn eval_import_fn_call(
         &mut self,
-        idx: u8,
+        table_id: usize,
         fn_name: &'ast str,
         arg_vals: &[ValueId],
         call_span: Span,
     ) -> Result<ValueId, LowerError> {
-        let idx = idx as usize;
-        let modules = self.ctx.modules;
-        let module = &modules[idx];
-        let import_ast = &module.ast;
-
-        // Extract fn info before swapping context
-        let import_eval = self.ctx.import_evals[idx].as_mut().unwrap();
-        let fn_node_id = import_eval.fns[fn_name];
+        let import_ast = self.modules[table_id].ast;
+        let fn_node_id = self.module_fns[table_id][fn_name];
         let fn_idx = match import_ast.node(fn_node_id) {
             Node::Fn(fi) => *fi,
             _ => unreachable!(),
         };
         let config = import_ast.get_fn(fn_idx);
         let body = config.body;
-        let params: Vec<_> = config.params.iter().map(|p| p.name).collect();
-        let import_fns = import_eval.fns.clone();
-        let import_values: Vec<_> = import_eval.values.iter().map(|(&k, &v)| (k, v)).collect();
-        let sub_evals = std::mem::take(&mut import_eval.sub_evals);
+        let params: Vec<NodeId> = config.params.iter().map(|p| p.name).collect();
 
-        let child = ModuleCtx {
-            ast: import_ast,
-            path: &module.path,
-            scopes: ScopeStack::new(),
-            fns: import_fns,
-            modules: &module.sub_modules,
-            base_grammar: module.lowered.as_ref(),
-            import_evals: sub_evals,
-        };
-        let saved = std::mem::replace(&mut self.ctx, child);
+        let saved_module = self.current_module;
+        let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
+        self.current_module = table_id;
 
         self.push_scope();
-        for (var_name, val) in &import_values {
-            self.bind(var_name, *val);
+        // Bind import's let values. Collect first to avoid borrow conflict
+        // between self.module_values and self.scopes.
+        let values: Vec<(&'ast str, ValueId)> = self.module_values[table_id]
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
+        for (name, val) in values {
+            self.scopes.insert(name, val);
         }
         for (i, &arg_val) in arg_vals.iter().enumerate() {
-            self.bind(import_ast.node_text(params[i]), arg_val);
+            self.scopes.insert(import_ast.node_text(params[i]), arg_val);
         }
 
         self.call_stack.push((fn_name, call_span));
@@ -1409,11 +1397,8 @@ impl<'ast> Evaluator<'ast> {
         self.call_stack.pop();
         self.pop_scope();
 
-        // Restore parent, preserving any child eval changes
-        let child_evals = std::mem::take(&mut self.ctx.import_evals);
-        self.ctx = saved;
-        self.ctx.import_evals[idx].as_mut().unwrap().sub_evals = child_evals;
-
+        self.current_module = saved_module;
+        self.scopes = saved_scopes;
         result
     }
 
@@ -1429,7 +1414,7 @@ impl<'ast> Evaluator<'ast> {
                     Value::Tuple(ids) => ids[j],
                     _ => item_id,
                 };
-                self.bind(self.ctx.ast.text(name_span), value_id);
+                self.bind(self.ast().text(name_span), value_id);
             }
             results.push(self.lower_to_rule(config.body)?);
             self.pop_scope();
@@ -1449,12 +1434,12 @@ impl Evaluator<'_> {
     /// Format `val_id` and write it to stderr, prefixed with `path:line:`.
     fn emit_print(&self, val_id: ValueId, item_span: Span) {
         use std::io::Write as _;
-        let line = offset_to_line(self.ctx.ast.source(), item_span.start as usize);
+        let line = offset_to_line(self.ast().source(), item_span.start as usize);
         let mut buf = String::new();
         self.write_value(&mut buf, val_id, 0);
         let stderr = std::io::stderr();
         let mut stderr = stderr.lock();
-        let _ = writeln!(stderr, "{}:{line}: {buf}", self.ctx.path.display());
+        let _ = writeln!(stderr, "{}:{line}: {buf}", self.path().display());
     }
 
     /// Write a value in compact form. Compound values at depth 0 break their
@@ -1493,7 +1478,7 @@ impl Evaluator<'_> {
             }
             Value::Module(idx) => {
                 w.push_str("<module:");
-                w.push_str(&self.ctx.modules[*idx as usize].path.display().to_string());
+                w.push_str(&self.modules[*idx as usize].path.display().to_string());
                 w.push('>');
             }
             Value::GrammarConfig => w.push_str("<grammar_config>"),
