@@ -370,7 +370,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 "rule_t" => Ok(Ty::Rule),
                 "str_t" => Ok(Ty::Str),
                 "int_t" => Ok(Ty::Int),
-                "module_t" => todo!(),
+                "module_t" => Ok(Ty::AnyModule),
                 "list_t" => {
                     self.expect(TokenKind::Lt)?;
                     let inner_ty = self.parse_type()?;
@@ -387,12 +387,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         | Ty::ListListInt
                         | Ty::Object(_)
                         // It doesn't make sense to have more than one of this type
+                        | Ty::AnyModule
+                        | Ty::Module(_)
                         | Ty::GrammarConfig => Err(ParseError {
                             kind: ParseErrorKind::ListInnerType(inner_ty),
                             span: id_span,
                             note: None,
                         }),
-                        Ty::Module(_) => todo!(), // need to address this
                         Ty::Spread => Err(ParseError {
                             kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
                             span: id_span,
@@ -422,13 +423,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         Ty::ListListInt => Ok(Ty::Object(InnerTy::ListListInt)),
                         // Prevent arbitrary nesting
                         Ty::Object(_)
+                        | Ty::AnyModule
+                        | Ty::Module(_)
                         // It doesn't make sense to have more than one of this type
                         | Ty::GrammarConfig => Err(ParseError {
                             kind: ParseErrorKind::ObjectInnerType(inner_ty),
                             span: id_span,
                             note: None,
                         }),
-                        Ty::Module(_) => todo!(), // need to address this
                         Ty::Spread => Err(ParseError {
                             kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
                             span: id_span,
