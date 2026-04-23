@@ -49,7 +49,6 @@ impl<'src> StringPool<'src> {
         id
     }
 
-    #[inline]
     fn resolve(&self, id: Str) -> &str {
         // Safety: id was produced by intern_span/intern_owned which return
         // sequential indices into self.entries.
@@ -60,7 +59,6 @@ impl<'src> StringPool<'src> {
         }
     }
 
-    #[inline]
     fn to_string(&self, id: Str) -> String {
         self.resolve(id).to_string()
     }
@@ -390,12 +388,10 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
 }
 
 impl<'ast> Evaluator<'ast> {
-    #[inline]
     fn ast(&self) -> &'ast Ast {
         self.modules[self.current_module].ast
     }
 
-    #[inline]
     fn module_idx(&self, global_id: u8) -> usize {
         debug_assert!(
             global_id as usize >= self.base_id,
@@ -411,7 +407,6 @@ impl<'ast> Evaluator<'ast> {
         id
     }
 
-    #[inline]
     fn get_val(&self, id: ValueId) -> &Value<'ast> {
         // Safety: id was produced by alloc_val which returns sequential indices
         // into self.values. No ValueId can outlive the Evaluator.
@@ -482,7 +477,6 @@ impl<'ast> Evaluator<'ast> {
     }
 
     /// Get a rule by arena ID. All `RuleId`s are produced by `alloc_rule`.
-    #[inline]
     fn get_rule(&self, id: RuleId) -> &ARule {
         // Safety: id was produced by alloc_rule which returns sequential indices.
         unsafe { self.rules.get_unchecked(id.0 as usize) }
