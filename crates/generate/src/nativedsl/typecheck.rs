@@ -874,6 +874,17 @@ fn check_item<'ast>(
     }
 }
 
+/// Widen `widest` to accommodate `ty`. Returns the wider type, or `None` if incompatible.
+fn widen_type(widest: Ty, ty: Ty) -> Option<Ty> {
+    if ty == widest || ty.is_compatible(widest) {
+        Some(widest)
+    } else if widest.is_compatible(ty) {
+        Some(ty)
+    } else {
+        None
+    }
+}
+
 // -- Config field validators --
 
 /// Check a list config field. For literal lists, checks each element with `check_elem`.
@@ -1198,15 +1209,7 @@ fn type_of_append<'ast>(
             if !r.is_list() {
                 return Err(mismatch(l, r, ast.span(right)));
             }
-            if l == r {
-                Ok(l)
-            } else if l.is_compatible(r) {
-                Ok(r)
-            } else if r.is_compatible(l) {
-                Ok(l)
-            } else {
-                Err(mismatch(l, r, ast.span(right)))
-            }
+            widen_type(l, r).ok_or_else(|| mismatch(l, r, ast.span(right)))
         }
         (Some(t), None) | (None, Some(t)) => {
             if !t.is_list() {
@@ -1358,14 +1361,7 @@ fn type_of_object<'ast>(
     let mut widest = type_of(ast, fields[0].1, env, modules)?;
     for &(_, val_id) in &fields[1..] {
         let ty = type_of(ast, val_id, env, modules)?;
-        if ty == widest || ty.is_compatible(widest) {
-            // ty equals or is a subtype of widest - no change needed
-        } else if widest.is_compatible(ty) {
-            // widest is a subtype of ty - promote to the wider type
-            widest = ty;
-        } else {
-            return Err(mismatch(widest, ty, ast.span(val_id)));
-        }
+        widest = widen_type(widest, ty).ok_or_else(|| mismatch(widest, ty, ast.span(val_id)))?;
     }
     let inner = InnerTy::try_from(widest).map_err(|()| {
         TypeError::new(
@@ -1393,20 +1389,15 @@ fn type_of_list<'ast>(
     let mut widest = type_of(ast, items[0], env, modules)?;
     for &item_id in &items[1..] {
         let ty = type_of(ast, item_id, env, modules)?;
-        if ty == widest || ty.is_compatible(widest) {
-            // ty equals or is a subtype of widest - no change needed
-        } else if widest.is_compatible(ty) {
-            // widest is a subtype of ty - promote to the wider type
-            widest = ty;
-        } else {
-            return Err(TypeError::new(
+        widest = widen_type(widest, ty).ok_or_else(|| {
+            TypeError::new(
                 TypeErrorKind::ListElementTypeMismatch {
                     first: widest,
                     got: ty,
                 },
                 ast.span(item_id),
-            ));
-        }
+            )
+        })?;
     }
     match widest {
         Ty::Str => Ok(Ty::ListStr),

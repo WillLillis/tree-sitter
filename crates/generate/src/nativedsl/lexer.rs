@@ -121,56 +121,56 @@ pub enum TokenKind {
     Eof,
 }
 
-impl TokenKind {
-    #[must_use]
-    #[rustfmt::skip]
-    pub const fn is_keyword(self) -> bool {
-        matches!(self,
-            Self::KwGrammar | Self::KwRule | Self::KwLet | Self::KwFn | Self::KwFor | Self::KwIn
-            | Self::KwSeq | Self::KwChoice | Self::KwRepeat | Self::KwRepeat1 | Self::KwOptional
-            | Self::KwBlank | Self::KwField | Self::KwAlias | Self::KwToken | Self::KwPrec
-            | Self::KwPrecLeft | Self::KwPrecRight | Self::KwPrecDynamic | Self::KwReserved
-            | Self::KwTokenImmediate | Self::KwConcat | Self::KwRegexp | Self::KwInherit
-            | Self::KwImport | Self::KwOverride | Self::KwAppend | Self::KwGrammarConfig
-        )
-    }
+/// Maps keyword text to `TokenKind` variant. Used by the lexer, Display, and `is_keyword`.
+macro_rules! keywords {
+    ($($variant:ident => $str:literal),* $(,)?) => {
+        impl TokenKind {
+            #[must_use]
+            pub const fn is_keyword(self) -> bool {
+                matches!(self, $(Self::$variant)|*)
+            }
+
+            /// Return the keyword string if this is a keyword token, or `None`.
+            const fn keyword_str(self) -> Option<&'static str> {
+                match self {
+                    $(Self::$variant => Some($str),)*
+                    _ => None,
+                }
+            }
+
+            /// Map keyword text to a `TokenKind`, or return `Ident`.
+            pub(super) fn from_keyword(text: &str) -> Self {
+                match text {
+                    $($str => Self::$variant,)*
+                    _ => Self::Ident,
+                }
+            }
+        }
+    };
+}
+
+keywords! {
+    KwGrammar => "grammar", KwRule => "rule", KwLet => "let", KwFn => "fn",
+    KwFor => "for", KwIn => "in", KwSeq => "seq", KwChoice => "choice",
+    KwRepeat => "repeat", KwRepeat1 => "repeat1", KwOptional => "optional",
+    KwBlank => "blank", KwField => "field", KwAlias => "alias", KwToken => "token",
+    KwPrec => "prec", KwPrecLeft => "prec_left", KwPrecRight => "prec_right",
+    KwPrecDynamic => "prec_dynamic", KwReserved => "reserved",
+    KwTokenImmediate => "token_immediate", KwConcat => "concat", KwRegexp => "regexp",
+    KwInherit => "inherit", KwImport => "import", KwOverride => "override",
+    KwAppend => "append", KwGrammarConfig => "grammar_config",
 }
 
 impl std::fmt::Display for TokenKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(kw) = self.keyword_str() {
+            return write!(f, "'{kw}'");
+        }
         f.write_str(match self {
             Self::Ident => "identifier",
             Self::StringLit => "string literal",
             Self::RawStringLit { .. } => "raw string literal",
             Self::IntLit(_) => "integer literal",
-            Self::KwGrammar => "'grammar'",
-            Self::KwRule => "'rule'",
-            Self::KwLet => "'let'",
-            Self::KwFn => "'fn'",
-            Self::KwFor => "'for'",
-            Self::KwIn => "'in'",
-            Self::KwSeq => "'seq'",
-            Self::KwChoice => "'choice'",
-            Self::KwRepeat => "'repeat'",
-            Self::KwRepeat1 => "'repeat1'",
-            Self::KwOptional => "'optional'",
-            Self::KwBlank => "'blank'",
-            Self::KwField => "'field'",
-            Self::KwAlias => "'alias'",
-            Self::KwToken => "'token'",
-            Self::KwPrec => "'prec'",
-            Self::KwPrecLeft => "'prec_left'",
-            Self::KwPrecRight => "'prec_right'",
-            Self::KwPrecDynamic => "'prec_dynamic'",
-            Self::KwReserved => "'reserved'",
-            Self::KwTokenImmediate => "'token_immediate'",
-            Self::KwConcat => "'concat'",
-            Self::KwRegexp => "'regexp'",
-            Self::KwInherit => "'inherit'",
-            Self::KwImport => "'import'",
-            Self::KwOverride => "'override'",
-            Self::KwAppend => "'append'",
-            Self::KwGrammarConfig => "'grammar_config'",
             Self::LBrace => "'{'",
             Self::RBrace => "'}'",
             Self::LParen => "'('",
@@ -188,6 +188,7 @@ impl std::fmt::Display for TokenKind {
             Self::Gt => "'>'",
             Self::Comment => "comment",
             Self::Eof => "end of file",
+            _ => unreachable!(),
         })
     }
 }
@@ -479,37 +480,7 @@ impl<'src> Lexer<'src> {
         if text == "r" && matches!(self.peek(), Some(b'"' | b'#')) {
             return self.lex_raw_string(start);
         }
-        Ok(match text {
-            "grammar" => TokenKind::KwGrammar,
-            "rule" => TokenKind::KwRule,
-            "let" => TokenKind::KwLet,
-            "fn" => TokenKind::KwFn,
-            "for" => TokenKind::KwFor,
-            "in" => TokenKind::KwIn,
-            "seq" => TokenKind::KwSeq,
-            "choice" => TokenKind::KwChoice,
-            "repeat" => TokenKind::KwRepeat,
-            "repeat1" => TokenKind::KwRepeat1,
-            "optional" => TokenKind::KwOptional,
-            "blank" => TokenKind::KwBlank,
-            "field" => TokenKind::KwField,
-            "alias" => TokenKind::KwAlias,
-            "token" => TokenKind::KwToken,
-            "prec" => TokenKind::KwPrec,
-            "prec_left" => TokenKind::KwPrecLeft,
-            "prec_right" => TokenKind::KwPrecRight,
-            "prec_dynamic" => TokenKind::KwPrecDynamic,
-            "reserved" => TokenKind::KwReserved,
-            "token_immediate" => TokenKind::KwTokenImmediate,
-            "concat" => TokenKind::KwConcat,
-            "regexp" => TokenKind::KwRegexp,
-            "inherit" => TokenKind::KwInherit,
-            "import" => TokenKind::KwImport,
-            "override" => TokenKind::KwOverride,
-            "append" => TokenKind::KwAppend,
-            "grammar_config" => TokenKind::KwGrammarConfig,
-            _ => TokenKind::Ident,
-        })
+        Ok(TokenKind::from_keyword(text))
     }
 }
 
