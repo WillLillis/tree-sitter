@@ -177,7 +177,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             message: NoteMessage::FirstDefinedHere,
             span,
             path: self.grammar_path.to_path_buf(),
-            source: self.ast.source().to_string(),
+            source: self.ast.ctx.source.clone(),
         }))
     }
 
@@ -224,22 +224,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwOverride => self.parse_override_rule_def(),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwFn => self.parse_fn_def(),
-            TokenKind::KwPrint => self.parse_print_item(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
 
-    fn parse_print_item(&mut self) -> ParseResult<NodeId> {
-        let start = self.expect(TokenKind::KwPrint)?;
-        self.expect(TokenKind::LParen)?;
-        let arg = self.parse_expr()?;
-        let end = self.expect(TokenKind::RParen)?;
-        Ok(self.ast.push(Node::Print(arg), start.merge(end)))
-    }
-
     fn parse_grammar_block(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwGrammar)?;
-        if self.ast.context.grammar_config.is_some() {
+        if self.ast.ctx.grammar_config.is_some() {
             let first_span = self
                 .ast
                 .root_items
@@ -265,12 +256,12 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         note: None,
                     });
                 }
-                self.ast.context.grammar_config = Some(config);
+                self.ast.ctx.grammar_config = Some(config);
                 return Ok(self.ast.push(Node::Grammar, start.merge(end)));
             }
             let key_span = self.expect_name()?;
             self.expect(TokenKind::Colon)?;
-            let key = self.ast.text(key_span);
+            let key = self.ast.ctx.text(key_span);
             let field = ConfigField::from_str(key).ok_or_else(|| ParseError {
                 kind: ParseErrorKind::UnknownGrammarField(key.to_string()),
                 span: key_span,
@@ -288,7 +279,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 ConfigField::Language => {
                     let s = self.expect_string()?;
                     let inner = s.strip_quotes();
-                    config.language = Some(self.ast.text(inner).to_string());
+                    config.language = Some(self.ast.ctx.text(inner).to_string());
                 }
                 ConfigField::Inherits => config.inherits = Some(self.parse_expr()?),
                 ConfigField::Extras => config.extras = Some(self.parse_expr()?),
@@ -375,7 +366,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
         if let Some(id_span) = self.eat(TokenKind::Ident) {
-            return match self.ast.text(id_span) {
+            return match self.ast.ctx.text(id_span) {
                 "rule_t" => Ok((Ty::Rule, id_span)),
                 "str_t" => Ok((Ty::Str, id_span)),
                 "int_t" => Ok((Ty::Int, id_span)),
@@ -415,18 +406,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     Ok((ty?, id_span.merge(gt)))
                 }
                 "grammar_config_t" => Ok((Ty::GrammarConfig, id_span)),
-                "void_t" => Err(ParseError {
-                    kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Void),
-                    span: id_span,
-                    note: None,
-                }),
                 "spread_t" => Err(ParseError {
                     kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
                     span: id_span,
                     note: None,
                 }),
                 _ => Err(ParseError {
-                    kind: ParseErrorKind::UnknownType(self.ast.text(id_span).to_string()),
+                    kind: ParseErrorKind::UnknownType(self.ast.ctx.text(id_span).to_string()),
                     span: id_span,
                     note: None,
                 }),
@@ -520,7 +506,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 })
             }
             TokenKind::KwAppend if next_lparen => self.parse_append(start),
-            TokenKind::KwPrint if next_lparen => self.parse_print_item(),
             TokenKind::KwGrammarConfig if next_lparen => {
                 self.parse_unary(start, TokenKind::KwGrammarConfig, Node::GrammarConfig)
             }
@@ -549,8 +534,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     .ast
                     .push(Node::Neg(inner), start.merge(self.ast.span(inner))))
             }
-            TokenKind::LBracket => self.parse_list(start),
-            TokenKind::LParen => self.parse_tuple(start),
+            TokenKind::LBracket => self.parse_delimited(start, TokenKind::RBracket, Node::List),
+            TokenKind::LParen => self.parse_delimited(start, TokenKind::RParen, Node::Tuple),
             TokenKind::LBrace => self.parse_object(start),
             _ => Err(self.error(ParseErrorKind::ExpectedExpression)),
         }
@@ -730,7 +715,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     self.advance_pos();
                     let mut children = vec![id, member];
                     let arg_ids = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
-                    children.extend_from_slice(self.ast.child_slice(arg_ids));
+                    children.extend_from_slice(self.ast.ctx.child_slice(arg_ids));
                     let end = self.expect(TokenKind::RParen)?;
                     let range = self
                         .ast
@@ -765,18 +750,16 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         Ok(id)
     }
 
-    fn parse_list(&mut self, start: Span) -> ParseResult<NodeId> {
+    fn parse_delimited(
+        &mut self,
+        start: Span,
+        close: TokenKind,
+        make: fn(ChildRange) -> Node,
+    ) -> ParseResult<NodeId> {
         self.advance_pos();
-        let range = self.comma_sep_children(TokenKind::RBracket, Self::parse_expr)?;
-        let end = self.expect(TokenKind::RBracket)?;
-        Ok(self.ast.push(Node::List(range), start.merge(end)))
-    }
-
-    fn parse_tuple(&mut self, start: Span) -> ParseResult<NodeId> {
-        self.advance_pos();
-        let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
-        let end = self.expect(TokenKind::RParen)?;
-        Ok(self.ast.push(Node::Tuple(range), start.merge(end)))
+        let range = self.comma_sep_children(close, Self::parse_expr)?;
+        let end = self.expect(close)?;
+        Ok(self.ast.push(make(range), start.merge(end)))
     }
 
     fn parse_object(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -792,7 +775,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             rustc_hash::FxBuildHasher,
         );
         for &(span, _) in &fields {
-            let key = self.ast.text(span);
+            let key = self.ast.ctx.text(span);
             if let Some(&first_span) = seen.get(key) {
                 return Err(ParseError {
                     kind: ParseErrorKind::DuplicateObjectKey(key.to_string()),
@@ -928,31 +911,49 @@ pub struct ParseError {
     pub note: Option<Box<Note>>,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Error)]
 pub enum ParseErrorKind {
-    ExpectedToken {
-        expected: TokenKind,
-        got: TokenKind,
-    },
+    #[error("expected {expected}, got {got}")]
+    ExpectedToken { expected: TokenKind, got: TokenKind },
+    #[error("expected identifier")]
     ExpectedIdent,
+    #[error("expected string literal")]
     ExpectedString,
+    #[error("expected name")]
     ExpectedName,
+    #[error("expected expression")]
     ExpectedExpression,
+    #[error("expected type")]
     ExpectedType,
+    #[error("expected 'grammar', 'rule', 'let', 'fn', or 'print'")]
     ExpectedItem,
+    #[error("unknown type '{0}'")]
     UnknownType(String),
+    #[error("{0} is an internal type and cannot be used as a type annotation")]
     InternalTypeNotAllowed(Ty),
+    #[error("{0} cannot be stored inside a list")]
     ListInnerType(Ty),
+    #[error("{0} cannot be stored inside an object")]
     ObjectInnerType(Ty),
+    #[error("unknown grammar field '{0}'")]
     UnknownGrammarField(String),
+    #[error("duplicate grammar field '{0}'")]
     DuplicateGrammarField(String),
+    #[error("duplicate object key '{0}'")]
     DuplicateObjectKey(String),
+    #[error("function must have a return type (-> type)")]
     MissingReturnType,
+    #[error("only identifiers can be used as function names")]
     ExpectedFunctionName,
+    #[error("only one grammar block is allowed")]
     DuplicateGrammarBlock,
+    #[error("grammar block must have a 'language' field")]
     MissingLanguageField,
+    #[error("expression nesting too deep (maximum {MAX_PARSE_DEPTH})")]
     NestingTooDeep,
+    #[error("too many elements (maximum 65535)")]
     TooManyChildren,
+    #[error("{}", format_arg_count(*.expected, .name, *.got))]
     WrongArgumentCount {
         name: TokenKind,
         expected: u8,
@@ -960,63 +961,20 @@ pub enum ParseErrorKind {
     },
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "called by thiserror with references"
+)]
+fn format_arg_count(expected: u8, name: &TokenKind, got: usize) -> String {
+    match expected {
+        0 => format!("{name} takes no arguments, got {got}"),
+        1 => format!("{name} takes 1 argument, got {got}"),
+        _ => format!("{name} takes {expected} arguments, got {got}"),
+    }
+}
+
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            ParseErrorKind::ExpectedToken { expected, got } => {
-                write!(f, "expected {expected}, got {got}")
-            }
-            ParseErrorKind::ExpectedIdent => write!(f, "expected identifier"),
-            ParseErrorKind::ExpectedString => write!(f, "expected string literal"),
-            ParseErrorKind::ExpectedName => write!(f, "expected name"),
-            ParseErrorKind::ExpectedExpression => write!(f, "expected expression"),
-            ParseErrorKind::ExpectedType => write!(f, "expected type"),
-            ParseErrorKind::ExpectedItem => {
-                write!(f, "expected 'grammar', 'rule', 'let', 'fn', or 'print'")
-            }
-            ParseErrorKind::UnknownType(n) => write!(f, "unknown type '{n}'"),
-            ParseErrorKind::ListInnerType(ty) => {
-                write!(f, "{ty} cannot be stored inside a list")
-            }
-            ParseErrorKind::ObjectInnerType(ty) => {
-                write!(f, "{ty} cannot be stored inside an object")
-            }
-            ParseErrorKind::InternalTypeNotAllowed(ty) => {
-                write!(
-                    f,
-                    "{ty} is an internal type and cannot be used as a type annotation"
-                )
-            }
-            ParseErrorKind::UnknownGrammarField(n) => write!(f, "unknown grammar field '{n}'"),
-            ParseErrorKind::DuplicateGrammarField(n) => {
-                write!(f, "duplicate grammar field '{n}'")
-            }
-            ParseErrorKind::DuplicateObjectKey(n) => write!(f, "duplicate object key '{n}'"),
-            ParseErrorKind::MissingReturnType => {
-                write!(f, "function must have a return type (-> type)")
-            }
-            ParseErrorKind::ExpectedFunctionName => {
-                write!(f, "only identifiers can be used as function names")
-            }
-            ParseErrorKind::DuplicateGrammarBlock => write!(f, "only one grammar block is allowed"),
-            ParseErrorKind::MissingLanguageField => {
-                write!(f, "grammar block must have a 'language' field")
-            }
-            ParseErrorKind::NestingTooDeep => {
-                write!(f, "expression nesting too deep (maximum {MAX_PARSE_DEPTH})")
-            }
-            ParseErrorKind::TooManyChildren => {
-                write!(f, "too many elements (maximum {})", u16::MAX)
-            }
-            ParseErrorKind::WrongArgumentCount {
-                name,
-                expected,
-                got,
-            } => match expected {
-                0 => write!(f, "{name} takes no arguments, got {got}"),
-                1 => write!(f, "{name} takes 1 argument, got {got}"),
-                _ => write!(f, "{name} takes {expected} arguments, got {got}"),
-            },
-        }
+        self.kind.fmt(f)
     }
 }

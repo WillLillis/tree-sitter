@@ -263,7 +263,7 @@ fn variable_is_used(
     result
 }
 
-pub(crate) fn parse_grammar(input: &str) -> ParseGrammarResult<InputGrammar> {
+pub fn parse_grammar(input: &str) -> ParseGrammarResult<InputGrammar> {
     let grammar_json = serde_json::from_str::<GrammarJSON>(input)?;
 
     let extra_symbols =
