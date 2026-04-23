@@ -144,7 +144,7 @@ pub fn load_module(
     let _ = typecheck::resolve_and_check(&mut ast, &type_envs, base, path)?;
 
     let lowered = if matches!(kind, ModuleKind::Grammar) {
-        Some(lower::lower_with_base(&ast, path, &sub_modules, global_id)?)
+        Some(lower::lower_with_base(&ast, &sub_modules, global_id)?)
     } else {
         None
     };
@@ -181,10 +181,10 @@ fn parse_native_dsl_inner(
 /// - If `inherit()` exists, `inherits` must be set in grammar config
 /// - If `inherits` is set, it must trace to an `inherit()` call
 pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()> {
-    if ast.context.grammar_config.is_none() {
+    if ast.ctx.grammar_config.is_none() {
         return Err(LowerError::new(LowerErrorKind::MissingGrammarBlock, Span::new(0, 0)).into());
     }
-    let config_inherits = ast.context.grammar_config.as_ref().and_then(|c| c.inherits);
+    let config_inherits = ast.ctx.grammar_config.as_ref().and_then(|c| c.inherits);
 
     let direct_in_config =
         config_inherits.is_some_and(|id| matches!(ast.node(id), Node::Inherit { .. }));
@@ -229,14 +229,14 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
 /// following variable references to let bindings if needed.
 #[must_use]
 pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
-    let inherits_id = ast.context.grammar_config.as_ref()?.inherits?;
+    let inherits_id = ast.ctx.grammar_config.as_ref()?.inherits?;
     match ast.node(inherits_id) {
         Node::Inherit { .. } => Some(inherits_id),
         Node::Ident => {
-            let name = ast.text(ast.span(inherits_id));
+            let name = ast.ctx.text(ast.span(inherits_id));
             ast.root_items.iter().find_map(|&item_id| {
                 if let Node::Let { name: n, value, .. } = ast.node(item_id)
-                    && ast.text(ast.span(*n)) == name
+                    && ast.ctx.text(ast.span(*n)) == name
                     && matches!(ast.node(*value), Node::Inherit { .. })
                 {
                     Some(*value)

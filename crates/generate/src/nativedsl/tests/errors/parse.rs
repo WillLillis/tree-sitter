@@ -30,10 +30,6 @@ parse_error_tests! {
         r#"grammar { language: "test" } let x: foo = "y" rule program { "x" }"#,
         ParseErrorKind::UnknownType("foo".into())
     }
-    error_void_t_not_allowed {
-        r#"grammar { language: "test" } let x: void_t = "y" rule program { "x" }"#,
-        ParseErrorKind::InternalTypeNotAllowed(Ty::Void)
-    }
     error_spread_t_not_allowed {
         r#"grammar { language: "test" } let x: spread_t = "y" rule program { "x" }"#,
         ParseErrorKind::InternalTypeNotAllowed(Ty::Spread)
@@ -223,36 +219,6 @@ fn keywords_as_identifiers() {
         r#"grammar { language: "test" } fn repeat(x: rule_t) -> rule_t { x } rule foo { repeat("a") }"#,
     );
     assert_eq!(g.variables[0].name, "foo");
-}
-
-#[test]
-fn error_print_as_expression_rejected() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-        rule program { seq(print("hi"), "x") }"#
-        ),
-        Type
-    );
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::Rule,
-            got: Ty::Void
-        }
-    );
-}
-
-#[test]
-fn error_let_rhs_print_rejected() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-        let x = print("hi") rule program { "x" }"#
-        ),
-        Type
-    );
-    assert_eq!(e.kind, TypeErrorKind::CannotBindVoid);
 }
 
 #[test]

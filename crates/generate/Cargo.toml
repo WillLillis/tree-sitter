@@ -48,10 +48,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 topological-sort.workspace = true
 
-[[bin]]
-name              = "bench-native-dsl"
-path              = "src/bin/bench_native_dsl.rs"
-required-features = ["nativedsl"]
-
 [dev-dependencies]
 tempfile.workspace = true

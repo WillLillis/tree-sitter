@@ -12,21 +12,7 @@ fn import_function_expands_comma_sep1() {
         rule program { h::comma_sep1(identifier) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    // comma_sep1(item) = seq(item, repeat(seq(",", item)))
-    // repeat(x) lowers to choice(repeat1(x), blank)
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(",".into()),
-                    Rule::NamedSymbol("identifier".into()),
-                ])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), comma_sep1_rule("identifier"));
 }
 
 #[test]
@@ -37,24 +23,7 @@ fn import_function_expands_comma_sep() {
         rule program { h::comma_sep(identifier) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    // comma_sep(item) = optional(comma_sep1(item))
-    // optional(x) lowers to choice(x, blank)
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::choice(vec![
-            Rule::seq(vec![
-                Rule::NamedSymbol("identifier".into()),
-                Rule::choice(vec![
-                    Rule::repeat(Rule::seq(vec![
-                        Rule::String(",".into()),
-                        Rule::NamedSymbol("identifier".into()),
-                    ])),
-                    Rule::Blank,
-                ]),
-            ]),
-            Rule::Blank,
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), comma_sep_rule("identifier"));
 }
 
 #[test]
