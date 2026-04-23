@@ -77,7 +77,7 @@ fn error_inherit_bad_extension() {
     std::fs::write(&bad_file, "not a grammar").unwrap();
     let input = format!(
         r#"let base = inherit("{}") grammar {{ language: "derived", inherits: base }}"#,
-        bad_file.display()
+        dsl_path(&bad_file)
     );
     let e = assert_err!(parse_native_dsl(&input, Path::new(".")).unwrap_err(), Lower);
     assert_eq!(e.kind, LowerErrorKind::ModuleUnsupportedExtension);
@@ -118,7 +118,7 @@ fn error_inherit_cycle() {
         &a_path,
         format!(
             "let base = inherit(\"{}\")\ngrammar {{ language: \"a\", inherits: base }}",
-            b_path.display()
+            dsl_path(&b_path)
         ),
     )
     .unwrap();
@@ -126,7 +126,7 @@ fn error_inherit_cycle() {
         &b_path,
         format!(
             "let base = inherit(\"{}\")\ngrammar {{ language: \"b\", inherits: base }}",
-            a_path.display()
+            dsl_path(&a_path)
         ),
     )
     .unwrap();
