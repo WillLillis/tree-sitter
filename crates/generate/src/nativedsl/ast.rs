@@ -472,7 +472,7 @@ pub struct GrammarConfig {
 
 #[derive(Clone)]
 pub struct FnConfig {
-    pub name: NodeId,
+    pub name: Span,
     pub params: Vec<Param>,
     pub return_ty: Ty,
     pub body: NodeId,
@@ -480,7 +480,7 @@ pub struct FnConfig {
 
 #[derive(Clone)]
 pub struct Param {
-    pub name: NodeId,
+    pub name: Span,
     pub ty: Ty,
 }
 
