@@ -13,37 +13,34 @@ use super::{DslError, NoteMessage, ast::Span};
 pub struct NativeDslError {
     pub error: DslError,
     #[serde(skip)]
-    pub source_text: String,
+    pub src: String,
     #[serde(skip)]
     pub path: PathBuf,
 }
 
 impl std::fmt::Display for NativeDslError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let error = &self.error;
-        let source = &self.source_text;
-        let path = &self.path;
         // Module errors: render the inner error with the child file's context,
         // then append a note pointing back to the import/inherit in the parent.
-        if let DslError::Module(e) = error {
+        if let DslError::Module(e) = &self.error {
             write!(f, "{e}")?;
             render_note_snippet(
                 f,
                 e.reference_span,
-                source,
-                path,
+                &self.src,
+                &self.path,
                 &NoteMessage::ReferencedFromHere,
             )?;
             return Ok(());
         }
 
-        let ctx = SpanContext::new(error.span(), source);
-        let path_display = path.display();
+        let ctx = SpanContext::new(self.error.span(), &self.src);
+        let path_display = self.path.display();
         let gutter_width = digit_count(ctx.line_num);
         let pipe = paint(AnsiColor::Cyan, "|");
         let underline = paint(AnsiColor::Red, &"^".repeat(ctx.underline_len));
 
-        writeln!(f, "{}: {error}", paint(AnsiColor::Red, "error"))?;
+        writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), self.error)?;
         writeln!(
             f,
             " {} {path_display}:{line_num}:{col}",
@@ -73,11 +70,11 @@ impl std::fmt::Display for NativeDslError {
             width = ctx.span_start_in_line,
         )?;
 
-        if let Some(note) = error.note() {
+        if let Some(note) = self.error.note() {
             render_note_snippet(f, note.span, &note.source, &note.path, &note.message)?;
         }
 
-        if let Some(trace) = error.call_trace() {
+        if let Some(trace) = self.error.call_trace() {
             let show = 3;
             let elided = trace.len().saturating_sub(show * 2);
             writeln!(f)?;
@@ -93,7 +90,7 @@ impl std::fmt::Display for NativeDslError {
                 if i >= show && i < trace.len() - show {
                     continue;
                 }
-                let fctx = SpanContext::new(*span, source);
+                let fctx = SpanContext::new(*span, &self.src);
                 writeln!(
                     f,
                     "   {} {path_display}:{}:{} in {name}()",
