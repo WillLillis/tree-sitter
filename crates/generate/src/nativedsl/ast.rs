@@ -130,6 +130,21 @@ macro_rules! id_type {
 id_type!(FnId);
 id_type!(ForId);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PrecKind {
+    Default,
+    Left,
+    Right,
+    Dynamic,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RepeatKind {
+    ZeroOrMore,
+    OneOrMore,
+    Optional,
+}
+
 /// Byte offset range `[start, end)` in the source text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Span {
@@ -360,9 +375,10 @@ pub enum Node {
     },
     Seq(ChildRange),
     Choice(ChildRange),
-    Repeat(NodeId),
-    Repeat1(NodeId),
-    Optional(NodeId),
+    Repeat {
+        kind: RepeatKind,
+        inner: NodeId,
+    },
     Blank,
     Field {
         name: NodeId,
@@ -375,18 +391,7 @@ pub enum Node {
     Token(NodeId),
     TokenImmediate(NodeId),
     Prec {
-        value: NodeId,
-        content: NodeId,
-    },
-    PrecLeft {
-        value: NodeId,
-        content: NodeId,
-    },
-    PrecRight {
-        value: NodeId,
-        content: NodeId,
-    },
-    PrecDynamic {
+        kind: PrecKind,
         value: NodeId,
         content: NodeId,
     },

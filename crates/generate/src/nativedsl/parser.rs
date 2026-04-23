@@ -14,7 +14,10 @@ use crate::nativedsl::InnerTy;
 use super::typecheck::Ty;
 use super::{
     Note, NoteMessage,
-    ast::{Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, Span},
+    ast::{
+        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, PrecKind,
+        RepeatKind, Span,
+    },
     lexer::{Token, TokenKind},
 };
 
@@ -443,14 +446,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         match &self.tokens[self.pos].kind {
             TokenKind::KwSeq if next_lparen => self.parse_variadic(start, Node::Seq),
             TokenKind::KwChoice if next_lparen => self.parse_variadic(start, Node::Choice),
-            TokenKind::KwRepeat if next_lparen => {
-                self.parse_unary(start, TokenKind::KwRepeat, Node::Repeat)
-            }
-            TokenKind::KwRepeat1 if next_lparen => {
-                self.parse_unary(start, TokenKind::KwRepeat1, Node::Repeat1)
-            }
-            TokenKind::KwOptional if next_lparen => {
-                self.parse_unary(start, TokenKind::KwOptional, Node::Optional)
+            TokenKind::KwRepeat | TokenKind::KwRepeat1 | TokenKind::KwOptional if next_lparen => {
+                let kw = self.tokens[self.pos].kind;
+                let kind = match kw {
+                    TokenKind::KwRepeat => RepeatKind::ZeroOrMore,
+                    TokenKind::KwRepeat1 => RepeatKind::OneOrMore,
+                    _ => RepeatKind::Optional,
+                };
+                self.parse_unary(start, kw, |inner| Node::Repeat { kind, inner })
             }
             TokenKind::KwBlank if next_lparen => {
                 self.advance_pos();
@@ -477,10 +480,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwTokenImmediate if next_lparen => {
                 self.parse_unary(start, TokenKind::KwTokenImmediate, Node::TokenImmediate)
             }
-            TokenKind::KwPrec if next_lparen => self.parse_prec(start, PrecVariant::Default),
-            TokenKind::KwPrecLeft if next_lparen => self.parse_prec(start, PrecVariant::Left),
-            TokenKind::KwPrecRight if next_lparen => self.parse_prec(start, PrecVariant::Right),
-            TokenKind::KwPrecDynamic if next_lparen => self.parse_prec(start, PrecVariant::Dynamic),
+            TokenKind::KwPrec if next_lparen => self.parse_prec(start, PrecKind::Default),
+            TokenKind::KwPrecLeft if next_lparen => self.parse_prec(start, PrecKind::Left),
+            TokenKind::KwPrecRight if next_lparen => self.parse_prec(start, PrecKind::Right),
+            TokenKind::KwPrecDynamic if next_lparen => self.parse_prec(start, PrecKind::Dynamic),
             TokenKind::KwReserved if next_lparen => self.parse_reserved_expr(start),
             TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
@@ -544,7 +547,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         &mut self,
         start: Span,
         name: TokenKind,
-        make: fn(NodeId) -> Node,
+        make: impl FnOnce(NodeId) -> Node,
     ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
@@ -598,15 +601,16 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             .push(Node::Alias { content, target }, start.merge(end)))
     }
 
-    fn parse_prec(&mut self, start: Span, variant: PrecVariant) -> ParseResult<NodeId> {
-        let (value, content, end) = self.parse_binary(start, variant.into(), Self::parse_expr)?;
-        let node = match variant {
-            PrecVariant::Default => Node::Prec { value, content },
-            PrecVariant::Left => Node::PrecLeft { value, content },
-            PrecVariant::Right => Node::PrecRight { value, content },
-            PrecVariant::Dynamic => Node::PrecDynamic { value, content },
-        };
-        Ok(self.ast.push(node, start.merge(end)))
+    fn parse_prec(&mut self, start: Span, kind: PrecKind) -> ParseResult<NodeId> {
+        let (value, content, end) = self.parse_binary(start, kind.into(), Self::parse_expr)?;
+        Ok(self.ast.push(
+            Node::Prec {
+                kind,
+                value,
+                content,
+            },
+            start.merge(end),
+        ))
     }
 
     /// Parse `reserved("context", content)` expression (not the config block).
@@ -838,21 +842,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum PrecVariant {
-    Default,
-    Left,
-    Right,
-    Dynamic,
-}
-
-impl From<PrecVariant> for TokenKind {
-    fn from(value: PrecVariant) -> Self {
+impl From<PrecKind> for TokenKind {
+    fn from(value: PrecKind) -> Self {
         match value {
-            PrecVariant::Default => Self::KwPrec,
-            PrecVariant::Left => Self::KwPrecLeft,
-            PrecVariant::Right => Self::KwPrecRight,
-            PrecVariant::Dynamic => Self::KwPrecDynamic,
+            PrecKind::Default => Self::KwPrec,
+            PrecKind::Left => Self::KwPrecLeft,
+            PrecKind::Right => Self::KwPrecRight,
+            PrecKind::Dynamic => Self::KwPrecDynamic,
         }
     }
 }
