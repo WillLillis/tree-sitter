@@ -1,12 +1,5 @@
-//! Zero-allocation lexer for the native grammar DSL.
-//!
-//! Operates directly on the source bytes (`&[u8]`) and produces a flat
-//! `Vec<Token>` with spans pointing back into the source. Uses `memchr` /
-//! `memchr2` for fast scanning of string literals and comments.
-//!
-//! Escape sequences inside string literals (`"..."`) are validated inline
-//! during lexing so that invalid escapes are caught early. Raw string
-//! literals (`r"..."`, `r#"..."#`) are scanned without escape processing.
+//! Lexer for the native grammar DSL. Produces a flat `Vec<Token>` from
+//! source bytes.
 
 use memchr::{memchr, memchr2};
 use serde::Serialize;
@@ -49,7 +42,7 @@ const BYTE_CLASS: [u8; 256] = {
 /// Classify a byte using the lookup table.
 #[inline]
 fn byte_is(b: u8, class: u8) -> bool {
-    // SAFETY: b is u8, BYTE_CLASS has 256 entries — every u8 is a valid index.
+    // SAFETY: b is u8, BYTE_CLASS has 256 entries, so every u8 is a valid index.
     unsafe { *BYTE_CLASS.get_unchecked(b as usize) & class != 0 }
 }
 
@@ -66,7 +59,6 @@ pub enum TokenKind {
         hash_count: u8,
     },
     IntLit(i32),
-
     // Structural keywords
     KwGrammar,
     KwRule,
@@ -74,7 +66,6 @@ pub enum TokenKind {
     KwFn,
     KwFor,
     KwIn,
-
     // Combinator keywords
     KwSeq,
     KwChoice,
@@ -98,7 +89,6 @@ pub enum TokenKind {
     KwOverride,
     KwAppend,
     KwGrammarConfig,
-
     // Punctuation
     LBrace,
     RBrace,
@@ -115,9 +105,8 @@ pub enum TokenKind {
     Eq,
     Lt,
     Gt,
-
+    // Other
     Comment,
-
     Eof,
 }
 
@@ -216,11 +205,8 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    /// Consume the entire source and return all tokens.
-    ///
-    /// The returned vector always ends with a `TokenKind::Eof` token.
-    /// Pre-allocates capacity based on source length (roughly 1 token per 4
-    /// bytes).
+    /// Consume the entire source and return all tokens. The returned vector
+    /// always ends with `TokenKind::Eof`.
     ///
     /// # Errors
     ///
@@ -271,16 +257,12 @@ impl<'src> Lexer<'src> {
     }
 
     fn skip_whitespace(&mut self) {
-        // caching `self.source` and `self.pos` into locals prevents LLVM from
-        // reloading the fat pointer on every iteration
         let source = self.source;
-        let mut pos = self.pos;
-        // SAFETY: pos < source.len() checked by loop condition.
-        while pos < source.len() && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_WHITESPACE)
+        while self.pos < source.len() // SAFETY: pos < source.len() checked by loop condition.
+            && byte_is(unsafe { *source.get_unchecked(self.pos) }, CLASS_WHITESPACE)
         {
-            pos += 1;
+            self.pos += 1;
         }
-        self.pos = pos;
     }
 
     fn next_token(&mut self) -> LexResult<Token> {
@@ -318,7 +300,6 @@ impl<'src> Lexer<'src> {
             b'0'..=b'9' => self.lex_int(start)?,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(start)?,
             _ => {
-                // Source is valid UTF-8; decode the full codepoint for the error.
                 // SAFETY: source originates from &str (Lexer::new takes &str).
                 let rest = unsafe { std::str::from_utf8_unchecked(&self.source[start..]) };
                 let ch = rest.chars().next().unwrap();
@@ -429,7 +410,6 @@ impl<'src> Lexer<'src> {
                 }
                 Some(offset) => {
                     pos += offset + 1; // advance past the "
-                    // Check if followed by the right number of #'s
                     let mut found = 0u8;
                     // SAFETY: pos < source.len() is checked by loop condition.
                     while found < hash_count
@@ -468,8 +448,7 @@ impl<'src> Lexer<'src> {
     fn lex_ident(&mut self, start: usize) -> LexResult<TokenKind> {
         let source = self.source;
         let mut pos = self.pos;
-        // SAFETY: pos < source.len() checked by loop condition.
-        while pos < source.len()
+        while pos < source.len() // SAFETY: pos < source.len() checked by loop condition.
             && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_IDENT_CONTINUE)
         {
             pos += 1;

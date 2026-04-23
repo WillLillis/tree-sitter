@@ -1,9 +1,4 @@
 //! Lowering pass: evaluates the typed AST into an [`InputGrammar`].
-//!
-//! Walks the AST, evaluating expressions into an intermediate arena, then
-//! converts to output [`InputGrammar`] / [`Rule`] types. Key types:
-//! [`StringPool`] (interned strings), rule arena (`Vec<ARule>`), value arena
-//! (`Vec<Value>`), and [`Evaluator`] (scope chain + function registry).
 
 use std::num::NonZeroU32;
 
