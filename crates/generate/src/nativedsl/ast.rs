@@ -344,11 +344,11 @@ impl ChildRange {
 pub enum Node {
     Grammar,
     Rule {
-        name: NodeId,
+        name: Span,
         body: NodeId,
     },
     OverrideRule {
-        name: NodeId,
+        name: Span,
         body: NodeId,
     },
     Let {
@@ -367,11 +367,11 @@ pub enum Node {
     VarRef,
     FieldAccess {
         obj: NodeId,
-        field: NodeId,
+        field: Span,
     },
     QualifiedAccess {
         obj: NodeId,
-        member: NodeId,
+        member: Span,
     },
     Seq(ChildRange),
     Choice(ChildRange),
