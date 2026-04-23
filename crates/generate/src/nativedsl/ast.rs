@@ -368,8 +368,10 @@ pub enum Node {
         content: NodeId,
         target: NodeId,
     },
-    Token(NodeId),
-    TokenImmediate(NodeId),
+    Token {
+        immediate: bool,
+        inner: NodeId,
+    },
     Prec {
         kind: PrecKind,
         value: NodeId,
