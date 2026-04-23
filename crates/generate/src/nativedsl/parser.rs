@@ -340,10 +340,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     fn parse_fn_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwFn)?;
-        let name = self.expect_ident_node()?;
+        let name = self.expect_ident()?;
         self.expect(TokenKind::LParen)?;
         let params = self.comma_sep(TokenKind::RParen, |this| {
-            let pname = this.expect_ident_node()?;
+            let pname = this.expect_ident()?;
             this.expect(TokenKind::Colon)?;
             Ok(Param {
                 name: pname,
