@@ -32,6 +32,12 @@ pub(super) fn test_fixtures_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nativedsl/test_fixtures")
 }
 
+/// Convert a path to a forward-slash string for embedding in DSL source.
+/// Ensures import/inherit paths work on Windows where `display()` produces `\`.
+pub(super) fn dsl_path(p: &std::path::Path) -> String {
+    p.to_str().unwrap().replace('\\', "/")
+}
+
 pub(super) fn dsl(input: &str) -> InputGrammar {
     parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap()
 }
