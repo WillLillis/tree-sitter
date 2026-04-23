@@ -188,7 +188,7 @@ impl Span {
 pub struct Ast {
     pub arena: NodeArena,
     pub root_items: Vec<NodeId>,
-    pub context: AstContext,
+    pub ctx: AstContext,
 }
 
 /// Immutable context data split from nodes so resolve can borrow
@@ -245,11 +245,6 @@ impl AstContext {
             )
         }
     }
-    #[inline]
-    #[must_use]
-    pub fn source(&self) -> &str {
-        &self.source
-    }
 }
 
 impl Ast {
@@ -259,7 +254,7 @@ impl Ast {
         Self {
             arena: NodeArena::new(cap),
             root_items: Vec::new(),
-            context: AstContext {
+            ctx: AstContext {
                 grammar_config: None,
                 fn_configs: Vec::new(),
                 for_configs: Vec::new(),
@@ -287,14 +282,14 @@ impl Ast {
     }
 
     pub fn push_fn(&mut self, config: FnConfig) -> FnId {
-        let id = FnId(self.context.fn_configs.len() as u32);
-        self.context.fn_configs.push(config);
+        let id = FnId(self.ctx.fn_configs.len() as u32);
+        self.ctx.fn_configs.push(config);
         id
     }
 
     pub fn push_for(&mut self, config: ForConfig) -> ForId {
-        let id = ForId(self.context.for_configs.len() as u32);
-        self.context.for_configs.push(config);
+        let id = ForId(self.ctx.for_configs.len() as u32);
+        self.ctx.for_configs.push(config);
         id
     }
 
@@ -302,65 +297,23 @@ impl Ast {
         &mut self,
         fields: Vec<(Span, NodeId)>,
     ) -> Result<ChildRange, CapacityError> {
-        let start = self.context.object_fields.len() as u32;
+        let start = self.ctx.object_fields.len() as u32;
         let len = u16::try_from(fields.len()).map_err(|_| CapacityError)?;
-        self.context.object_fields.extend(fields);
+        self.ctx.object_fields.extend(fields);
         Ok(ChildRange::new(start, len))
     }
 
     pub fn push_children(&mut self, items: &[NodeId]) -> Result<ChildRange, CapacityError> {
-        let start = self.context.children.len() as u32;
+        let start = self.ctx.children.len() as u32;
         let len = u16::try_from(items.len()).map_err(|_| CapacityError)?;
-        self.context.children.extend_from_slice(items);
+        self.ctx.children.extend_from_slice(items);
         Ok(ChildRange::new(start, len))
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn get_fn(&self, id: FnId) -> &FnConfig {
-        self.context.get_fn(id)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn get_for(&self, id: ForId) -> &ForConfig {
-        self.context.get_for(id)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
-        self.context.get_object(range)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
-        self.context.get_qualified_call(range)
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn source(&self) -> &str {
-        &self.context.source
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn text(&self, span: Span) -> &str {
-        self.context.text(span)
     }
 
     #[inline]
     #[must_use]
     pub fn node_text(&self, id: NodeId) -> &str {
-        self.text(self.span(id))
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
-        self.context.child_slice(range)
+        self.ctx.text(self.span(id))
     }
 }
 
@@ -482,11 +435,6 @@ pub enum Node {
     Tuple(ChildRange),
     Object(ChildRange),
     Neg(NodeId),
-    /// Top-level `print(expr)` debugging item. Evaluates `expr` during
-    /// lowering and writes a representation of the value to stderr. Returns
-    /// `Ty::Void` from typecheck - only valid as a top-level item, never
-    /// inside an expression that expects a value.
-    Print(NodeId),
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
     #[doc(hidden)]
     Unreachable,
