@@ -38,7 +38,10 @@ use thiserror::Error;
 ///
 /// Returns [`DslError`] if any pipeline stage fails.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
-    parse_native_dsl_inner(input, grammar_path, &[])
+    let module = load_module(input, grammar_path, ModuleKind::Grammar, &[], &mut 0)?;
+    Ok(module
+        .lowered
+        .expect("Grammar module always has lowered grammar"))
 }
 
 #[derive(Clone, Copy)]
@@ -148,23 +151,6 @@ pub fn load_module(
         lowered,
         global_id,
     })
-}
-
-fn parse_native_dsl_inner(
-    input: &str,
-    grammar_path: &Path,
-    ancestor_paths: &[PathBuf],
-) -> DslResult<InputGrammar> {
-    let module = load_module(
-        input,
-        grammar_path,
-        ModuleKind::Grammar,
-        ancestor_paths,
-        &mut 0,
-    )?;
-    Ok(module
-        .lowered
-        .expect("Grammar module always has lowered grammar"))
 }
 
 /// Validate grammar module structure:

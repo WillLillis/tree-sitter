@@ -87,8 +87,7 @@ enum ARule {
     PrecDynamic(i32, RuleId),
     Field(Str, RuleId),
     Alias(Str, bool, RuleId),
-    Token(RuleId),
-    ImmediateToken(RuleId),
+    Token(bool, RuleId),
     Reserved(Str, RuleId),
 }
 
@@ -556,8 +555,14 @@ impl<'ast> Evaluator<'ast> {
             ARule::PrecDynamic(v, r) => Rule::prec_dynamic(*v, self.build_rule(*r)),
             ARule::Field(n, r) => Rule::field(s.to_string(*n), self.build_rule(*r)),
             ARule::Alias(v, named, r) => Rule::alias(self.build_rule(*r), s.to_string(*v), *named),
-            ARule::Token(r) => Rule::token(self.build_rule(*r)),
-            ARule::ImmediateToken(r) => Rule::immediate_token(self.build_rule(*r)),
+            ARule::Token(imm, r) => {
+                let r = self.build_rule(*r);
+                if *imm {
+                    Rule::immediate_token(r)
+                } else {
+                    Rule::token(r)
+                }
+            }
             ARule::Reserved(ctx, r) => Rule::Reserved {
                 rule: Box::new(self.build_rule(*r)),
                 context_name: s.to_string(*ctx),
@@ -852,9 +857,9 @@ impl<'ast> Evaluator<'ast> {
                     rid = self.alloc_rule(ARule::Field(sid, rid));
                 }
                 if params.is_token && params.is_main_token {
-                    rid = self.alloc_rule(ARule::ImmediateToken(rid));
+                    rid = self.alloc_rule(ARule::Token(true, rid));
                 } else if params.is_token {
-                    rid = self.alloc_rule(ARule::Token(rid));
+                    rid = self.alloc_rule(ARule::Token(false, rid));
                 }
                 rid
             }
@@ -1062,7 +1067,7 @@ impl<'ast> Evaluator<'ast> {
             #[rustfmt::skip]
             Node::Seq(_) | Node::Choice(_) | Node::Repeat { .. }
             | Node::Blank | Node::Field { .. } | Node::Alias { .. }
-            | Node::Token(_) | Node::TokenImmediate(_) | Node::Prec { .. }
+            | Node::Token { .. } | Node::Prec { .. }
             | Node::Reserved { .. } => self.eval_combinator(id),
             _ => {
                 let vid = self.eval_expr(id)?;
@@ -1174,13 +1179,10 @@ impl<'ast> Evaluator<'ast> {
                     }
                 }
             }
-            Node::Token(inner) => {
+            Node::Token { immediate, inner } => {
                 let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::Token(inner)))
-            }
-            Node::TokenImmediate(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
+                let arule = ARule::Token(*immediate, inner);
+                Ok(self.alloc_rule(arule))
             }
             Node::Prec {
                 kind,
