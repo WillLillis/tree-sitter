@@ -11,9 +11,9 @@ log*.html
 profile*
 fuzz-results
 test/fuzz/out
+crates/generate/fuzz/
 test/fixtures/grammars/*
 !test/fixtures/grammars/.gitkeep
-fuzz_crash_[0-9]*.tsg
 
 node_modules
 

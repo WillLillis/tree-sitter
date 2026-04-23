@@ -1,0 +1,4 @@
+grammar { language: "test" }
+let t =t(1, "a", "b")
+let l = ["a", "b", "c"]
+rule program { "x" }
