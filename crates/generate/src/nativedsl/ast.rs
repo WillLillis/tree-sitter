@@ -1,8 +1,4 @@
 //! Arena-based AST for the native grammar DSL.
-//!
-//! Nodes and spans live in parallel vectors indexed by [`NodeId`]. Compound
-//! config (grammar settings, fn/for configs) is in [`AstContext`], separate
-//! from nodes so later passes can mutate nodes while reading context.
 
 use std::{fmt, num::NonZeroU32};
 

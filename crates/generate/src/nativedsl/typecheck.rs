@@ -1,15 +1,7 @@
 //! Name resolution and type checking for the native grammar DSL.
 //!
-//! Entry point is [`resolve_and_check`], which runs two phases:
-//! 1. Collect declarations and resolve identifiers (mutates the arena).
-//! 2. Type-check the resolved AST (reads immutably).
-//!
-//! Uses a flat type system with shallow generics (`list_t<T>`, `obj_t<T>`)
-//! for the values that grammar definitions actually use.
-//!
-//! Subtyping: `str_t` is a subtype of `rule_t`, `list_t<str_t>` is a subtype
-//! of `list_t<rule_t>`, and `list_t<list_t<str_t>>` is a subtype of
-//! `list_t<list_t<rule_t>>`.
+//! Entry point is [`resolve_and_check`]: collects declarations, resolves
+//! identifiers, then type-checks the resolved AST.
 
 use std::path::Path;
 

@@ -1,5 +1,4 @@
 //! Diagnostic rendering for DSL errors.
-//! rustc-style error output with source snippets, annotations, and cross-file notes.
 
 use std::path::{Path, PathBuf};
 
