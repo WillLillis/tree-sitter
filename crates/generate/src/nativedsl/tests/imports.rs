@@ -268,7 +268,7 @@ fn delimited(item: rule_t) -> rule_t {
         rule program {{ h::delimited(identifier) }}
         rule identifier {{ regexp(r"[a-z]+") }}
     "#,
-        helper.display()
+        dsl_path(&helper)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(
@@ -368,7 +368,7 @@ fn error_import_disallowed_rule() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        bad_helper.display()
+        dsl_path(&bad_helper)
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let outer = assert_err!(err, Module);
@@ -397,7 +397,7 @@ fn error_import_disallowed_grammar_block() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        bad_helper.display()
+        dsl_path(&bad_helper)
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let outer = assert_err!(err, Module);
@@ -416,8 +416,16 @@ fn error_import_cycle() {
     let a_path = dir.path().join("a.tsg");
     let b_path = dir.path().join("b.tsg");
 
-    std::fs::write(&a_path, format!("let b = import(\"{}\")", b_path.display())).unwrap();
-    std::fs::write(&b_path, format!("let a = import(\"{}\")", a_path.display())).unwrap();
+    std::fs::write(
+        &a_path,
+        format!("let b = import(\"{}\")", dsl_path(&b_path)),
+    )
+    .unwrap();
+    std::fs::write(
+        &b_path,
+        format!("let a = import(\"{}\")", dsl_path(&a_path)),
+    )
+    .unwrap();
 
     let input = format!(
         r#"
@@ -425,7 +433,7 @@ fn error_import_cycle() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        a_path.display()
+        dsl_path(&a_path)
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     // Should detect cycle somewhere in the chain
@@ -470,7 +478,7 @@ fn error_import_nested_error() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        bad_helper.display()
+        dsl_path(&bad_helper)
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let outer = assert_err!(err, Module);
@@ -485,7 +493,7 @@ fn error_import_transitive_nested_error() {
     let bad = dir.path().join("bad.tsg");
     std::fs::write(&bad, "let x = @@@").unwrap();
     let middle = dir.path().join("middle.tsg");
-    std::fs::write(&middle, format!("let h = import(\"{}\")", bad.display())).unwrap();
+    std::fs::write(&middle, format!("let h = import(\"{}\")", dsl_path(&bad))).unwrap();
 
     let input = format!(
         r#"
@@ -493,7 +501,7 @@ fn error_import_transitive_nested_error() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        middle.display()
+        dsl_path(&middle)
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let outer = assert_err!(err, Module);
@@ -517,7 +525,7 @@ fn error_import_json_not_allowed() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        json.display()
+        dsl_path(&json)
     );
     let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
     let e = assert_err!(err, Lower);
@@ -636,7 +644,7 @@ fn import_diamond() {
         &b_path,
         format!(
             "let h = import(\"{}\")\nfn b_fn(x: rule_t) -> rule_t {{ prec(h::VAL, x) }}",
-            helpers_path.display()
+            dsl_path(&helpers_path)
         ),
     )
     .unwrap();
@@ -644,7 +652,7 @@ fn import_diamond() {
         &c_path,
         format!(
             "let h = import(\"{}\")\nfn c_fn(x: rule_t) -> rule_t {{ prec(h::VAL, x) }}",
-            helpers_path.display()
+            dsl_path(&helpers_path)
         ),
     )
     .unwrap();
@@ -656,8 +664,8 @@ fn import_diamond() {
         grammar {{ language: "test" }}
         rule program {{ choice(b::b_fn("a"), c::c_fn("b")) }}
     "#,
-        b_path.display(),
-        c_path.display()
+        dsl_path(&b_path),
+        dsl_path(&c_path)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(
@@ -681,7 +689,7 @@ fn import_empty_module() {
         grammar {{ language: "test" }}
         rule program {{ "x" }}
     "#,
-        empty.display()
+        dsl_path(&empty)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(*find_rule(&g, "program"), Rule::String("x".into()));
@@ -699,7 +707,7 @@ fn import_value_in_config_extras() {
         grammar {{ language: "test", extras: ws::WS }}
         rule program {{ "x" }}
     "#,
-        helper.display()
+        dsl_path(&helper)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(g.extra_symbols.len(), 2);
