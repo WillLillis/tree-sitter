@@ -303,7 +303,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     fn parse_rule_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwRule)?;
-        let name = self.expect_ident_node()?;
+        let name = self.expect_ident()?;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
@@ -313,7 +313,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     fn parse_override_rule_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwOverride)?;
         self.expect(TokenKind::KwRule)?;
-        let name = self.expect_ident_node()?;
+        let name = self.expect_ident()?;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
@@ -426,12 +426,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let start = self.ast.span(result);
         while self.at(TokenKind::Dot) {
             self.advance_pos();
-            let field_span = self.expect_name()?;
-            let field = self.ast.push(Node::Ident, field_span);
-            result = self.ast.push(
-                Node::FieldAccess { obj: result, field },
-                start.merge(self.ast.span(field)),
-            );
+            let field = self.expect_name()?;
+            result = self
+                .ast
+                .push(Node::FieldAccess { obj: result, field }, start.merge(field));
         }
         self.depth -= 1;
         Ok(result)
@@ -696,19 +694,18 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         loop {
             if self.at(TokenKind::Dot) {
                 self.advance_pos();
-                let field_span = self.expect_name()?;
-                let field = self.ast.push(Node::Ident, field_span);
-                id = self.ast.push(
-                    Node::FieldAccess { obj: id, field },
-                    start.merge(self.ast.span(field)),
-                );
+                let field = self.expect_name()?;
+                id = self
+                    .ast
+                    .push(Node::FieldAccess { obj: id, field }, start.merge(field));
             } else if self.at(TokenKind::ColonColon) {
                 self.advance_pos();
-                let member = self.expect_ident_node()?;
+                let member_span = self.expect_ident()?;
                 if self.at(TokenKind::LParen) {
-                    // h::fn_name(args) - qualified call
+                    // h::fn_name(args) - qualified call needs member as NodeId in ChildRange
+                    let member_id = self.ast.push(Node::Ident, member_span);
                     self.advance_pos();
-                    let mut children = vec![id, member];
+                    let mut children = vec![id, member_id];
                     let arg_ids = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
                     children.extend_from_slice(self.ast.ctx.child_slice(arg_ids));
                     let end = self.expect(TokenKind::RParen)?;
@@ -720,8 +717,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     break;
                 }
                 id = self.ast.push(
-                    Node::QualifiedAccess { obj: id, member },
-                    start.merge(self.ast.span(member)),
+                    Node::QualifiedAccess {
+                        obj: id,
+                        member: member_span,
+                    },
+                    start.merge(member_span),
                 );
             } else if self.at(TokenKind::LParen) {
                 if !matches!(self.ast.node(id), Node::Ident) {
