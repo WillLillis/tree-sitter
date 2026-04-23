@@ -250,7 +250,7 @@ impl Locals<'_> {
 
     /// Iterative walk + manual loops (instead of recursion + `.any()` closures)
     /// to reduce register pressure in the inner loops.
-    fn contains(&self, arena: &NodeArena, ctx: &AstContext, name: &str) -> bool {
+    fn contains(&self, ctx: &AstContext, name: &str) -> bool {
         let source = &ctx.source;
         let mut current = self;
         loop {
@@ -258,7 +258,7 @@ impl Locals<'_> {
                 LocalScope::Empty => {}
                 LocalScope::FnParams(params) => {
                     for p in *params {
-                        if arena.span(p.name).resolve(source) == name {
+                        if p.name.resolve(source) == name {
                             return true;
                         }
                     }
@@ -405,7 +405,7 @@ fn collect_decls<'a>(
                 let config = ctx.get_fn(*fn_idx);
                 insert_decl(
                     &mut decls,
-                    ctx.text(arena.span(config.name)),
+                    ctx.text(config.name),
                     Decl::Fn,
                     span,
                     grammar_path,
@@ -606,7 +606,7 @@ fn resolve_expr_tc(
     if matches!(arena.get(id), Node::Ident) {
         let span = arena.span(id);
         let name = ctx.text(span);
-        if locals.contains(arena, ctx, name) {
+        if locals.contains(ctx, name) {
             arena.set(id, Node::VarRef);
         } else if let Some(&(decl, _)) = decls.get(name) {
             match decl {
@@ -631,7 +631,7 @@ fn resolve_expr_tc(
         resolve_expr_tc(arena, ctx, decls, content, locals)?;
         if matches!(*arena.get(target), Node::Ident) {
             let name = ctx.text(arena.span(target));
-            if locals.contains(arena, ctx, name) {
+            if locals.contains(ctx, name) {
                 arena.set(target, Node::VarRef);
             } else {
                 arena.set(target, Node::RuleRef);
@@ -757,7 +757,7 @@ pub fn check<'ast>(
                 let params: Vec<Ty> = config.params.iter().map(|p| p.ty).collect();
                 let return_ty = config.return_ty;
                 env.fns
-                    .insert(ast.node_text(config.name), FnSig { params, return_ty });
+                    .insert(ast.ctx.text(config.name), FnSig { params, return_ty });
             }
             _ => {}
         }
@@ -847,14 +847,14 @@ fn check_item<'ast>(
         }
         Node::Fn(fn_idx) => {
             let config = ast.ctx.get_fn(*fn_idx);
-            let fn_name = ast.node_text(config.name);
+            let fn_name = ast.ctx.text(config.name);
             let sig = &env.fns[fn_name];
             let return_ty = sig.return_ty;
             let n_params = sig.params.len();
             let mut scope = env.scoped();
             for i in 0..n_params {
                 let ty = scope.fns[fn_name].params[i];
-                scope.insert_var(ast.node_text(config.params[i].name), ty);
+                scope.insert_var(ast.ctx.text(config.params[i].name), ty);
             }
             let body_ty = type_of(ast, config.body, &mut scope, modules)?;
             if !body_ty.is_compatible(return_ty) {
