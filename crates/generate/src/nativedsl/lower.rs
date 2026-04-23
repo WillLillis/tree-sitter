@@ -16,7 +16,7 @@ use crate::nativedsl::scope_stack::ScopeStack;
 use crate::rules::{Associativity, Precedence, Rule};
 
 use super::Note;
-use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, Span};
+use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecKind, RepeatKind, Span};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Str(NonZeroU32);
@@ -1062,10 +1062,9 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             #[rustfmt::skip]
-            Node::Seq(_) | Node::Choice(_) | Node::Repeat(_) | Node::Repeat1(_)
-            | Node::Optional(_) | Node::Blank | Node::Field { .. } | Node::Alias { .. }
+            Node::Seq(_) | Node::Choice(_) | Node::Repeat { .. }
+            | Node::Blank | Node::Field { .. } | Node::Alias { .. }
             | Node::Token(_) | Node::TokenImmediate(_) | Node::Prec { .. }
-            | Node::PrecLeft { .. } | Node::PrecRight { .. } | Node::PrecDynamic { .. }
             | Node::Reserved { .. } => self.eval_combinator(id),
             _ => {
                 let vid = self.eval_expr(id)?;
@@ -1123,26 +1122,26 @@ impl<'ast> Evaluator<'ast> {
                 };
                 Ok(self.alloc_rule(arule))
             }
-            Node::Repeat(inner) => {
+            Node::Repeat { kind, inner } => {
                 let inner = self.lower_to_rule(*inner)?;
-                let rep = self.alloc_rule(ARule::Repeat(inner));
-                let blank = self.alloc_rule(ARule::Blank);
-                let start = self.children_start();
-                self.rule_children.extend_from_slice(&[rep, blank]);
-                let (s, l) = self.children_range(start, ast.span(id)).unwrap();
-                Ok(self.alloc_rule(ARule::Choice(s, l)))
-            }
-            Node::Repeat1(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::Repeat(inner)))
-            }
-            Node::Optional(inner) => {
-                let inner = self.lower_to_rule(*inner)?;
-                let blank = self.alloc_rule(ARule::Blank);
-                let start = self.children_start();
-                self.rule_children.extend_from_slice(&[inner, blank]);
-                let (s, l) = self.children_range(start, ast.span(id)).unwrap();
-                Ok(self.alloc_rule(ARule::Choice(s, l)))
+                match kind {
+                    RepeatKind::ZeroOrMore => {
+                        let rep = self.alloc_rule(ARule::Repeat(inner));
+                        let blank = self.alloc_rule(ARule::Blank);
+                        let start = self.children_start();
+                        self.rule_children.extend_from_slice(&[rep, blank]);
+                        let (s, l) = self.children_range(start, ast.span(id)).unwrap();
+                        Ok(self.alloc_rule(ARule::Choice(s, l)))
+                    }
+                    RepeatKind::OneOrMore => Ok(self.alloc_rule(ARule::Repeat(inner))),
+                    RepeatKind::Optional => {
+                        let blank = self.alloc_rule(ARule::Blank);
+                        let start = self.children_start();
+                        self.rule_children.extend_from_slice(&[inner, blank]);
+                        let (s, l) = self.children_range(start, ast.span(id)).unwrap();
+                        Ok(self.alloc_rule(ARule::Choice(s, l)))
+                    }
+                }
             }
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             Node::Field { name, content } => {
@@ -1185,25 +1184,25 @@ impl<'ast> Evaluator<'ast> {
                 let inner = self.lower_to_rule(*inner)?;
                 Ok(self.alloc_rule(ARule::ImmediateToken(inner)))
             }
-            Node::Prec { value, content }
-            | Node::PrecLeft { value, content }
-            | Node::PrecRight { value, content } => {
-                let node = ast.node(id);
+            Node::Prec {
+                kind,
+                value,
+                content,
+            } => {
                 let vid = self.eval_expr(*value)?;
-                let prec = self.value_to_prec(vid);
                 let inner = self.lower_to_rule(*content)?;
-                let ctor = match node {
-                    Node::Prec { .. } => ARule::Prec,
-                    Node::PrecLeft { .. } => ARule::PrecLeft,
-                    _ => ARule::PrecRight,
-                };
-                Ok(self.alloc_rule(ctor(prec, inner)))
-            }
-            Node::PrecDynamic { value, content } => {
-                let vid = self.eval_expr(*value)?;
-                let n = self.int_val(Self::expect_int(vid));
-                let inner = self.lower_to_rule(*content)?;
-                Ok(self.alloc_rule(ARule::PrecDynamic(n, inner)))
+                if *kind == PrecKind::Dynamic {
+                    let n = self.int_val(Self::expect_int(vid));
+                    Ok(self.alloc_rule(ARule::PrecDynamic(n, inner)))
+                } else {
+                    let prec = self.value_to_prec(vid);
+                    let ctor = match kind {
+                        PrecKind::Left => ARule::PrecLeft,
+                        PrecKind::Right => ARule::PrecRight,
+                        _ => ARule::Prec,
+                    };
+                    Ok(self.alloc_rule(ctor(prec, inner)))
+                }
             }
             Node::Reserved { context, content } => {
                 let inner = self.lower_to_rule(*content)?;
