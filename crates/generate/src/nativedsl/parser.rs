@@ -51,24 +51,20 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         Ok(self.ast)
     }
 
-    #[inline]
     fn skip_comments(&mut self) {
         while self.tokens[self.pos].kind == TokenKind::Comment {
             self.pos += 1;
         }
     }
 
-    #[inline]
     fn span(&self) -> Span {
         self.tokens[self.pos].span
     }
 
-    #[inline]
     fn at_eof(&self) -> bool {
         self.tokens[self.pos].kind == TokenKind::Eof
     }
 
-    #[inline]
     fn at(&self, kind: TokenKind) -> bool {
         self.tokens[self.pos].kind == kind
     }
@@ -90,7 +86,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     /// Advance past the current token, skipping any comments.
     /// Safe without bounds check: the token stream always ends with `Eof`.
-    #[inline]
     fn advance_pos(&mut self) {
         self.pos += 1;
         while self.tokens[self.pos].kind == TokenKind::Comment {
@@ -98,7 +93,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
-    #[inline]
     fn eat(&mut self, kind: TokenKind) -> Option<Span> {
         if self.at(kind) {
             let s = self.span();
@@ -109,7 +103,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
-    #[inline]
     fn expect(&mut self, kind: TokenKind) -> ParseResult<Span> {
         self.eat(kind).ok_or_else(|| {
             self.error(ParseErrorKind::ExpectedToken {
