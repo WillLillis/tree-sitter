@@ -18,8 +18,3 @@ tree-sitter-generate = { path = "..", features = ["nativedsl"] }
 name = "native_dsl"
 path = "fuzz_targets/native_dsl.rs"
 doc = false
-
-[[bin]]
-name = "native_dsl_inherit"
-path = "fuzz_targets/native_dsl_inherit.rs"
-doc = false

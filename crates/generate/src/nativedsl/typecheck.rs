@@ -17,7 +17,9 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, Span};
+use super::ast::{
+    Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, PrecKind, Span,
+};
 use super::scope_stack::ScopeStack;
 
 /// Function pointer type for element/inner checkers passed to `expect_list` and
@@ -689,9 +691,7 @@ fn resolve_children_tc(
             }
             Ok(())
         }
-        Node::Repeat(inner)
-        | Node::Repeat1(inner)
-        | Node::Optional(inner)
+        Node::Repeat { inner, .. }
         | Node::Token(inner)
         | Node::TokenImmediate(inner)
         | Node::Neg(inner)
@@ -708,10 +708,7 @@ fn resolve_children_tc(
             resolve_expr_tc(arena, ctx, decls, left, locals)?;
             resolve_expr_tc(arena, ctx, decls, right, locals)
         }
-        Node::Prec { value, content }
-        | Node::PrecLeft { value, content }
-        | Node::PrecRight { value, content }
-        | Node::PrecDynamic { value, content } => {
+        Node::Prec { value, content, .. } => {
             let (value, content) = (*value, *content);
             resolve_expr_tc(arena, ctx, decls, value, locals)?;
             resolve_expr_tc(arena, ctx, decls, content, locals)
@@ -1125,9 +1122,7 @@ fn type_of<'ast>(
             }
             Ok(Ty::Rule)
         }
-        Node::Repeat(inner)
-        | Node::Repeat1(inner)
-        | Node::Optional(inner)
+        Node::Repeat { inner, .. }
         | Node::Token(inner)
         | Node::TokenImmediate(inner)
         | Node::Field { content: inner, .. }
@@ -1148,19 +1143,17 @@ fn type_of<'ast>(
             }
             Ok(Ty::Rule)
         }
-        Node::Prec { value, content }
-        | Node::PrecLeft { value, content }
-        | Node::PrecRight { value, content } => {
+        Node::Prec {
+            kind,
+            value,
+            content,
+        } => {
             let vt = type_of(ast, *value, env, modules)?;
-            if vt != Ty::Int && vt != Ty::Str {
-                return Err(mismatch(Ty::Int, vt, ast.span(*value)));
-            }
-            expect_rule(ast, *content, env, modules)?;
-            Ok(Ty::Rule)
-        }
-        Node::PrecDynamic { value, content } => {
-            let vt = type_of(ast, *value, env, modules)?;
-            if vt != Ty::Int {
+            if *kind == PrecKind::Dynamic {
+                if vt != Ty::Int {
+                    return Err(mismatch(Ty::Int, vt, ast.span(*value)));
+                }
+            } else if vt != Ty::Int && vt != Ty::Str {
                 return Err(mismatch(Ty::Int, vt, ast.span(*value)));
             }
             expect_rule(ast, *content, env, modules)?;
