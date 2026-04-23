@@ -1,15 +1,7 @@
 //! Native DSL front-end for tree-sitter grammar definitions.
 //!
-//! This module implements a four-stage pipeline that compiles `.tsg` source
-//! files into the same [`InputGrammar`] representation produced by parsing
-//! `grammar.json`:
-//!
-//! 1. **Lexing** ([`lexer`]) - tokenizes source text into a flat `Vec<Token>`.
-//! 2. **Parsing** ([`parser`]) - builds an arena-based AST from the token stream.
-//! 3. **Resolve + type checking** ([`typecheck`]) - resolves identifiers and validates types.
-//! 4. **Lowering** ([`lower`]) - evaluates the AST into an [`InputGrammar`].
-//!
-//! Each stage produces structured, serializable errors that carry source spans.
+//! Pipeline: lex -> parse -> resolve+typecheck -> lower, producing an
+//! [`InputGrammar`] equivalent to what `grammar.json` parsing produces.
 
 pub mod ast;
 pub mod diagnostic;
