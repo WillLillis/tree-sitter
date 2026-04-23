@@ -160,7 +160,7 @@ fn collect_fns(ast: &Ast) -> FxHashMap<&str, NodeId> {
     for &item_id in &ast.root_items {
         if let Node::Fn(fn_idx) = ast.node(item_id) {
             let config = ast.ctx.get_fn(*fn_idx);
-            fns.insert(ast.node_text(config.name), item_id);
+            fns.insert(ast.ctx.text(config.name), item_id);
         }
     }
     fns
@@ -1253,7 +1253,7 @@ impl<'ast> Evaluator<'ast> {
         self.scopes.push();
         for (i, &arg_val) in arg_vals.iter().enumerate() {
             self.scopes
-                .insert(self.ast().node_text(config.params[i].name), arg_val);
+                .insert(self.ast().ctx.text(config.params[i].name), arg_val);
         }
         let result = self.eval_expr(body);
         self.scopes.pop();
@@ -1330,7 +1330,7 @@ impl<'ast> Evaluator<'ast> {
         }
         for (i, param) in fn_config.params.iter().enumerate() {
             self.scopes
-                .insert(import_ast.node_text(param.name), arg_vals[i]);
+                .insert(import_ast.ctx.text(param.name), arg_vals[i]);
         }
 
         let result = self.eval_expr(body);
