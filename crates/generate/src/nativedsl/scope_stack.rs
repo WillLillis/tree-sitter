@@ -1,8 +1,4 @@
-//! Generic scope stack used by the typechecker and lowerer.
-//!
-//! A scope stack is a `Vec` of `FxHashMap`s where lookups search from the
-//! innermost (last) scope outward. Push/pop manage nesting for function
-//! bodies, for-loop bodies, etc.
+//! Scope stack: nested `FxHashMap`s with innermost-first lookup.
 
 use rustc_hash::FxHashMap;
 
