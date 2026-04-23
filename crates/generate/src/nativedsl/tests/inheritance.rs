@@ -305,7 +305,7 @@ fn inherit_from_json() {
     .unwrap();
     let input = format!(
         "let base = inherit(\"{}\")\ngrammar {{ language: \"extended\", inherits: base }}\nrule new_rule {{ \"y\" }}",
-        json_path.display()
+        dsl_path(&json_path)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(g.name, "extended");
