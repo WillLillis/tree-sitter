@@ -291,7 +291,7 @@ fn collect_referenced_names<'a>(rule: &'a Rule, skip_top_level: bool, out: &mut 
     }
 }
 
-pub(crate) fn parse_grammar(
+pub fn parse_grammar(
     input: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> ParseGrammarResult<InputGrammar> {
