@@ -259,11 +259,11 @@ fn evaluate(
             }
             Node::Rule { name, body } => {
                 let rule_id = eval.lower_to_rule(*body)?;
-                rule_entries.push((ast.node_text(*name), rule_id));
+                rule_entries.push((ast.ctx.text(*name), rule_id));
             }
             Node::OverrideRule { name, body } => {
                 let rule_id = eval.lower_to_rule(*body)?;
-                override_entries.push((ast.node_text(*name), rule_id, ast.span(*name)));
+                override_entries.push((ast.ctx.text(*name), rule_id, *name));
             }
             _ => unreachable!(),
         }
@@ -324,22 +324,33 @@ fn evaluate(
 fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult<InputGrammar> {
     // Start with inherited rules (cloned), apply overrides, then append new rules.
     let mut variables = if let Some(base) = base {
-        let name_index: FxHashMap<&str, usize> = base
-            .variables
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (v.name.as_str(), i))
-            .collect();
-        let mut vars = base.variables.clone();
+        // Build override map so we can apply them in a single pass over the
+        // base variables, avoiding a full clone of every rule tree.
+        let mut overrides: FxHashMap<String, (Rule, Span)> = FxHashMap::default();
         for (name, rule, span) in result.overrides {
-            if let Some(&idx) = name_index.get(name.as_str()) {
-                vars[idx].rule = rule;
+            overrides.insert(name, (rule, span));
+        }
+        let mut vars = Vec::with_capacity(base.variables.len());
+        for v in &base.variables {
+            if let Some((rule, _)) = overrides.remove(v.name.as_str()) {
+                vars.push(Variable {
+                    name: v.name.clone(),
+                    kind: v.kind,
+                    rule,
+                });
             } else {
-                return Err(LowerError::new(
-                    LowerErrorKind::OverrideRuleNotFound(name),
-                    span,
-                ));
+                vars.push(v.clone());
             }
+        }
+        // Any remaining overrides reference rules that don't exist in the base.
+        if !overrides.is_empty() {
+            let entries: Vec<_> = overrides.into_iter().collect();
+            let span = entries[0].1.1;
+            let names = entries.into_iter().map(|(n, _)| n).collect();
+            return Err(LowerError::new(
+                LowerErrorKind::OverrideRuleNotFound(names),
+                span,
+            ));
         }
         vars
     } else if !result.overrides.is_empty() {
@@ -941,19 +952,17 @@ impl<'ast> Evaluator<'ast> {
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
                 let obj_val = self.eval_expr(obj)?;
-                let field_name = ast.node_text(field);
+                let field_name = ast.ctx.text(field);
                 match self.get_val(obj_val) {
                     Value::Object(map) => Ok(*map.get(field_name).unwrap()),
-                    Value::GrammarConfig => {
-                        self.import_config_field_or_err(field_name, ast.span(field))
-                    }
+                    Value::GrammarConfig => self.import_config_field_or_err(field_name, field),
                     _ => unreachable!(), // guarded by typecheck
                 }
             }
             Node::QualifiedAccess { obj, member } => {
                 let (obj, member) = (*obj, *member);
                 let obj_val = self.eval_expr(obj)?;
-                let member_name = ast.node_text(member);
+                let member_name = ast.ctx.text(member);
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
@@ -973,7 +982,7 @@ impl<'ast> Evaluator<'ast> {
                 }
                 Err(LowerError::new(
                     LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
-                    ast.span(member),
+                    member,
                 ))
             }
             Node::Object(range) => {
@@ -1408,8 +1417,8 @@ pub enum DisallowedItemKind {
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
-    #[error("override rule '{0}' not found in base grammar")]
-    OverrideRuleNotFound(String),
+    #[error("override rule(s) not found in base grammar: {}", .0.join(", "))]
+    OverrideRuleNotFound(Vec<String>),
     #[error("'override rule' requires a grammar with 'inherits'")]
     OverrideWithoutInherit,
     #[error("failed to resolve '{path}': {error}")]

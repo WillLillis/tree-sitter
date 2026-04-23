@@ -394,7 +394,7 @@ fn collect_decls<'a>(
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
                 insert_decl(
                     &mut decls,
-                    ctx.text(arena.span(*name)),
+                    ctx.text(*name),
                     Decl::Rule,
                     span,
                     grammar_path,
@@ -750,7 +750,7 @@ pub fn check<'ast>(
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
             Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
-                env.insert_var(ast.node_text(*name), Ty::Rule);
+                env.insert_var(ast.ctx.text(*name), Ty::Rule);
             }
             Node::Fn(fn_idx) => {
                 let config = ast.ctx.get_fn(*fn_idx);
@@ -1220,12 +1220,12 @@ fn type_of_append<'ast>(
 fn type_of_field_access<'ast>(
     ast: &'ast Ast,
     obj: NodeId,
-    field: NodeId,
+    field: Span,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
     let obj_ty = type_of(ast, obj, env, modules)?;
-    let field_name = ast.node_text(field);
+    let field_name = ast.ctx.text(field);
     match obj_ty {
         Ty::Object(inner) => {
             let field_known = match ast.node(obj) {
@@ -1248,7 +1248,7 @@ fn type_of_field_access<'ast>(
                         field: field_name.to_string(),
                         on_type: obj_ty,
                     },
-                    ast.span(field),
+                    field,
                 ));
             }
             Ok(Ty::from(inner))
@@ -1260,7 +1260,7 @@ fn type_of_field_access<'ast>(
             "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
             _ => Err(TypeError::new(
                 TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                ast.span(field),
+                field,
             )),
         },
         _ => Err(TypeError::new(
@@ -1273,10 +1273,10 @@ fn type_of_field_access<'ast>(
 fn type_of_import_access(
     ast: &Ast,
     idx: u8,
-    member: NodeId,
+    member: Span,
     modules: &[Option<TypeEnv<'_>>],
 ) -> Result<Ty, TypeError> {
-    let member_name = ast.node_text(member);
+    let member_name = ast.ctx.text(member);
     // Safe: idx was assigned during loading and typecheck_modules populates
     // the table before any module that references it is checked.
     let import_env = modules[idx as usize].as_ref().unwrap();
@@ -1286,12 +1286,12 @@ fn type_of_import_access(
     if import_env.fns.contains_key(member_name) {
         return Err(TypeError::new(
             TypeErrorKind::ImportFunctionUsedAsValue(member_name.to_string()),
-            ast.span(member),
+            member,
         ));
     }
     Err(TypeError::new(
         TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
-        ast.span(member),
+        member,
     ))
 }
 
