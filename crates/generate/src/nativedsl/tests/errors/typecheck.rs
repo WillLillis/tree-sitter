@@ -140,12 +140,6 @@ type_error_tests! {
         rule program { "x" }"#,
         TypeErrorKind::ExpectedRuleName
     }
-    error_print_rejects_for_loop_arg {
-        r#"grammar { language: "test" }
-        print(for (k: str_t) in ["a", "b"] { k })
-        rule program { "x" }"#,
-        TypeErrorKind::CannotPrintType(Ty::Spread)
-    }
     error_let_rhs_for_loop_rejected {
         r#"grammar { language: "test" }
         let foo = for (k: str_t) in ["a", "b"] { k }

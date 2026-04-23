@@ -142,7 +142,11 @@ fn json_roundtrip() {
         rule string { regexp(r#""[^"]*""#) }
     "##;
     let path = test_fixtures_dir().join("grammar.tsg");
-    let (grammar, json_str) = dsl_to_json(input, &path);
+    let mut grammar = parse_native_dsl(input, &path).unwrap();
+    crate::parse_grammar::normalize_grammar(&mut grammar);
+    let json_str =
+        serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
+            .expect("grammar JSON serialization should not fail");
     let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
     assert_eq!(grammar.name, reparsed.name);
     assert_eq!(grammar.variables.len(), reparsed.variables.len());
