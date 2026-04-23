@@ -682,8 +682,7 @@ fn resolve_children_tc(
             Ok(())
         }
         Node::Repeat { inner, .. }
-        | Node::Token(inner)
-        | Node::TokenImmediate(inner)
+        | Node::Token { inner, .. }
         | Node::Neg(inner)
         | Node::GrammarConfig(inner) => {
             let inner = *inner;
@@ -1113,8 +1112,7 @@ fn type_of<'ast>(
             Ok(Ty::Rule)
         }
         Node::Repeat { inner, .. }
-        | Node::Token(inner)
-        | Node::TokenImmediate(inner)
+        | Node::Token { inner, .. }
         | Node::Field { content: inner, .. }
         | Node::Reserved { content: inner, .. } => {
             expect_rule(ast, *inner, env, modules)?;

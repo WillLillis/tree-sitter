@@ -516,16 +516,15 @@ pub fn load_grammar_file(
         )),
         #[cfg(feature = "nativedsl")]
         Some("tsg") => {
-            let source_text = fs::read_to_string(grammar_path)
+            let src = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
-            let grammar =
-                nativedsl::parse_native_dsl(&source_text, grammar_path).map_err(|error| {
-                    LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
-                        error,
-                        source_text,
-                        path: grammar_path.to_owned(),
-                    }))
-                })?;
+            let grammar = nativedsl::parse_native_dsl(&src, grammar_path).map_err(|error| {
+                LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
+                    error,
+                    src,
+                    path: grammar_path.to_owned(),
+                }))
+            })?;
             Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,

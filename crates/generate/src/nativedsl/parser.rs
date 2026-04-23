@@ -430,17 +430,20 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         // followed by `(` (or `{` for `for`). Otherwise they are identifiers
         // so grammars can use names like `import`, `field`, etc. as rules.
         let next_lparen = self.next_is(TokenKind::LParen);
-        match &self.tokens[self.pos].kind {
+        let kw = self.tokens[self.pos].kind;
+        match kw {
             TokenKind::KwSeq if next_lparen => self.parse_variadic(start, Node::Seq),
             TokenKind::KwChoice if next_lparen => self.parse_variadic(start, Node::Choice),
             TokenKind::KwRepeat | TokenKind::KwRepeat1 | TokenKind::KwOptional if next_lparen => {
-                let kw = self.tokens[self.pos].kind;
-                let kind = match kw {
+                let repeat_kind = match kw {
                     TokenKind::KwRepeat => RepeatKind::ZeroOrMore,
                     TokenKind::KwRepeat1 => RepeatKind::OneOrMore,
                     _ => RepeatKind::Optional,
                 };
-                self.parse_unary(start, kw, |inner| Node::Repeat { kind, inner })
+                self.parse_unary(start, kw, |inner| Node::Repeat {
+                    kind: repeat_kind,
+                    inner,
+                })
             }
             TokenKind::KwBlank if next_lparen => {
                 self.advance_pos();
@@ -461,11 +464,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             }
             TokenKind::KwField if next_lparen => self.parse_field(start),
             TokenKind::KwAlias if next_lparen => self.parse_alias(start),
-            TokenKind::KwToken if next_lparen => {
-                self.parse_unary(start, TokenKind::KwToken, Node::Token)
-            }
-            TokenKind::KwTokenImmediate if next_lparen => {
-                self.parse_unary(start, TokenKind::KwTokenImmediate, Node::TokenImmediate)
+            TokenKind::KwToken | TokenKind::KwTokenImmediate if next_lparen => {
+                let immediate = kw == TokenKind::KwTokenImmediate;
+                self.parse_unary(start, kw, |inner| Node::Token { immediate, inner })
             }
             TokenKind::KwPrec if next_lparen => self.parse_prec(start, PrecKind::Default),
             TokenKind::KwPrecLeft if next_lparen => self.parse_prec(start, PrecKind::Left),
@@ -499,14 +500,12 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 Ok(self.ast.push(Node::StringLit, start.strip_quotes()))
             }
             TokenKind::IntLit(n) => {
-                let n = *n;
                 self.advance_pos();
                 Ok(self.ast.push(Node::IntLit(n), start))
             }
             TokenKind::RawStringLit { hash_count } => {
-                let h = *hash_count;
                 self.advance_pos();
-                Ok(self.ast.push(Node::RawStringLit { hash_count: h }, start))
+                Ok(self.ast.push(Node::RawStringLit { hash_count }, start))
             }
             TokenKind::Minus => {
                 self.advance_pos();
