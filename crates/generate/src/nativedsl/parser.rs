@@ -381,13 +381,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         Ty::ListRule => Ok(Ty::ListListRule),
                         Ty::ListStr => Ok(Ty::ListListStr),
                         Ty::ListInt => Ok(Ty::ListListInt),
-                        // All other types (too-deep nesting, objects, modules,
-                        // internal types) are rejected as list elements.
-                        _ => Err(ParseError {
-                            kind: ParseErrorKind::ListInnerType(inner_ty),
-                            span: inner_span,
-                            note: None,
-                        }),
+                        _ => Err(Self::error_at(
+                            ParseErrorKind::ListInnerType(inner_ty),
+                            inner_span,
+                        )),
                     };
                     let gt = self.expect(TokenKind::Gt)?;
                     Ok((ty?, id_span.merge(gt)))
@@ -395,27 +392,21 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 "obj_t" => {
                     self.expect(TokenKind::Lt)?;
                     let (inner_ty, inner_span) = self.parse_type()?;
-                    let ty = InnerTy::try_from(inner_ty)
-                        .map(Ty::Object)
-                        .map_err(|()| ParseError {
-                            kind: ParseErrorKind::ObjectInnerType(inner_ty),
-                            span: inner_span,
-                            note: None,
-                        });
+                    let ty = InnerTy::try_from(inner_ty).map(Ty::Object).map_err(|()| {
+                        Self::error_at(ParseErrorKind::ObjectInnerType(inner_ty), inner_span)
+                    });
                     let gt = self.expect(TokenKind::Gt)?;
                     Ok((ty?, id_span.merge(gt)))
                 }
                 "grammar_config_t" => Ok((Ty::GrammarConfig, id_span)),
-                "spread_t" => Err(ParseError {
-                    kind: ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
-                    span: id_span,
-                    note: None,
-                }),
-                _ => Err(ParseError {
-                    kind: ParseErrorKind::UnknownType(self.ast.ctx.text(id_span).to_string()),
-                    span: id_span,
-                    note: None,
-                }),
+                "spread_t" => Err(Self::error_at(
+                    ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
+                    id_span,
+                )),
+                _ => Err(Self::error_at(
+                    ParseErrorKind::UnknownType(self.ast.ctx.text(id_span).to_string()),
+                    id_span,
+                )),
             };
         }
         Err(self.error(ParseErrorKind::ExpectedType))

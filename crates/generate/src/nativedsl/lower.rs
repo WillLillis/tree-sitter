@@ -961,26 +961,20 @@ impl<'ast> Evaluator<'ast> {
                 // Check pre-evaluated let values first
                 let values = self.module_values[table_id].as_ref().unwrap();
                 if let Some(&val) = values.get(member_name) {
-                    Ok(val)
-                } else if let Some(grammar) = self.modules[table_id].base_grammar {
-                    // For inherited grammar modules, fall back to rule bodies.
-                    // Config fields are accessed via grammar_config() builtin.
-                    match grammar.variables.iter().find(|v| v.name == member_name) {
-                        Some(var) => {
-                            let rid = self.import_rule(&var.rule);
-                            Ok(self.alloc_val(Value::Rule(rid)))
-                        }
-                        None => Err(LowerError::new(
-                            LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
-                            ast.span(member),
-                        )),
-                    }
-                } else {
-                    Err(LowerError::new(
-                        LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
-                        ast.span(member),
-                    ))
+                    return Ok(val);
                 }
+                // For inherited grammar modules, fall back to rule bodies.
+                if let Some(var) = self.modules[table_id]
+                    .base_grammar
+                    .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
+                {
+                    let rid = self.import_rule(&var.rule);
+                    return Ok(self.alloc_val(Value::Rule(rid)));
+                }
+                Err(LowerError::new(
+                    LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
+                    ast.span(member),
+                ))
             }
             Node::Object(range) => {
                 let fields = ast.ctx.get_object(*range);
@@ -1016,13 +1010,10 @@ impl<'ast> Evaluator<'ast> {
             Node::DynRegex { pattern, flags } => {
                 let pv = self.eval_expr(*pattern)?;
                 let ps = self.get_str_val(pv);
-                let fs = match flags {
-                    Some(fid) => {
-                        let fv = self.eval_expr(*fid)?;
-                        Some(self.get_str_val(fv))
-                    }
-                    None => None,
-                };
+                let fs = flags
+                    .map(|fid| self.eval_expr(fid))
+                    .transpose()?
+                    .map(|fv| self.get_str_val(fv));
                 let rid = self.alloc_rule(ARule::Pattern(ps, fs));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
@@ -1253,9 +1244,8 @@ impl<'ast> Evaluator<'ast> {
         let body = config.body;
         self.scopes.push();
         for (i, &arg_val) in arg_vals.iter().enumerate() {
-            let param_name = self.get_fn_config(fn_id).params[i].name;
             self.scopes
-                .insert(self.ast().node_text(param_name), arg_val);
+                .insert(self.ast().node_text(config.params[i].name), arg_val);
         }
         let result = self.eval_expr(body);
         self.scopes.pop();
@@ -1315,8 +1305,8 @@ impl<'ast> Evaluator<'ast> {
             Node::Fn(fi) => *fi,
             _ => unreachable!(),
         };
-        let body = import_ast.ctx.get_fn(fn_idx).body;
-        let n_params = import_ast.ctx.get_fn(fn_idx).params.len();
+        let fn_config = import_ast.ctx.get_fn(fn_idx);
+        let body = fn_config.body;
 
         self.push_call(fn_name, call_span)?;
 
@@ -1330,10 +1320,9 @@ impl<'ast> Evaluator<'ast> {
         for (&name, &val) in self.module_values[table_id].as_ref().unwrap() {
             self.scopes.insert(name, val);
         }
-        #[expect(clippy::needless_range_loop, reason = "`i` has two uses")]
-        for i in 0..n_params {
-            let param_name = import_ast.node_text(import_ast.ctx.get_fn(fn_idx).params[i].name);
-            self.scopes.insert(param_name, arg_vals[i]);
+        for (i, param) in fn_config.params.iter().enumerate() {
+            self.scopes
+                .insert(import_ast.node_text(param.name), arg_vals[i]);
         }
 
         let result = self.eval_expr(body);
