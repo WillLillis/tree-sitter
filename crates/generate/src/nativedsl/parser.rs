@@ -1,8 +1,4 @@
 //! Recursive descent parser for the native grammar DSL.
-//!
-//! Consumes tokens from the lexer and builds an arena-based [`Ast`].
-//! Trailing commas are allowed everywhere. All identifiers start as
-//! `Node::Ident` and are resolved to `RuleRef`/`VarRef` in a later pass.
 
 use serde::Serialize;
 use thiserror::Error;
