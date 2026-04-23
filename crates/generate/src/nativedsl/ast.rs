@@ -113,27 +113,22 @@ impl NodeArena {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FnId(u32);
-
-impl FnId {
-    #[inline]
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
+macro_rules! id_type {
+    ($name:ident) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(u32);
+        impl $name {
+            #[inline]
+            #[must_use]
+            pub const fn index(self) -> usize {
+                self.0 as usize
+            }
+        }
+    };
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ForId(u32);
-
-impl ForId {
-    #[inline]
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+id_type!(FnId);
+id_type!(ForId);
 
 /// Byte offset range `[start, end)` in the source text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
