@@ -22,14 +22,12 @@ impl NodeId {
     /// The first valid `NodeId` (index 1, after the sentinel).
     pub const FIRST: Self = Self(NonZeroU32::new(1).unwrap());
 
-    #[inline]
     #[must_use]
     pub const fn index(self) -> usize {
         self.0.get() as usize
     }
 
     /// Return the next `NodeId` (index + 1).
-    #[inline]
     #[must_use]
     pub const fn next(self) -> Self {
         // SAFETY: self.0 >= 1, so self.0 + 1 >= 2, always non-zero.
@@ -55,6 +53,7 @@ impl NodeArena {
         Self { nodes, spans }
     }
 
+    #[inline]
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
         let index = self.nodes.len() as u32;
         // SAFETY: nodes[0] is always the Unreachable sentinel, so len() >= 1.
@@ -64,32 +63,27 @@ impl NodeArena {
         id
     }
 
-    #[inline]
     #[must_use]
     pub fn get(&self, id: NodeId) -> &Node {
         &self.nodes[id.index()]
     }
 
-    #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
         self.spans[id.index()]
     }
 
-    #[inline]
     pub fn set(&mut self, id: NodeId, node: Node) {
         self.nodes[id.index()] = node;
     }
 
     /// Number of nodes (excluding sentinel).
-    #[inline]
     #[must_use]
     pub const fn len(&self) -> usize {
         self.nodes.len() - 1
     }
 
     /// Returns `true` if the arena contains no nodes (excluding sentinel).
-    #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.nodes.len() == 1
@@ -114,7 +108,6 @@ macro_rules! id_type {
         #[derive(Clone, Copy, PartialEq, Eq, Hash)]
         pub struct $name(u32);
         impl $name {
-            #[inline]
             #[must_use]
             pub const fn index(self) -> usize {
                 self.0 as usize
@@ -181,7 +174,6 @@ impl Span {
     }
 
     /// Resolve to a `&str` slice.
-    #[inline]
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
         // SAFETY: span boundaries are at ASCII byte positions (all token
@@ -210,33 +202,27 @@ pub struct AstContext {
 
 impl AstContext {
     /// Resolve a span to the source text it covers.
-    #[inline]
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         span.resolve(&self.source)
     }
-    #[inline]
     #[must_use]
     pub fn get_fn(&self, id: FnId) -> &FnConfig {
         &self.fn_configs[id.index()]
     }
-    #[inline]
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         &self.for_configs[id.index()]
     }
-    #[inline]
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
         &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
     }
-    #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         &self.children[range.start as usize..range.start as usize + range.len as usize]
     }
     /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
-    #[inline]
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
         let children = self.child_slice(range);
@@ -276,12 +262,10 @@ impl Ast {
         self.arena.push(node, span)
     }
 
-    #[inline]
     #[must_use]
     pub fn node(&self, id: NodeId) -> &Node {
         self.arena.get(id)
     }
-    #[inline]
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
         self.arena.span(id)
