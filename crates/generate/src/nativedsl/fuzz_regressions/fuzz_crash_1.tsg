@@ -1,0 +1,2 @@
+grammar { language: "test" }
+let P = { a:(P.a, seq(prec(P.b, "x"), prec(P.c, "y"))) }
