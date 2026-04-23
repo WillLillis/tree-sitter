@@ -1,0 +1,5 @@
+grammar { language: "test", inline: [_inner], supertypes: [expr] }
+rule program { expr }
+rule expr { _inner(1, seq("a", "b")) }
+rule fourth { prec_dynamic(1, "x") }
+rule fifth { prec(-1, "x") }
