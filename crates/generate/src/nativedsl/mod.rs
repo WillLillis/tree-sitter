@@ -16,10 +16,15 @@ pub mod typecheck;
 
 // Re-export errors and inner types for downstream consumers
 pub use diagnostic::NativeDslError;
-pub use lexer::{LexError, LexErrorKind};
-pub use lower::{DisallowedItemKind, LowerError, LowerErrorKind, LowerResult};
-pub use parser::{ParseError, ParseErrorKind};
-pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
+pub use lexer::LexErrorKind;
+pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult};
+pub use parser::ParseErrorKind;
+pub use typecheck::{InnerTy, Ty, TypeErrorKind};
+
+pub type LexError = Diagnostic<LexErrorKind>;
+pub type ParseError = Diagnostic<ParseErrorKind>;
+pub type TypeError = Diagnostic<TypeErrorKind>;
+pub type LowerError = Diagnostic<LowerErrorKind>;
 
 use std::path::{Path, PathBuf};
 
@@ -70,10 +75,7 @@ pub fn load_module(
         .ok_or_else(|| LowerError::new(LowerErrorKind::ModuleTooMany, Span::new(0, 0)))?;
 
     if source.len() >= u32::MAX as usize {
-        Err(LexError {
-            kind: LexErrorKind::InputTooLarge,
-            span: Span::new(0, 0),
-        })?;
+        Err(LexError::new(LexErrorKind::InputTooLarge, Span::new(0, 0)))?;
     }
 
     let module_dir = path.parent().unwrap();
@@ -471,6 +473,41 @@ pub fn typecheck_modules<'m>(
 
 pub type DslResult<T> = Result<T, DslError>;
 
+/// Diagnostic error shared by all pipeline stages.
+#[derive(Debug, Serialize)]
+pub struct Diagnostic<K> {
+    pub kind: K,
+    pub span: Span,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<Box<Note>>,
+}
+
+impl<K> Diagnostic<K> {
+    pub const fn new(kind: K, span: Span) -> Self {
+        Self {
+            kind,
+            span,
+            note: None,
+        }
+    }
+
+    pub fn with_note(kind: K, span: Span, note: Note) -> Self {
+        Self {
+            kind,
+            span,
+            note: Some(Box::new(note)),
+        }
+    }
+}
+
+impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
+}
+
+impl<K: std::fmt::Debug + std::fmt::Display> std::error::Error for Diagnostic<K> {}
+
 #[derive(Debug, Error, Serialize)]
 pub enum DslError {
     #[error(transparent)]
@@ -549,11 +586,11 @@ impl DslError {
     #[must_use]
     pub fn note(&self) -> Option<&Note> {
         match self {
+            Self::Lex(e) => e.note.as_deref(),
             Self::Parse(e) => e.note.as_deref(),
             Self::Type(e) => e.note.as_deref(),
             Self::Lower(e) => e.note.as_deref(),
             Self::Module(e) => e.inner.note(),
-            Self::Lex(_) => None,
         }
     }
 }

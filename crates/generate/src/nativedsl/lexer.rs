@@ -3,8 +3,8 @@
 
 use memchr::{memchr, memchr2};
 use serde::Serialize;
-use thiserror::Error;
 
+use super::LexError;
 use super::ast::Span;
 
 /// Byte classification flags for the lexer's hot loops.
@@ -295,10 +295,10 @@ impl<'src> Lexer<'src> {
                 let rest = unsafe { std::str::from_utf8_unchecked(&self.source[start..]) };
                 let ch = rest.chars().next().unwrap();
                 self.pos = start + ch.len_utf8();
-                return Err(LexError {
-                    kind: LexErrorKind::UnexpectedChar(ch),
-                    span: Span::from_usize(start, self.pos),
-                });
+                return Err(LexError::new(
+                    LexErrorKind::UnexpectedChar(ch),
+                    Span::from_usize(start, self.pos),
+                ));
             }
         };
         Ok(Token {
@@ -316,18 +316,18 @@ impl<'src> Lexer<'src> {
             // Fast-skip to the next interesting byte: " or \
             match memchr2(b'"', b'\\', &source[pos..]) {
                 None => {
-                    Err(LexError {
-                        kind: LexErrorKind::UnterminatedString,
-                        span: Span::from_usize(start, source.len()),
-                    })?;
+                    Err(LexError::new(
+                        LexErrorKind::UnterminatedString,
+                        Span::from_usize(start, source.len()),
+                    ))?;
                 }
                 Some(offset) => {
                     // Check for newline in the skipped region
                     if let Some(nl) = memchr(b'\n', &source[pos..pos + offset]) {
-                        Err(LexError {
-                            kind: LexErrorKind::NewlineInString,
-                            span: Span::from_usize(start, pos + nl),
-                        })?;
+                        Err(LexError::new(
+                            LexErrorKind::NewlineInString,
+                            Span::from_usize(start, pos + nl),
+                        ))?;
                     }
                     pos += offset;
                     // SAFETY: memchr2 found a byte at this position, so pos < source.len().
@@ -340,10 +340,10 @@ impl<'src> Lexer<'src> {
                             let esc_pos = pos;
                             pos += 1;
                             if pos >= source.len() {
-                                Err(LexError {
-                                    kind: LexErrorKind::UnterminatedEscape,
-                                    span: Span::from_usize(esc_pos, source.len()),
-                                })?;
+                                Err(LexError::new(
+                                    LexErrorKind::UnterminatedEscape,
+                                    Span::from_usize(esc_pos, source.len()),
+                                ))?;
                             }
                             // SAFETY: pos < source.len() checked above.
                             match unsafe { *source.get_unchecked(pos) } {
@@ -353,10 +353,10 @@ impl<'src> Lexer<'src> {
                                     let rest =
                                         unsafe { std::str::from_utf8_unchecked(&source[pos..]) };
                                     let ch = rest.chars().next().unwrap();
-                                    Err(LexError {
-                                        kind: LexErrorKind::InvalidEscape(ch),
-                                        span: Span::from_usize(esc_pos, pos + ch.len_utf8()),
-                                    })?;
+                                    Err(LexError::new(
+                                        LexErrorKind::InvalidEscape(ch),
+                                        Span::from_usize(esc_pos, pos + ch.len_utf8()),
+                                    ))?;
                                 }
                             }
                         }
@@ -376,16 +376,18 @@ impl<'src> Lexer<'src> {
         let mut hash_count: u8 = 0;
         while self.peek() == Some(b'#') {
             self.advance();
-            hash_count = hash_count.checked_add(1).ok_or_else(|| LexError {
-                kind: LexErrorKind::TooManyHashes,
-                span: Span::from_usize(start, self.pos),
+            hash_count = hash_count.checked_add(1).ok_or_else(|| {
+                LexError::new(
+                    LexErrorKind::TooManyHashes,
+                    Span::from_usize(start, self.pos),
+                )
             })?;
         }
         if self.peek() != Some(b'"') {
-            Err(LexError {
-                kind: LexErrorKind::ExpectedRawStringQuote,
-                span: Span::from_usize(start, self.pos),
-            })?;
+            Err(LexError::new(
+                LexErrorKind::ExpectedRawStringQuote,
+                Span::from_usize(start, self.pos),
+            ))?;
         }
         self.advance(); // skip opening "
 
@@ -394,10 +396,10 @@ impl<'src> Lexer<'src> {
         loop {
             match memchr(b'"', &source[pos..]) {
                 None => {
-                    return Err(LexError {
-                        kind: LexErrorKind::UnterminatedRawString,
-                        span: Span::from_usize(start, source.len()),
-                    });
+                    return Err(LexError::new(
+                        LexErrorKind::UnterminatedRawString,
+                        Span::from_usize(start, source.len()),
+                    ));
                 }
                 Some(offset) => {
                     pos += offset + 1; // advance past the "
@@ -429,9 +431,11 @@ impl<'src> Lexer<'src> {
         self.pos = pos;
         // SAFETY: the slice contains only ASCII digits (b'0'..=b'9'), which are valid UTF-8.
         let text = unsafe { std::str::from_utf8_unchecked(&source[start..pos]) };
-        let value: i32 = text.parse().map_err(|_| LexError {
-            kind: LexErrorKind::IntegerOverflow,
-            span: Span::from_usize(start, self.pos),
+        let value: i32 = text.parse().map_err(|_| {
+            LexError::new(
+                LexErrorKind::IntegerOverflow,
+                Span::from_usize(start, self.pos),
+            )
         })?;
         Ok(TokenKind::IntLit(value))
     }
@@ -454,14 +458,7 @@ impl<'src> Lexer<'src> {
     }
 }
 
-pub type LexResult<T> = Result<T, LexError>;
-
-/// An error encountered during lexing, with the source span of the problem.
-#[derive(Debug, Serialize, Error)]
-pub struct LexError {
-    pub kind: LexErrorKind,
-    pub span: Span,
-}
+pub type LexResult<T> = Result<T, super::LexError>;
 
 /// The specific kind of lexer error.
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -478,31 +475,31 @@ pub enum LexErrorKind {
     InputTooLarge,
 }
 
-impl std::fmt::Display for LexError {
+impl std::fmt::Display for LexErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            LexErrorKind::UnterminatedString => write!(f, "unterminated string literal"),
-            LexErrorKind::UnterminatedRawString => write!(f, "unterminated raw string literal"),
-            LexErrorKind::UnterminatedEscape => write!(f, "unterminated escape sequence"),
-            LexErrorKind::InvalidEscape(ch) => write!(f, "invalid escape sequence: \\{ch}"),
-            LexErrorKind::UnexpectedChar(ch) => write!(f, "unexpected character: {ch:?}"),
-            LexErrorKind::NewlineInString => {
+        match self {
+            Self::UnterminatedString => write!(f, "unterminated string literal"),
+            Self::UnterminatedRawString => write!(f, "unterminated raw string literal"),
+            Self::UnterminatedEscape => write!(f, "unterminated escape sequence"),
+            Self::InvalidEscape(ch) => write!(f, "invalid escape sequence: \\{ch}"),
+            Self::UnexpectedChar(ch) => write!(f, "unexpected character: {ch:?}"),
+            Self::NewlineInString => {
                 write!(
                     f,
                     "unterminated string literal (newline before closing quote)"
                 )
             }
-            LexErrorKind::ExpectedRawStringQuote => {
+            Self::ExpectedRawStringQuote => {
                 write!(f, "expected '\"' after 'r' and '#' delimiters")
             }
-            LexErrorKind::TooManyHashes => {
+            Self::TooManyHashes => {
                 write!(
                     f,
                     "raw string has too many '#' delimiters (maximum {})",
                     u8::MAX
                 )
             }
-            LexErrorKind::IntegerOverflow => {
+            Self::IntegerOverflow => {
                 write!(
                     f,
                     "integer literal out of range [{}, {}]",
@@ -510,7 +507,7 @@ impl std::fmt::Display for LexError {
                     i32::MAX,
                 )
             }
-            LexErrorKind::InputTooLarge => {
+            Self::InputTooLarge => {
                 write!(f, "input exceeds maximum size of {} bytes", u32::MAX)
             }
         }

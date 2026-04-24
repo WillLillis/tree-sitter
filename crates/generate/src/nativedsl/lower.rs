@@ -13,7 +13,6 @@ use crate::{
 };
 
 use super::{
-    Note,
     ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecKind, RepeatKind, Span},
     scope_stack::ScopeStack,
 };
@@ -1403,26 +1402,9 @@ fn unescape_string(raw: &str) -> String {
     result
 }
 
-pub type LowerResult<T> = Result<T, LowerError>;
+pub type LowerResult<T> = Result<T, super::LowerError>;
 
-#[derive(Debug, Serialize, Error)]
-pub struct LowerError {
-    pub kind: LowerErrorKind,
-    pub span: Span,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<Box<Note>>,
-}
-
-impl LowerError {
-    #[must_use]
-    pub const fn new(kind: LowerErrorKind, span: Span) -> Self {
-        Self {
-            kind,
-            span,
-            note: None,
-        }
-    }
-}
+use super::LowerError;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum DisallowedItemKind {
@@ -1483,11 +1465,5 @@ const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {
         DisallowedItemKind::Rule => "rule",
         DisallowedItemKind::OverrideRule => "override rule",
         DisallowedItemKind::GrammarBlock => "grammar block",
-    }
-}
-
-impl std::fmt::Display for LowerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.kind.fmt(f)
     }
 }
