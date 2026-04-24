@@ -1,19 +1,10 @@
 //! Arena-based AST for the native grammar DSL.
 
-use std::{fmt, num::NonZeroU32};
+use std::num::NonZeroU32;
 
 use serde::Serialize;
 
 use super::typecheck::Ty;
-
-#[derive(Clone, Copy)]
-pub struct CapacityError;
-
-impl fmt::Display for CapacityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "too many elements (maximum {})", u16::MAX)
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(NonZeroU32);
@@ -288,21 +279,18 @@ impl Ast {
         id
     }
 
-    pub fn push_object(
-        &mut self,
-        fields: Vec<(Span, NodeId)>,
-    ) -> Result<ChildRange, CapacityError> {
+    pub fn push_object(&mut self, fields: Vec<(Span, NodeId)>) -> Option<ChildRange> {
         let start = self.ctx.object_fields.len() as u32;
-        let len = u16::try_from(fields.len()).map_err(|_| CapacityError)?;
+        let len = u16::try_from(fields.len()).ok()?;
         self.ctx.object_fields.extend(fields);
-        Ok(ChildRange::new(start, len))
+        Some(ChildRange::new(start, len))
     }
 
-    pub fn push_children(&mut self, items: &[NodeId]) -> Result<ChildRange, CapacityError> {
+    pub fn push_children(&mut self, items: &[NodeId]) -> Option<ChildRange> {
         let start = self.ctx.children.len() as u32;
-        let len = u16::try_from(items.len()).map_err(|_| CapacityError)?;
+        let len = u16::try_from(items.len()).ok()?;
         self.ctx.children.extend_from_slice(items);
-        Ok(ChildRange::new(start, len))
+        Some(ChildRange::new(start, len))
     }
 
     #[inline]
@@ -391,7 +379,7 @@ pub enum Node {
     /// `inherit("path.tsg")` or `import("path.tsg")`. `module` is `None`
     /// after parsing, set to a global module index by the loading pre-pass.
     ModuleRef {
-        is_import: bool,
+        import: bool,
         path: Span,
         module: Option<u8>,
     },
