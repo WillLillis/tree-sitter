@@ -113,7 +113,7 @@ pub fn load_module(
         ast.arena.set(
             inherit_id,
             Node::ModuleRef {
-                is_import: false,
+                import: false,
                 path: *p,
                 module: Some(child_gid),
             },
@@ -165,27 +165,14 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
     }
     let config_inherits = ast.ctx.grammar_config.as_ref().and_then(|c| c.inherits);
 
-    let direct_in_config = config_inherits.is_some_and(|id| {
-        matches!(
-            ast.node(id),
-            Node::ModuleRef {
-                is_import: false,
-                ..
-            }
-        )
-    });
+    let direct_in_config = config_inherits
+        .is_some_and(|id| matches!(ast.node(id), Node::ModuleRef { import: false, .. }));
 
     // Find all inherit() calls in let bindings, error if more than one
     let mut inherit_let: Option<Span> = None;
     for &item_id in &ast.root_items {
         if let Node::Let { value, .. } = ast.node(item_id)
-            && matches!(
-                ast.node(*value),
-                Node::ModuleRef {
-                    is_import: false,
-                    ..
-                }
-            )
+            && matches!(ast.node(*value), Node::ModuleRef { import: false, .. })
         {
             if inherit_let.is_some() || direct_in_config {
                 Err(LowerError::new(
@@ -223,21 +210,13 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
 pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
     let inherits_id = ast.ctx.grammar_config.as_ref()?.inherits?;
     match ast.node(inherits_id) {
-        Node::ModuleRef {
-            is_import: false, ..
-        } => Some(inherits_id),
+        Node::ModuleRef { import: false, .. } => Some(inherits_id),
         Node::Ident => {
             let name = ast.ctx.text(ast.span(inherits_id));
             ast.root_items.iter().find_map(|&item_id| {
                 if let Node::Let { name: n, value, .. } = ast.node(item_id)
                     && ast.ctx.text(ast.span(*n)) == name
-                    && matches!(
-                        ast.node(*value),
-                        Node::ModuleRef {
-                            is_import: false,
-                            ..
-                        }
-                    )
+                    && matches!(ast.node(*value), Node::ModuleRef { import: false, .. })
                 {
                     Some(*value)
                 } else {
@@ -416,7 +395,7 @@ fn load_import_children(
     let mut node_id = NodeId::FIRST;
     while node_id.index() <= ast.arena.len() {
         let (path, is_import, kind) = if let Node::ModuleRef {
-            is_import,
+            import: is_import,
             path,
             module: None,
         } = ast.node(node_id)
@@ -463,7 +442,7 @@ fn load_import_children(
         ast.arena.set(
             node_id,
             Node::ModuleRef {
-                is_import,
+                import: is_import,
                 path,
                 module: Some(idx),
             },
