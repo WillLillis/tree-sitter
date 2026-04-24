@@ -1,17 +1,22 @@
 //! Lowering pass: evaluates the typed AST into an [`InputGrammar`].
 
 use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType};
-use crate::nativedsl::scope_stack::ScopeStack;
-use crate::rules::{Associativity, Precedence, Rule};
+use crate::{
+    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
+    rules::{Associativity, Precedence, Rule},
+};
 
-use super::Note;
-use super::ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecKind, RepeatKind, Span};
+use super::{
+    Note,
+    ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecKind, RepeatKind, Span},
+    scope_stack::ScopeStack,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Str(NonZeroU32);
@@ -117,6 +122,7 @@ const MAX_CALL_DEPTH: u16 = 64;
 /// Flat entry for one module in the evaluator's module table.
 struct ModuleInfo<'ast> {
     ast: &'ast Ast,
+    path: &'ast Path,
     base_grammar: Option<&'ast InputGrammar>,
 }
 
@@ -132,7 +138,7 @@ struct Evaluator<'ast> {
     current_module: usize,
     scopes: ScopeStack<'ast, ValueId>,
     // Shared across module boundaries
-    call_stack: Vec<(&'ast str, Span)>,
+    call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
     values: Vec<Value<'ast>>,
     rules: Vec<ARule>,
     rule_children: Vec<RuleId>,
@@ -171,11 +177,13 @@ struct EvalResult {
 /// module is placed at index 0; children follow in depth-first pre-order.
 fn build_module_table<'ast>(
     root_ast: &'ast Ast,
+    root_path: &'ast Path,
     root_base_grammar: Option<&'ast InputGrammar>,
     sub_modules: &'ast [super::Module],
 ) -> (Vec<ModuleInfo<'ast>>, Vec<FxHashMap<&'ast str, NodeId>>) {
     let mut infos = vec![ModuleInfo {
         ast: root_ast,
+        path: root_path,
         base_grammar: root_base_grammar,
     }];
     let mut fns = vec![collect_fns(root_ast)];
@@ -188,6 +196,7 @@ fn build_module_table<'ast>(
         for m in modules {
             infos.push(ModuleInfo {
                 ast: &m.ast,
+                path: &m.path,
                 base_grammar: m.lowered.as_ref(),
             });
             fns.push(collect_fns(&m.ast));
@@ -204,9 +213,10 @@ pub fn lower_with_base(
     ast: &Ast,
     modules: &[super::Module],
     root_global_id: u8,
+    root_path: &Path,
 ) -> LowerResult<InputGrammar> {
     let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
-    let result = evaluate(ast, modules, base_grammar, root_global_id)?;
+    let result = evaluate(ast, modules, base_grammar, root_global_id, root_path)?;
     build_grammar(result, base_grammar)
 }
 
@@ -216,8 +226,9 @@ fn evaluate(
     modules: &[super::Module],
     base_grammar: Option<&InputGrammar>,
     root_global_id: u8,
+    root_path: &Path,
 ) -> LowerResult<EvalResult> {
-    let (module_infos, module_fns) = build_module_table(ast, base_grammar, modules);
+    let (module_infos, module_fns) = build_module_table(ast, root_path, base_grammar, modules);
     let n = module_infos.len();
     let mut eval = Evaluator {
         modules: module_infos,
@@ -1212,19 +1223,35 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn push_call(&mut self, name: &'ast str, span: Span) -> LowerResult<()> {
-        self.call_stack.push((name, span));
+        self.call_stack.push((name, span, self.current_module));
         if self.call_stack.len() > MAX_CALL_DEPTH as usize {
-            let trace = self
-                .call_stack
-                .iter()
-                .map(|(name, span)| (name.to_string(), *span))
-                .collect();
-            return Err(LowerError::new(
-                LowerErrorKind::CallDepthExceeded(trace),
-                span,
-            ));
+            return Err(self.build_call_depth_error());
         }
         Ok(())
+    }
+
+    fn build_call_depth_error(&self) -> LowerError {
+        let trace = self
+            .call_stack
+            .iter()
+            .map(|(name, span, mod_idx)| {
+                let info = &self.modules[*mod_idx];
+                let offset = span.start as usize;
+                let bytes = info.ast.ctx.source.as_bytes();
+                let mut line_start = 0;
+                let mut line = 1usize;
+                for (i, &b) in bytes.iter().enumerate().take(offset) {
+                    if b == b'\n' {
+                        line_start = i + 1;
+                        line += 1;
+                    }
+                }
+                let col = offset - line_start + 1;
+                (name.to_string(), info.path.to_path_buf(), line, col)
+            })
+            .collect();
+        let root_span = self.call_stack[0].1;
+        LowerError::new(LowerErrorKind::CallDepthExceeded(trace), root_span)
     }
 
     fn eval_fn_call(
@@ -1304,7 +1331,13 @@ impl<'ast> Evaluator<'ast> {
         let fn_config = import_ast.ctx.get_fn(fn_idx);
         let body = fn_config.body;
 
-        self.push_call(fn_name, call_span)?;
+        // Record the call with the caller's span but the callee's module,
+        // so the trace shows the correct file path for the function.
+        self.call_stack
+            .push((fn_name, call_span, self.current_module));
+        if self.call_stack.len() > MAX_CALL_DEPTH as usize {
+            return Err(self.build_call_depth_error());
+        }
 
         let saved_module = self.current_module;
         let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
@@ -1445,7 +1478,7 @@ pub enum LowerErrorKind {
     #[error("too many elements (maximum 65535)")]
     TooManyChildren,
     #[error("maximum function call depth ({MAX_CALL_DEPTH}) exceeded")]
-    CallDepthExceeded(Vec<(String, Span)>),
+    CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
 }
 
 const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {
