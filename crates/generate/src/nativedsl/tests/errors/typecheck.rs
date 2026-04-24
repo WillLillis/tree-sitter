@@ -218,6 +218,12 @@ type_error_tests! {
         rule program { "x" }"#,
         TypeErrorKind::CannotInferType
     }
+    error_bare_function_reference {
+        r#"grammar { language: "test" }
+        fn make_rule(x: str_t) rule_t { x }
+        rule program { make_rule }"#,
+        TypeErrorKind::FunctionUsedAsValue("make_rule".into())
+    }
 }
 
 // Complex test that needs file I/O and nested error inspection

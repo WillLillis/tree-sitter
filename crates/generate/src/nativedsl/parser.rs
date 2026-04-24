@@ -8,8 +8,8 @@ use thiserror::Error;
 use super::{
     InnerTy, Note, NoteMessage, ParseError,
     ast::{
-        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, PrecKind,
-        RepeatKind, Span,
+        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, IdentKind, Node, NodeId, Param,
+        PrecKind, RepeatKind, Span,
     },
     lexer::{Token, TokenKind},
     typecheck::Ty,
@@ -112,7 +112,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     fn expect_ident_node(&mut self) -> ParseResult<NodeId> {
         let span = self.expect_ident()?;
-        Ok(self.ast.push(Node::Ident, span))
+        Ok(self.ast.push(Node::Ident(IdentKind::Unresolved), span))
     }
 
     /// Accept an identifier or a keyword used as an identifier.
@@ -552,7 +552,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     fn parse_field(&mut self, start: Span) -> ParseResult<NodeId> {
         let (name, content, end) = self.parse_binary(start, TokenKind::KwField, |this| {
             let s = this.expect_name()?;
-            Ok(this.ast.push(Node::Ident, s))
+            Ok(this.ast.push(Node::Ident(IdentKind::Unresolved), s))
         })?;
         Ok(self
             .ast
@@ -677,7 +677,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 let member_span = self.expect_ident()?;
                 if self.at(TokenKind::LParen) {
                     // h::fn_name(args) - qualified call needs member as NodeId in ChildRange
-                    let member_id = self.ast.push(Node::Ident, member_span);
+                    let member_id = self
+                        .ast
+                        .push(Node::Ident(IdentKind::Unresolved), member_span);
                     self.advance_pos();
                     let mut children = vec![id, member_id];
                     let arg_ids = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
@@ -698,7 +700,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     start.merge(member_span),
                 );
             } else if self.at(TokenKind::LParen) {
-                if !matches!(self.ast.node(id), Node::Ident) {
+                if !matches!(self.ast.node(id), Node::Ident(IdentKind::Unresolved)) {
                     return Err(self.error(ParseErrorKind::ExpectedFunctionName));
                 }
                 self.advance_pos();
