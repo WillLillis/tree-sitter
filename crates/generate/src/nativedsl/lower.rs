@@ -1072,7 +1072,7 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             #[rustfmt::skip]
-            Node::Seq(_) | Node::Choice(_) | Node::Repeat { .. }
+            Node::SeqOrChoice { .. } | Node::Repeat { .. }
             | Node::Blank | Node::Field { .. } | Node::Alias { .. }
             | Node::Token { .. } | Node::Prec { .. }
             | Node::Reserved { .. } => self.eval_combinator(id),
@@ -1104,8 +1104,7 @@ impl<'ast> Evaluator<'ast> {
     fn eval_combinator(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let ast = self.ast();
         match ast.node(id) {
-            Node::Seq(range) | Node::Choice(range) => {
-                let is_seq = matches!(ast.node(id), Node::Seq(_));
+            Node::SeqOrChoice { seq, range } => {
                 let children = ast.ctx.child_slice(*range);
                 // Collect into a temporary Vec before pushing to rule_children.
                 // We can't push directly because nested combinators (e.g.
@@ -1122,7 +1121,7 @@ impl<'ast> Evaluator<'ast> {
                 let start = self.children_start();
                 self.rule_children.extend_from_slice(&child_ids);
                 let (offset, len) = self.children_range(start, ast.span(id))?;
-                let arule = if is_seq {
+                let arule = if *seq {
                     ARule::Seq(offset, len)
                 } else {
                     ARule::Choice(offset, len)
