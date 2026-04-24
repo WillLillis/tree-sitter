@@ -1,1 +1,1 @@
-grammar { language: "test" } fn f(x: rule_t) -> rule_t { f(x) } rule program { f("x") }
+grammar { language: "test" } fn f(x: rule_t) rule_t { f(x) } rule program { f("x") }

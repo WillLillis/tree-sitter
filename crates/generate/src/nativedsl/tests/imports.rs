@@ -254,7 +254,7 @@ fn import_function_uses_own_let_binding() {
         &helper,
         r#"
 let DELIM = ","
-fn delimited(item: rule_t) -> rule_t {
+fn delimited(item: rule_t) rule_t {
     seq(item, repeat(seq(DELIM, item)))
 }
 "#,
@@ -387,7 +387,7 @@ fn error_import_disallowed_grammar_block() {
     let bad_helper = dir.path().join("bad.tsg");
     std::fs::write(
         &bad_helper,
-        "grammar { language: \"bad\" }\nfn f(x: rule_t) -> rule_t { x }",
+        "grammar { language: \"bad\" }\nfn f(x: rule_t) rule_t { x }",
     )
     .unwrap();
 
@@ -643,7 +643,7 @@ fn import_diamond() {
     std::fs::write(
         &b_path,
         format!(
-            "let h = import(\"{}\")\nfn b_fn(x: rule_t) -> rule_t {{ prec(h::VAL, x) }}",
+            "let h = import(\"{}\")\nfn b_fn(x: rule_t) rule_t {{ prec(h::VAL, x) }}",
             dsl_path(&helpers_path)
         ),
     )
@@ -651,7 +651,7 @@ fn import_diamond() {
     std::fs::write(
         &c_path,
         format!(
-            "let h = import(\"{}\")\nfn c_fn(x: rule_t) -> rule_t {{ prec(h::VAL, x) }}",
+            "let h = import(\"{}\")\nfn c_fn(x: rule_t) rule_t {{ prec(h::VAL, x) }}",
             dsl_path(&helpers_path)
         ),
     )

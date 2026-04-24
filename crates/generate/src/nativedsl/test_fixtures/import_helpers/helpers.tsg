@@ -1,14 +1,14 @@
 // Test helper module for import tests
 
-fn comma_sep1(item: rule_t) -> rule_t {
+fn comma_sep1(item: rule_t) rule_t {
     seq(item, repeat(seq(",", item)))
 }
 
-fn comma_sep(item: rule_t) -> rule_t {
+fn comma_sep(item: rule_t) rule_t {
     optional(comma_sep1(item))
 }
 
-fn sep_by(separator: str_t, item: rule_t) -> rule_t {
+fn sep_by(separator: str_t, item: rule_t) rule_t {
     seq(item, repeat(seq(separator, item)))
 }
 
