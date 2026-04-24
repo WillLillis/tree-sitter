@@ -743,5 +743,16 @@ fn import_call_depth_shared_across_modules() {
     "#,
     );
     let e = assert_err!(err, Lower);
-    assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
+    let LowerErrorKind::CallDepthExceeded(trace) = &e.kind else {
+        panic!("expected CallDepthExceeded");
+    };
+    let fixtures = test_fixtures_dir();
+    let grammar_path = fixtures.join("grammar.tsg");
+    let recursive_path = fixtures.join("import_helpers/recursive.tsg");
+    // First frame: call site in root grammar
+    assert_eq!(trace[0], ("recurse".into(), grammar_path, 4, 24));
+    // Remaining frames: self-recursive calls within the imported helper
+    for frame in &trace[1..] {
+        assert_eq!(*frame, ("recurse".into(), recursive_path.clone(), 4, 5));
+    }
 }

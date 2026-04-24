@@ -79,7 +79,7 @@ impl std::fmt::Display for NativeDslError {
             let elided = trace.len().saturating_sub(show * 2);
             writeln!(f)?;
             writeln!(f, " {} call trace:", paint(AnsiColor::Cyan, "="))?;
-            for (i, (name, span)) in trace.iter().enumerate() {
+            for (i, (name, path, line, col)) in trace.iter().enumerate() {
                 if elided > 0 && i == show {
                     writeln!(
                         f,
@@ -90,13 +90,11 @@ impl std::fmt::Display for NativeDslError {
                 if i >= show && i < trace.len() - show {
                     continue;
                 }
-                let fctx = SpanContext::new(*span, &self.src);
                 writeln!(
                     f,
-                    "   {} {path_display}:{}:{} in {name}()",
+                    "   {} {}:{line}:{col} in {name}()",
                     paint(AnsiColor::Cyan, "-->"),
-                    fctx.line_num,
-                    fctx.col,
+                    path.display(),
                 )?;
             }
         }
