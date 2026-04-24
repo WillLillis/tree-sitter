@@ -635,7 +635,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.ast.push(
             Node::ModuleRef {
-                is_import,
+                import: is_import,
                 path: path_span.strip_quotes(),
                 module: None,
             },
@@ -696,7 +696,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     let range = self
                         .ast
                         .push_children(&children)
-                        .map_err(|_| self.error(ParseErrorKind::NestingTooDeep))?;
+                        .ok_or_else(|| self.error(ParseErrorKind::NestingTooDeep))?;
                     id = self.ast.push(Node::QualifiedCall(range), start.merge(end));
                     break;
                 }
@@ -768,7 +768,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let range = self
             .ast
             .push_object(fields)
-            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.ast.push(Node::Object(range), start.merge(end)))
     }
 
@@ -799,7 +799,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let range = self
             .ast
             .push_children(&self.scratch[saved..])
-            .map_err(|_| self.error(ParseErrorKind::TooManyChildren))?;
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
         self.scratch.truncate(saved);
         Ok(range)
     }
