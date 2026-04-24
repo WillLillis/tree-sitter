@@ -13,7 +13,10 @@ use crate::grammars::InputGrammar;
 
 use super::{
     Note, NoteMessage,
-    ast::{Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, PrecKind, Span},
+    ast::{
+        Ast, AstContext, ChildRange, ForId, IdentKind, Node, NodeArena, NodeId, Param, PrecKind,
+        Span,
+    },
     scope_stack::ScopeStack,
 };
 
@@ -280,7 +283,7 @@ enum Decl {
 /// Run name resolution and type checking in a single function.
 ///
 /// **Phase 1** (resolve): collects declarations, registers inherited names,
-/// and mutates `Node::Ident` nodes into `Node::RuleRef` / `Node::VarRef`.
+/// and resolves `Node::Ident` nodes from `Unresolved` to `Rule` / `Var`.
 ///
 /// **Phase 2** (typecheck): calls the existing `check()` function on the
 /// now-resolved AST.
@@ -300,7 +303,7 @@ pub fn resolve_and_check<'ast>(
     // but not ast.arena, so we can later mutably borrow ast.arena for resolve_item.
     let mut decls = collect_decls(&ast.arena, &ast.ctx, &ast.root_items, grammar_path)?;
 
-    // Register inherited rule names so they resolve to RuleRef.
+    // Register inherited rule names so they resolve as rules.
     // Use the inherit statement's span so "first defined here" points there.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
@@ -336,7 +339,7 @@ pub fn resolve_and_check<'ast>(
 }
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
-/// names to their kind (for Ident -> RuleRef/VarRef mutation) and span
+/// names to their kind (for Ident resolution) and span
 /// (for duplicate checking / "first defined here" notes).
 type Decls<'src> = FxHashMap<&'src str, (Decl, Span)>;
 
@@ -445,12 +448,12 @@ fn collect_external_names_tc<'a>(
 ) -> Result<(), TypeError> {
     match arena.get(id) {
         // Bare identifier: either a let binding (follow it) or an external token name.
-        Node::Ident => {
+        Node::Ident(IdentKind::Unresolved) => {
             let name = ctx.text(arena.span(id));
             if let Some(value_id) = find_let_value(arena, ctx, root_items, name) {
                 // Self-referential let (e.g. `let C = C`) - skip without registering.
                 // Phase 2 will catch this as UnknownIdentifier.
-                if matches!(arena.get(value_id), Node::Ident)
+                if matches!(arena.get(value_id), Node::Ident(IdentKind::Unresolved))
                     && ctx.text(arena.span(value_id)) == name
                 {
                     return Ok(());
@@ -594,15 +597,16 @@ fn resolve_expr_tc(
     locals: &Locals<'_>,
 ) -> Result<(), TypeError> {
     // Handle Ident mutation first
-    if matches!(arena.get(id), Node::Ident) {
+    if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = ctx.text(span);
         if locals.contains(ctx, name) {
-            arena.set(id, Node::VarRef);
+            arena.resolve_as_var(id);
         } else if let Some(&(decl, _)) = decls.get(name) {
             match decl {
-                Decl::Var => arena.set(id, Node::VarRef),
-                Decl::Rule | Decl::Fn => arena.set(id, Node::RuleRef),
+                Decl::Var => arena.resolve_as_var(id),
+                Decl::Rule => arena.resolve_as_rule(id),
+                Decl::Fn => arena.resolve_as_fn(id),
             }
         } else {
             return Err(TypeError::new(
@@ -613,19 +617,19 @@ fn resolve_expr_tc(
         return Ok(());
     }
 
-    // Alias target: bare identifiers become RuleRef (named alias) unless
-    // they refer to a local variable (VarRef for fn params / for bindings).
+    // Alias target: bare identifiers resolve as Rule (named alias) unless
+    // they refer to a local variable (Var for fn params / for bindings).
     // Targets don't require the name to be declared - they're just node names,
     // same as grammar.js `alias($.x, $.undeclared_name)`.
     if let Node::Alias { content, target } = arena.get(id) {
         let (content, target) = (*content, *target);
         resolve_expr_tc(arena, ctx, decls, content, locals)?;
-        if matches!(*arena.get(target), Node::Ident) {
+        if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             let name = ctx.text(arena.span(target));
             if locals.contains(ctx, name) {
-                arena.set(target, Node::VarRef);
+                arena.resolve_as_var(target);
             } else {
-                arena.set(target, Node::RuleRef);
+                arena.resolve_as_rule(target);
             }
         } else {
             resolve_expr_tc(arena, ctx, decls, target, locals)?;
@@ -920,8 +924,8 @@ fn expect_name_ref<'ast>(
     modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
     match ast.node(id) {
-        Node::RuleRef => Ok(()),
-        Node::VarRef | Node::FieldAccess { .. } => {
+        Node::Ident(IdentKind::Rule) => Ok(()),
+        Node::Ident(IdentKind::Var) | Node::FieldAccess { .. } => {
             let ty = type_of(ast, id, env, modules)?;
             if ty != Ty::Rule {
                 return Err(mismatch(Ty::Rule, ty, ast.span(id)));
@@ -1030,7 +1034,7 @@ fn type_of<'ast>(
     match ast.node(id) {
         Node::IntLit(_) => Ok(Ty::Int),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
-        Node::RuleRef | Node::Blank => Ok(Ty::Rule),
+        Node::Ident(IdentKind::Rule) | Node::Blank => Ok(Ty::Rule),
         Node::ModuleRef { module, .. } => {
             let idx = module.expect("module index not set by loading pre-pass");
             Ok(Ty::Module(idx))
@@ -1045,8 +1049,12 @@ fn type_of<'ast>(
             }
             Ok(Ty::GrammarConfig)
         }
-        Node::Ident => unreachable!(),
-        Node::VarRef => {
+        Node::Ident(IdentKind::Unresolved) => unreachable!(),
+        Node::Ident(IdentKind::Fn) => Err(TypeError::new(
+            TypeErrorKind::FunctionUsedAsValue(ast.ctx.text(span).to_string()),
+            span,
+        )),
+        Node::Ident(IdentKind::Var) => {
             let name = ast.ctx.text(span);
             env.get_var(name).ok_or_else(|| {
                 TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
@@ -1120,8 +1128,10 @@ fn type_of<'ast>(
         Node::Alias { content, target } => {
             expect_rule(ast, *content, env, modules)?;
             let target_ty = type_of(ast, *target, env, modules)?;
-            let is_valid =
-                matches!(ast.node(*target), Node::RuleRef | Node::VarRef) || target_ty == Ty::Str;
+            let is_valid = matches!(
+                ast.node(*target),
+                Node::Ident(IdentKind::Rule | IdentKind::Var)
+            ) || target_ty == Ty::Str;
             if !is_valid {
                 return Err(TypeError::new(
                     TypeErrorKind::InvalidAliasTarget(target_ty),
@@ -1216,7 +1226,7 @@ fn type_of_field_access<'ast>(
     match obj_ty {
         Ty::Object(inner) => {
             let field_known = match ast.node(obj) {
-                Node::VarRef => {
+                Node::Ident(IdentKind::Var) => {
                     let var_name = ast.ctx.text(ast.span(obj));
                     env.get_object_fields(var_name)
                         .is_none_or(|fields| fields.contains(&field_name))
@@ -1592,6 +1602,8 @@ pub enum TypeErrorKind {
     ImportFunctionNotFound(String),
     #[error("'::' call requires module_t, got {0}")]
     QualifiedCallOnNonModule(Ty),
+    #[error("'{0}' is a function, not a value; call it with {0}()")]
+    FunctionUsedAsValue(String),
     #[error("duplicate declaration '{0}'")]
     DuplicateDeclaration(String),
     #[error("unknown identifier '{0}'")]
