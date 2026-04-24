@@ -1087,10 +1087,7 @@ impl<'ast> Evaluator<'ast> {
     fn value_to_rule(&mut self, id: ValueId) -> RuleId {
         match self.get_val(id) {
             Value::Rule(rid) => *rid,
-            Value::Str(s) => {
-                let s = *s;
-                self.alloc_rule(ARule::String(s))
-            }
+            Value::Str(s) => self.alloc_rule(ARule::String(*s)),
             // Guarded by super::typecheck::expect_rule - only rule-like values reach here
             _ => unreachable!(),
         }
