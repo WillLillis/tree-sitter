@@ -68,6 +68,24 @@ impl NodeArena {
         self.nodes[id.index()] = node;
     }
 
+    #[inline]
+    pub fn resolve_as_rule(&mut self, id: NodeId) {
+        debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
+        self.set(id, Node::Ident(IdentKind::Rule));
+    }
+
+    #[inline]
+    pub fn resolve_as_var(&mut self, id: NodeId) {
+        debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
+        self.set(id, Node::Ident(IdentKind::Var));
+    }
+
+    #[inline]
+    pub fn resolve_as_fn(&mut self, id: NodeId) {
+        debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
+        self.set(id, Node::Ident(IdentKind::Fn));
+    }
+
     /// Number of nodes (excluding sentinel).
     #[must_use]
     pub const fn len(&self) -> usize {
@@ -123,6 +141,14 @@ pub enum RepeatKind {
     ZeroOrMore,
     OneOrMore,
     Optional,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IdentKind {
+    Unresolved,
+    Rule,
+    Var,
+    Fn,
 }
 
 /// Byte offset range `[start, end)` in the source text.
@@ -332,9 +358,7 @@ pub enum Node {
         hash_count: u8,
     },
     IntLit(i32),
-    Ident,
-    RuleRef,
-    VarRef,
+    Ident(IdentKind),
     FieldAccess {
         obj: NodeId,
         field: Span,

@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    ast::{Ast, FnConfig, ForConfig, Node, NodeId, PrecKind, RepeatKind, Span},
+    ast::{Ast, FnConfig, ForConfig, IdentKind, Node, NodeId, PrecKind, RepeatKind, Span},
     scope_stack::ScopeStack,
 };
 
@@ -82,8 +82,7 @@ enum ARule {
     String(Str),
     Pattern(Str, Option<Str>),
     NamedSymbol(Str),
-    Seq(u32, u16),
-    Choice(u32, u16),
+    SeqOrChoice(bool, u32, u16),
     Repeat(RuleId),
     Prec(APrec, RuleId),
     PrecLeft(APrec, RuleId),
@@ -540,8 +539,7 @@ impl<'ast> Evaluator<'ast> {
                 f.map_or_else(String::new, |f| s.to_string(f)),
             ),
             ARule::NamedSymbol(sid) => Rule::NamedSymbol(s.to_string(*sid)),
-            ARule::Seq(start, len) | ARule::Choice(start, len) => {
-                let is_seq = matches!(self.get_rule(id), ARule::Seq(..));
+            ARule::SeqOrChoice(is_seq, start, len) => {
                 let range = *start as usize..*start as usize + *len as usize;
                 // Safety: start and len are produced by children_start/children_range
                 // which track rule_children indices.
@@ -549,7 +547,7 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|&id| self.build_rule(id))
                     .collect();
-                if is_seq {
+                if *is_seq {
                     Rule::seq(children)
                 } else {
                     Rule::choice(children)
@@ -829,12 +827,7 @@ impl<'ast> Evaluator<'ast> {
                     u16::try_from(count).is_ok(),
                     "inherited rule has too many children"
                 );
-                let len = count as u16;
-                if is_seq {
-                    self.alloc_rule(ARule::Seq(start, len))
-                } else {
-                    self.alloc_rule(ARule::Choice(start, len))
-                }
+                self.alloc_rule(ARule::SeqOrChoice(is_seq, start, count as u16))
             }
             Rule::Repeat(inner) => {
                 let inner = self.import_rule(inner);
@@ -916,15 +909,15 @@ impl<'ast> Evaluator<'ast> {
                 let n = self.int_val(Self::expect_int(vid));
                 Ok(self.alloc_val(Value::Int(-n)))
             }
-            // Guarded by super::resolve - all Idents replaced with RuleRef/VarRef
-            Node::Ident => unreachable!(),
-            Node::RuleRef => {
+            // Guarded by super::resolve + typecheck
+            Node::Ident(IdentKind::Unresolved | IdentKind::Fn) => unreachable!(),
+            Node::Ident(IdentKind::Rule) => {
                 let sid = self.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
-            // Guarded by super::resolve::resolve - all variable names validated
-            Node::VarRef => Ok(self.scopes.get(ast.ctx.text(span)).unwrap()),
+            // Guarded by super::resolve - all variable names validated
+            Node::Ident(IdentKind::Var) => Ok(self.scopes.get(ast.ctx.text(span)).unwrap()),
             Node::GrammarConfig(inner) => {
                 let inner_val = self.eval_expr(*inner)?;
                 let Value::Module(_) = *self.get_val(inner_val) else {
@@ -1059,7 +1052,7 @@ impl<'ast> Evaluator<'ast> {
     fn lower_to_rule(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let ast = self.ast();
         match ast.node(id) {
-            Node::RuleRef => {
+            Node::Ident(IdentKind::Rule) => {
                 let sid = self.intern_span(ast.span(id));
                 Ok(self.alloc_rule(ARule::NamedSymbol(sid)))
             }
@@ -1121,12 +1114,7 @@ impl<'ast> Evaluator<'ast> {
                 let start = self.children_start();
                 self.rule_children.extend_from_slice(&child_ids);
                 let (offset, len) = self.children_range(start, ast.span(id))?;
-                let arule = if *seq {
-                    ARule::Seq(offset, len)
-                } else {
-                    ARule::Choice(offset, len)
-                };
-                Ok(self.alloc_rule(arule))
+                Ok(self.alloc_rule(ARule::SeqOrChoice(*seq, offset, len)))
             }
             Node::Repeat { kind, inner } => {
                 let inner = self.lower_to_rule(*inner)?;
@@ -1137,7 +1125,7 @@ impl<'ast> Evaluator<'ast> {
                         let start = self.children_start();
                         self.rule_children.extend_from_slice(&[rep, blank]);
                         let (s, l) = self.children_range(start, ast.span(id)).unwrap();
-                        Ok(self.alloc_rule(ARule::Choice(s, l)))
+                        Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
                     }
                     RepeatKind::OneOrMore => Ok(self.alloc_rule(ARule::Repeat(inner))),
                     RepeatKind::Optional => {
@@ -1145,7 +1133,7 @@ impl<'ast> Evaluator<'ast> {
                         let start = self.children_start();
                         self.rule_children.extend_from_slice(&[inner, blank]);
                         let (s, l) = self.children_range(start, ast.span(id)).unwrap();
-                        Ok(self.alloc_rule(ARule::Choice(s, l)))
+                        Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
                     }
                 }
             }
@@ -1158,27 +1146,24 @@ impl<'ast> Evaluator<'ast> {
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
                 let inner = self.lower_to_rule(content)?;
-                match ast.node(target) {
-                    Node::RuleRef | Node::VarRef => {
-                        let sid = self.intern_span(ast.span(target));
-                        Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
-                    }
-                    _ => {
-                        let vid = self.eval_expr(target)?;
-                        match self.get_val(vid) {
-                            Value::Str(s) => Ok(self.alloc_rule(ARule::Alias(*s, false, inner))),
-                            Value::Rule(rid) => {
-                                // Guarded by super::typecheck::type_of (Node::Alias) -
-                                // InvalidAliasTarget rejects non-name/non-str targets
-                                let ARule::NamedSymbol(s) = self.get_rule(*rid) else {
-                                    unreachable!()
-                                };
-                                Ok(self.alloc_rule(ARule::Alias(*s, true, inner)))
-                            }
+                if let Node::Ident(IdentKind::Rule | IdentKind::Var) = ast.node(target) {
+                    let sid = self.intern_span(ast.span(target));
+                    Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
+                } else {
+                    let vid = self.eval_expr(target)?;
+                    match self.get_val(vid) {
+                        Value::Str(s) => Ok(self.alloc_rule(ARule::Alias(*s, false, inner))),
+                        Value::Rule(rid) => {
                             // Guarded by super::typecheck::type_of (Node::Alias) -
-                            // only str or rule-name targets pass
-                            _ => unreachable!(),
+                            // InvalidAliasTarget rejects non-name/non-str targets
+                            let ARule::NamedSymbol(s) = self.get_rule(*rid) else {
+                                unreachable!()
+                            };
+                            Ok(self.alloc_rule(ARule::Alias(*s, true, inner)))
                         }
+                        // Guarded by super::typecheck::type_of (Node::Alias) -
+                        // only str or rule-name targets pass
+                        _ => unreachable!(),
                     }
                 }
             }
