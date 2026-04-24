@@ -212,8 +212,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     fn parse_item(&mut self) -> ParseResult<NodeId> {
         match &self.tokens[self.pos].kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
-            TokenKind::KwRule => self.parse_rule_def(),
-            TokenKind::KwOverride => self.parse_override_rule_def(),
+            TokenKind::KwRule => self.parse_rule_def(false),
+            TokenKind::KwOverride => self.parse_rule_def(true),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwFn => self.parse_fn_def(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
@@ -242,11 +242,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         loop {
             if let Some(end) = self.eat(TokenKind::RBrace) {
                 if config.language.is_none() {
-                    return Err(ParseError {
-                        kind: ParseErrorKind::MissingLanguageField,
-                        span: start.merge(end),
-                        note: None,
-                    });
+                    return Err(Self::error_at(
+                        ParseErrorKind::MissingLanguageField,
+                        start.merge(end),
+                    ));
                 }
                 self.ast.ctx.grammar_config = Some(config);
                 return Ok(self.ast.push(Node::Grammar, start.merge(end)));
@@ -254,10 +253,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             let key_span = self.expect_name()?;
             self.expect(TokenKind::Colon)?;
             let key = self.ast.ctx.text(key_span);
-            let field = ConfigField::from_str(key).ok_or_else(|| ParseError {
-                kind: ParseErrorKind::UnknownGrammarField(key.to_string()),
-                span: key_span,
-                note: None,
+            let field = ConfigField::from_str(key).ok_or_else(|| {
+                Self::error_at(
+                    ParseErrorKind::UnknownGrammarField(key.to_string()),
+                    key_span,
+                )
             })?;
             if let Some(first_span) = seen[field as usize] {
                 Err(ParseError {
@@ -270,8 +270,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             match field {
                 ConfigField::Language => {
                     let s = self.expect_string()?;
-                    let inner = s.strip_quotes();
-                    config.language = Some(self.ast.ctx.text(inner).to_string());
+                    config.language = Some(self.ast.ctx.text(s.strip_quotes()).to_string());
                 }
                 ConfigField::Inherits => config.inherits = Some(self.parse_expr()?),
                 ConfigField::Extras => config.extras = Some(self.parse_expr()?),
@@ -282,7 +281,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 ConfigField::Conflicts => config.conflicts = Some(self.parse_expr()?),
                 ConfigField::Precedences => config.precedences = Some(self.parse_expr()?),
                 ConfigField::Reserved => config.reserved = Some(self.parse_expr()?),
-                ConfigField::_Count => unreachable!(),
             }
             if !self.at(TokenKind::RBrace) {
                 self.expect(TokenKind::Comma)?;
@@ -290,25 +288,26 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
-    fn parse_rule_def(&mut self) -> ParseResult<NodeId> {
-        let start = self.expect(TokenKind::KwRule)?;
+    fn parse_rule_def(&mut self, is_override: bool) -> ParseResult<NodeId> {
+        let start = if is_override {
+            let s = self.expect(TokenKind::KwOverride)?;
+            self.expect(TokenKind::KwRule)?;
+            s
+        } else {
+            self.expect(TokenKind::KwRule)?
+        };
         let name = self.expect_ident()?;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
-        Ok(self.ast.push(Node::Rule { name, body }, start.merge(end)))
-    }
-
-    fn parse_override_rule_def(&mut self) -> ParseResult<NodeId> {
-        let start = self.expect(TokenKind::KwOverride)?;
-        self.expect(TokenKind::KwRule)?;
-        let name = self.expect_ident()?;
-        self.expect(TokenKind::LBrace)?;
-        let body = self.parse_expr()?;
-        let end = self.expect(TokenKind::RBrace)?;
-        Ok(self
-            .ast
-            .push(Node::OverrideRule { name, body }, start.merge(end)))
+        Ok(self.ast.push(
+            Node::Rule {
+                is_override,
+                name,
+                body,
+            },
+            start.merge(end),
+        ))
     }
 
     fn parse_let_def(&mut self) -> ParseResult<NodeId> {
@@ -473,16 +472,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
             TokenKind::KwInherit if next_lparen => {
-                self.parse_module_path(start, TokenKind::KwInherit, |p| Node::Inherit {
-                    path: p,
-                    module: None,
-                })
+                self.parse_module_path(start, TokenKind::KwInherit, false)
             }
             TokenKind::KwImport if next_lparen => {
-                self.parse_module_path(start, TokenKind::KwImport, |p| Node::Import {
-                    path: p,
-                    module: None,
-                })
+                self.parse_module_path(start, TokenKind::KwImport, true)
             }
             TokenKind::KwAppend if next_lparen => self.parse_append(start),
             TokenKind::KwGrammarConfig if next_lparen => {
@@ -630,7 +623,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         &mut self,
         start: Span,
         kw: TokenKind,
-        make_node: fn(NodeId) -> Node,
+        is_import: bool,
     ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
@@ -638,10 +631,16 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             return Err(self.err_arg_count(kw, 1, 0, start));
         }
         let path_span = self.expect_string()?;
-        let path = self.ast.push(Node::StringLit, path_span.strip_quotes());
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self.ast.push(make_node(path), start.merge(end)))
+        Ok(self.ast.push(
+            Node::ModuleRef {
+                is_import,
+                path: path_span.strip_quotes(),
+                module: None,
+            },
+            start.merge(end),
+        ))
     }
 
     fn parse_append(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -850,12 +849,10 @@ enum ConfigField {
     Conflicts,
     Precedences,
     Reserved,
-    // Sentinel - must be last. Used to derive COUNT.
-    _Count,
 }
 
 impl ConfigField {
-    const COUNT: usize = Self::_Count as usize;
+    const COUNT: usize = 10; // `std::mem::variant_count` once stabilized
 
     fn from_str(s: &str) -> Option<Self> {
         Some(match s {

@@ -97,16 +97,9 @@ struct ValueId(u32);
 /// Typed wrappers around [`ValueId`] that guarantee the underlying value has
 /// been validated. Constructed via `Evaluator::expect_*` methods; zero-cost
 /// at runtime (same size as `ValueId`).
-#[derive(Clone, Copy)]
-struct ListVal(ValueId);
-#[derive(Clone, Copy)]
-struct RuleVal(ValueId);
-#[derive(Clone, Copy)]
-struct StrVal(ValueId);
-#[derive(Clone, Copy)]
-struct IntVal(ValueId);
-#[derive(Clone, Copy)]
-struct ObjectVal(ValueId);
+macro_rules! typed_val { ($($name:ident),+) => { $(#[derive(Clone, Copy)] struct $name(ValueId);)+ } }
+typed_val!(ListVal, RuleVal, StrVal, IntVal, ObjectVal);
+
 enum Value<'src> {
     Int(i32),
     Str(Str),
@@ -249,13 +242,17 @@ fn evaluate(
                 let val = eval.eval_expr(*value)?;
                 eval.scopes.insert(ast.node_text(*name), val);
             }
-            Node::Rule { name, body } => {
+            Node::Rule {
+                is_override,
+                name,
+                body,
+            } => {
                 let rule_id = eval.lower_to_rule(*body)?;
-                rule_entries.push((ast.ctx.text(*name), rule_id));
-            }
-            Node::OverrideRule { name, body } => {
-                let rule_id = eval.lower_to_rule(*body)?;
-                override_entries.push((ast.ctx.text(*name), rule_id, *name));
+                if *is_override {
+                    override_entries.push((ast.ctx.text(*name), rule_id, *name));
+                } else {
+                    rule_entries.push((ast.ctx.text(*name), rule_id));
+                }
             }
             _ => unreachable!(),
         }
@@ -925,7 +922,7 @@ impl<'ast> Evaluator<'ast> {
                 };
                 Ok(self.alloc_val(Value::GrammarConfig))
             }
-            Node::Inherit { module, .. } | Node::Import { module, .. } => {
+            Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
                 let table_id = self.module_idx(global_id);
                 self.eval_import_module(table_id)?;
