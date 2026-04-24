@@ -100,7 +100,6 @@ pub enum TokenKind {
     Colon,
     ColonColon,
     Dot,
-    Arrow, // ->
     Minus,
     Eq,
     Lt,
@@ -170,7 +169,6 @@ impl std::fmt::Display for TokenKind {
             Self::Colon => "':'",
             Self::ColonColon => "'::'",
             Self::Dot => "'.'",
-            Self::Arrow => "'->'",
             Self::Minus => "'-'",
             Self::Eq => "'='",
             Self::Lt => "'<'",
@@ -288,14 +286,7 @@ impl<'src> Lexer<'src> {
             b'=' => TokenKind::Eq,
             b'<' => TokenKind::Lt,
             b'>' => TokenKind::Gt,
-            b'-' => {
-                if self.peek() == Some(b'>') {
-                    self.advance();
-                    TokenKind::Arrow
-                } else {
-                    TokenKind::Minus
-                }
-            }
+            b'-' => TokenKind::Minus,
             b'"' => self.lex_string(start)?,
             b'0'..=b'9' => self.lex_int(start)?,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(start)?,

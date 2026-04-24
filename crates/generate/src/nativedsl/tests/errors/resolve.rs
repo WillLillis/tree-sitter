@@ -34,8 +34,8 @@ resolve_error_tests! {
     }
     error_duplicate_fn {
         r#"grammar { language: "test" }
-        fn f(x: rule_t) -> rule_t { x }
-        fn f(x: rule_t) -> rule_t { x }
+        fn f(x: rule_t) rule_t { x }
+        fn f(x: rule_t) rule_t { x }
         rule program { "x" }"#,
         TypeErrorKind::DuplicateDeclaration("f".into())
     }
@@ -49,7 +49,7 @@ resolve_error_tests! {
     // Unknown identifier inside a function body
     error_unknown_in_fn_body {
         r#"grammar { language: "test" }
-        fn f(x: rule_t) -> rule_t { bogus }
+        fn f(x: rule_t) rule_t { bogus }
         rule program { f(program) }"#,
         TypeErrorKind::UnknownIdentifier("bogus".into())
     }
