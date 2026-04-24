@@ -6,7 +6,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::{
-    Diagnostic, InnerTy, Note, NoteMessage, ParseError,
+    InnerTy, Note, NoteMessage, ParseError,
     ast::{
         Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, PrecKind,
         RepeatKind, Span,
@@ -145,26 +145,17 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     #[cold]
     fn error(&self, kind: ParseErrorKind) -> ParseError {
-        Self::error_at(kind, self.span())
+        ParseError::new(kind, self.span())
     }
 
     #[cold]
-    const fn error_at(kind: ParseErrorKind, span: Span) -> ParseError {
-        ParseError::new(kind, span)
-    }
-
-    #[cold]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "matches Note's Option<Box<Note>> field"
-    )]
-    fn first_defined_note(&self, span: Span) -> Option<Box<Note>> {
-        Some(Box::new(Note {
+    fn first_defined_note(&self, span: Span) -> Note {
+        Note {
             message: NoteMessage::FirstDefinedHere,
             span,
             path: self.grammar_path.to_path_buf(),
             source: self.ast.ctx.source.clone(),
-        }))
+        }
     }
 
     #[cold]
@@ -223,11 +214,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 .find(|&&id| matches!(self.ast.node(id), Node::Grammar))
                 .map(|&id| self.ast.span(id))
                 .unwrap();
-            Err(Diagnostic {
-                kind: ParseErrorKind::DuplicateGrammarBlock,
-                span: start,
-                note: self.first_defined_note(first_span),
-            })?;
+            Err(ParseError::with_note(
+                ParseErrorKind::DuplicateGrammarBlock,
+                start,
+                self.first_defined_note(first_span),
+            ))?;
         }
         self.expect(TokenKind::LBrace)?;
         let mut config = GrammarConfig::default();
@@ -235,7 +226,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         loop {
             if let Some(end) = self.eat(TokenKind::RBrace) {
                 if config.language.is_none() {
-                    return Err(Self::error_at(
+                    return Err(ParseError::new(
                         ParseErrorKind::MissingLanguageField,
                         start.merge(end),
                     ));
@@ -247,17 +238,17 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             self.expect(TokenKind::Colon)?;
             let key = self.ast.ctx.text(key_span);
             let field = ConfigField::from_str(key).ok_or_else(|| {
-                Self::error_at(
+                ParseError::new(
                     ParseErrorKind::UnknownGrammarField(key.to_string()),
                     key_span,
                 )
             })?;
             if let Some(first_span) = seen[field as usize] {
-                Err(Diagnostic {
-                    kind: ParseErrorKind::DuplicateGrammarField(key.to_string()),
-                    span: key_span,
-                    note: self.first_defined_note(first_span),
-                })?;
+                Err(ParseError::with_note(
+                    ParseErrorKind::DuplicateGrammarField(key.to_string()),
+                    key_span,
+                    self.first_defined_note(first_span),
+                ))?;
             }
             seen[field as usize] = Some(key_span);
             match field {
@@ -362,7 +353,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         Ty::ListRule => Ok(Ty::ListListRule),
                         Ty::ListStr => Ok(Ty::ListListStr),
                         Ty::ListInt => Ok(Ty::ListListInt),
-                        _ => Err(Self::error_at(
+                        _ => Err(ParseError::new(
                             ParseErrorKind::ListInnerType(inner_ty),
                             inner_span,
                         )),
@@ -374,17 +365,17 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     self.expect(TokenKind::Lt)?;
                     let (inner_ty, inner_span) = self.parse_type()?;
                     let ty = InnerTy::try_from(inner_ty).map(Ty::Object).map_err(|()| {
-                        Self::error_at(ParseErrorKind::ObjectInnerType(inner_ty), inner_span)
+                        ParseError::new(ParseErrorKind::ObjectInnerType(inner_ty), inner_span)
                     });
                     let gt = self.expect(TokenKind::Gt)?;
                     Ok((ty?, id_span.merge(gt)))
                 }
                 "grammar_config_t" => Ok((Ty::GrammarConfig, id_span)),
-                "spread_t" => Err(Self::error_at(
+                "spread_t" => Err(ParseError::new(
                     ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
                     id_span,
                 )),
-                _ => Err(Self::error_at(
+                _ => Err(ParseError::new(
                     ParseErrorKind::UnknownType(self.ast.ctx.text(id_span).to_string()),
                     id_span,
                 )),
@@ -421,8 +412,10 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let next_lparen = self.next_is(TokenKind::LParen);
         let kw = self.tokens[self.pos].kind;
         match kw {
-            TokenKind::KwSeq if next_lparen => self.parse_variadic(start, Node::Seq),
-            TokenKind::KwChoice if next_lparen => self.parse_variadic(start, Node::Choice),
+            TokenKind::KwSeq | TokenKind::KwChoice if next_lparen => {
+                let seq = kw == TokenKind::KwSeq;
+                self.parse_variadic(start, |r| Node::SeqOrChoice { seq, range: r })
+            }
             TokenKind::KwRepeat | TokenKind::KwRepeat1 | TokenKind::KwOptional if next_lparen => {
                 let repeat_kind = match kw {
                     TokenKind::KwRepeat => RepeatKind::ZeroOrMore,
@@ -504,7 +497,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
-    fn parse_variadic(&mut self, start: Span, make: fn(ChildRange) -> Node) -> ParseResult<NodeId> {
+    fn parse_variadic(
+        &mut self,
+        start: Span,
+        make: impl FnOnce(ChildRange) -> Node,
+    ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
@@ -749,11 +746,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         for &(span, _) in &fields {
             let key = self.ast.ctx.text(span);
             if let Some(&first_span) = seen.get(key) {
-                return Err(Diagnostic {
-                    kind: ParseErrorKind::DuplicateObjectKey(key.to_string()),
+                return Err(ParseError::with_note(
+                    ParseErrorKind::DuplicateObjectKey(key.to_string()),
                     span,
-                    note: self.first_defined_note(first_span),
-                });
+                    self.first_defined_note(first_span),
+                ));
             }
             seen.insert(key, span);
         }

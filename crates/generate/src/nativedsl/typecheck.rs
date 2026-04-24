@@ -478,7 +478,7 @@ fn collect_external_names_tc<'a>(
             }
         }
         // List: scan children for identifiers.
-        Node::List(range) | Node::Seq(range) | Node::Choice(range) | Node::Tuple(range) => {
+        Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
             for &child in ctx.child_slice(*range) {
                 collect_external_names_tc(
                     arena,
@@ -1101,7 +1101,7 @@ fn type_of<'ast>(
             }
             Ok(Ty::Rule)
         }
-        Node::Seq(range) | Node::Choice(range) => {
+        Node::SeqOrChoice { range, .. } => {
             for &member in ast.ctx.child_slice(*range) {
                 let ty = type_of(ast, member, env, modules)?;
                 if ty != Ty::Spread && !ty.is_rule_like() {
