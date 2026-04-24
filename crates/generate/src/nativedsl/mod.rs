@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::grammars::InputGrammar;
 
-use ast::{Ast, Node, NodeId, Span};
+use ast::{Ast, IdentKind, Node, NodeId, Span};
 use typecheck::TypeEnv;
 
 /// Parse a native DSL source file into an [`InputGrammar`].
@@ -221,7 +221,7 @@ pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
     let inherits_id = ast.ctx.grammar_config.as_ref()?.inherits?;
     match ast.node(inherits_id) {
         Node::ModuleRef { import: false, .. } => Some(inherits_id),
-        Node::Ident => {
+        Node::Ident(IdentKind::Unresolved) => {
             let name = ast.ctx.text(ast.span(inherits_id));
             ast.root_items.iter().find_map(|&item_id| {
                 if let Node::Let { name: n, value, .. } = ast.node(item_id)
