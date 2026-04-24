@@ -9,17 +9,18 @@ use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ast::{
-    Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, PrecKind, Span,
+use crate::grammars::InputGrammar;
+
+use super::{
+    Note, NoteMessage,
+    ast::{Ast, AstContext, ChildRange, ForId, Node, NodeArena, NodeId, Param, PrecKind, Span},
+    scope_stack::ScopeStack,
 };
-use super::scope_stack::ScopeStack;
 
 /// Function pointer type for element/inner checkers passed to `expect_list` and
 /// `expect_list_list`. Checks a single node against the type environment.
 type CheckFn<'ast> =
     fn(&'ast Ast, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>;
-use super::{Note, NoteMessage};
-use crate::grammars::InputGrammar;
 
 /// Types that can appear as homogeneous object field values.
 /// Each variant maps 1:1 to a `Ty` variant of the same name.
