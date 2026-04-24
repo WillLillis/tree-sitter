@@ -1,20 +1,18 @@
 //! Recursive descent parser for the native grammar DSL.
 
+use std::path::Path;
+
 use serde::Serialize;
 use thiserror::Error;
 
-use std::path::Path;
-
-use crate::nativedsl::InnerTy;
-
-use super::typecheck::Ty;
 use super::{
-    Note, NoteMessage,
+    InnerTy, Note, NoteMessage,
     ast::{
         Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, PrecKind,
         RepeatKind, Span,
     },
     lexer::{Token, TokenKind},
+    typecheck::Ty,
 };
 
 const MAX_PARSE_DEPTH: u16 = 256;
