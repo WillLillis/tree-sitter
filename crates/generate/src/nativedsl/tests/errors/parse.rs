@@ -48,7 +48,7 @@ parse_error_tests! {
     }
     error_missing_return_type {
         r#"grammar { language: "test" } fn f(x: rule_t) { x } rule program { "x" }"#,
-        ParseErrorKind::MissingReturnType
+        ParseErrorKind::ExpectedType
     }
     error_missing_language_field {
         r#"grammar { extras: [] } rule program { "x" }"#,
@@ -216,7 +216,7 @@ fn keywords_as_identifiers() {
     let g = dsl(r#"grammar { language: "test" } let token = "x" rule foo { token }"#);
     assert_eq!(g.variables[0].name, "foo");
     let g = dsl(
-        r#"grammar { language: "test" } fn repeat(x: rule_t) -> rule_t { x } rule foo { repeat("a") }"#,
+        r#"grammar { language: "test" } fn repeat(x: rule_t) rule_t { x } rule foo { repeat("a") }"#,
     );
     assert_eq!(g.variables[0].name, "foo");
 }

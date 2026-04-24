@@ -1,7 +1,7 @@
 // Nested helper that imports another helper (for transitive import tests)
 let h = import("helpers.tsg")
 
-fn sep_by1(sep: rule_t, item: rule_t) -> rule_t {
+fn sep_by1(sep: rule_t, item: rule_t) rule_t {
     seq(item, repeat(seq(sep, item)))
 }
 
