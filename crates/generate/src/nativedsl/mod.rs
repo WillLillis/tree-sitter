@@ -23,14 +23,14 @@ pub use typecheck::{InnerTy, Ty, TypeError, TypeErrorKind};
 
 use std::path::{Path, PathBuf};
 
+use rustc_hash::FxHashMap;
+use serde::Serialize;
+use thiserror::Error;
+
 use crate::grammars::InputGrammar;
 
 use ast::{Ast, Node, NodeId, Span};
 use typecheck::TypeEnv;
-
-use rustc_hash::FxHashMap;
-use serde::Serialize;
-use thiserror::Error;
 
 /// Parse a native DSL source file into an [`InputGrammar`].
 ///
@@ -99,22 +99,30 @@ pub fn load_module(
 
     // Load inherited grammar (Grammar kind only, must happen before typecheck).
     if let Some(inherit_id) = inherit_node {
-        let child_gid = load_inherit_child(
-            &ast,
-            inherit_id,
-            module_dir,
-            ancestor_paths,
-            &mut sub_modules,
-            next_global_id,
-        )?;
-        let Node::ModuleRef { path: p, .. } = ast.node(inherit_id) else {
+        let Node::ModuleRef {
+            import: false,
+            path,
+            ..
+        } = ast.node(inherit_id)
+        else {
             unreachable!()
         };
+        let path = *path;
+        let child = load_child_module(
+            ast.ctx.text(path),
+            module_dir,
+            path,
+            ancestor_paths,
+            ModuleKind::Grammar,
+            next_global_id,
+        )?;
+        let child_gid = child.global_id;
+        sub_modules.push(child);
         ast.arena.set(
             inherit_id,
             Node::ModuleRef {
                 import: false,
-                path: *p,
+                path,
                 module: Some(child_gid),
             },
         );
@@ -140,7 +148,7 @@ pub fn load_module(
     let _ = typecheck::resolve_and_check(&mut ast, &type_envs, base, path)?;
 
     let lowered = if matches!(kind, ModuleKind::Grammar) {
-        Some(lower::lower_with_base(&ast, &sub_modules, global_id)?)
+        Some(lower::lower_with_base(&ast, &sub_modules, global_id, path)?)
     } else {
         None
     };
@@ -325,35 +333,6 @@ fn read_child_module(
     Ok((content, canonical))
 }
 
-/// Load the inherited grammar as a child module and push it to the modules list.
-fn load_inherit_child(
-    ast: &Ast,
-    inherit_id: NodeId,
-    module_dir: &Path,
-    ancestor_paths: &[PathBuf],
-    modules: &mut Vec<Module>,
-    next_global_id: &mut u8,
-) -> DslResult<u8> {
-    let Node::ModuleRef { path, .. } = ast.node(inherit_id) else {
-        unreachable!()
-    };
-
-    let path_str = ast.ctx.text(*path);
-    let span = *path;
-    let child_module = load_child_module(
-        path_str,
-        module_dir,
-        span,
-        ancestor_paths,
-        ModuleKind::Grammar,
-        next_global_id,
-    )?;
-
-    let gid = child_module.global_id;
-    modules.push(child_module);
-    Ok(gid)
-}
-
 /// A loaded and resolved module (imported or inherited), ready for
 /// typechecking and lowering.
 pub struct Module {
@@ -459,12 +438,13 @@ fn validate_import_items(ast: &Ast) -> DslResult<()> {
     for &item_id in &ast.root_items {
         let kind = match ast.node(item_id) {
             Node::Grammar => DisallowedItemKind::GrammarBlock,
-            Node::Rule {
-                is_override: false, ..
-            } => DisallowedItemKind::Rule,
-            Node::Rule {
-                is_override: true, ..
-            } => DisallowedItemKind::OverrideRule,
+            Node::Rule { is_override, .. } => {
+                if *is_override {
+                    DisallowedItemKind::OverrideRule
+                } else {
+                    DisallowedItemKind::Rule
+                }
+            }
             _ => continue,
         };
         Err(LowerError::new(
@@ -556,7 +536,7 @@ impl DslError {
     }
 
     #[must_use]
-    pub fn call_trace(&self) -> Option<&[(String, Span)]> {
+    pub fn call_trace(&self) -> Option<&[(String, PathBuf, usize, usize)]> {
         if let Self::Lower(e) = self
             && let lower::LowerErrorKind::CallDepthExceeded(trace) = &e.kind
         {
