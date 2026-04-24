@@ -329,10 +329,7 @@ impl ChildRange {
 pub enum Node {
     Grammar,
     Rule {
-        name: Span,
-        body: NodeId,
-    },
-    OverrideRule {
+        is_override: bool,
         name: Span,
         body: NodeId,
     },
@@ -391,20 +388,15 @@ pub enum Node {
         pattern: NodeId,
         flags: Option<NodeId>,
     },
-    Inherit {
-        path: NodeId,
-        /// Module index, set by the loading pre-pass.
+    /// `inherit("path.tsg")` or `import("path.tsg")`. `module` is `None`
+    /// after parsing, set to a global module index by the loading pre-pass.
+    ModuleRef {
+        is_import: bool,
+        path: Span,
         module: Option<u8>,
     },
     /// `grammar_config(module)` - returns the grammar config of a module as an object.
     GrammarConfig(NodeId),
-    /// `import("path.tsg")` expression - loads a helper file, returns `module_t`.
-    /// `module` is `None` after parsing, set to an index into `Vec<Module>`
-    /// by the loading pre-pass.
-    Import {
-        path: NodeId,
-        module: Option<u8>,
-    },
     /// `expr::name(args)` - function call through `::` access.
     /// Children layout: `[obj, name, arg0, arg1, ...]` where obj is the
     /// namespace value and name is the function identifier.
