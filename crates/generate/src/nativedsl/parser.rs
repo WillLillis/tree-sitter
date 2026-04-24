@@ -6,7 +6,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::{
-    InnerTy, Note, NoteMessage,
+    Diagnostic, InnerTy, Note, NoteMessage, ParseError,
     ast::{
         Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, Node, NodeId, Param, PrecKind,
         RepeatKind, Span,
@@ -150,11 +150,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     #[cold]
     const fn error_at(kind: ParseErrorKind, span: Span) -> ParseError {
-        ParseError {
-            kind,
-            span,
-            note: None,
-        }
+        ParseError::new(kind, span)
     }
 
     #[cold]
@@ -173,15 +169,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     #[cold]
     fn err_arg_count(&self, name: TokenKind, expected: u8, got: usize, start: Span) -> ParseError {
-        ParseError {
-            kind: ParseErrorKind::WrongArgumentCount {
+        ParseError::new(
+            ParseErrorKind::WrongArgumentCount {
                 name,
                 expected,
                 got,
             },
-            span: start.merge(self.span()),
-            note: None,
-        }
+            start.merge(self.span()),
+        )
     }
 
     fn expect_close_args(&mut self, name: TokenKind, expected: u8, start: Span) -> ParseResult<()> {
@@ -228,7 +223,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 .find(|&&id| matches!(self.ast.node(id), Node::Grammar))
                 .map(|&id| self.ast.span(id))
                 .unwrap();
-            Err(ParseError {
+            Err(Diagnostic {
                 kind: ParseErrorKind::DuplicateGrammarBlock,
                 span: start,
                 note: self.first_defined_note(first_span),
@@ -258,7 +253,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 )
             })?;
             if let Some(first_span) = seen[field as usize] {
-                Err(ParseError {
+                Err(Diagnostic {
                     kind: ParseErrorKind::DuplicateGrammarField(key.to_string()),
                     span: key_span,
                     note: self.first_defined_note(first_span),
@@ -754,7 +749,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         for &(span, _) in &fields {
             let key = self.ast.ctx.text(span);
             if let Some(&first_span) = seen.get(key) {
-                return Err(ParseError {
+                return Err(Diagnostic {
                     kind: ParseErrorKind::DuplicateObjectKey(key.to_string()),
                     span,
                     note: self.first_defined_note(first_span),
@@ -869,14 +864,7 @@ impl ConfigField {
     }
 }
 
-pub type ParseResult<T> = Result<T, ParseError>;
-
-#[derive(Debug, Serialize, Error)]
-pub struct ParseError {
-    pub kind: ParseErrorKind,
-    pub span: Span,
-    pub note: Option<Box<Note>>,
-}
+pub type ParseResult<T> = Result<T, super::ParseError>;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
 pub enum ParseErrorKind {
@@ -935,11 +923,5 @@ fn format_arg_count(expected: u8, name: &TokenKind, got: usize) -> String {
         0 => format!("{name} takes no arguments, got {got}"),
         1 => format!("{name} takes 1 argument, got {got}"),
         _ => format!("{name} takes {expected} arguments, got {got}"),
-    }
-}
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.kind.fmt(f)
     }
 }

@@ -1527,30 +1527,7 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 
 // -- Error types --
 
-#[derive(Debug, Serialize, Error)]
-pub struct TypeError {
-    pub kind: TypeErrorKind,
-    pub span: Span,
-    pub note: Option<Box<Note>>,
-}
-
-impl TypeError {
-    const fn new(kind: TypeErrorKind, span: Span) -> Self {
-        Self {
-            kind,
-            span,
-            note: None,
-        }
-    }
-
-    fn with_note(kind: TypeErrorKind, span: Span, note: Note) -> Self {
-        Self {
-            kind,
-            span,
-            note: Some(Box::new(note)),
-        }
-    }
-}
+use super::TypeError;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
 pub enum TypeErrorKind {
@@ -1621,10 +1598,4 @@ pub enum TypeErrorKind {
     UnknownIdentifier(String),
     #[error("externals must be a list literal, append(), or variable reference")]
     InvalidExternalsExpression,
-}
-
-impl std::fmt::Display for TypeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.kind.fmt(f)
-    }
 }
