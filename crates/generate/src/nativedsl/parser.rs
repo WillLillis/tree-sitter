@@ -340,9 +340,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        if self.eat(TokenKind::Arrow).is_none() {
-            return Err(self.error(ParseErrorKind::MissingReturnType));
-        }
         let return_ty = self.parse_type()?.0;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
@@ -916,8 +913,6 @@ pub enum ParseErrorKind {
     DuplicateGrammarField(String),
     #[error("duplicate object key '{0}'")]
     DuplicateObjectKey(String),
-    #[error("function must have a return type (-> type)")]
-    MissingReturnType,
     #[error("only identifiers can be used as function names")]
     ExpectedFunctionName,
     #[error("only one grammar block is allowed")]
