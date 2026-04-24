@@ -107,20 +107,21 @@ pub fn load_module(
             &mut sub_modules,
             next_global_id,
         )?;
-        let Node::Inherit { path: p, .. } = ast.node(inherit_id) else {
+        let Node::ModuleRef { path: p, .. } = ast.node(inherit_id) else {
             unreachable!()
         };
         ast.arena.set(
             inherit_id,
-            Node::Inherit {
+            Node::ModuleRef {
+                is_import: false,
                 path: *p,
                 module: Some(child_gid),
             },
         );
     }
 
-    // Load imports. Import nodes are identified by Node::Import { module: None }
-    // which is set by the parser.
+    // Load imports. Unresolved module refs are identified by
+    // Node::ModuleRef { module: None } which is set by the parser.
     load_import_children(
         &mut ast,
         module_dir,
@@ -164,14 +165,27 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
     }
     let config_inherits = ast.ctx.grammar_config.as_ref().and_then(|c| c.inherits);
 
-    let direct_in_config =
-        config_inherits.is_some_and(|id| matches!(ast.node(id), Node::Inherit { .. }));
+    let direct_in_config = config_inherits.is_some_and(|id| {
+        matches!(
+            ast.node(id),
+            Node::ModuleRef {
+                is_import: false,
+                ..
+            }
+        )
+    });
 
     // Find all inherit() calls in let bindings, error if more than one
     let mut inherit_let: Option<Span> = None;
     for &item_id in &ast.root_items {
         if let Node::Let { value, .. } = ast.node(item_id)
-            && matches!(ast.node(*value), Node::Inherit { .. })
+            && matches!(
+                ast.node(*value),
+                Node::ModuleRef {
+                    is_import: false,
+                    ..
+                }
+            )
         {
             if inherit_let.is_some() || direct_in_config {
                 Err(LowerError::new(
@@ -209,13 +223,21 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
 pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
     let inherits_id = ast.ctx.grammar_config.as_ref()?.inherits?;
     match ast.node(inherits_id) {
-        Node::Inherit { .. } => Some(inherits_id),
+        Node::ModuleRef {
+            is_import: false, ..
+        } => Some(inherits_id),
         Node::Ident => {
             let name = ast.ctx.text(ast.span(inherits_id));
             ast.root_items.iter().find_map(|&item_id| {
                 if let Node::Let { name: n, value, .. } = ast.node(item_id)
                     && ast.ctx.text(ast.span(*n)) == name
-                    && matches!(ast.node(*value), Node::Inherit { .. })
+                    && matches!(
+                        ast.node(*value),
+                        Node::ModuleRef {
+                            is_import: false,
+                            ..
+                        }
+                    )
                 {
                     Some(*value)
                 } else {
@@ -333,12 +355,12 @@ fn load_inherit_child(
     modules: &mut Vec<Module>,
     next_global_id: &mut u8,
 ) -> DslResult<u8> {
-    let Node::Inherit { path, .. } = ast.node(inherit_id) else {
+    let Node::ModuleRef { path, .. } = ast.node(inherit_id) else {
         unreachable!()
     };
 
-    let path_str = ast.node_text(*path);
-    let span = ast.span(*path);
+    let path_str = ast.ctx.text(*path);
+    let span = *path;
     let child_module = load_child_module(
         path_str,
         module_dir,
@@ -375,8 +397,8 @@ impl Module {
     }
 }
 
-/// Walk ALL nodes in the AST for unresolved `import()` nodes, load each
-/// file via `load_module`, and set `Node::Import { module }` indices.
+/// Walk ALL nodes in the AST for unresolved module ref nodes, load each
+/// file via `load_module`, and set `Node::ModuleRef { module }` indices.
 /// Deduplicates: if the same file is imported multiple times, it is loaded
 /// once and all references share the same module index.
 fn load_import_children(
@@ -393,23 +415,31 @@ fn load_import_children(
     // expression position are resolved (e.g. `extras: import("h.tsg")::EXTRAS`).
     let mut node_id = NodeId::FIRST;
     while node_id.index() <= ast.arena.len() {
-        let (import_path_id, span, kind) = match ast.node(node_id) {
-            Node::Import { path, module: None } => (*path, ast.span(*path), ModuleKind::Helper),
-            Node::Inherit { path, module: None } => (*path, ast.span(*path), ModuleKind::Grammar),
-            _ => {
-                node_id = node_id.next();
-                continue;
-            }
+        let (path, is_import, kind) = if let Node::ModuleRef {
+            is_import,
+            path,
+            module: None,
+        } = ast.node(node_id)
+        {
+            let kind = if *is_import {
+                ModuleKind::Helper
+            } else {
+                ModuleKind::Grammar
+            };
+            (*path, *is_import, kind)
+        } else {
+            node_id = node_id.next();
+            continue;
         };
 
-        let path_str = ast.node_text(import_path_id);
+        let path_str = ast.ctx.text(path);
         let canonical = dunce::canonicalize(module_dir.join(path_str)).map_err(|e| {
             LowerError::new(
                 LowerErrorKind::ModuleResolveFailed {
                     path: module_dir.join(path_str).display().to_string(),
                     error: e.to_string(),
                 },
-                span,
+                path,
             )
         })?;
 
@@ -419,7 +449,7 @@ fn load_import_children(
             let child = load_child_module(
                 path_str,
                 module_dir,
-                span,
+                path,
                 ancestor_paths,
                 kind,
                 next_global_id,
@@ -430,18 +460,14 @@ fn load_import_children(
             idx
         };
 
-        let new_node = match ast.node(node_id) {
-            Node::Import { .. } => Node::Import {
-                path: import_path_id,
+        ast.arena.set(
+            node_id,
+            Node::ModuleRef {
+                is_import,
+                path,
                 module: Some(idx),
             },
-            Node::Inherit { .. } => Node::Inherit {
-                path: import_path_id,
-                module: Some(idx),
-            },
-            _ => unreachable!(),
-        };
-        ast.arena.set(node_id, new_node);
+        );
 
         node_id = node_id.next();
     }
@@ -454,8 +480,12 @@ fn validate_import_items(ast: &Ast) -> DslResult<()> {
     for &item_id in &ast.root_items {
         let kind = match ast.node(item_id) {
             Node::Grammar => DisallowedItemKind::GrammarBlock,
-            Node::Rule { .. } => DisallowedItemKind::Rule,
-            Node::OverrideRule { .. } => DisallowedItemKind::OverrideRule,
+            Node::Rule {
+                is_override: false, ..
+            } => DisallowedItemKind::Rule,
+            Node::Rule {
+                is_override: true, ..
+            } => DisallowedItemKind::OverrideRule,
             _ => continue,
         };
         Err(LowerError::new(

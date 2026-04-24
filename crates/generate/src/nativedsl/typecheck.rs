@@ -381,7 +381,7 @@ fn collect_decls<'a>(
     for &item_id in root_items {
         let span = arena.span(item_id);
         match arena.get(item_id) {
-            Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
+            Node::Rule { name, .. } => {
                 insert_decl(
                     &mut decls,
                     ctx.text(*name),
@@ -563,7 +563,7 @@ fn resolve_item_tc(
             }
             Ok(())
         }
-        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
+        Node::Rule { body, .. } => {
             let body = *body;
             resolve_expr_tc(arena, ctx, decls, body, &Locals::EMPTY)
         }
@@ -738,7 +738,7 @@ pub fn check<'ast>(
     let mut env = TypeEnv::new();
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
-            Node::Rule { name, .. } | Node::OverrideRule { name, .. } => {
+            Node::Rule { name, .. } => {
                 env.insert_var(ast.ctx.text(*name), Ty::Rule);
             }
             Node::Fn(fn_idx) => {
@@ -851,9 +851,7 @@ fn check_item<'ast>(
             }
             Ok(())
         }
-        Node::Rule { body, .. } | Node::OverrideRule { body, .. } => {
-            expect_rule(ast, *body, env, modules)
-        }
+        Node::Rule { body, .. } => expect_rule(ast, *body, env, modules),
         // Unreachable: parse_item() only produces Grammar, Let, Fn, Rule,
         // OverrideRule, and Print nodes at root level.
         _ => unreachable!(),
@@ -1032,7 +1030,7 @@ fn type_of<'ast>(
         Node::IntLit(_) => Ok(Ty::Int),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
         Node::RuleRef | Node::Blank => Ok(Ty::Rule),
-        Node::Inherit { module, .. } | Node::Import { module, .. } => {
+        Node::ModuleRef { module, .. } => {
             let idx = module.expect("module index not set by loading pre-pass");
             Ok(Ty::Module(idx))
         }
