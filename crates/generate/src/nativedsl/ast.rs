@@ -228,12 +228,17 @@ impl AstContext {
         let children = self.child_slice(range);
         // SAFETY: QualifiedCall nodes are always constructed with [obj, name, ...args]
         // by the parser, so len >= 2 is structurally guaranteed.
-        debug_assert!(children.len() >= 2);
+        let len = children.len();
+        debug_assert!(len >= 2);
         unsafe {
             (
                 *children.get_unchecked(0),
                 *children.get_unchecked(1),
-                children.get_unchecked(2..),
+                if len > 2 {
+                    children.get_unchecked(2..)
+                } else {
+                    &[]
+                },
             )
         }
     }

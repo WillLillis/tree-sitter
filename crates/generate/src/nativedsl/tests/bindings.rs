@@ -67,7 +67,7 @@ binding_tests! {
     }
     function_expansion {
         r#"grammar { language: "test" }
-        fn comma_sep(item: rule_t) -> rule_t { seq(item, repeat(seq(",", item))) }
+        fn comma_sep(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }"#,
         Rule::seq(vec![
@@ -82,7 +82,7 @@ binding_tests! {
     }
     function_multi_params {
         r#"grammar { language: "test" }
-        fn wrap(before: str_t, content: rule_t, after: str_t) -> rule_t {
+        fn wrap(before: str_t, content: rule_t, after: str_t) rule_t {
             seq(before, content, after)
         }
         rule program { wrap("(", identifier, ")") }
@@ -122,7 +122,7 @@ fn object_with_list_rule_values() {
 #[test]
 fn function_multiple_calls() {
     let g = dsl(r##"grammar { language: "test" }
-        fn make_if(content: rule_t) -> rule_t { seq("#if", content, "#endif") }
+        fn make_if(content: rule_t) rule_t { seq("#if", content, "#endif") }
         rule preproc_if { make_if(_statement) }
         rule preproc_block_if { make_if(_block_item) }
         rule _statement { "stmt" }
@@ -148,8 +148,8 @@ fn function_multiple_calls() {
 #[test]
 fn nested_function_calls() {
     let g = dsl(r#"grammar { language: "test" }
-        fn comma_sep1(item: rule_t) -> rule_t { seq(item, repeat(seq(",", item))) }
-        fn comma_sep(item: rule_t) -> rule_t { optional(comma_sep1(item)) }
+        fn comma_sep1(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
+        fn comma_sep(item: rule_t) rule_t { optional(comma_sep1(item)) }
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }"#);
     assert_eq!(g.variables.len(), 2);
@@ -220,7 +220,7 @@ fn for_empty_list() {
 fn fn_param_shadows_let_binding() {
     let g = dsl(r#"grammar { language: "test" }
         let X: str_t = "shadowed"
-        fn wrap(X: rule_t) -> rule_t { seq("(", X, ")") }
+        fn wrap(X: rule_t) rule_t { seq("(", X, ")") }
         rule program { wrap(identifier) }
         rule identifier { regexp("[a-z]+") }"#);
     // Function parameter X should shadow the let binding X
@@ -237,7 +237,7 @@ fn fn_param_shadows_let_binding() {
 #[test]
 fn for_var_shadows_fn_param() {
     let g = dsl(r#"grammar { language: "test" }
-        fn make(item: str_t) -> rule_t {
+        fn make(item: str_t) rule_t {
             choice(for (item: str_t) in ["a", "b"] { item })
         }
         rule program { make("ignored") }"#);
@@ -274,7 +274,7 @@ fn for_var_shadows_let_binding() {
 #[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
-        r#"grammar { language: "test" } fn f(x: rule_t) -> rule_t { f(x) } rule program { f("x") }"#,
+        r#"grammar { language: "test" } fn f(x: rule_t) rule_t { f(x) } rule program { f("x") }"#,
     );
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
