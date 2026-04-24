@@ -343,8 +343,10 @@ pub enum Node {
         obj: NodeId,
         member: Span,
     },
-    Seq(ChildRange),
-    Choice(ChildRange),
+    SeqOrChoice {
+        seq: bool,
+        range: ChildRange,
+    },
     Repeat {
         kind: RepeatKind,
         inner: NodeId,
@@ -415,9 +417,10 @@ impl Node {
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {
-            Self::Seq(r) | Self::Choice(r) | Self::List(r) | Self::Tuple(r) | Self::Concat(r) => {
-                Some(*r)
-            }
+            Self::SeqOrChoice { range: r, .. }
+            | Self::List(r)
+            | Self::Tuple(r)
+            | Self::Concat(r) => Some(*r),
             _ => None,
         }
     }
