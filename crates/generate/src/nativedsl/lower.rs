@@ -249,7 +249,7 @@ fn evaluate(
             Node::Grammar | Node::Fn(_) => {}
             Node::Let { name, value, .. } => {
                 let val = eval.eval_expr(*value)?;
-                eval.scopes.insert(ast.node_text(*name), val);
+                eval.scopes.insert(ast.ctx.text(*name), val);
             }
             Node::Rule {
                 is_override,
@@ -522,6 +522,13 @@ impl<'ast> Evaluator<'ast> {
         self.str_id(Self::expect_str(id))
     }
 
+    /// Intern a string, create a `NamedSymbol` rule, and wrap as a `Value::Rule`.
+    fn owned_symbol_val(&mut self, name: String) -> ValueId {
+        let sid = self.strings.intern_owned(name);
+        let rid = self.alloc_rule(ARule::NamedSymbol(sid));
+        self.alloc_val(Value::Rule(rid))
+    }
+
     fn build_rule(&self, id: RuleId) -> Rule {
         let s = &self.strings;
         match self.get_rule(id) {
@@ -729,11 +736,7 @@ impl<'ast> Evaluator<'ast> {
                                     let sid = self.strings.intern_owned(s.clone());
                                     self.alloc_val(Value::Str(sid))
                                 }
-                                PrecedenceEntry::Symbol(s) => {
-                                    let sid = self.strings.intern_owned(s.clone());
-                                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                                    self.alloc_val(Value::Rule(rid))
-                                }
+                                PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s.clone()),
                             })
                             .collect();
                         self.alloc_val(Value::List(inner))
@@ -743,9 +746,7 @@ impl<'ast> Evaluator<'ast> {
             }
             "word" => {
                 if let Some(name) = &grammar.word_token {
-                    let sid = self.strings.intern_owned(name.clone());
-                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                    Ok(self.alloc_val(Value::Rule(rid)))
+                    Ok(self.owned_symbol_val(name.clone()))
                 } else {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
@@ -785,11 +786,7 @@ impl<'ast> Evaluator<'ast> {
     fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
         let vals: Vec<ValueId> = names
             .iter()
-            .map(|name| {
-                let sid = self.strings.intern_owned(name.clone());
-                let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                self.alloc_val(Value::Rule(rid))
-            })
+            .map(|name| self.owned_symbol_val(name.clone()))
             .collect();
         self.alloc_val(Value::List(vals))
     }
@@ -1003,8 +1000,9 @@ impl<'ast> Evaluator<'ast> {
                 let sid = self.strings.intern_owned(result);
                 Ok(self.alloc_val(Value::Str(sid)))
             }
-            Node::DynRegex { pattern, flags } => {
-                let pv = self.eval_expr(*pattern)?;
+            Node::DynRegex(range) => {
+                let (pattern, flags) = ast.ctx.get_regex(*range);
+                let pv = self.eval_expr(pattern)?;
                 let ps = self.get_str_val(pv);
                 let fs = flags
                     .map(|fid| self.eval_expr(fid))
@@ -1129,7 +1127,7 @@ impl<'ast> Evaluator<'ast> {
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             Node::Field { name, content } => {
                 let inner = self.lower_to_rule(*content)?;
-                let sid = self.intern_span(ast.span(*name));
+                let sid = self.intern_span(*name);
                 Ok(self.alloc_rule(ARule::Field(sid, inner)))
             }
             Node::Alias { content, target } => {
@@ -1183,7 +1181,7 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::Reserved { context, content } => {
                 let inner = self.lower_to_rule(*content)?;
-                let sid = self.intern_span(ast.span(*context));
+                let sid = self.intern_span(*context);
                 Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
             // Guarded by lower_to_rule - only combinator nodes are dispatched here
@@ -1303,7 +1301,7 @@ impl<'ast> Evaluator<'ast> {
             if let Node::Let { name, value, .. } = self.ast().node(item_id) {
                 let (name, value) = (*name, *value);
                 let val = self.eval_expr(value)?;
-                let var_name = self.ast().node_text(name);
+                let var_name = self.ast().ctx.text(name);
                 self.scopes.insert(var_name, val);
                 values.insert(var_name, val);
             }
