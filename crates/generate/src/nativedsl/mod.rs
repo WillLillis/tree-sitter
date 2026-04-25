@@ -53,7 +53,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
 pub enum ModuleKind {
     /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
-    /// Helper file (imported). Only let/fn/import/print allowed.
+    /// Helper file (imported). Only let/fn/import allowed.
     Helper,
 }
 
@@ -130,8 +130,6 @@ pub fn load_module(
         );
     }
 
-    // Load imports. Unresolved module refs are identified by
-    // Node::ModuleRef { module: None } which is set by the parser.
     load_import_children(
         &mut ast,
         module_dir,
@@ -141,7 +139,7 @@ pub fn load_module(
     )?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
-    let mut type_envs: Vec<Option<TypeEnv<'_>>> = (0..*next_global_id).map(|_| None).collect();
+    let mut type_envs: Vec<Option<TypeEnv<'_>>> = vec![None; *next_global_id as usize];
     typecheck_modules(&sub_modules, &mut type_envs)?;
     let base = inherit_node.and_then(|id| {
         let module = sub_modules.iter().find(|m| m.is_grammar())?;

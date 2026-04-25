@@ -71,7 +71,7 @@ resolve_error_tests! {
         r#"let C = C
         grammar { language: "test", externals: [C] }
         rule program { "x" }"#,
-        TypeErrorKind::UnresolvedVariable("C".into())
+        TypeErrorKind::UnknownIdentifier("C".into())
     }
 }
 

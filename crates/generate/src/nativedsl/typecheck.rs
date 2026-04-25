@@ -137,6 +137,10 @@ impl Ty {
                     )
             )
     }
+
+    fn is_bindable(self) -> bool {
+        self != Self::Spread
+    }
 }
 
 impl std::fmt::Display for Ty {
@@ -159,11 +163,13 @@ impl std::fmt::Display for Ty {
     }
 }
 
+#[derive(Clone)]
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub return_ty: Ty,
 }
 
+#[derive(Clone)]
 pub struct TypeEnv<'src> {
     pub vars: ScopeStack<'src, Ty>,
     pub fns: FxHashMap<&'src str, FnSig>,
@@ -220,8 +226,6 @@ impl std::ops::DerefMut for ScopeGuard<'_, '_> {
         self.0
     }
 }
-
-// -- Name resolution --
 
 /// Zero-allocation scope chain (linked list on stack, borrows from configs).
 struct Locals<'a> {
@@ -298,9 +302,7 @@ pub fn resolve_and_check<'ast>(
     base: Option<(&'ast InputGrammar, Span)>,
     grammar_path: &Path,
 ) -> Result<TypeEnv<'ast>, TypeError> {
-    // -- Phase 1: Name resolution (mutates arena) --
-    // Split borrow: collect_decls borrows ast.context (for &str slices in decls)
-    // but not ast.arena, so we can later mutably borrow ast.arena for resolve_item.
+    // Phase 1: Name resolution
     let mut decls = collect_decls(&ast.arena, &ast.ctx, &ast.root_items, grammar_path)?;
 
     // Register inherited rule names so they resolve as rules.
@@ -313,11 +315,10 @@ pub fn resolve_and_check<'ast>(
         }
     }
 
-    // Split borrow: decls holds &str from ast.context.source (immutable),
-    // while resolve_item_tc mutates ast.arena. Access context and arena separately.
     let n_items = ast.root_items.len();
     for i in 0..n_items {
         let item_id = ast.root_items[i];
+        resolve_item_tc(&mut ast.arena, &ast.ctx, &decls, item_id)?;
         // Register let bindings in order so forward references are caught
         if let Node::Let { name, .. } = ast.arena.get(item_id) {
             let name_text = ast.ctx.text(ast.arena.span(*name));
@@ -331,10 +332,9 @@ pub fn resolve_and_check<'ast>(
                 &ast.ctx.source,
             )?;
         }
-        resolve_item_tc(&mut ast.arena, &ast.ctx, &decls, item_id)?;
     }
 
-    // -- Phase 2: Type checking (reads ast immutably) --
+    // Phase 2: Type checking
     check(ast, modules)
 }
 
@@ -406,6 +406,20 @@ fn collect_decls<'a>(
                     source,
                 )?;
             }
+            Node::Let { name, value, .. } => {
+                // Self-referential let (e.g. `let C = C`). This must be caught before
+                // the call below to  `collect_external_names_tc` to avoid an infinite loop
+                let lhs = ctx.text(arena.span(*name));
+                if matches!(arena.get(*value), Node::Ident(IdentKind::Unresolved))
+                    && ctx.text(arena.span(*value)) == lhs
+                    && !decls.contains_key(lhs)
+                {
+                    return Err(TypeError::new(
+                        TypeErrorKind::UnknownIdentifier(lhs.to_string()),
+                        arena.span(*value),
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -451,13 +465,6 @@ fn collect_external_names_tc<'a>(
         Node::Ident(IdentKind::Unresolved) => {
             let name = ctx.text(arena.span(id));
             if let Some(value_id) = find_let_value(arena, ctx, root_items, name) {
-                // Self-referential let (e.g. `let C = C`) - skip without registering.
-                // Phase 2 will catch this as UnknownIdentifier.
-                if matches!(arena.get(value_id), Node::Ident(IdentKind::Unresolved))
-                    && ctx.text(arena.span(value_id)) == name
-                {
-                    return Ok(());
-                }
                 // It's a let binding - recurse into its value.
                 collect_external_names_tc(
                     arena,
@@ -567,13 +574,9 @@ fn resolve_item_tc(
             }
             Ok(())
         }
-        Node::Rule { body, .. } => {
-            let body = *body;
-            resolve_expr_tc(arena, ctx, decls, body, &Locals::EMPTY)
-        }
-        Node::Let { value, .. } => {
-            let value = *value;
-            resolve_expr_tc(arena, ctx, decls, value, &Locals::EMPTY)
+        Node::Rule { body: inner, .. } | Node::Let { value: inner, .. } => {
+            let inner = *inner;
+            resolve_expr_tc(arena, ctx, decls, inner, &Locals::EMPTY)
         }
         Node::Fn(fn_idx) => {
             let fn_config = ctx.get_fn(*fn_idx);
@@ -778,10 +781,10 @@ fn check_item<'ast>(
                 expect_name_list(ast, id, env, modules)?;
             }
             if let Some(id) = config.conflicts {
-                expect_list_list(ast, id, env, modules, expect_name_list)?;
+                expect_list_of_groups(ast, id, env, modules, expect_name_list)?;
             }
             if let Some(id) = config.precedences {
-                expect_list_list(ast, id, env, modules, expect_precedence_group)?;
+                expect_list_of_groups(ast, id, env, modules, expect_precedence_group)?;
             }
             if let Some(id) = config.word {
                 expect_name_ref(ast, id, env, modules)?;
@@ -793,38 +796,36 @@ fn check_item<'ast>(
         }
         Node::Let { name, ty, value } => {
             let var_name = ast.node_text(*name);
-            let declared = *ty;
-            // Empty list: type comes from annotation, not inference
+            let declared_ty = *ty;
+            // For empty containers, the inner type comes from annotation only
             let is_empty_list =
                 matches!(ast.node(*value), Node::List(r) if ast.ctx.child_slice(*r).is_empty());
-            let resolved_ty = if is_empty_list {
-                match declared {
-                    Some(ty) if ty.is_list() => ty,
-                    _ => {
-                        return Err(TypeError::new(
-                            TypeErrorKind::EmptyListNeedsAnnotation,
-                            ast.span(*value),
-                        ));
-                    }
-                }
-            } else {
-                let inferred = type_of(ast, *value, env, modules)?;
-                // `for (...) { ... }` yields non-storable types. Reject it
-                // at the let binding with a specific message; without this the
-                // for-expansion case would panic during lowering.
-                if inferred == Ty::Spread {
+            let is_empty_obj =
+                matches!(ast.node(*value), Node::Object(r) if ast.ctx.get_object(*r).is_empty());
+            let resolved_ty = match (is_empty_list, is_empty_obj, declared_ty) {
+                (true, _, Some(ty)) if ty.is_list() => ty,
+                (_, true, Some(ty)) if matches!(ty, Ty::Object(_)) => ty,
+                (true, _, None) | (_, true, None) => {
                     return Err(TypeError::new(
-                        TypeErrorKind::CannotBindSpread,
+                        TypeErrorKind::EmptyContainerNeedsAnnotation,
                         ast.span(*value),
                     ));
                 }
-                if let Some(d) = declared
-                    && !inferred.is_compatible(d)
-                {
-                    return Err(mismatch(d, inferred, ast.span(*value)));
+                (_, _, Some(ty)) => {
+                    let inferred = type_of(ast, *value, env, modules)?;
+                    if !inferred.is_compatible(ty) {
+                        return Err(mismatch(ty, inferred, ast.span(*value)));
+                    }
+                    inferred
                 }
-                inferred
+                (_, _, None) => type_of(ast, *value, env, modules)?,
             };
+            if !resolved_ty.is_bindable() {
+                return Err(TypeError::new(
+                    TypeErrorKind::NonBindableType(resolved_ty),
+                    ast.span(*value),
+                ));
+            }
             // If the value is an object literal, register its field names
             if let Node::Object(range) = ast.node(*value) {
                 let fields: Vec<&str> = ast
@@ -858,7 +859,7 @@ fn check_item<'ast>(
         }
         Node::Rule { body, .. } => expect_rule(ast, *body, env, modules),
         // Unreachable: parse_item() only produces Grammar, Let, Fn, Rule,
-        // OverrideRule, and Print nodes at root level.
+        // and OverrideRule nodes at root level.
         _ => unreachable!(),
     }
 }
@@ -873,8 +874,6 @@ fn widen_type(widest: Ty, ty: Ty) -> Option<Ty> {
         None
     }
 }
-
-// -- Config field validators --
 
 /// Check a list config field. For literal lists, checks each element with `check_elem`.
 /// For non-literal expressions, checks the overall type is a list type.
@@ -942,7 +941,7 @@ fn expect_name_ref<'ast>(
 /// Check a `list_list_rule_t` config field. For literal lists-of-lists, validates
 /// each inner list element-wise with `check_inner`. For non-literal expressions,
 /// checks the overall type is `list_list_rule_t` (or a subtype thereof).
-fn expect_list_list<'ast>(
+fn expect_list_of_groups<'ast>(
     ast: &'ast Ast,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
@@ -956,7 +955,7 @@ fn expect_list_list<'ast>(
         return Ok(());
     }
     let ty = type_of(ast, id, env, modules)?;
-    if ty == Ty::ListListRule || ty == Ty::ListListStr {
+    if ty.is_compatible(Ty::ListListRule) {
         return Ok(());
     }
     Err(mismatch(Ty::ListListRule, ty, ast.span(id)))
@@ -1021,8 +1020,6 @@ fn expect_rule<'ast>(
     }
     Ok(())
 }
-
-// -- Type inference --
 
 fn type_of<'ast>(
     ast: &'ast Ast,
@@ -1166,8 +1163,6 @@ fn type_of<'ast>(
     }
 }
 
-// -- type_of helpers (extracted from the main match) --
-
 fn type_of_append<'ast>(
     ast: &'ast Ast,
     left: NodeId,
@@ -1208,7 +1203,7 @@ fn type_of_append<'ast>(
             Ok(t)
         }
         (None, None) => Err(TypeError::new(
-            TypeErrorKind::EmptyListNeedsAnnotation,
+            TypeErrorKind::EmptyContainerNeedsAnnotation,
             span,
         )),
     }
@@ -1274,7 +1269,7 @@ fn type_of_import_access(
     modules: &[Option<TypeEnv<'_>>],
 ) -> Result<Ty, TypeError> {
     let member_name = ast.ctx.text(member);
-    // Safe: idx was assigned during loading and typecheck_modules populates
+    // Invariant: idx was assigned during loading and `typecheck_module` populates
     // the table before any module that references it is checked.
     let import_env = modules[idx as usize].as_ref().unwrap();
     if let Some(ty) = import_env.vars.get(member_name) {
@@ -1339,7 +1334,7 @@ fn type_of_qualified_call<'a>(
 
 fn type_of_object<'ast>(
     ast: &'ast Ast,
-    range: super::ast::ChildRange,
+    range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
@@ -1364,7 +1359,7 @@ fn type_of_object<'ast>(
 
 fn type_of_list<'ast>(
     ast: &'ast Ast,
-    range: super::ast::ChildRange,
+    range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
@@ -1372,7 +1367,7 @@ fn type_of_list<'ast>(
     let items = ast.ctx.child_slice(range);
     if items.is_empty() {
         return Err(TypeError::new(
-            TypeErrorKind::EmptyListNeedsAnnotation,
+            TypeErrorKind::EmptyContainerNeedsAnnotation,
             span,
         ));
     }
@@ -1406,7 +1401,7 @@ fn type_of_list<'ast>(
 fn type_of_call<'ast>(
     ast: &'ast Ast,
     name: NodeId,
-    args: super::ast::ChildRange,
+    args: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
@@ -1437,8 +1432,6 @@ fn type_of_call<'ast>(
     }
     Ok(return_ty)
 }
-
-// -- For-loop checking --
 
 fn check_for_expr<'ast>(
     ast: &'ast Ast,
@@ -1529,13 +1522,9 @@ fn check_for_tuple_element<'ast>(
     Ok(())
 }
 
-// -- Helpers --
-
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
 }
-
-// -- Error types --
 
 use super::TypeError;
 
@@ -1562,7 +1551,7 @@ pub enum TypeErrorKind {
     #[error("list elements must be rule_t, str_t, int_t, or a list type")]
     InvalidListElement,
     #[error("empty list requires a type annotation")]
-    EmptyListNeedsAnnotation,
+    EmptyContainerNeedsAnnotation,
     #[error("for-expression requires a list, got {0}")]
     ForRequiresList(Ty),
     #[error("for with multiple bindings requires a list of tuples")]
@@ -1588,12 +1577,8 @@ pub enum TypeErrorKind {
     ExpectedReservedConfig,
     #[error("cannot infer type of this expression")]
     CannotInferType,
-    #[error("cannot bind 'print' to a variable: 'print' does not produce a value")]
-    CannotBindVoid,
     #[error("cannot bind a for-loop expansion to a variable: for-loops are expanded inline")]
-    CannotBindSpread,
-    #[error("cannot print a value of type {0}")]
-    CannotPrintType(Ty),
+    NonBindableType(Ty),
     #[error("imported module has no member '{0}'")]
     ImportMemberNotFound(String),
     #[error("'{0}' is a function, not a value; call it with {0}()")]

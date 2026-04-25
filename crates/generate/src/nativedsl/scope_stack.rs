@@ -2,6 +2,7 @@
 
 use rustc_hash::FxHashMap;
 
+#[derive(Clone)]
 pub struct ScopeStack<'src, V: Copy> {
     scopes: Vec<FxHashMap<&'src str, V>>,
 }
