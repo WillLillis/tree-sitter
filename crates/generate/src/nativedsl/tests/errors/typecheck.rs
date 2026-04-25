@@ -63,7 +63,7 @@ type_error_tests! {
         r#"grammar { language: "test" }
         let P = { a: P.a }
         rule program { "x" }"#,
-        TypeErrorKind::UnresolvedVariable("P".into())
+        TypeErrorKind::UnknownIdentifier("P".into())
     }
     error_wrong_arg_count {
         r#"grammar { language: "test" }
@@ -144,7 +144,7 @@ type_error_tests! {
         r#"grammar { language: "test" }
         let foo = for (k: str_t) in ["a", "b"] { k }
         rule program { seq(foo) }"#,
-        TypeErrorKind::CannotBindSpread
+        TypeErrorKind::NonBindableType(Ty::Spread)
     }
     error_conflicts_rejects_non_name {
         r#"grammar {
@@ -194,7 +194,7 @@ type_error_tests! {
         r#"grammar { language: "test" }
         let x = []
         rule program { "x" }"#,
-        TypeErrorKind::EmptyListNeedsAnnotation
+        TypeErrorKind::EmptyContainerNeedsAnnotation
     }
     error_for_requires_tuples {
         r#"grammar { language: "test" }
@@ -216,7 +216,7 @@ type_error_tests! {
         r#"grammar { language: "test" }
         let x = {}
         rule program { "x" }"#,
-        TypeErrorKind::CannotInferType
+        TypeErrorKind::EmptyContainerNeedsAnnotation
     }
     error_bare_function_reference {
         r#"grammar { language: "test" }

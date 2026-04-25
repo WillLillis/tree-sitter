@@ -879,7 +879,7 @@ pub enum ParseErrorKind {
     ExpectedExpression,
     #[error("expected type")]
     ExpectedType,
-    #[error("expected 'grammar', 'rule', 'let', 'fn', or 'print'")]
+    #[error("expected 'grammar', 'rule', 'let', or 'fn'")]
     ExpectedItem,
     #[error("unknown type '{0}'")]
     UnknownType(String),
