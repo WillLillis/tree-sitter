@@ -106,15 +106,7 @@ impl Ty {
     }
 
     const fn is_list(self) -> bool {
-        matches!(
-            self,
-            Self::ListRule
-                | Self::ListStr
-                | Self::ListInt
-                | Self::ListListRule
-                | Self::ListListStr
-                | Self::ListListInt
-        )
+        self.elem_type().is_some()
     }
 
     /// Check if `self` is assignable to `expected`.
@@ -140,6 +132,34 @@ impl Ty {
 
     fn is_bindable(self) -> bool {
         self != Self::Spread
+    }
+
+    /// Promote a type to its list wrapper (e.g. `Rule` -> `ListRule`).
+    /// Returns `None` for types that can't be list elements.
+    pub(super) const fn to_list(self) -> Option<Self> {
+        Some(match self {
+            Self::Rule => Self::ListRule,
+            Self::Str => Self::ListStr,
+            Self::Int => Self::ListInt,
+            Self::ListRule => Self::ListListRule,
+            Self::ListStr => Self::ListListStr,
+            Self::ListInt => Self::ListListInt,
+            _ => return None,
+        })
+    }
+
+    /// Unwrap a list type to its element type (e.g. `ListRule` -> `Rule`).
+    /// Returns `None` for non-list types.
+    const fn elem_type(self) -> Option<Self> {
+        Some(match self {
+            Self::ListRule => Self::Rule,
+            Self::ListStr => Self::Str,
+            Self::ListInt => Self::Int,
+            Self::ListListRule => Self::ListRule,
+            Self::ListListStr => Self::ListStr,
+            Self::ListListInt => Self::ListInt,
+            _ => return None,
+        })
     }
 }
 
@@ -1277,7 +1297,7 @@ fn type_of_import_access(
     }
     if import_env.fns.contains_key(member_name) {
         return Err(TypeError::new(
-            TypeErrorKind::ImportFunctionUsedAsValue(member_name.to_string()),
+            TypeErrorKind::FunctionUsedAsValue(member_name.to_string()),
             member,
         ));
     }
@@ -1384,18 +1404,9 @@ fn type_of_list<'ast>(
             )
         })?;
     }
-    match widest {
-        Ty::Str => Ok(Ty::ListStr),
-        _ if widest.is_rule_like() => Ok(Ty::ListRule),
-        Ty::Int => Ok(Ty::ListInt),
-        Ty::ListRule => Ok(Ty::ListListRule),
-        Ty::ListStr => Ok(Ty::ListListStr),
-        Ty::ListInt => Ok(Ty::ListListInt),
-        _ => Err(TypeError::new(
-            TypeErrorKind::InvalidListElement,
-            ast.span(items[0]),
-        )),
-    }
+    widest
+        .to_list()
+        .ok_or_else(|| TypeError::new(TypeErrorKind::InvalidListElement, ast.span(items[0])))
 }
 
 fn type_of_call<'ast>(
@@ -1471,15 +1482,8 @@ fn check_for_expr<'ast>(
         ));
     }
     let (name_span, declared_ty) = config.bindings[0];
-    let elem_ty = match iter_ty {
-        Ty::ListRule => Ty::Rule,
-        Ty::ListStr => Ty::Str,
-        Ty::ListInt => Ty::Int,
-        Ty::ListListRule => Ty::ListRule,
-        Ty::ListListStr => Ty::ListStr,
-        Ty::ListListInt => Ty::ListInt,
-        _ => unreachable!(),
-    };
+    // is_list() check above guarantees elem_type() returns Some
+    let elem_ty = iter_ty.elem_type().unwrap();
     if !elem_ty.is_compatible(declared_ty) {
         return Err(mismatch(declared_ty, elem_ty, name_span));
     }
@@ -1581,13 +1585,11 @@ pub enum TypeErrorKind {
     NonBindableType(Ty),
     #[error("imported module has no member '{0}'")]
     ImportMemberNotFound(String),
-    #[error("'{0}' is a function, not a value; call it with {0}()")]
-    ImportFunctionUsedAsValue(String),
     #[error("imported module has no function '{0}'")]
     ImportFunctionNotFound(String),
     #[error("'::' call requires module_t, got {0}")]
     QualifiedCallOnNonModule(Ty),
-    #[error("'{0}' is a function, not a value; call it with {0}()")]
+    #[error("'{0}' is a function, not a value; call it with {0}(...)")]
     FunctionUsedAsValue(String),
     #[error("duplicate declaration '{0}'")]
     DuplicateDeclaration(String),

@@ -346,20 +346,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 "list_t" => {
                     self.expect(TokenKind::Lt)?;
                     let (inner_ty, inner_span) = self.parse_type()?;
-                    let ty = match inner_ty {
-                        Ty::Rule => Ok(Ty::ListRule),
-                        Ty::Str => Ok(Ty::ListStr),
-                        Ty::Int => Ok(Ty::ListInt),
-                        Ty::ListRule => Ok(Ty::ListListRule),
-                        Ty::ListStr => Ok(Ty::ListListStr),
-                        Ty::ListInt => Ok(Ty::ListListInt),
-                        _ => Err(ParseError::new(
-                            ParseErrorKind::ListInnerType(inner_ty),
-                            inner_span,
-                        )),
-                    };
+                    let ty = inner_ty.to_list().ok_or_else(|| {
+                        ParseError::new(ParseErrorKind::ListInnerType(inner_ty), inner_span)
+                    })?;
                     let gt = self.expect(TokenKind::Gt)?;
-                    Ok((ty?, id_span.merge(gt)))
+                    Ok((ty, id_span.merge(gt)))
                 }
                 "obj_t" => {
                     self.expect(TokenKind::Lt)?;
