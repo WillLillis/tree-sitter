@@ -259,6 +259,12 @@ impl AstContext {
             )
         }
     }
+    /// Unpack a `DynRegex(range)` into `(pattern, Option<flags>)`.
+    #[must_use]
+    pub fn get_regex(&self, range: ChildRange) -> (NodeId, Option<NodeId>) {
+        let c = self.child_slice(range);
+        (c[0], c.get(1).copied())
+    }
 }
 
 impl Ast {
@@ -348,7 +354,7 @@ pub enum Node {
         body: NodeId,
     },
     Let {
-        name: NodeId,
+        name: Span,
         ty: Option<Ty>,
         value: NodeId,
     },
@@ -367,6 +373,8 @@ pub enum Node {
         obj: NodeId,
         member: Span,
     },
+    /// `seq(a, b, ...)` or `choice(a, b, ...)`.
+    /// Children: `[member0, member1, ...]` - each is a rule expression.
     SeqOrChoice {
         seq: bool,
         range: ChildRange,
@@ -377,7 +385,7 @@ pub enum Node {
     },
     Blank,
     Field {
-        name: NodeId,
+        name: Span,
         content: NodeId,
     },
     Alias {
@@ -394,14 +402,14 @@ pub enum Node {
         content: NodeId,
     },
     Reserved {
-        context: NodeId,
+        context: Span,
         content: NodeId,
     },
+    /// `concat(a, b, ...)`. Children: `[part0, part1, ...]` - each must be `str_t`.
     Concat(ChildRange),
-    DynRegex {
-        pattern: NodeId,
-        flags: Option<NodeId>,
-    },
+    /// `regexp(pattern)` or `regexp(pattern, flags)`. Children layout:
+    /// `[pattern]` or `[pattern, flags]` in the children vec.
+    DynRegex(ChildRange),
     /// `inherit("path.tsg")` or `import("path.tsg")`. `module` is `None`
     /// after parsing, set to a global module index by the loading pre-pass.
     ModuleRef {
@@ -420,12 +428,16 @@ pub enum Node {
         right: NodeId,
     },
     For(ForId),
+    /// `name(arg0, arg1, ...)`. `args` children: `[arg0, arg1, ...]`.
     Call {
         name: NodeId,
         args: ChildRange,
     },
+    /// `[elem0, elem1, ...]`. Children: `[elem0, elem1, ...]`.
     List(ChildRange),
+    /// `(elem0, elem1, ...)`. Children: `[elem0, elem1, ...]`.
     Tuple(ChildRange),
+    /// `{ key0: val0, key1: val1, ... }`. Fields stored in `AstContext::object_fields`.
     Object(ChildRange),
     Neg(NodeId),
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
