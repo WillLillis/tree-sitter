@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    ast::{Ast, FnConfig, ForConfig, IdentKind, Node, NodeId, PrecKind, RepeatKind, Span},
+    ast::{Ast, ForConfig, IdentKind, Node, NodeId, PrecKind, RepeatKind, Span},
     scope_stack::ScopeStack,
 };
 
@@ -496,13 +496,6 @@ impl<'ast> Evaluator<'ast> {
         u16::try_from(count)
             .map(|len| (start, len))
             .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
-    }
-
-    fn get_fn_config(&self, fn_id: NodeId) -> &'ast FnConfig {
-        match self.ast().node(fn_id) {
-            Node::Fn(fn_idx) => self.ast().ctx.get_fn(*fn_idx),
-            _ => unreachable!(),
-        }
     }
 
     /// Intern a span using the current module's source text.
@@ -1026,7 +1019,8 @@ impl<'ast> Evaluator<'ast> {
                 for &arg_id in ast.ctx.child_slice(args) {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
-                self.eval_fn_call(ast.node_text(name), &arg_vals, span)
+                let module = self.current_module;
+                self.call_fn(module, ast.node_text(name), &arg_vals, span)
             }
             Node::QualifiedCall(range) => {
                 let (obj, name, args) = ast.ctx.get_qualified_call(*range);
@@ -1040,7 +1034,7 @@ impl<'ast> Evaluator<'ast> {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
                 let fn_name = ast.node_text(name);
-                self.eval_import_fn_call(idx as usize, fn_name, &arg_vals, span)
+                self.call_fn(idx as usize, fn_name, &arg_vals, span)
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -1118,24 +1112,19 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::Repeat { kind, inner } => {
                 let inner = self.lower_to_rule(*inner)?;
-                match kind {
-                    RepeatKind::ZeroOrMore => {
-                        let rep = self.alloc_rule(ARule::Repeat(inner));
-                        let blank = self.alloc_rule(ARule::Blank);
-                        let start = self.children_start();
-                        self.rule_children.extend_from_slice(&[rep, blank]);
-                        let (s, l) = self.children_range(start, ast.span(id)).unwrap();
-                        Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
-                    }
-                    RepeatKind::OneOrMore => Ok(self.alloc_rule(ARule::Repeat(inner))),
-                    RepeatKind::Optional => {
-                        let blank = self.alloc_rule(ARule::Blank);
-                        let start = self.children_start();
-                        self.rule_children.extend_from_slice(&[inner, blank]);
-                        let (s, l) = self.children_range(start, ast.span(id)).unwrap();
-                        Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
-                    }
+                if *kind == RepeatKind::OneOrMore {
+                    return Ok(self.alloc_rule(ARule::Repeat(inner)));
                 }
+                let first = if *kind == RepeatKind::ZeroOrMore {
+                    self.alloc_rule(ARule::Repeat(inner))
+                } else {
+                    inner
+                };
+                let blank = self.alloc_rule(ARule::Blank);
+                let start = self.children_start();
+                self.rule_children.extend_from_slice(&[first, blank]);
+                let (s, l) = self.children_range(start, ast.span(id)).unwrap();
+                Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
             }
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             Node::Field { name, content } => {
@@ -1234,25 +1223,54 @@ impl<'ast> Evaluator<'ast> {
         LowerError::new(LowerErrorKind::CallDepthExceeded(trace), root_span)
     }
 
-    fn eval_fn_call(
+    /// Call a function, either in the current module or an imported one.
+    /// For cross-module calls, saves/restores module context and binds
+    /// the target module's let values into scope.
+    fn call_fn(
         &mut self,
-        name: &'ast str,
+        table_id: usize,
+        fn_name: &'ast str,
         arg_vals: &[ValueId],
         call_span: Span,
     ) -> LowerResult<ValueId> {
-        self.push_call(name, call_span)?;
-        // Guarded by super::typecheck::check_call_args - validates function exists
-        let &fn_id = self.module_fns[self.current_module].get(name).unwrap();
-        let config = self.get_fn_config(fn_id);
-        let body = config.body;
+        self.push_call(fn_name, call_span)?;
+
+        let fn_ast = self.modules[table_id].ast;
+        let &fn_node_id = self.module_fns[table_id].get(fn_name).unwrap();
+        let fn_config = match fn_ast.node(fn_node_id) {
+            Node::Fn(fi) => fn_ast.ctx.get_fn(*fi),
+            _ => unreachable!(),
+        };
+        let body = fn_config.body;
+
+        let cross_module = table_id != self.current_module;
+        let saved_module = self.current_module;
+        let saved_scopes = if cross_module {
+            self.current_module = table_id;
+            Some(std::mem::replace(&mut self.scopes, ScopeStack::new()))
+        } else {
+            None
+        };
+
         self.scopes.push();
-        for (i, &arg_val) in arg_vals.iter().enumerate() {
-            self.scopes
-                .insert(self.ast().ctx.text(config.params[i].name), arg_val);
+        if cross_module {
+            for (&name, &val) in self.module_values[table_id].as_ref().unwrap() {
+                self.scopes.insert(name, val);
+            }
         }
+        for (i, param) in fn_config.params.iter().enumerate() {
+            self.scopes.insert(fn_ast.ctx.text(param.name), arg_vals[i]);
+        }
+
         let result = self.eval_expr(body);
-        self.scopes.pop();
         self.call_stack.pop();
+        self.scopes.pop();
+
+        if let Some(saved) = saved_scopes {
+            self.current_module = saved_module;
+            self.scopes = saved;
+        }
+
         result
     }
 
@@ -1292,55 +1310,6 @@ impl<'ast> Evaluator<'ast> {
         }
         self.scopes.pop();
         Ok(values)
-    }
-
-    /// Call a function defined in an imported module.
-    fn eval_import_fn_call(
-        &mut self,
-        table_id: usize,
-        fn_name: &'ast str,
-        arg_vals: &[ValueId],
-        call_span: Span,
-    ) -> LowerResult<ValueId> {
-        let import_ast = self.modules[table_id].ast;
-        let fn_node_id = self.module_fns[table_id][fn_name];
-        let fn_idx = match import_ast.node(fn_node_id) {
-            Node::Fn(fi) => *fi,
-            _ => unreachable!(),
-        };
-        let fn_config = import_ast.ctx.get_fn(fn_idx);
-        let body = fn_config.body;
-
-        // Record the call with the caller's span but the callee's module,
-        // so the trace shows the correct file path for the function.
-        self.call_stack
-            .push((fn_name, call_span, self.current_module));
-        if self.call_stack.len() > MAX_CALL_DEPTH as usize {
-            return Err(self.build_call_depth_error());
-        }
-
-        let saved_module = self.current_module;
-        let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
-        self.current_module = table_id;
-
-        self.scopes.push();
-        // Bind import's let values. Direct field access allows split borrowing
-        // of self.module_values (immutable) and self.scopes (mutable).
-        for (&name, &val) in self.module_values[table_id].as_ref().unwrap() {
-            self.scopes.insert(name, val);
-        }
-        for (i, param) in fn_config.params.iter().enumerate() {
-            self.scopes
-                .insert(import_ast.ctx.text(param.name), arg_vals[i]);
-        }
-
-        let result = self.eval_expr(body);
-        self.call_stack.pop();
-        self.scopes.pop();
-
-        self.current_module = saved_module;
-        self.scopes = saved_scopes;
-        result
     }
 
     fn eval_for_to_rules(&mut self, config: &ForConfig) -> LowerResult<Vec<RuleId>> {
