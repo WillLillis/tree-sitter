@@ -296,7 +296,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
 
     fn parse_let_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwLet)?;
-        let name = self.expect_ident_node()?;
+        let name = self.expect_ident()?;
         let ty = if self.eat(TokenKind::Colon).is_some() {
             Some(self.parse_type()?.0)
         } else {
@@ -518,12 +518,12 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     }
 
     /// Parse a two-argument builtin: `name(first, second)`.
-    fn parse_binary(
+    fn parse_binary<T>(
         &mut self,
         start: Span,
         name: TokenKind,
-        parse_first: fn(&mut Self) -> ParseResult<NodeId>,
-    ) -> ParseResult<(NodeId, NodeId, Span)> {
+        parse_first: fn(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<(T, NodeId, Span)> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
@@ -541,10 +541,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     }
 
     fn parse_field(&mut self, start: Span) -> ParseResult<NodeId> {
-        let (name, content, end) = self.parse_binary(start, TokenKind::KwField, |this| {
-            let s = this.expect_name()?;
-            Ok(this.ast.push(Node::Ident(IdentKind::Unresolved), s))
-        })?;
+        let (name, content, end) =
+            self.parse_binary(start, TokenKind::KwField, Self::expect_name)?;
         Ok(self
             .ast
             .push(Node::Field { name, content }, start.merge(end)))
@@ -573,8 +571,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     /// Parse `reserved("context", content)` expression (not the config block).
     fn parse_reserved_expr(&mut self, start: Span) -> ParseResult<NodeId> {
         let (context, content, end) = self.parse_binary(start, TokenKind::KwReserved, |this| {
-            let cs = this.expect_string()?;
-            Ok(this.ast.push(Node::StringLit, cs.strip_quotes()))
+            Ok(this.expect_string()?.strip_quotes())
         })?;
         Ok(self
             .ast
@@ -595,9 +592,12 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         };
         self.expect_close_args(TokenKind::KwRegexp, 1 + u8::from(flags.is_some()), start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self
-            .ast
-            .push(Node::DynRegex { pattern, flags }, start.merge(end)))
+        let range = if let Some(f) = flags {
+            self.ast.push_children(&[pattern, f]).unwrap()
+        } else {
+            self.ast.push_children(&[pattern]).unwrap()
+        };
+        Ok(self.ast.push(Node::DynRegex(range), start.merge(end)))
     }
 
     fn parse_module_path(

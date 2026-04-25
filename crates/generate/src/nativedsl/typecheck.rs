@@ -341,7 +341,7 @@ pub fn resolve_and_check<'ast>(
         resolve_item_tc(&mut ast.arena, &ast.ctx, &decls, item_id)?;
         // Register let bindings in order so forward references are caught
         if let Node::Let { name, .. } = ast.arena.get(item_id) {
-            let name_text = ast.ctx.text(ast.arena.span(*name));
+            let name_text = ast.ctx.text(*name);
             let span = ast.arena.span(item_id);
             insert_decl(
                 &mut decls,
@@ -429,7 +429,7 @@ fn collect_decls<'a>(
             Node::Let { name, value, .. } => {
                 // Self-referential let (e.g. `let C = C`). This must be caught before
                 // the call below to  `collect_external_names_tc` to avoid an infinite loop
-                let lhs = ctx.text(arena.span(*name));
+                let lhs = ctx.text(*name);
                 if matches!(arena.get(*value), Node::Ident(IdentKind::Unresolved))
                     && ctx.text(arena.span(*value)) == lhs
                     && !decls.contains_key(lhs)
@@ -557,7 +557,7 @@ fn find_let_value(
 ) -> Option<NodeId> {
     root_items.iter().find_map(|&item_id| {
         if let Node::Let { name: n, value, .. } = arena.get(item_id)
-            && ctx.text(arena.span(*n)) == name
+            && ctx.text(*n) == name
         {
             return Some(*value);
         }
@@ -730,8 +730,8 @@ fn resolve_children_tc(
             resolve_expr_tc(arena, ctx, decls, value, locals)?;
             resolve_expr_tc(arena, ctx, decls, content, locals)
         }
-        Node::DynRegex { pattern, flags } => {
-            let (pattern, flags) = (*pattern, *flags);
+        Node::DynRegex(range) => {
+            let (pattern, flags) = ctx.get_regex(*range);
             resolve_expr_tc(arena, ctx, decls, pattern, locals)?;
             if let Some(flags) = flags {
                 resolve_expr_tc(arena, ctx, decls, flags, locals)?;
@@ -815,7 +815,7 @@ fn check_item<'ast>(
             Ok(())
         }
         Node::Let { name, ty, value } => {
-            let var_name = ast.node_text(*name);
+            let var_name = ast.ctx.text(*name);
             let declared_ty = *ty;
             // For empty containers, the inner type comes from annotation only
             let is_empty_list =
@@ -1113,15 +1113,16 @@ fn type_of<'ast>(
             }
             Ok(Ty::Str)
         }
-        Node::DynRegex { pattern, flags } => {
-            let pt = type_of(ast, *pattern, env, modules)?;
+        Node::DynRegex(range) => {
+            let (pattern, flags) = ast.ctx.get_regex(*range);
+            let pt = type_of(ast, pattern, env, modules)?;
             if pt != Ty::Str {
-                return Err(mismatch(Ty::Str, pt, ast.span(*pattern)));
+                return Err(mismatch(Ty::Str, pt, ast.span(pattern)));
             }
             if let Some(fid) = flags {
-                let ft = type_of(ast, *fid, env, modules)?;
+                let ft = type_of(ast, fid, env, modules)?;
                 if ft != Ty::Str {
-                    return Err(mismatch(Ty::Str, ft, ast.span(*fid)));
+                    return Err(mismatch(Ty::Str, ft, ast.span(fid)));
                 }
             }
             Ok(Ty::Rule)

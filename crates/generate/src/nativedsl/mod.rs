@@ -223,7 +223,7 @@ pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
             let name = ast.ctx.text(ast.span(inherits_id));
             ast.root_items.iter().find_map(|&item_id| {
                 if let Node::Let { name: n, value, .. } = ast.node(item_id)
-                    && ast.ctx.text(ast.span(*n)) == name
+                    && ast.ctx.text(*n) == name
                     && matches!(ast.node(*value), Node::ModuleRef { import: false, .. })
                 {
                     Some(*value)
