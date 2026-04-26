@@ -2,7 +2,7 @@ use super::*;
 use crate::grammars::PrecedenceEntry;
 
 #[test]
-fn inherit_all_rules() {
+fn inherit_rules_and_config() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
@@ -18,14 +18,6 @@ fn inherit_all_rules() {
             "_inline_rule"
         ]
     );
-}
-
-#[test]
-fn inherit_config() {
-    let g = dsl(r#"
-        let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base }
-    "#);
     assert_eq!(g.word_token.as_deref(), Some("identifier"));
     assert_eq!(g.variables_to_inline, vec!["_inline_rule"]);
     assert_eq!(g.extra_symbols.len(), 1);
