@@ -19,6 +19,13 @@ macro_rules! rule_tests {
     };
 }
 
+/// Generate tests that just verify a grammar compiles without error.
+macro_rules! compile_tests {
+    ($($name:ident { $input:expr })*) => {
+        $(#[test] fn $name() { dsl($input); })*
+    };
+}
+
 macro_rules! assert_err {
     ($err:expr, $variant:ident) => {
         match $err {
