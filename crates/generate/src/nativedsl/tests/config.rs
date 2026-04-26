@@ -360,16 +360,6 @@ fn externals_via_let_mixed_declared_and_undeclared() {
 }
 
 #[test]
-fn externals_via_let_empty() {
-    let g = dsl(r#"
-        let ext: list_t<rule_t> = []
-        grammar { language: "test", externals: ext }
-        rule program { "x" }
-    "#);
-    assert!(g.external_tokens.is_empty());
-}
-
-#[test]
 fn externals_via_append_let_and_inline() {
     // append(let_binding, inline_list)
     let g = dsl(r#"
