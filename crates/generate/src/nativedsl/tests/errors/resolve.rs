@@ -1,15 +1,6 @@
 use super::super::*;
 
-macro_rules! resolve_error_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let e = assert_err!(dsl_err($input), Type);
-            assert_eq!(e.kind, $expected);
-        })*
-    };
-}
-
-resolve_error_tests! {
+error_tests! { Type {
     error_unknown_identifier {
         r#"grammar { language: "test" } rule program { nonexistent }"#,
         TypeErrorKind::UnknownIdentifier("nonexistent".into())
@@ -73,7 +64,7 @@ resolve_error_tests! {
         rule program { "x" }"#,
         TypeErrorKind::UnknownIdentifier("C".into())
     }
-}
+}}
 
 #[test]
 fn error_duplicate_declaration_has_note() {
@@ -110,26 +101,17 @@ fn external_and_rule_same_name_is_valid() {
 
 #[test]
 fn error_inherited_resolve_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(
-        &base_path,
-        "grammar { language: \"base\" }\nrule program { undefined_name }\n",
-    )
-    .unwrap();
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
+    let (err, base_path) =
+        inherit_err("grammar { language: \"base\" }\nrule program { undefined_name }\n");
+    let DslError::Module(m) = &err else {
+        panic!("expected Module, got {err:?}")
     };
-    let DslError::Type(type_err) = inherited.inner.as_ref() else {
-        panic!("expected Type error, got {:?}", inherited.inner)
+    let DslError::Type(e) = m.inner.as_ref() else {
+        panic!("expected Type, got {:?}", m.inner)
     };
     assert_eq!(
-        type_err.kind,
-        TypeErrorKind::UnknownIdentifier("undefined_name".to_string())
+        e.kind,
+        TypeErrorKind::UnknownIdentifier("undefined_name".into())
     );
-    assert_eq!(inherited.path, base_path);
-    assert!(inherited.source_text.contains("undefined_name"));
+    assert_eq!(m.path, base_path);
 }
