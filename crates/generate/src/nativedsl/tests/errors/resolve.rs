@@ -99,19 +99,9 @@ fn external_and_rule_same_name_is_valid() {
     assert_eq!(g.variables.len(), 2);
 }
 
-#[test]
-fn error_inherited_resolve_error() {
-    let (err, base_path) =
-        inherit_err("grammar { language: \"base\" }\nrule program { undefined_name }\n");
-    let DslError::Module(m) = &err else {
-        panic!("expected Module, got {err:?}")
-    };
-    let DslError::Type(e) = m.inner.as_ref() else {
-        panic!("expected Type, got {:?}", m.inner)
-    };
-    assert_eq!(
-        e.kind,
+inherit_error_tests! { Type {
+    error_inherited_resolve_error {
+        "grammar { language: \"base\" }\nrule program { undefined_name }\n",
         TypeErrorKind::UnknownIdentifier("undefined_name".into())
-    );
-    assert_eq!(m.path, base_path);
-}
+    }
+}}

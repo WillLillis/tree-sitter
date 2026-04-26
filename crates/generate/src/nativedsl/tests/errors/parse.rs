@@ -219,35 +219,13 @@ fn keywords_as_identifiers() {
     assert_eq!(g.variables[0].name, "foo");
 }
 
-#[test]
-fn error_inherited_parse_error() {
-    let (err, base_path) =
-        inherit_err("grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n");
-    let DslError::Module(m) = &err else {
-        panic!("expected Module, got {err:?}")
-    };
-    let DslError::Parse(e) = m.inner.as_ref() else {
-        panic!("expected Parse, got {:?}", m.inner)
-    };
-    assert_eq!(
-        e.kind,
-        ParseErrorKind::ExpectedToken {
-            expected: TokenKind::RParen,
-            got: TokenKind::StringLit
-        }
-    );
-    assert_eq!(m.path, base_path);
-}
-
-#[test]
-fn error_inherited_missing_language() {
-    let (err, base_path) = inherit_err("grammar { extras: [] }\nrule program { \"x\" }\n");
-    let DslError::Module(m) = &err else {
-        panic!("expected Module, got {err:?}")
-    };
-    let DslError::Parse(e) = m.inner.as_ref() else {
-        panic!("expected Parse, got {:?}", m.inner)
-    };
-    assert_eq!(e.kind, ParseErrorKind::MissingLanguageField);
-    assert_eq!(m.path, base_path);
-}
+inherit_error_tests! { Parse {
+    error_inherited_parse_error {
+        "grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n",
+        ParseErrorKind::ExpectedToken { expected: TokenKind::RParen, got: TokenKind::StringLit }
+    }
+    error_inherited_missing_language {
+        "grammar { extras: [] }\nrule program { \"x\" }\n",
+        ParseErrorKind::MissingLanguageField
+    }
+}}
