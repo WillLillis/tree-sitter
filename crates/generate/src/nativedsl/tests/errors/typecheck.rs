@@ -228,3 +228,31 @@ inherit_error_tests! { Type {
         TypeErrorKind::TypeMismatch { expected: Ty::Rule, got: Ty::Int }
     }
 }}
+
+#[test]
+fn for_tuple_stale_binding_type_mismatch() {
+    // The outer `x: str_t` is used in the second tuple. Without proper
+    // scoping, stale loop bindings from the first tuple make `x` appear
+    // as int_t, masking the str_t vs int_t mismatch.
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            let x: str_t = "hello"
+            rule a { "a" }
+            rule b { "b" }
+            rule program {
+                choice(for (x: int_t, y: rule_t) in [(1, a), (x, b)] {
+                    prec(x, y)
+                })
+            }"#
+        ),
+        Type
+    );
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::Int,
+            got: Ty::Str
+        }
+    );
+}

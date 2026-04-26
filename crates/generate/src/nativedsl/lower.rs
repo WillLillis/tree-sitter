@@ -1153,7 +1153,7 @@ impl<'ast> Evaluator<'ast> {
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
                 let inner = self.lower_to_rule(content)?;
-                if let Node::Ident(IdentKind::Rule | IdentKind::Var) = ast.node(target) {
+                if matches!(ast.node(target), Node::Ident(IdentKind::Rule)) {
                     let sid = self.intern_span(ast.span(target));
                     Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
                 } else {

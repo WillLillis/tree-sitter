@@ -43,7 +43,22 @@ use typecheck::TypeEnv;
 ///
 /// Returns [`DslError`] if any pipeline stage fails.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
-    let module = load_module(input, grammar_path, ModuleKind::Grammar, &[], &mut 0)?;
+    let canonical = dunce::canonicalize(grammar_path).map_err(|e| {
+        LowerError::new(
+            LowerErrorKind::ModuleResolveFailed {
+                path: grammar_path.display().to_string(),
+                error: e.to_string(),
+            },
+            Span::new(0, 0),
+        )
+    })?;
+    let module = load_module(
+        input,
+        grammar_path,
+        ModuleKind::Grammar,
+        &[canonical],
+        &mut 0,
+    )?;
     Ok(module
         .lowered
         .expect("Grammar module always has lowered grammar"))
@@ -257,10 +272,6 @@ fn load_child_module(
         )
     })?;
 
-    if ancestor_paths.iter().any(|p| p == &canonical) {
-        return Err(LowerError::new(LowerErrorKind::ModuleCycle, span).into());
-    }
-
     let content = std::fs::read_to_string(&full_path).map_err(|e| {
         LowerError::new(
             LowerErrorKind::ModuleReadFailed {
@@ -270,6 +281,19 @@ fn load_child_module(
             span,
         )
     })?;
+
+    if ancestor_paths.iter().any(|p| p == &canonical) {
+        #[expect(
+            clippy::needless_return_with_question_mark,
+            reason = "bad move semantics"
+        )]
+        return Err(ModuleError {
+            inner: Box::new(LowerError::new(LowerErrorKind::ModuleCycle, span).into()),
+            source_text: content,
+            path: canonical,
+            reference_span: span,
+        })?;
+    }
 
     let mut child_ancestors = ancestor_paths.to_vec();
     child_ancestors.push(canonical.clone());
