@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::grammars::InputGrammar;
 
-use ast::{Ast, IdentKind, Node, NodeId, Span};
+use ast::{Ast, Node, NodeId, Span};
 use typecheck::TypeEnv;
 
 /// Parse a native DSL source file into an [`InputGrammar`].
@@ -83,10 +83,9 @@ pub fn load_module(
     let tokens = lexer::Lexer::new(source).tokenize()?;
     let mut ast = parser::Parser::new(&tokens, source.to_string(), path).parse()?;
 
-    // Validate items based on module kind
     let inherit_node = match kind {
         ModuleKind::Grammar => {
-            let node = find_inherit_node(&ast);
+            let node = ast.ctx.grammar_config.as_ref().and_then(|c| c.inherit_node);
             validate_grammar(&ast, node)?;
             node
         }
@@ -162,11 +161,7 @@ pub fn load_module(
     })
 }
 
-/// Validate grammar module structure:
-/// - Grammar block must exist
-/// - At most one `inherit()` call
-/// - If `inherit()` exists, `inherits` must be set in grammar config
-/// - If `inherits` is set, it must trace to an `inherit()` call
+/// Validate: grammar block exists, at most one `inherit()`, inherits field consistency.
 pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()> {
     if ast.ctx.grammar_config.is_none() {
         return Err(LowerError::new(LowerErrorKind::MissingGrammarBlock, Span::new(0, 0)).into());
@@ -210,30 +205,6 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
     }
 
     Ok(())
-}
-
-/// Resolve the `Inherit` node from the grammar config's `inherits` field,
-/// following variable references to let bindings if needed.
-#[must_use]
-pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
-    let inherits_id = ast.ctx.grammar_config.as_ref()?.inherits?;
-    match ast.node(inherits_id) {
-        Node::ModuleRef { import: false, .. } => Some(inherits_id),
-        Node::Ident(IdentKind::Unresolved) => {
-            let name = ast.ctx.text(ast.span(inherits_id));
-            ast.root_items.iter().find_map(|&item_id| {
-                if let Node::Let { name: n, value, .. } = ast.node(item_id)
-                    && ast.ctx.text(*n) == name
-                    && matches!(ast.node(*value), Node::ModuleRef { import: false, .. })
-                {
-                    Some(*value)
-                } else {
-                    None
-                }
-            })
-        }
-        _ => None,
-    }
 }
 
 /// Load a child module from a path string. Handles .tsg and .json extensions,
@@ -341,10 +312,8 @@ impl Module {
     }
 }
 
-/// Walk ALL nodes in the AST for unresolved module ref nodes, load each
-/// file via `load_module`, and set `Node::ModuleRef { module }` indices.
-/// Deduplicates: if the same file is imported multiple times, it is loaded
-/// once and all references share the same module index.
+/// Scan AST for unresolved module refs, load files, and set indices.
+/// Deduplicates: same file imported multiple times is loaded once.
 fn load_import_children(
     ast: &mut Ast,
     module_dir: &Path,
@@ -441,8 +410,7 @@ fn validate_import_items(ast: &Ast) -> DslResult<()> {
     Ok(())
 }
 
-/// Recursively typecheck imported modules, writing each module's type env
-/// into `table` at the slot corresponding to its `global_id`.
+/// Recursively typecheck modules, storing type envs in table by `global_id`.
 pub fn typecheck_modules<'m>(
     modules: &'m [Module],
     table: &mut Vec<Option<TypeEnv<'m>>>,
