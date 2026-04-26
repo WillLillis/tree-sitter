@@ -298,11 +298,10 @@ where
     let (input_grammar, grammar_json) = match grammar_source {
         GrammarSource::Json(json) => (parse_grammar(&json)?, json),
         #[cfg(feature = "nativedsl")]
-        GrammarSource::Grammar(mut grammar) => {
-            parse_grammar::normalize_grammar(&mut grammar);
+        GrammarSource::Grammar(grammar) => {
             let json =
                 serde_json::to_string_pretty(&nativedsl::serialize::grammar_to_json(&grammar))
-                    .expect("grammar JSON serialization should not fail");
+                    .unwrap();
             (*grammar, json)
         }
     };
@@ -481,13 +480,10 @@ fn read_grammar_version(repo_path: &Path) -> Result<Option<Version>, ParseVersio
 #[cfg(feature = "load")]
 fn find_grammar_file(dir: &Path) -> PathBuf {
     #[cfg(feature = "nativedsl")]
-    {
-        let tsg = dir.join("grammar.tsg");
-        if tsg.exists() {
-            return tsg;
-        }
-    }
-    for ext in ["js", "json"] {
+    const EXTS: &[&str] = &["tsg", "js", "json"];
+    #[cfg(not(feature = "nativedsl"))]
+    const EXTS: &[&str] = &["js", "json"];
+    for ext in EXTS {
         let path = dir.join(format!("grammar.{ext}"));
         if path.exists() {
             return path;
@@ -517,13 +513,14 @@ pub fn load_grammar_file(
         Some("tsg") => {
             let src = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
-            let grammar = nativedsl::parse_native_dsl(&src, grammar_path).map_err(|error| {
+            let mut grammar = nativedsl::parse_native_dsl(&src, grammar_path).map_err(|error| {
                 LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
                     error,
                     src,
                     path: grammar_path.to_owned(),
                 }))
             })?;
+            parse_grammar::normalize_grammar(&mut grammar);
             Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
