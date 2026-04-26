@@ -61,11 +61,3 @@ After fixing the bug:
 2. Add a regression file to `src/nativedsl/fuzz_regressions/` (the `fuzz_regressions` test
    iterates all `.tsg` files there and verifies none panic).
 3. Add a targeted test in `tests.rs` that asserts the expected error.
-
-## Relationship to the xtask fuzzer
-
-The xtask fuzzer (`cargo run -p xtask -- fuzz-dsl`) is a custom random-mutation fuzzer
-that runs on stable Rust. This cargo-fuzz setup uses LLVM's coverage-guided mutations,
-which are significantly more effective at finding deep bugs but require nightly.
-Both can coexist - use the xtask fuzzer for quick smoke tests on stable, and cargo-fuzz
-for thorough exploration.

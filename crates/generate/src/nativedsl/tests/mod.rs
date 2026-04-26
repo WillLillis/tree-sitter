@@ -49,22 +49,28 @@ pub(super) fn dsl_err(input: &str) -> DslError {
 /// Build the Rule tree for `comma_sep1(item)`:
 /// `seq(item, choice(repeat(seq(",", item)), blank))`
 pub(super) fn comma_sep1_rule(item: &str) -> Rule {
-    Rule::seq(vec![
-        Rule::NamedSymbol(item.into()),
-        Rule::choice(vec![
-            Rule::repeat(Rule::seq(vec![
-                Rule::String(",".into()),
-                Rule::NamedSymbol(item.into()),
-            ])),
-            Rule::Blank,
-        ]),
-    ])
+    sep_by1_rule(",", item)
 }
 
 /// Build the Rule tree for `comma_sep(item)`:
 /// `choice(comma_sep1(item), blank)`
 pub(super) fn comma_sep_rule(item: &str) -> Rule {
     Rule::choice(vec![comma_sep1_rule(item), Rule::Blank])
+}
+
+/// Build the Rule tree for `sep_by1(sep, item)`:
+/// `seq(item, choice(repeat(seq(sep, item)), blank))`
+pub(super) fn sep_by1_rule(sep: &str, item: &str) -> Rule {
+    Rule::seq(vec![
+        Rule::NamedSymbol(item.into()),
+        Rule::choice(vec![
+            Rule::repeat(Rule::seq(vec![
+                Rule::String(sep.into()),
+                Rule::NamedSymbol(item.into()),
+            ])),
+            Rule::Blank,
+        ]),
+    ])
 }
 
 pub(super) fn rule_names(g: &InputGrammar) -> Vec<&str> {

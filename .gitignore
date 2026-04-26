@@ -11,7 +11,9 @@ log*.html
 profile*
 fuzz-results
 test/fuzz/out
-crates/generate/fuzz/
+crates/generate/fuzz/target/
+crates/generate/fuzz/corpus/
+crates/generate/fuzz/artifacts/
 test/fixtures/grammars/*
 !test/fixtures/grammars/.gitkeep
 

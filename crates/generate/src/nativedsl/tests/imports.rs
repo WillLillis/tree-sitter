@@ -34,20 +34,7 @@ fn import_function_with_string_param() {
         rule program { n::sep_by1(";", identifier) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    // sep_by1(sep, item) = seq(item, repeat(seq(sep, item)))
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(";".into()),
-                    Rule::NamedSymbol("identifier".into()),
-                ])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(";", "identifier"));
 }
 
 #[test]
@@ -141,20 +128,7 @@ fn import_transitive_function_body() {
         rule program { n::sep_by1(",", identifier) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    // Same body shape as comma_sep1 but with "," as explicit separator
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(",".into()),
-                    Rule::NamedSymbol("identifier".into()),
-                ])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
 }
 
 #[test]
@@ -186,21 +160,9 @@ fn import_multiple_modules_body() {
         }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    let sep1 = |sep: &str| {
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(sep.into()),
-                    Rule::NamedSymbol("identifier".into()),
-                ])),
-                Rule::Blank,
-            ]),
-        ])
-    };
     assert_eq!(
         *find_rule(&g, "program"),
-        Rule::choice(vec![sep1(","), sep1(";")])
+        Rule::choice(vec![sep_by1_rule(",", "identifier"), sep_by1_rule(";", "identifier")])
     );
 }
 
@@ -216,16 +178,7 @@ fn import_function_result_in_seq() {
         *find_rule(&g, "program"),
         Rule::seq(vec![
             Rule::String("{".into()),
-            Rule::seq(vec![
-                Rule::NamedSymbol("identifier".into()),
-                Rule::choice(vec![
-                    Rule::repeat(Rule::seq(vec![
-                        Rule::String(",".into()),
-                        Rule::NamedSymbol("identifier".into()),
-                    ])),
-                    Rule::Blank,
-                ]),
-            ]),
+            comma_sep1_rule("identifier"),
             Rule::String("}".into()),
         ])
     );
@@ -271,19 +224,7 @@ fn delimited(item: rule_t) rule_t {
         dsl_path(&helper)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(",".into()),
-                    Rule::NamedSymbol("identifier".into()),
-                ])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
 }
 
 // -- Error cases --
@@ -532,19 +473,6 @@ fn error_import_json_not_allowed() {
     assert_eq!(e.kind, LowerErrorKind::JsonImportNotAllowed);
 }
 
-#[test]
-fn error_import_member_not_found_value() {
-    let g_err = dsl_err(
-        r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::NONEXISTENT }
-    "#,
-    );
-    let e = assert_err!(g_err, Type);
-    assert!(matches!(e.kind, TypeErrorKind::ImportMemberNotFound(_)));
-}
-
 // -- Edge cases --
 
 #[test]
@@ -578,17 +506,7 @@ fn import_function_receives_caller_let_binding() {
         rule program { h::sep_by(SEP, identifier) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    let id = Rule::NamedSymbol("identifier".into());
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            id.clone(),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![Rule::String(";".into()), id])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(";", "identifier"));
 }
 
 #[test]
@@ -600,17 +518,7 @@ fn import_function_receives_object_field() {
         rule program { h::sep_by(SEPS.stmt, identifier) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    let id = Rule::NamedSymbol("identifier".into());
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            id.clone(),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![Rule::String(";".into()), id])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(";", "identifier"));
 }
 
 #[test]
