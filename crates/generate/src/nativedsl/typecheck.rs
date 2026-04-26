@@ -709,26 +709,21 @@ fn resolve_children_tc(
             }
             Ok(())
         }
-        Node::Repeat { inner, .. }
-        | Node::Token { inner, .. }
-        | Node::Neg(inner)
-        | Node::GrammarConfig(inner) => {
-            let inner = *inner;
-            resolve_expr_tc(arena, ctx, decls, inner, locals)
-        }
-        Node::Field { content, .. } | Node::Reserved { content, .. } => {
-            let content = *content;
-            resolve_expr_tc(arena, ctx, decls, content, locals)
-        }
-        Node::Append { left, right } => {
-            let (left, right) = (*left, *right);
-            resolve_expr_tc(arena, ctx, decls, left, locals)?;
-            resolve_expr_tc(arena, ctx, decls, right, locals)
-        }
-        Node::Prec { value, content, .. } => {
-            let (value, content) = (*value, *content);
-            resolve_expr_tc(arena, ctx, decls, value, locals)?;
-            resolve_expr_tc(arena, ctx, decls, content, locals)
+        Node::Repeat { inner: c, .. }
+        | Node::Token { inner: c, .. }
+        | Node::Neg(c)
+        | Node::GrammarConfig(c)
+        | Node::Field { content: c, .. }
+        | Node::Reserved { content: c, .. } => resolve_expr_tc(arena, ctx, decls, *c, locals),
+        Node::Append { left: a, right: b }
+        | Node::Prec {
+            value: a,
+            content: b,
+            ..
+        } => {
+            let (a, b) = (*a, *b);
+            resolve_expr_tc(arena, ctx, decls, a, locals)?;
+            resolve_expr_tc(arena, ctx, decls, b, locals)
         }
         Node::DynRegex(range) => {
             let (pattern, flags) = ctx.get_regex(*range);
@@ -1192,18 +1187,13 @@ fn type_of_append<'ast>(
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
-    let l_empty = matches!(ast.node(left), Node::List(r) if ast.ctx.child_slice(*r).is_empty());
-    let r_empty = matches!(ast.node(right), Node::List(r) if ast.ctx.child_slice(*r).is_empty());
-    let lt = if l_empty {
-        None
-    } else {
-        Some(type_of(ast, left, env, modules)?)
-    };
-    let rt = if r_empty {
-        None
-    } else {
-        Some(type_of(ast, right, env, modules)?)
-    };
+    let is_empty = |id| matches!(ast.node(id), Node::List(r) if ast.ctx.child_slice(*r).is_empty());
+    let lt = (!is_empty(left))
+        .then(|| type_of(ast, left, env, modules))
+        .transpose()?;
+    let rt = (!is_empty(right))
+        .then(|| type_of(ast, right, env, modules))
+        .transpose()?;
     match (lt, rt) {
         (Some(l), Some(r)) => {
             if !l.is_list() {

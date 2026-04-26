@@ -97,29 +97,21 @@ error_tests! { Parse {
 }}
 
 #[test]
-fn error_duplicate_grammar_field() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test", word: foo, word: bar }
-        rule foo { "x" } rule bar { "y" }"#
+fn error_duplicates_have_notes() {
+    for (src, expected) in [
+        (
+            r#"grammar { language: "test", word: foo, word: bar } rule foo { "x" } rule bar { "y" }"#,
+            ParseErrorKind::DuplicateGrammarField("word".into()),
         ),
-        Parse
-    );
-    assert_eq!(e.kind, ParseErrorKind::DuplicateGrammarField("word".into()));
-    assert!(e.note.is_some());
-}
-
-#[test]
-fn error_duplicate_object_key() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-        let x = { a: 1, b: 2, a: 3 } rule foo { "x" }"#
+        (
+            r#"grammar { language: "test" } let x = { a: 1, b: 2, a: 3 } rule foo { "x" }"#,
+            ParseErrorKind::DuplicateObjectKey("a".into()),
         ),
-        Parse
-    );
-    assert_eq!(e.kind, ParseErrorKind::DuplicateObjectKey("a".into()));
-    assert!(e.note.is_some());
+    ] {
+        let e = assert_err!(dsl_err(src), Parse);
+        assert_eq!(e.kind, expected);
+        assert!(e.note.is_some());
+    }
 }
 
 #[test]
