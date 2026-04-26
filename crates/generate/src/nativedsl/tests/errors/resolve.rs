@@ -61,6 +61,18 @@ error_tests! { Type {
 }}
 
 #[test]
+fn error_mutual_let_ref_in_externals() {
+    // Mutual let references should not cause infinite recursion in
+    // collect_external_names_tc.
+    let _err = dsl_err(
+        r#"let A: list_t<rule_t> = B
+        let B: list_t<rule_t> = A
+        grammar { language: "test", externals: A }
+        rule program { "x" }"#,
+    );
+}
+
+#[test]
 fn error_duplicate_declaration_has_note() {
     let e = assert_err!(
         dsl_err(r#"grammar { language: "test" } rule foo { "a" } rule foo { "b" }"#),
