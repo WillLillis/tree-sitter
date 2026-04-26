@@ -100,6 +100,7 @@ pub(super) fn inherit_err(base_content: &str) -> (DslError, PathBuf) {
     let parent_src = "let base = inherit(\"base.tsg\")\n\
                       grammar { language: \"derived\", inherits: base }\n\
                       rule extra { \"hello\" }\n";
+    std::fs::write(&parent_path, parent_src).unwrap();
     let err = parse_native_dsl(parent_src, &parent_path).unwrap_err();
     (err, base_path)
 }

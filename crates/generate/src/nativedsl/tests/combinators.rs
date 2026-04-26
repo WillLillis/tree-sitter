@@ -47,6 +47,13 @@ rule_tests! {
         rule block { "{}" }"#,
         Rule::alias(Rule::NamedSymbol("_impl".into()), "block".to_string(), true)
     }
+    alias_with_variable_target {
+        r#"grammar { language: "test" }
+        fn make_alias(target: rule_t) rule_t { alias("x", target) }
+        rule program { make_alias(some_rule) }
+        rule some_rule { "y" }"#,
+        Rule::alias(Rule::String("x".into()), "some_rule".to_string(), true)
+    }
     prec_default {
         r#"grammar { language: "test" } rule program { prec(1, "x") }"#,
         Rule::prec(Precedence::Integer(1), Rule::String("x".into()))

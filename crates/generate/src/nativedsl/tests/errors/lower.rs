@@ -103,7 +103,7 @@ fn error_inherit_cycle() {
     )
     .unwrap();
     let source = std::fs::read_to_string(&a_path).unwrap();
-    let err = parse_native_dsl(&source, dir.path()).unwrap_err();
+    let err = parse_native_dsl(&source, &a_path).unwrap_err();
     let mut chain = Vec::new();
     let mut current: &DslError = &err;
     loop {
@@ -120,6 +120,31 @@ fn error_inherit_cycle() {
         }
     }
     assert_eq!(chain, ["b.tsg", "a.tsg"]);
+}
+
+#[test]
+fn error_self_inherit_cycle() {
+    // A grammar that inherits itself should be caught as a cycle,
+    // not spin until MAX_MODULE_DEPTH.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("grammar.tsg");
+    std::fs::write(
+        &path,
+        r#"let base = inherit("grammar.tsg")
+        grammar { language: "test", inherits: base }
+        rule program { "x" }"#,
+    )
+    .unwrap();
+    let source = std::fs::read_to_string(&path).unwrap();
+    let err = parse_native_dsl(&source, &path).unwrap_err();
+    match &err {
+        DslError::Module(m) => {
+            assert!(
+                matches!(*m.inner, DslError::Lower(ref e) if matches!(e.kind, LowerErrorKind::ModuleCycle))
+            );
+        }
+        other => panic!("expected Module(ModuleCycle), got {other:?}"),
+    }
 }
 
 #[test]
