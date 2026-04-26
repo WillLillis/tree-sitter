@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::{
-    ast::{Ast, ForConfig, IdentKind, Node, NodeId, PrecKind, RepeatKind, Span},
+    ast::{Ast, ChildRange, ForConfig, IdentKind, Node, NodeId, PrecKind, RepeatKind, Span},
     scope_stack::ScopeStack,
 };
 
@@ -103,13 +103,19 @@ struct ValueId(u32);
 macro_rules! typed_val { ($($name:ident),+) => { $(#[derive(Clone, Copy)] struct $name(ValueId);)+ } }
 typed_val!(ListVal, RuleVal, StrVal, IntVal, ObjectVal);
 
-enum Value<'src> {
+/// Compact value representation. Compound data (List/Tuple/Object) stores
+/// indices into external pools on the Evaluator rather than inline heap data.
+#[derive(Clone, Copy)]
+enum Value {
     Int(i32),
     Str(Str),
     Rule(RuleId),
-    Object(FxHashMap<&'src str, ValueId>),
-    List(Vec<ValueId>),
-    Tuple(Vec<ValueId>),
+    /// Index into `Evaluator::object_pool`.
+    Object(u32),
+    /// Range into `Evaluator::value_children`.
+    List(ChildRange),
+    /// Range into `Evaluator::value_children`.
+    Tuple(ChildRange),
     Module(u8),
     /// Grammar config accessor - lazily resolves fields on `.` access.
     GrammarConfig,
@@ -137,9 +143,11 @@ struct Evaluator<'ast> {
     scopes: ScopeStack<'ast, ValueId>,
     // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
-    values: Vec<Value<'ast>>,
+    values: Vec<Value>,
     rules: Vec<ARule>,
     rule_children: Vec<RuleId>,
+    value_children: Vec<ValueId>,
+    object_pool: Vec<FxHashMap<&'ast str, ValueId>>,
     strings: StringPool<'ast>,
 }
 
@@ -239,6 +247,8 @@ fn evaluate(
         values: Vec::with_capacity(ast.arena.len()),
         rules: Vec::with_capacity(ast.arena.len()),
         rule_children: Vec::with_capacity(ast.arena.len()),
+        value_children: Vec::with_capacity(ast.arena.len()),
+        object_pool: Vec::new(),
         strings: StringPool::new(),
     };
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
@@ -406,16 +416,36 @@ impl<'ast> Evaluator<'ast> {
         global_id as usize - self.base_id
     }
 
-    fn alloc_val(&mut self, val: Value<'ast>) -> ValueId {
+    fn alloc_val(&mut self, val: Value) -> ValueId {
         let id = ValueId(self.values.len() as u32);
         self.values.push(val);
         id
     }
 
-    fn get_val(&self, id: ValueId) -> &Value<'ast> {
+    fn get_val(&self, id: ValueId) -> &Value {
         // Safety: id was produced by alloc_val which returns sequential indices
         // into self.values. No ValueId can outlive the Evaluator.
         unsafe { self.values.get_unchecked(id.0 as usize) }
+    }
+
+    fn alloc_list(&mut self, items: &[ValueId]) -> Value {
+        let start = self.value_children.len() as u32;
+        let len = items.len() as u16;
+        self.value_children.extend_from_slice(items);
+        Value::List(ChildRange::new(start, len))
+    }
+
+    fn alloc_tuple(&mut self, items: &[ValueId]) -> Value {
+        let start = self.value_children.len() as u32;
+        let len = items.len() as u16;
+        self.value_children.extend_from_slice(items);
+        Value::Tuple(ChildRange::new(start, len))
+    }
+
+    fn alloc_object(&mut self, map: FxHashMap<&'ast str, ValueId>) -> Value {
+        let idx = self.object_pool.len() as u32;
+        self.object_pool.push(map);
+        Value::Object(idx)
     }
 
     // -- Typed value constructors and accessors --
@@ -429,10 +459,10 @@ impl<'ast> Evaluator<'ast> {
         ListVal(vid)
     }
     fn list_items(&self, v: ListVal) -> &[ValueId] {
-        let Value::List(items) = self.get_val(v.0) else {
+        let Value::List(range) = *self.get_val(v.0) else {
             unreachable!()
         };
-        items
+        &self.value_children[range.start as usize..range.start as usize + range.len as usize]
     }
 
     const fn expect_rule(vid: ValueId) -> RuleVal {
@@ -469,10 +499,10 @@ impl<'ast> Evaluator<'ast> {
         ObjectVal(vid)
     }
     fn object_fields(&self, v: ObjectVal) -> &FxHashMap<&'ast str, ValueId> {
-        let Value::Object(map) = self.get_val(v.0) else {
+        let Value::Object(idx) = *self.get_val(v.0) else {
             unreachable!()
         };
-        map
+        &self.object_pool[idx as usize]
     }
 
     fn alloc_rule(&mut self, rule: ARule) -> RuleId {
@@ -722,7 +752,8 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|g| self.import_names_as_list(g))
                     .collect();
-                Ok(self.alloc_val(Value::List(vals)))
+                let v = self.alloc_list(&vals);
+                Ok(self.alloc_val(v))
             }
             "precedences" => {
                 let vals: Vec<ValueId> = grammar
@@ -739,10 +770,12 @@ impl<'ast> Evaluator<'ast> {
                                 PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s.clone()),
                             })
                             .collect();
-                        self.alloc_val(Value::List(inner))
+                        let v = self.alloc_list(&inner);
+                        self.alloc_val(v)
                     })
                     .collect();
-                Ok(self.alloc_val(Value::List(vals)))
+                let v = self.alloc_list(&vals);
+                Ok(self.alloc_val(v))
             }
             "word" => {
                 if let Some(name) = &grammar.word_token {
@@ -760,10 +793,12 @@ impl<'ast> Evaluator<'ast> {
                         let name_val = self.alloc_val(Value::Str(name_sid));
                         let words = self.import_rules_as_list(&ctx.reserved_words);
                         let map = FxHashMap::from_iter([("name", name_val), ("words", words)]);
-                        self.alloc_val(Value::Object(map))
+                        let v = self.alloc_object(map);
+                        self.alloc_val(v)
                     })
                     .collect();
-                Ok(self.alloc_val(Value::List(sets)))
+                let v = self.alloc_list(&sets);
+                Ok(self.alloc_val(v))
             }
             _ => Err(LowerError::new(
                 LowerErrorKind::ModuleMemberNotFound(field.to_string()),
@@ -780,7 +815,8 @@ impl<'ast> Evaluator<'ast> {
                 self.alloc_val(Value::Rule(rid))
             })
             .collect();
-        self.alloc_val(Value::List(vals))
+        let v = self.alloc_list(&vals);
+        self.alloc_val(v)
     }
 
     fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
@@ -788,7 +824,8 @@ impl<'ast> Evaluator<'ast> {
             .iter()
             .map(|name| self.owned_symbol_val(name.clone()))
             .collect();
-        self.alloc_val(Value::List(vals))
+        let v = self.alloc_list(&vals);
+        self.alloc_val(v)
     }
 
     fn import_rule(&mut self, rule: &Rule) -> RuleId {
@@ -931,14 +968,17 @@ impl<'ast> Evaluator<'ast> {
                 let mut combined = Vec::with_capacity(li.len() + ri.len());
                 combined.extend_from_slice(li);
                 combined.extend_from_slice(ri);
-                Ok(self.alloc_val(Value::List(combined)))
+                let v = self.alloc_list(&combined);
+                Ok(self.alloc_val(v))
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = ast.ctx.text(field);
-                match self.get_val(obj_val) {
-                    Value::Object(map) => Ok(*map.get(field_name).unwrap()),
+                match *self.get_val(obj_val) {
+                    Value::Object(idx) => {
+                        Ok(*self.object_pool[idx as usize].get(field_name).unwrap())
+                    }
                     Value::GrammarConfig => self.import_config_field_or_err(field_name, field),
                     _ => unreachable!(), // guarded by typecheck
                 }
@@ -976,7 +1016,8 @@ impl<'ast> Evaluator<'ast> {
                 for &(key_span, value_id) in fields {
                     map.insert(ast.ctx.text(key_span), self.eval_expr(value_id)?);
                 }
-                Ok(self.alloc_val(Value::Object(map)))
+                let v = self.alloc_object(map);
+                Ok(self.alloc_val(v))
             }
             Node::List(range) | Node::Tuple(range) => {
                 let items = ast.ctx.child_slice(*range);
@@ -985,9 +1026,9 @@ impl<'ast> Evaluator<'ast> {
                     vals.push(self.eval_expr(item_id)?);
                 }
                 let val = if matches!(ast.node(id), Node::List(_)) {
-                    Value::List(vals)
+                    self.alloc_list(&vals)
                 } else {
-                    Value::Tuple(vals)
+                    self.alloc_tuple(&vals)
                 };
                 Ok(self.alloc_val(val))
             }
@@ -1318,8 +1359,8 @@ impl<'ast> Evaluator<'ast> {
             let item_id = self.list_items(Self::expect_list(iter_vid))[i];
             self.scopes.push();
             for (j, &(name_span, _)) in config.bindings.iter().enumerate() {
-                let value_id = match self.get_val(item_id) {
-                    Value::Tuple(ids) => ids[j],
+                let value_id = match *self.get_val(item_id) {
+                    Value::Tuple(range) => self.value_children[range.start as usize + j],
                     _ => item_id,
                 };
                 self.scopes.insert(self.ast().ctx.text(name_span), value_id);
