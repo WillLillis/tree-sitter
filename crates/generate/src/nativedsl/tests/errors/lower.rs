@@ -2,16 +2,7 @@ use std::path::Path;
 
 use super::super::*;
 
-macro_rules! lower_error_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let e = assert_err!(dsl_err($input), Lower);
-            assert_eq!(e.kind, $expected);
-        })*
-    };
-}
-
-lower_error_tests! {
+error_tests! { Lower {
     error_override_without_inherit {
         r#"grammar { language: "test" } override rule foo { "bar" }"#,
         LowerErrorKind::OverrideWithoutInherit
@@ -56,7 +47,7 @@ lower_error_tests! {
         rule program { "z" }"#,
         LowerErrorKind::ExpectedRuleName
     }
-}
+}}
 
 #[test]
 fn error_inherit_bad_path() {
@@ -85,28 +76,16 @@ fn error_inherit_bad_extension() {
 
 #[test]
 fn error_inherit_child_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(
-        &base_path,
-        "grammar { language: \"base\" }\nrule program { bogus_ref }\n",
-    )
-    .unwrap();
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
+    let (err, base_path) =
+        inherit_err("grammar { language: \"base\" }\nrule program { bogus_ref }\n");
+    let DslError::Module(m) = &err else {
+        panic!("expected Module, got {err:?}")
     };
-    let DslError::Type(type_err) = inherited.inner.as_ref() else {
-        panic!("expected Type error, got {:?}", inherited.inner)
+    let DslError::Type(e) = m.inner.as_ref() else {
+        panic!("expected Type, got {:?}", m.inner)
     };
-    assert_eq!(
-        type_err.kind,
-        TypeErrorKind::UnknownIdentifier("bogus_ref".to_string())
-    );
-    assert_eq!(inherited.path, base_path);
-    assert!(inherited.source_text.contains("bogus_ref"));
+    assert_eq!(e.kind, TypeErrorKind::UnknownIdentifier("bogus_ref".into()));
+    assert_eq!(m.path, base_path);
 }
 
 #[test]

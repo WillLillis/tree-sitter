@@ -238,6 +238,8 @@ pub fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
 
 /// Load a child module from a path string. Handles .tsg and .json extensions,
 /// cycle detection, and error wrapping.
+const MAX_MODULE_DEPTH: usize = 256;
+
 fn load_child_module(
     path_str: &str,
     module_dir: &Path,
@@ -246,7 +248,34 @@ fn load_child_module(
     kind: ModuleKind,
     next_global_id: &mut u8,
 ) -> DslResult<Module> {
-    let (content, canonical) = read_child_module(path_str, module_dir, span, ancestor_paths)?;
+    if ancestor_paths.len() >= MAX_MODULE_DEPTH {
+        return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
+    }
+
+    let full_path = module_dir.join(path_str);
+    let canonical = dunce::canonicalize(&full_path).map_err(|e| {
+        LowerError::new(
+            LowerErrorKind::ModuleResolveFailed {
+                path: full_path.display().to_string(),
+                error: e.to_string(),
+            },
+            span,
+        )
+    })?;
+
+    if ancestor_paths.iter().any(|p| p == &canonical) {
+        return Err(LowerError::new(LowerErrorKind::ModuleCycle, span).into());
+    }
+
+    let content = std::fs::read_to_string(&full_path).map_err(|e| {
+        LowerError::new(
+            LowerErrorKind::ModuleReadFailed {
+                path: full_path.display().to_string(),
+                error: e.to_string(),
+            },
+            span,
+        )
+    })?;
 
     let mut child_ancestors = ancestor_paths.to_vec();
     child_ancestors.push(canonical.clone());
@@ -288,49 +317,6 @@ fn load_child_module(
         Some("json") => Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into()),
         _ => Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
     }
-}
-
-const MAX_MODULE_DEPTH: usize = 256;
-
-/// Resolve the path for a child module, read its source, and handle
-/// cycle/depth detection. Returns `(content, canonical_path)`.
-fn read_child_module(
-    path_str: &str,
-    module_dir: &Path,
-    span: Span,
-    ancestor_paths: &[PathBuf],
-) -> DslResult<(String, PathBuf)> {
-    if ancestor_paths.len() >= MAX_MODULE_DEPTH {
-        return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
-    }
-
-    let full_path = module_dir.join(path_str);
-    let canonical = dunce::canonicalize(&full_path).map_err(|e| {
-        LowerError::new(
-            LowerErrorKind::ModuleResolveFailed {
-                path: full_path.display().to_string(),
-                error: e.to_string(),
-            },
-            span,
-        )
-    })?;
-
-    // Cycle detection
-    if ancestor_paths.iter().any(|p| p == &canonical) {
-        Err(LowerError::new(LowerErrorKind::ModuleCycle, span))?;
-    }
-
-    let content = std::fs::read_to_string(&full_path).map_err(|e| {
-        LowerError::new(
-            LowerErrorKind::ModuleReadFailed {
-                path: full_path.display().to_string(),
-                error: e.to_string(),
-            },
-            span,
-        )
-    })?;
-
-    Ok((content, canonical))
 }
 
 /// A loaded and resolved module (imported or inherited), ready for

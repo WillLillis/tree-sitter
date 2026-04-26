@@ -1,15 +1,6 @@
 use super::*;
 
-macro_rules! binding_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let g = dsl($input);
-            assert_eq!(g.variables[0].rule, $expected);
-        })*
-    };
-}
-
-binding_tests! {
+rule_tests! {
     let_binding_int {
         r#"grammar { language: "test" }
         let P: int_t = 5
