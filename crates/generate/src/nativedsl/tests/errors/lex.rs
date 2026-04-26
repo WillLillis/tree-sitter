@@ -59,15 +59,9 @@ error_tests! { Lex {
     }
 }}
 
-#[test]
-fn error_inherited_lex_error() {
-    let (err, base_path) = inherit_err(r#"grammar { language: "base"#);
-    let DslError::Module(m) = &err else {
-        panic!("expected Module, got {err:?}")
-    };
-    let DslError::Lex(e) = m.inner.as_ref() else {
-        panic!("expected Lex, got {:?}", m.inner)
-    };
-    assert_eq!(e.kind, LexErrorKind::UnterminatedString);
-    assert_eq!(m.path, base_path);
-}
+inherit_error_tests! { Lex {
+    error_inherited_lex_error {
+        r#"grammar { language: "base"#,
+        LexErrorKind::UnterminatedString
+    }
+}}
