@@ -874,10 +874,8 @@ impl<'ast> Evaluator<'ast> {
                     let sid = self.strings.intern_owned(field_name.clone());
                     rid = self.alloc_rule(ARule::Field(sid, rid));
                 }
-                if params.is_token && params.is_main_token {
-                    rid = self.alloc_rule(ARule::Token(true, rid));
-                } else if params.is_token {
-                    rid = self.alloc_rule(ARule::Token(false, rid));
+                if params.is_token {
+                    rid = self.alloc_rule(ARule::Token(params.is_main_token, rid));
                 }
                 rid
             }
@@ -1107,15 +1105,6 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn value_to_prec(&self, id: ValueId) -> APrec {
-        match self.get_val(id) {
-            Value::Int(n) => APrec::Integer(*n),
-            Value::Str(s) => APrec::Name(*s),
-            // Guarded by super::typecheck::type_of (Node::Prec) - ensures value is int or str
-            _ => unreachable!(),
-        }
-    }
-
     fn eval_combinator(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let ast = self.ast();
         match ast.node(id) {
@@ -1186,8 +1175,7 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::Token { immediate, inner } => {
                 let inner = self.lower_to_rule(*inner)?;
-                let arule = ARule::Token(*immediate, inner);
-                Ok(self.alloc_rule(arule))
+                Ok(self.alloc_rule(ARule::Token(*immediate, inner)))
             }
             Node::Prec {
                 kind,
@@ -1200,7 +1188,12 @@ impl<'ast> Evaluator<'ast> {
                     let n = self.int_val(Self::expect_int(vid));
                     Ok(self.alloc_rule(ARule::PrecDynamic(n, inner)))
                 } else {
-                    let prec = self.value_to_prec(vid);
+                    // Guarded by super::typecheck::type_of (Node::Prec)
+                    let prec = match self.get_val(vid) {
+                        Value::Int(n) => APrec::Integer(*n),
+                        Value::Str(s) => APrec::Name(*s),
+                        _ => unreachable!(),
+                    };
                     let ctor = match kind {
                         PrecKind::Left => ARule::PrecLeft,
                         PrecKind::Right => ARule::PrecRight,
@@ -1234,16 +1227,9 @@ impl<'ast> Evaluator<'ast> {
             .map(|(name, span, mod_idx)| {
                 let info = &self.modules[*mod_idx];
                 let offset = span.start as usize;
-                let bytes = info.ast.ctx.source.as_bytes();
-                let mut line_start = 0;
-                let mut line = 1usize;
-                for (i, &b) in bytes.iter().enumerate().take(offset) {
-                    if b == b'\n' {
-                        line_start = i + 1;
-                        line += 1;
-                    }
-                }
-                let col = offset - line_start + 1;
+                let bytes = &info.ast.ctx.source.as_bytes()[..offset];
+                let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
+                let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
                 (name.to_string(), info.path.to_path_buf(), line, col)
             })
             .collect();
