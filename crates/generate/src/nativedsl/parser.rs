@@ -24,6 +24,9 @@ pub struct Parser<'tok, 'path> {
     pub ast: Ast,
     scratch: Vec<NodeId>,
     depth: u16,
+    /// Tracks the most recent `inherit()` `ModuleRef` node so we can store it
+    /// in `GrammarConfig::inherit_node` without a post-parse search.
+    last_inherit_node: Option<NodeId>,
 }
 
 impl<'tok, 'path> Parser<'tok, 'path> {
@@ -36,6 +39,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             ast: Ast::new(source),
             scratch: Vec::new(),
             depth: 0,
+            last_inherit_node: None,
         }
     }
 
@@ -45,6 +49,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             let id = self.parse_item()?;
             self.ast.root_items.push(id);
             self.skip_comments();
+        }
+        if let Some(config) = &mut self.ast.ctx.grammar_config {
+            config.inherit_node = self.last_inherit_node;
         }
         Ok(self.ast)
     }
@@ -173,14 +180,12 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     fn expect_close_args(&mut self, name: TokenKind, expected: u8, start: Span) -> ParseResult<()> {
         if self.at(TokenKind::Comma) {
             let mut got = expected as usize;
-            // account for trailing comma with no extra args
             self.advance_pos();
             if self.at(TokenKind::RParen) {
                 return Ok(());
             }
             self.parse_expr()?;
             got += 1;
-            // if there are extra args, count them
             while self.eat(TokenKind::Comma).is_some() {
                 if self.at(TokenKind::RParen) {
                     break;
@@ -613,14 +618,18 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let path_span = self.expect_string()?;
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self.ast.push(
+        let id = self.ast.push(
             Node::ModuleRef {
                 import: is_import,
                 path: path_span.strip_quotes(),
                 module: None,
             },
             start.merge(end),
-        ))
+        );
+        if !is_import {
+            self.last_inherit_node = Some(id);
+        }
+        Ok(id)
     }
 
     fn parse_append(&mut self, start: Span) -> ParseResult<NodeId> {

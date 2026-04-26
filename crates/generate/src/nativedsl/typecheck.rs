@@ -464,13 +464,7 @@ fn collect_decls<'a>(
     Ok(decls)
 }
 
-/// Recursively walk an externals expression to find bare identifiers that
-/// need pre-registration as external token names. Follows all expression
-/// forms: lists, appends, variable references (via let binding values),
-/// and any other compound expression.
-///
-/// Cycles are impossible: let bindings cannot forward-reference each other,
-/// so circular references are caught as `UnknownIdentifier` during resolution.
+/// Recursively collect external token names from an expression.
 fn collect_external_names_tc<'a>(
     arena: &NodeArena,
     ctx: &'a AstContext,
@@ -873,8 +867,6 @@ fn check_item<'ast>(
             Ok(())
         }
         Node::Rule { body, .. } => expect_rule(ast, *body, env, modules),
-        // Unreachable: parse_item() only produces Grammar, Let, Fn, Rule,
-        // and OverrideRule nodes at root level.
         _ => unreachable!(),
     }
 }
@@ -953,9 +945,7 @@ fn expect_name_ref<'ast>(
     }
 }
 
-/// Check a `list_list_rule_t` config field. For literal lists-of-lists, validates
-/// each inner list element-wise with `check_inner`. For non-literal expressions,
-/// checks the overall type is `list_list_rule_t` (or a subtype thereof).
+/// Check a `list_list_rule_t` config field, validating inner elements.
 fn expect_list_of_groups<'ast>(
     ast: &'ast Ast,
     id: NodeId,
