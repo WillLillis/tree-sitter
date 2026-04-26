@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::grammars::InputGrammar;
 
-use ast::{Ast, Node, NodeId, Span};
+use ast::{Ast, IdentKind, Node, NodeId, Span};
 use typecheck::TypeEnv;
 
 /// Parse a native DSL source file into an [`InputGrammar`].
@@ -85,7 +85,7 @@ pub fn load_module(
 
     let inherit_node = match kind {
         ModuleKind::Grammar => {
-            let node = ast.ctx.grammar_config.as_ref().and_then(|c| c.inherit_node);
+            let node = find_inherit_node(&ast);
             validate_grammar(&ast, node)?;
             node
         }
@@ -205,6 +205,29 @@ pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()
     }
 
     Ok(())
+}
+
+/// Resolve the inherit node from the `inherits` config field, following
+/// let-binding indirection if needed.
+fn find_inherit_node(ast: &Ast) -> Option<NodeId> {
+    let inherits_id = ast.ctx.grammar_config.as_ref()?.inherits?;
+    match ast.node(inherits_id) {
+        Node::ModuleRef { import: false, .. } => Some(inherits_id),
+        Node::Ident(IdentKind::Unresolved) => {
+            let name = ast.ctx.text(ast.span(inherits_id));
+            ast.root_items.iter().find_map(|&item_id| {
+                if let Node::Let { name: n, value, .. } = ast.node(item_id)
+                    && ast.ctx.text(*n) == name
+                    && matches!(ast.node(*value), Node::ModuleRef { import: false, .. })
+                {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Load a child module from a path string. Handles .tsg and .json extensions,

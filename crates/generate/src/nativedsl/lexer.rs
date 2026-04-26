@@ -42,9 +42,8 @@ const BYTE_CLASS: [u8; 256] = {
 
 /// Classify a byte using the lookup table.
 #[inline]
-fn byte_is(b: u8, class: u8) -> bool {
-    // SAFETY: b is u8, BYTE_CLASS has 256 entries, so every u8 is a valid index.
-    unsafe { *BYTE_CLASS.get_unchecked(b as usize) & class != 0 }
+const fn byte_is(b: u8, class: u8) -> bool {
+    BYTE_CLASS[b as usize] & class != 0
 }
 
 /// The kind of a lexer token.
