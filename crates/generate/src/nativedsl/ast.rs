@@ -444,6 +444,9 @@ impl Node {
 pub struct GrammarConfig {
     pub language: Option<String>,
     pub inherits: Option<NodeId>,
+    /// Resolved `ModuleRef` node for inheritance. Set by `load_module` after
+    /// parsing, following let-binding indirection if needed.
+    pub inherit_node: Option<NodeId>,
     pub extras: Option<NodeId>,
     pub externals: Option<NodeId>,
     pub inline: Option<NodeId>,
