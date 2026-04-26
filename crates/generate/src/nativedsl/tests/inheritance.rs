@@ -167,8 +167,6 @@ fn rule_inline_expands_base_rule_body() {
         grammar { language: "derived", inherits: base }
         override rule expression { choice(base::expression, "extended") }
     "#);
-    // c::rule_name inlines the body of the base rule (which is `identifier`,
-    // i.e. NamedSymbol("identifier"))
     assert_eq!(
         *find_rule(&g, "expression"),
         Rule::choice(vec![
@@ -333,9 +331,7 @@ fn inherit_from_grammar_that_imports() {
 
 #[test]
 fn import_before_inherit_in_source_order() {
-    // Import appears before inherit in source order. The import gets a
-    // higher module index (assigned by node position during loading) but
-    // is evaluated first. This tests that module eval order doesn't
+    // Import before inherit in source order. Tests that eval order doesn't
     // corrupt the module values table.
     let g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
