@@ -47,7 +47,6 @@ fn config_precedences() {
 
 #[test]
 fn conflicts_accepts_appended_list() {
-    // conflicts expression is no longer special-cased, so `append` works.
     let g = dsl(r#"
         grammar {
             language: "test",
@@ -69,7 +68,6 @@ fn conflicts_accepts_appended_list() {
 
 #[test]
 fn precedences_mixed_names_and_idents() {
-    // precedences inner list accepts string literals and rule references together.
     let g = dsl(r#"
         grammar {
             language: "test",
@@ -99,15 +97,12 @@ fn empty_list_compatible_with_any_list_type() {
 
 #[test]
 fn empty_list_append() {
-    // append([], concrete_list) should return the concrete list type
     let g = dsl(r#"
         grammar { language: "test", extras: append([], [regexp("\\s")]) }
         rule foo { "x" }
     "#);
     assert_eq!(g.extra_symbols.len(), 1);
 }
-
-// ===== Raw strings =====
 
 #[test]
 fn raw_string_literal() {
@@ -119,8 +114,6 @@ fn raw_string_literal() {
     assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == r#""[^"]*""#));
 }
 
-// ===== String escapes =====
-
 #[test]
 fn string_with_escapes() {
     let g = dsl(r#"
@@ -129,8 +122,6 @@ fn string_with_escapes() {
     "#);
     assert_eq!(g.variables[0].rule, Rule::String("\n\t\\".into()));
 }
-
-// ===== JSON roundtrip =====
 
 #[test]
 fn json_roundtrip() {
@@ -222,8 +213,6 @@ fn config_all_fields_at_once() {
     assert_eq!(g.precedence_orderings.len(), 1);
 }
 
-// ===== Externals resolution =====
-
 #[test]
 fn externals_inline_list() {
     let g = dsl(r#"
@@ -245,7 +234,6 @@ fn externals_with_string_literals() {
 
 #[test]
 fn externals_mixed_with_declared_rules() {
-    // Mix of undeclared externals and declared rules
     let g = dsl(r#"
         grammar { language: "test", externals: [heredoc, comment] }
         rule program { "x" }
@@ -256,7 +244,6 @@ fn externals_mixed_with_declared_rules() {
 
 #[test]
 fn externals_used_in_extras() {
-    // External token referenced in extras
     let g = dsl(r#"
         grammar {
             language: "test",
@@ -271,7 +258,6 @@ fn externals_used_in_extras() {
 
 #[test]
 fn externals_used_in_rule_body() {
-    // External token referenced in a rule
     let g = dsl(r#"
         grammar { language: "test", externals: [heredoc] }
         rule program { choice("x", heredoc) }
@@ -281,7 +267,6 @@ fn externals_used_in_rule_body() {
 
 #[test]
 fn externals_used_in_conflicts() {
-    // External token referenced in conflicts
     let g = dsl(r#"
         grammar {
             language: "test",
@@ -313,32 +298,26 @@ fn externals_empty_list() {
 }
 
 #[test]
-fn externals_via_let_binding() {
-    // External names in let bindings are resolved by following the variable
-    // to its value expression during external name pre-registration.
-    let g = dsl(r#"
-        let ext: list_t<rule_t> = [heredoc]
+fn externals_via_let_bindings() {
+    // Direct and chained let indirection both resolve external names.
+    for src in [
+        r#"let ext: list_t<rule_t> = [heredoc]
         grammar { language: "test", externals: ext }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("heredoc".into())]);
-}
-
-#[test]
-fn externals_via_chained_let_bindings() {
-    // Two levels of let indirection: externals: b -> a -> [heredoc]
-    let g = dsl(r#"
-        let a: list_t<rule_t> = [heredoc]
+        rule program { "x" }"#,
+        r#"let a: list_t<rule_t> = [heredoc]
         let b: list_t<rule_t> = a
         grammar { language: "test", externals: b }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("heredoc".into())]);
+        rule program { "x" }"#,
+    ] {
+        assert_eq!(
+            dsl(src).external_tokens,
+            vec![Rule::NamedSymbol("heredoc".into())]
+        );
+    }
 }
 
 #[test]
 fn externals_via_let_with_append() {
-    // let binding with append inside
     let g = dsl(r#"
         let ext: list_t<rule_t> = append([heredoc], [_eof])
         grammar { language: "test", externals: ext }
@@ -349,7 +328,6 @@ fn externals_via_let_with_append() {
 
 #[test]
 fn externals_via_let_mixed_declared_and_undeclared() {
-    // Mix of a declared rule and an undeclared external in a let binding
     let g = dsl(r#"
         let ext: list_t<rule_t> = [heredoc, comment]
         grammar { language: "test", externals: ext }
@@ -372,7 +350,6 @@ fn externals_via_append_let_and_inline() {
 
 #[test]
 fn externals_used_in_extras_via_let() {
-    // External declared via let, also used in extras
     let g = dsl(r#"
         let ext: list_t<rule_t> = [_newline]
         grammar {
@@ -388,7 +365,6 @@ fn externals_used_in_extras_via_let() {
 
 #[test]
 fn externals_via_chained_let_with_append() {
-    // Intermediate let uses append, outer let references it
     let g = dsl(r#"
         let a: list_t<rule_t> = [heredoc]
         let b: list_t<rule_t> = append(a, [_eof])
