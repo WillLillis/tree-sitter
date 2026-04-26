@@ -222,28 +222,48 @@ impl<'src> TypeEnv<'src> {
     #[inline]
     fn scoped(&mut self) -> ScopeGuard<'_, 'src> {
         self.vars.push();
-        ScopeGuard(self)
+        ScopeGuard {
+            env: self,
+            hidden_fields: Vec::new(),
+        }
     }
 }
 
-struct ScopeGuard<'a, 'src>(&'a mut TypeEnv<'src>);
+struct ScopeGuard<'a, 'src> {
+    env: &'a mut TypeEnv<'src>,
+    /// `object_fields` entries removed by `insert_var`, restored on drop.
+    hidden_fields: Vec<(&'src str, Vec<&'src str>)>,
+}
+
+impl<'src> ScopeGuard<'_, 'src> {
+    /// Insert a variable, hiding any stale `object_fields` entry for the same name.
+    fn insert_var(&mut self, name: &'src str, ty: Ty) {
+        if let Some(fields) = self.env.object_fields.remove(name) {
+            self.hidden_fields.push((name, fields));
+        }
+        self.env.vars.insert(name, ty);
+    }
+}
 
 impl Drop for ScopeGuard<'_, '_> {
     fn drop(&mut self) {
-        self.0.vars.pop();
+        self.env.vars.pop();
+        for (name, fields) in self.hidden_fields.drain(..) {
+            self.env.object_fields.insert(name, fields);
+        }
     }
 }
 
 impl<'src> std::ops::Deref for ScopeGuard<'_, 'src> {
     type Target = TypeEnv<'src>;
     fn deref(&self) -> &Self::Target {
-        self.0
+        self.env
     }
 }
 
 impl std::ops::DerefMut for ScopeGuard<'_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
+        self.env
     }
 }
 
@@ -428,7 +448,7 @@ fn collect_decls<'a>(
             }
             Node::Let { name, value, .. } => {
                 // Self-referential let (e.g. `let C = C`). This must be caught before
-                // the call below to  `collect_external_names_tc` to avoid an infinite loop
+                // the call below to `collect_external_names` to avoid an infinite loop
                 let lhs = ctx.text(*name);
                 if matches!(arena.get(*value), Node::Ident(IdentKind::Unresolved))
                     && ctx.text(arena.span(*value)) == lhs
@@ -1439,6 +1459,11 @@ fn check_for_expr<'ast>(
             for &item_id in items {
                 check_for_tuple_element(ast, item_id, config, &mut scope, modules)?;
             }
+            // Insert bindings only after all tuples are validated, so
+            // tuple elements are checked against the outer scope
+            for &(name_span, declared_ty) in &config.bindings {
+                scope.insert_var(ast.ctx.text(name_span), declared_ty);
+            }
             return expect_rule(ast, config.body, &mut scope, modules);
         }
     }
@@ -1491,13 +1516,11 @@ fn check_for_tuple_element<'ast>(
             ast.span(item_id),
         ));
     }
-    // Pop and re-push scope vars for each tuple (last iteration's bindings win)
     for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
         let actual = type_of(ast, elems[i], scope, modules)?;
         if !actual.is_compatible(declared_ty) {
             return Err(mismatch(declared_ty, actual, name_span));
         }
-        scope.insert_var(ast.ctx.text(name_span), declared_ty);
     }
     Ok(())
 }
