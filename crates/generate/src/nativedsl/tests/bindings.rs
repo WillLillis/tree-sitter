@@ -226,6 +226,20 @@ fn fn_param_shadows_let_binding() {
 }
 
 #[test]
+fn fn_param_shadows_let_object_field_access() {
+    // The fn param `obj` shadows the let-bound object. Field access on the
+    // param should not be validated against the outer object's fields.
+    let g = dsl(r#"grammar { language: "test" }
+        let obj = { a: 1 }
+        fn get_val(obj: obj_t<int_t>) int_t { obj.x }
+        rule program { prec(get_val({ x: 5 }), "y") }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec(Precedence::Integer(5), Rule::String("y".into()))
+    );
+}
+
+#[test]
 fn for_var_shadows_fn_param() {
     let g = dsl(r#"grammar { language: "test" }
         fn make(item: str_t) rule_t {
