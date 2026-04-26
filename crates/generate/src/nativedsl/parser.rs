@@ -24,9 +24,6 @@ pub struct Parser<'tok, 'path> {
     pub ast: Ast,
     scratch: Vec<NodeId>,
     depth: u16,
-    /// Tracks the most recent `inherit()` `ModuleRef` node so we can store it
-    /// in `GrammarConfig::inherit_node` without a post-parse search.
-    last_inherit_node: Option<NodeId>,
 }
 
 impl<'tok, 'path> Parser<'tok, 'path> {
@@ -39,7 +36,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             ast: Ast::new(source),
             scratch: Vec::new(),
             depth: 0,
-            last_inherit_node: None,
         }
     }
 
@@ -49,9 +45,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             let id = self.parse_item()?;
             self.ast.root_items.push(id);
             self.skip_comments();
-        }
-        if let Some(config) = &mut self.ast.ctx.grammar_config {
-            config.inherit_node = self.last_inherit_node;
         }
         Ok(self.ast)
     }
@@ -402,8 +395,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     fn parse_primary(&mut self) -> ParseResult<NodeId> {
         let start = self.span();
         // Builtin keywords are contextual: they act as keywords only when
-        // followed by `(` (or `{` for `for`). Otherwise they are identifiers
-        // so grammars can use names like `import`, `field`, etc. as rules.
+        // followed by `(`. Otherwise they are identifiers so grammars can
+        // use names like `import`, `field`, `for`, etc. as rules.
         let next_lparen = self.next_is(TokenKind::LParen);
         let kw = self.tokens[self.pos].kind;
         match kw {
@@ -428,6 +421,9 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 if !self.at(TokenKind::RParen) {
                     let mut got = 0usize;
                     loop {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
                         self.parse_expr()?;
                         got += 1;
                         if self.eat(TokenKind::Comma).is_none() {
@@ -462,7 +458,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwGrammarConfig if next_lparen => {
                 self.parse_unary(start, TokenKind::KwGrammarConfig, Node::GrammarConfig)
             }
-            TokenKind::KwFor => self.parse_for(start),
+            TokenKind::KwFor if next_lparen => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             // Keyword used as identifier (e.g. `import` as a rule reference)
             k if k.is_keyword() => self.parse_ident_expr(start),
@@ -618,18 +614,14 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let path_span = self.expect_string()?;
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        let id = self.ast.push(
+        Ok(self.ast.push(
             Node::ModuleRef {
                 import: is_import,
                 path: path_span.strip_quotes(),
                 module: None,
             },
             start.merge(end),
-        );
-        if !is_import {
-            self.last_inherit_node = Some(id);
-        }
-        Ok(id)
+        ))
     }
 
     fn parse_append(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -680,10 +672,11 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                         .ast
                         .push(Node::Ident(IdentKind::Unresolved), member_span);
                     self.advance_pos();
-                    let mut children = vec![id, member_id];
-                    let arg_ids = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
-                    children.extend_from_slice(self.ast.ctx.child_slice(arg_ids));
+                    let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
                     let end = self.expect(TokenKind::RParen)?;
+                    let mut children = Vec::with_capacity(2 + args.len());
+                    children.extend_from_slice(&[id, member_id]);
+                    children.extend(args);
                     let range = self
                         .ast
                         .push_children(&children)

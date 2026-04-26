@@ -124,6 +124,7 @@ fn error_builtin_arg_count_messages() {
     #[rustfmt::skip]
     let cases: &[(&str, TokenKind, u8, usize)] = &[
         (g!("blank(\"a\")"), TokenKind::KwBlank, 0, 1),
+        (g!("blank(\"a\",)"), TokenKind::KwBlank, 0, 1),
         (g!("blank(\"a\", \"b\")"), TokenKind::KwBlank, 0, 2),
         (g!("repeat()"), TokenKind::KwRepeat, 1, 0),
         (g!("repeat1()"), TokenKind::KwRepeat1, 1, 0),
