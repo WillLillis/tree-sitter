@@ -383,8 +383,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         let mut result = self.parse_primary()?;
         // Post-primary chaining: allow `.field` after any expression
         // (e.g. `grammar_config(base).extras`).
-        let start = self.ast.span(result);
         while self.at(TokenKind::Dot) {
+            let start = self.ast.span(result);
             self.advance_pos();
             let field = self.expect_name()?;
             result = self
