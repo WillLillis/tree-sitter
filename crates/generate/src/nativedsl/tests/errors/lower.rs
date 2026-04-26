@@ -74,19 +74,12 @@ fn error_inherit_bad_extension() {
     assert_eq!(e.kind, LowerErrorKind::ModuleUnsupportedExtension);
 }
 
-#[test]
-fn error_inherit_child_error() {
-    let (err, base_path) =
-        inherit_err("grammar { language: \"base\" }\nrule program { bogus_ref }\n");
-    let DslError::Module(m) = &err else {
-        panic!("expected Module, got {err:?}")
-    };
-    let DslError::Type(e) = m.inner.as_ref() else {
-        panic!("expected Type, got {:?}", m.inner)
-    };
-    assert_eq!(e.kind, TypeErrorKind::UnknownIdentifier("bogus_ref".into()));
-    assert_eq!(m.path, base_path);
-}
+inherit_error_tests! { Type {
+    error_inherit_child_error {
+        "grammar { language: \"base\" }\nrule program { bogus_ref }\n",
+        TypeErrorKind::UnknownIdentifier("bogus_ref".into())
+    }
+}}
 
 #[test]
 fn error_inherit_cycle() {

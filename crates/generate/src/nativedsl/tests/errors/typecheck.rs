@@ -217,21 +217,9 @@ error_tests! { Type {
     }
 }}
 
-#[test]
-fn error_inherited_type_error() {
-    let (err, base_path) = inherit_err("grammar { language: \"base\" }\nrule program { 42 }\n");
-    let DslError::Module(m) = &err else {
-        panic!("expected Module, got {err:?}")
-    };
-    let DslError::Type(e) = m.inner.as_ref() else {
-        panic!("expected Type, got {:?}", m.inner)
-    };
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::Rule,
-            got: Ty::Int
-        }
-    );
-    assert_eq!(m.path, base_path);
-}
+inherit_error_tests! { Type {
+    error_inherited_type_error {
+        "grammar { language: \"base\" }\nrule program { 42 }\n",
+        TypeErrorKind::TypeMismatch { expected: Ty::Rule, got: Ty::Int }
+    }
+}}
