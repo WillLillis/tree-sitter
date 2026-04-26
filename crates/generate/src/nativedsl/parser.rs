@@ -243,14 +243,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     key_span,
                 )
             })?;
-            if let Some(first_span) = seen[field as usize] {
+            if let Some(first_span) = seen[field as usize].replace(key_span) {
                 Err(ParseError::with_note(
                     ParseErrorKind::DuplicateGrammarField(key.to_string()),
                     key_span,
                     self.first_defined_note(first_span),
                 ))?;
             }
-            seen[field as usize] = Some(key_span);
             match field {
                 ConfigField::Language => {
                     let s = self.expect_string()?;
@@ -738,14 +737,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         );
         for &(span, _) in &fields {
             let key = self.ast.ctx.text(span);
-            if let Some(&first_span) = seen.get(key) {
+            if let Some(first_span) = seen.insert(key, span) {
                 return Err(ParseError::with_note(
                     ParseErrorKind::DuplicateObjectKey(key.to_string()),
                     span,
                     self.first_defined_note(first_span),
                 ));
             }
-            seen.insert(key, span);
         }
         let end = self.expect(TokenKind::RBrace)?;
         let range = self

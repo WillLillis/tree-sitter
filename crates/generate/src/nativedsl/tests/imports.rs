@@ -2,8 +2,6 @@ use super::*;
 use crate::rules::{Precedence, Rule};
 use std::path::Path;
 
-// -- Imported function body assertions --
-
 #[test]
 fn import_function_expands_comma_sep1() {
     let g = dsl(r#"
@@ -61,8 +59,6 @@ fn import_function_intra_module_call() {
     );
 }
 
-// -- Imported values --
-
 #[test]
 fn import_string_value() {
     let g = dsl(r#"
@@ -118,8 +114,6 @@ fn import_value_reassigned_to_local() {
     );
 }
 
-// -- Transitive imports --
-
 #[test]
 fn import_transitive_function_body() {
     let g = dsl(r#"
@@ -143,8 +137,6 @@ fn import_transitive_value() {
         Rule::prec(Precedence::Integer(42), Rule::String("x".into()))
     );
 }
-
-// -- Multiple imports --
 
 #[test]
 fn import_multiple_modules_body() {
@@ -187,8 +179,6 @@ fn import_function_result_in_seq() {
     );
 }
 
-// -- Import with only values, only functions --
-
 #[test]
 fn import_module_values_only() {
     let g = dsl(r#"
@@ -229,8 +219,6 @@ fn delimited(item: rule_t) rule_t {
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
 }
-
-// -- Error cases --
 
 #[test]
 fn error_import_member_not_found() {
@@ -301,57 +289,28 @@ fn error_import_wrong_arg_count() {
 }
 
 #[test]
-fn error_import_disallowed_rule() {
-    let dir = tempfile::tempdir().unwrap();
-    let bad_helper = dir.path().join("bad.tsg");
-    std::fs::write(&bad_helper, "rule foo { \"x\" }").unwrap();
-
-    let input = format!(
-        r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
-    "#,
-        dsl_path(&bad_helper)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
-    let outer = assert_err!(err, Module);
-    let DslError::Lower(e) = outer.inner.as_ref() else {
-        panic!("expected Lower error, got {:?}", outer.inner)
-    };
-    assert_eq!(
-        e.kind,
-        LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::Rule)
-    );
-}
-
-#[test]
-fn error_import_disallowed_grammar_block() {
-    let dir = tempfile::tempdir().unwrap();
-    let bad_helper = dir.path().join("bad.tsg");
-    std::fs::write(
-        &bad_helper,
-        "grammar { language: \"bad\" }\nfn f(x: rule_t) rule_t { x }",
-    )
-    .unwrap();
-
-    let input = format!(
-        r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
-    "#,
-        dsl_path(&bad_helper)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
-    let outer = assert_err!(err, Module);
-    let DslError::Lower(e) = outer.inner.as_ref() else {
-        panic!("expected Lower error, got {:?}", outer.inner)
-    };
-    assert_eq!(
-        e.kind,
-        LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::GrammarBlock)
-    );
+fn error_import_disallowed_items() {
+    for (content, expected) in [
+        ("rule foo { \"x\" }", DisallowedItemKind::Rule),
+        (
+            "grammar { language: \"bad\" }\nfn f(x: rule_t) rule_t { x }",
+            DisallowedItemKind::GrammarBlock,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bad_helper = dir.path().join("bad.tsg");
+        std::fs::write(&bad_helper, content).unwrap();
+        let input = format!(
+            "let h = import(\"{}\")\ngrammar {{ language: \"test\" }}\nrule program {{ \"x\" }}",
+            dsl_path(&bad_helper)
+        );
+        let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+        let outer = assert_err!(err, Module);
+        let DslError::Lower(e) = outer.inner.as_ref() else {
+            panic!("expected Lower error, got {:?}", outer.inner)
+        };
+        assert_eq!(e.kind, LowerErrorKind::ModuleDisallowedItem(expected));
+    }
 }
 
 #[test]
@@ -475,8 +434,6 @@ fn error_import_json_not_allowed() {
     let e = assert_err!(err, Lower);
     assert_eq!(e.kind, LowerErrorKind::JsonImportNotAllowed);
 }
-
-// -- Edge cases --
 
 #[test]
 fn import_function_receives_complex_expr() {
@@ -631,8 +588,6 @@ fn import_value_in_config_extras() {
         Rule::Pattern(r"//[^\n]*".into(), String::new())
     );
 }
-
-// -- Keyword as identifier in imported context --
 
 #[test]
 fn import_keyword_as_rule_name() {
