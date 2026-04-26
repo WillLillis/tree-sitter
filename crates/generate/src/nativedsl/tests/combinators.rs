@@ -1,15 +1,6 @@
 use super::*;
 
-macro_rules! combinator_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let g = dsl($input);
-            assert_eq!(g.variables[0].rule, $expected);
-        })*
-    };
-}
-
-combinator_tests! {
+rule_tests! {
     seq_and_choice {
         r#"grammar { language: "test" } rule program { seq(choice("a", "b"), "c") }"#,
         Rule::seq(vec![

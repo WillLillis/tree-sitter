@@ -1,15 +1,6 @@
 use super::super::*;
 
-macro_rules! lex_error_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let e = assert_err!(dsl_err($input), Lex);
-            assert_eq!(e.kind, $expected);
-        })*
-    };
-}
-
-lex_error_tests! {
+error_tests! { Lex {
     error_unterminated_string {
         r#"grammar { language: "test }rule program { "x" }"#,
         LexErrorKind::UnterminatedString
@@ -66,22 +57,17 @@ lex_error_tests! {
         "grammar { language: \"te\\ést\" } rule program { \"x\" }",
         LexErrorKind::InvalidEscape('é')
     }
-}
+}}
 
 #[test]
 fn error_inherited_lex_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(&base_path, r#"grammar { language: "base"#).unwrap();
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
+    let (err, base_path) = inherit_err(r#"grammar { language: "base"#);
+    let DslError::Module(m) = &err else {
+        panic!("expected Module, got {err:?}")
     };
-    let DslError::Lex(lex_err) = inherited.inner.as_ref() else {
-        panic!("expected Lex error, got {:?}", inherited.inner)
+    let DslError::Lex(e) = m.inner.as_ref() else {
+        panic!("expected Lex, got {:?}", m.inner)
     };
-    assert_eq!(lex_err.kind, LexErrorKind::UnterminatedString);
-    assert_eq!(inherited.path, base_path);
+    assert_eq!(e.kind, LexErrorKind::UnterminatedString);
+    assert_eq!(m.path, base_path);
 }

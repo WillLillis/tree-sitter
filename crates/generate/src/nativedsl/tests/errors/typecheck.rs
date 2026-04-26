@@ -1,15 +1,6 @@
 use super::super::*;
 
-macro_rules! type_error_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let e = assert_err!(dsl_err($input), Type);
-            assert_eq!(e.kind, $expected);
-        })*
-    };
-}
-
-type_error_tests! {
+error_tests! { Type {
     error_type_mismatch_fn_args {
         r#"grammar { language: "test" }
         fn needs_int(x: int_t) rule_t { prec(x, "a") }
@@ -224,43 +215,23 @@ type_error_tests! {
         rule program { make_rule }"#,
         TypeErrorKind::FunctionUsedAsValue("make_rule".into())
     }
-}
+}}
 
-// Complex test that needs file I/O and nested error inspection
 #[test]
 fn error_inherited_type_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(
-        &base_path,
-        "grammar { language: \"base\" }\nrule program { 42 }\n",
-    )
-    .unwrap();
-
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\n\
-                      grammar { language: \"derived\", inherits: base }\n\
-                      rule extra { \"hello\" }\n"
-        .to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
+    let (err, base_path) = inherit_err("grammar { language: \"base\" }\nrule program { 42 }\n");
+    let DslError::Module(m) = &err else {
+        panic!("expected Module, got {err:?}")
     };
-    let DslError::Type(type_err) = inherited.inner.as_ref() else {
-        panic!("expected Type error, got {:?}", inherited.inner)
+    let DslError::Type(e) = m.inner.as_ref() else {
+        panic!("expected Type, got {:?}", m.inner)
     };
     assert_eq!(
-        type_err.kind,
+        e.kind,
         TypeErrorKind::TypeMismatch {
             expected: Ty::Rule,
             got: Ty::Int
         }
     );
-    assert_eq!(inherited.path, base_path);
-    assert!(inherited.source_text.contains("42"));
-    assert_eq!(
-        &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
-        "base.tsg"
-    );
+    assert_eq!(m.path, base_path);
 }

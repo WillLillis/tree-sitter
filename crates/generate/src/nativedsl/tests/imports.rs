@@ -162,7 +162,10 @@ fn import_multiple_modules_body() {
     "#);
     assert_eq!(
         *find_rule(&g, "program"),
-        Rule::choice(vec![sep_by1_rule(",", "identifier"), sep_by1_rule(";", "identifier")])
+        Rule::choice(vec![
+            sep_by1_rule(",", "identifier"),
+            sep_by1_rule(";", "identifier")
+        ])
     );
 }
 
