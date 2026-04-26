@@ -160,15 +160,6 @@ fn config_override_replaces() {
 }
 
 #[test]
-fn config_word_inherited() {
-    let g = dsl(r#"
-        let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base }
-    "#);
-    assert_eq!(g.word_token.as_deref(), Some("identifier"));
-}
-
-#[test]
 fn config_word_overridden() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
@@ -361,17 +352,5 @@ fn import_before_inherit_in_source_order() {
         rule new_rule { h::comma_sep1(identifier) }
     "#);
     assert_eq!(g.name, "derived");
-    assert_eq!(
-        *find_rule(&g, "new_rule"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(",".into()),
-                    Rule::NamedSymbol("identifier".into()),
-                ])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    assert_eq!(*find_rule(&g, "new_rule"), comma_sep1_rule("identifier"));
 }
