@@ -2678,7 +2678,6 @@ dependencies = [
  "anyhow",
  "bindgen",
  "clap",
- "ctrlc",
  "etcetera",
  "indoc",
  "notify",

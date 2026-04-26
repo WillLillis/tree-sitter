@@ -174,7 +174,7 @@ impl GrammarSource {
             #[cfg(feature = "nativedsl")]
             Self::Grammar(grammar) => {
                 serde_json::to_string_pretty(&nativedsl::serialize::grammar_to_json(&grammar))
-                    .expect("grammar JSON serialization should not fail")
+                    .unwrap()
             }
         }
     }
@@ -617,8 +617,7 @@ pub fn load_grammar_file(
     if grammar_path.is_dir() {
         Err(LoadGrammarError::InvalidPath)?;
     }
-    let start = std::time::Instant::now();
-    let g = match grammar_path.extension().and_then(|e| e.to_str()) {
+    match grammar_path.extension().and_then(|e| e.to_str()) {
         Some("js") => Ok(GrammarSource::Json(load_js_grammar_file(
             grammar_path,
             js_runtime,
@@ -641,14 +640,7 @@ pub fn load_grammar_file(
             Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
-    };
-    println!(
-        "Generate time: {:?} ({:?})",
-        start.elapsed(),
-        grammar_path.extension()
-    );
-
-    g
+    }
 }
 
 #[cfg(feature = "load")]

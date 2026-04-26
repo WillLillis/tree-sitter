@@ -1,15 +1,6 @@
 use super::super::*;
 
-macro_rules! parse_error_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let e = assert_err!(dsl_err($input), Parse);
-            assert_eq!(e.kind, $expected);
-        })*
-    };
-}
-
-parse_error_tests! {
+error_tests! { Parse {
     error_unknown_grammar_field {
         r#"grammar { language: "test", bogus: "x" } rule program { "x" }"#,
         ParseErrorKind::UnknownGrammarField("bogus".into())
@@ -96,7 +87,14 @@ parse_error_tests! {
         },
         ParseErrorKind::NestingTooDeep
     }
-}
+    error_too_many_children {
+        &{
+            let args = vec!["\"x\""; 65_536].join(",");
+            format!("grammar {{ language: \"test\" }} rule foo {{ seq({args}) }}")
+        },
+        ParseErrorKind::TooManyChildren
+    }
+}}
 
 #[test]
 fn error_duplicate_grammar_field() {
@@ -223,56 +221,33 @@ fn keywords_as_identifiers() {
 
 #[test]
 fn error_inherited_parse_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(
-        &base_path,
-        "grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n",
-    )
-    .unwrap();
-
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
+    let (err, base_path) =
+        inherit_err("grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n");
+    let DslError::Module(m) = &err else {
+        panic!("expected Module, got {err:?}")
     };
-    let DslError::Parse(parse_err) = inherited.inner.as_ref() else {
-        panic!("expected Parse error, got {:?}", inherited.inner)
+    let DslError::Parse(e) = m.inner.as_ref() else {
+        panic!("expected Parse, got {:?}", m.inner)
     };
     assert_eq!(
-        parse_err.kind,
+        e.kind,
         ParseErrorKind::ExpectedToken {
             expected: TokenKind::RParen,
             got: TokenKind::StringLit
         }
     );
-    assert_eq!(inherited.path, base_path);
-    assert_eq!(
-        &parent_src[inherited.reference_span.start as usize..inherited.reference_span.end as usize],
-        "base.tsg"
-    );
+    assert_eq!(m.path, base_path);
 }
 
 #[test]
 fn error_inherited_missing_language() {
-    let dir = tempfile::tempdir().unwrap();
-    let base_path = dir.path().join("base.tsg");
-    std::fs::write(
-        &base_path,
-        "grammar { extras: [] }\nrule program { \"x\" }\n",
-    )
-    .unwrap();
-    let parent_path = dir.path().join("parent.tsg");
-    let parent_src = "let base = inherit(\"base.tsg\")\ngrammar { language: \"derived\", inherits: base }\nrule extra { \"hello\" }\n".to_string();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
-    let DslError::Module(inherited) = &err else {
-        panic!("expected Module error, got {err:?}")
+    let (err, base_path) = inherit_err("grammar { extras: [] }\nrule program { \"x\" }\n");
+    let DslError::Module(m) = &err else {
+        panic!("expected Module, got {err:?}")
     };
-    let DslError::Parse(parse_err) = inherited.inner.as_ref() else {
-        panic!("expected Parse error, got {:?}", inherited.inner)
+    let DslError::Parse(e) = m.inner.as_ref() else {
+        panic!("expected Parse, got {:?}", m.inner)
     };
-    assert_eq!(parse_err.kind, ParseErrorKind::MissingLanguageField);
-    assert_eq!(inherited.path, base_path);
+    assert_eq!(e.kind, ParseErrorKind::MissingLanguageField);
+    assert_eq!(m.path, base_path);
 }
