@@ -157,17 +157,14 @@ impl SpanContext<'_> {
     fn new(span: Span, source_text: &str) -> SpanContext<'_> {
         let offset = span.start as usize;
         let bytes = source_text.as_bytes();
-
-        let mut line_start = 0;
-        let mut prev_line_start = None;
-        let mut line_num = 1;
-        for (i, &b) in bytes.iter().enumerate().take(offset) {
-            if b == b'\n' {
-                prev_line_start = Some(line_start);
-                line_start = i + 1;
-                line_num += 1;
-            }
-        }
+        let prefix = &bytes[..offset];
+        let line_num = memchr::memchr_iter(b'\n', prefix).count() + 1;
+        let line_start = memchr::memrchr(b'\n', prefix).map_or(0, |i| i + 1);
+        let prev_line_start = if line_start > 0 {
+            Some(memchr::memrchr(b'\n', &prefix[..line_start - 1]).map_or(0, |i| i + 1))
+        } else {
+            None
+        };
         let line_end =
             memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |pos| line_start + pos);
         let col = offset - line_start + 1;
