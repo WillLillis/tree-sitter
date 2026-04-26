@@ -624,12 +624,12 @@ fn resolve_expr_tc(
         let span = arena.span(id);
         let name = ctx.text(span);
         if locals.contains(ctx, name) {
-            arena.resolve_as_var(id);
+            arena.resolve_as(id, IdentKind::Var);
         } else if let Some(&(decl, _)) = decls.get(name) {
             match decl {
-                Decl::Var => arena.resolve_as_var(id),
-                Decl::Rule => arena.resolve_as_rule(id),
-                Decl::Fn => arena.resolve_as_fn(id),
+                Decl::Var => arena.resolve_as(id, IdentKind::Var),
+                Decl::Rule => arena.resolve_as(id, IdentKind::Rule),
+                Decl::Fn => arena.resolve_as(id, IdentKind::Fn),
             }
         } else {
             return Err(TypeError::new(
@@ -650,9 +650,9 @@ fn resolve_expr_tc(
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             let name = ctx.text(arena.span(target));
             if locals.contains(ctx, name) {
-                arena.resolve_as_var(target);
+                arena.resolve_as(target, IdentKind::Var);
             } else {
-                arena.resolve_as_rule(target);
+                arena.resolve_as(target, IdentKind::Rule);
             }
         } else {
             resolve_expr_tc(arena, ctx, decls, target, locals)?;
@@ -1323,7 +1323,7 @@ fn type_of_qualified_call<'a>(
             ast.span(obj),
         ));
     };
-    let fn_name = ast.node_text(name);
+    let fn_name = ast.ctx.text(ast.span(name));
     let import_env = modules[idx as usize].as_ref().unwrap();
     let Some(sig) = import_env.fns.get(fn_name) else {
         return Err(TypeError::new(
@@ -1418,7 +1418,7 @@ fn type_of_call<'ast>(
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<Ty, TypeError> {
-    let fn_name = ast.node_text(name);
+    let fn_name = ast.ctx.text(ast.span(name));
     let sig = env.fns.get(fn_name).ok_or_else(|| {
         TypeError::new(TypeErrorKind::UndefinedFunction(fn_name.to_string()), span)
     })?;

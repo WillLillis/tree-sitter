@@ -428,28 +428,26 @@ impl<'ast> Evaluator<'ast> {
         unsafe { self.values.get_unchecked(id.0 as usize) }
     }
 
-    fn alloc_list(&mut self, items: &[ValueId]) -> Value {
+    fn alloc_list(&mut self, items: &[ValueId]) -> ValueId {
         let start = self.value_children.len() as u32;
         let len = items.len() as u16;
         self.value_children.extend_from_slice(items);
-        Value::List(ChildRange::new(start, len))
+        self.alloc_val(Value::List(ChildRange::new(start, len)))
     }
 
-    fn alloc_tuple(&mut self, items: &[ValueId]) -> Value {
+    fn alloc_tuple(&mut self, items: &[ValueId]) -> ValueId {
         let start = self.value_children.len() as u32;
         let len = items.len() as u16;
         self.value_children.extend_from_slice(items);
-        Value::Tuple(ChildRange::new(start, len))
+        self.alloc_val(Value::Tuple(ChildRange::new(start, len)))
     }
 
-    fn alloc_object(&mut self, map: FxHashMap<&'ast str, ValueId>) -> Value {
+    fn alloc_object(&mut self, map: FxHashMap<&'ast str, ValueId>) -> ValueId {
         let idx = self.object_pool.len() as u32;
         self.object_pool.push(map);
-        Value::Object(idx)
+        self.alloc_val(Value::Object(idx))
     }
 
-    // -- Typed value constructors and accessors --
-    //
     // `expect_*` wraps a `ValueId` in a typed newtype. The compile-time
     // safety comes from the wrapper: you can't call `list_items` without
     // going through `expect_list`. Each accessor has a single `unreachable!`
@@ -752,8 +750,7 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|g| self.import_names_as_list(g))
                     .collect();
-                let v = self.alloc_list(&vals);
-                Ok(self.alloc_val(v))
+                Ok(self.alloc_list(&vals))
             }
             "precedences" => {
                 let vals: Vec<ValueId> = grammar
@@ -770,12 +767,10 @@ impl<'ast> Evaluator<'ast> {
                                 PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s.clone()),
                             })
                             .collect();
-                        let v = self.alloc_list(&inner);
-                        self.alloc_val(v)
+                        self.alloc_list(&inner)
                     })
                     .collect();
-                let v = self.alloc_list(&vals);
-                Ok(self.alloc_val(v))
+                Ok(self.alloc_list(&vals))
             }
             "word" => {
                 if let Some(name) = &grammar.word_token {
@@ -793,12 +788,10 @@ impl<'ast> Evaluator<'ast> {
                         let name_val = self.alloc_val(Value::Str(name_sid));
                         let words = self.import_rules_as_list(&ctx.reserved_words);
                         let map = FxHashMap::from_iter([("name", name_val), ("words", words)]);
-                        let v = self.alloc_object(map);
-                        self.alloc_val(v)
+                        self.alloc_object(map)
                     })
                     .collect();
-                let v = self.alloc_list(&sets);
-                Ok(self.alloc_val(v))
+                Ok(self.alloc_list(&sets))
             }
             _ => Err(LowerError::new(
                 LowerErrorKind::ModuleMemberNotFound(field.to_string()),
@@ -815,8 +808,7 @@ impl<'ast> Evaluator<'ast> {
                 self.alloc_val(Value::Rule(rid))
             })
             .collect();
-        let v = self.alloc_list(&vals);
-        self.alloc_val(v)
+        self.alloc_list(&vals)
     }
 
     fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
@@ -824,8 +816,7 @@ impl<'ast> Evaluator<'ast> {
             .iter()
             .map(|name| self.owned_symbol_val(name.clone()))
             .collect();
-        let v = self.alloc_list(&vals);
-        self.alloc_val(v)
+        self.alloc_list(&vals)
     }
 
     fn import_rule(&mut self, rule: &Rule) -> RuleId {
@@ -968,8 +959,7 @@ impl<'ast> Evaluator<'ast> {
                 let mut combined = Vec::with_capacity(li.len() + ri.len());
                 combined.extend_from_slice(li);
                 combined.extend_from_slice(ri);
-                let v = self.alloc_list(&combined);
-                Ok(self.alloc_val(v))
+                Ok(self.alloc_list(&combined))
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
@@ -1016,8 +1006,7 @@ impl<'ast> Evaluator<'ast> {
                 for &(key_span, value_id) in fields {
                     map.insert(ast.ctx.text(key_span), self.eval_expr(value_id)?);
                 }
-                let v = self.alloc_object(map);
-                Ok(self.alloc_val(v))
+                Ok(self.alloc_object(map))
             }
             Node::List(range) | Node::Tuple(range) => {
                 let items = ast.ctx.child_slice(*range);
@@ -1030,7 +1019,7 @@ impl<'ast> Evaluator<'ast> {
                 } else {
                     self.alloc_tuple(&vals)
                 };
-                Ok(self.alloc_val(val))
+                Ok(val)
             }
             Node::Concat(range) => {
                 let mut result = String::new();
@@ -1059,7 +1048,7 @@ impl<'ast> Evaluator<'ast> {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
                 let module = self.current_module;
-                self.call_fn(module, ast.node_text(name), &arg_vals, span)
+                self.call_fn(module, ast.ctx.text(ast.span(name)), &arg_vals, span)
             }
             Node::QualifiedCall(range) => {
                 let (obj, name, args) = ast.ctx.get_qualified_call(*range);
@@ -1072,7 +1061,7 @@ impl<'ast> Evaluator<'ast> {
                 for &arg_id in args {
                     arg_vals.push(self.eval_expr(arg_id)?);
                 }
-                let fn_name = ast.node_text(name);
+                let fn_name = ast.ctx.text(ast.span(name));
                 self.call_fn(idx as usize, fn_name, &arg_vals, span)
             }
             _ => {
