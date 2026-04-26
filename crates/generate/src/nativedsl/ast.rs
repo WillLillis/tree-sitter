@@ -26,9 +26,7 @@ impl NodeId {
     }
 }
 
-/// Arena for AST nodes and their spans. Hides the sentinel at index 0
-/// and enforces [`NodeId`]-based access so callers can't accidentally
-/// index at 0 or iterate from the wrong starting point.
+/// Arena for AST nodes and their spans.
 pub struct NodeArena {
     nodes: Vec<Node>,
     spans: Vec<Span>,
@@ -69,21 +67,9 @@ impl NodeArena {
     }
 
     #[inline]
-    pub fn resolve_as_rule(&mut self, id: NodeId) {
+    pub fn resolve_as(&mut self, id: NodeId, kind: IdentKind) {
         debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
-        self.set(id, Node::Ident(IdentKind::Rule));
-    }
-
-    #[inline]
-    pub fn resolve_as_var(&mut self, id: NodeId) {
-        debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
-        self.set(id, Node::Ident(IdentKind::Var));
-    }
-
-    #[inline]
-    pub fn resolve_as_fn(&mut self, id: NodeId) {
-        debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
-        self.set(id, Node::Ident(IdentKind::Fn));
+        self.set(id, Node::Ident(kind));
     }
 
     /// Number of nodes (excluding sentinel).
@@ -193,9 +179,8 @@ impl Span {
     /// Resolve to a `&str` slice.
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
-        // SAFETY: span boundaries are at ASCII byte positions (all token
-        // delimiters are ASCII), which are always valid UTF-8 boundaries.
-        // The input length is checked against u32::MAX before lexing.
+        // SAFETY: span boundaries are at ASCII byte positions. The
+        // input length is checked against u32::MAX before lexing.
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
     }
 }
@@ -206,8 +191,7 @@ pub struct Ast {
     pub ctx: AstContext,
 }
 
-/// Immutable context data split from nodes so resolve can borrow
-/// `&mut arena` while reading `&context`.
+/// Immutable context data split from nodes
 pub struct AstContext {
     pub grammar_config: Option<GrammarConfig>,
     pub fn_configs: Vec<FnConfig>,
@@ -323,12 +307,6 @@ impl Ast {
         let len = u16::try_from(items.len()).ok()?;
         self.ctx.children.extend_from_slice(items);
         Some(ChildRange::new(start, len))
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn node_text(&self, id: NodeId) -> &str {
-        self.ctx.text(self.span(id))
     }
 }
 

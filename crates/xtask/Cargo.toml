@@ -19,7 +19,6 @@ anstyle.workspace     = true
 anyhow.workspace      = true
 bindgen               = { version = "0.72.1" }
 clap.workspace        = true
-ctrlc.workspace       = true
 etcetera.workspace    = true
 indoc.workspace       = true
 notify                = "8.2.0"

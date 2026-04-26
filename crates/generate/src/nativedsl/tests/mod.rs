@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::grammars::{InputGrammar, VariableType};
+use crate::grammars::InputGrammar;
 use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
@@ -8,6 +8,16 @@ use super::{
     DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, NoteMessage,
     ParseErrorKind, Ty, TypeErrorKind, parse_native_dsl,
 };
+
+/// Generate tests that parse a grammar and assert on the first variable's rule.
+macro_rules! rule_tests {
+    ($($name:ident { $input:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let g = dsl($input);
+            assert_eq!(g.variables[0].rule, $expected);
+        })*
+    };
+}
 
 macro_rules! assert_err {
     ($err:expr, $variant:ident) => {
@@ -18,7 +28,6 @@ macro_rules! assert_err {
     };
 }
 
-mod ast_tests;
 mod bindings;
 mod combinators;
 mod config;
@@ -71,6 +80,21 @@ pub(super) fn sep_by1_rule(sep: &str, item: &str) -> Rule {
             Rule::Blank,
         ]),
     ])
+}
+
+/// Parse a grammar that inherits from a tempfile base, returning the error.
+/// `base_content` is written to `base.tsg`, and the parent grammar is:
+/// `let base = inherit("base.tsg") grammar { language: "derived", inherits: base } rule extra { "hello" }`
+pub(super) fn inherit_err(base_content: &str) -> (DslError, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let base_path = dir.path().join("base.tsg");
+    std::fs::write(&base_path, base_content).unwrap();
+    let parent_path = dir.path().join("parent.tsg");
+    let parent_src = "let base = inherit(\"base.tsg\")\n\
+                      grammar { language: \"derived\", inherits: base }\n\
+                      rule extra { \"hello\" }\n";
+    let err = parse_native_dsl(parent_src, &parent_path).unwrap_err();
+    (err, base_path)
 }
 
 pub(super) fn rule_names(g: &InputGrammar) -> Vec<&str> {
