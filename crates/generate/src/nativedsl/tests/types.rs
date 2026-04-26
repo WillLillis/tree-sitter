@@ -1,7 +1,5 @@
 use super::*;
 
-// ===== str_t -> rule_t coercion in lists =====
-
 #[test]
 fn list_mixed_rule_and_str_coerces_to_list_rule() {
     // String literals are str_t, rule refs are rule_t. A mixed list should

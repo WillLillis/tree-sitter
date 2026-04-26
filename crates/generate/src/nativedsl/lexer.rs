@@ -3,6 +3,7 @@
 
 use memchr::{memchr, memchr2};
 use serde::Serialize;
+use thiserror::Error;
 
 use super::LexError;
 use super::ast::Span;
@@ -461,55 +462,26 @@ impl<'src> Lexer<'src> {
 pub type LexResult<T> = Result<T, super::LexError>;
 
 /// The specific kind of lexer error.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Error)]
 pub enum LexErrorKind {
+    #[error("unterminated string literal")]
     UnterminatedString,
+    #[error("unterminated raw string literal")]
     UnterminatedRawString,
+    #[error("unterminated escape sequence")]
     UnterminatedEscape,
+    #[error("invalid escape sequence: \\{0}")]
     InvalidEscape(char),
+    #[error("unexpected character: {0}")]
     UnexpectedChar(char),
+    #[error("unterminated string literal (newline before closing quote)")]
     NewlineInString,
+    #[error("expected '\"' after 'r' and '#' delimiters")]
     ExpectedRawStringQuote,
+    #[error("integer literal out of range")]
     IntegerOverflow,
+    #[error("raw string has too many '#' delimiters (maximum 255)")]
     TooManyHashes,
+    #[error("input exceeds maximum size")]
     InputTooLarge,
-}
-
-impl std::fmt::Display for LexErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnterminatedString => write!(f, "unterminated string literal"),
-            Self::UnterminatedRawString => write!(f, "unterminated raw string literal"),
-            Self::UnterminatedEscape => write!(f, "unterminated escape sequence"),
-            Self::InvalidEscape(ch) => write!(f, "invalid escape sequence: \\{ch}"),
-            Self::UnexpectedChar(ch) => write!(f, "unexpected character: {ch:?}"),
-            Self::NewlineInString => {
-                write!(
-                    f,
-                    "unterminated string literal (newline before closing quote)"
-                )
-            }
-            Self::ExpectedRawStringQuote => {
-                write!(f, "expected '\"' after 'r' and '#' delimiters")
-            }
-            Self::TooManyHashes => {
-                write!(
-                    f,
-                    "raw string has too many '#' delimiters (maximum {})",
-                    u8::MAX
-                )
-            }
-            Self::IntegerOverflow => {
-                write!(
-                    f,
-                    "integer literal out of range [{}, {}]",
-                    i32::MIN,
-                    i32::MAX,
-                )
-            }
-            Self::InputTooLarge => {
-                write!(f, "input exceeds maximum size of {} bytes", u32::MAX)
-            }
-        }
-    }
 }

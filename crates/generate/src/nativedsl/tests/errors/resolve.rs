@@ -30,34 +30,28 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::DuplicateDeclaration("f".into())
     }
-    // Cross-kind duplicate: let binding with same name as a rule
     error_duplicate_let_and_rule {
         r#"grammar { language: "test" }
         let program: str_t = "x"
         rule program { "y" }"#,
         TypeErrorKind::DuplicateDeclaration("program".into())
     }
-    // Unknown identifier inside a function body
     error_unknown_in_fn_body {
         r#"grammar { language: "test" }
         fn f(x: rule_t) rule_t { bogus }
         rule program { f(program) }"#,
         TypeErrorKind::UnknownIdentifier("bogus".into())
     }
-    // Unknown identifier inside a for-loop body
     error_unknown_in_for_body {
         r#"grammar { language: "test" }
         rule program { for (v: rule_t) in [program] { bogus } }"#,
         TypeErrorKind::UnknownIdentifier("bogus".into())
     }
-    // Externals via for-loop expression
     error_externals_via_for_loop {
         r#"grammar { language: "test", externals: for (x: rule_t) in [a] { x } }
         rule program { "x" }"#,
         TypeErrorKind::InvalidExternalsExpression
     }
-    // Self-referential let in externals - should not stack overflow,
-    // caught as UnresolvedVariable during phase 2 resolution.
     error_self_referential_let_in_externals {
         r#"let C = C
         grammar { language: "test", externals: [C] }
