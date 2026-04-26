@@ -428,18 +428,20 @@ impl<'ast> Evaluator<'ast> {
         unsafe { self.values.get_unchecked(id.0 as usize) }
     }
 
-    fn alloc_list(&mut self, items: &[ValueId]) -> ValueId {
+    fn alloc_list(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
         let start = self.value_children.len() as u32;
-        let len = items.len() as u16;
+        let len = u16::try_from(items.len())
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
         self.value_children.extend_from_slice(items);
-        self.alloc_val(Value::List(ChildRange::new(start, len)))
+        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
-    fn alloc_tuple(&mut self, items: &[ValueId]) -> ValueId {
+    fn alloc_tuple(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
         let start = self.value_children.len() as u32;
-        let len = items.len() as u16;
+        let len = u16::try_from(items.len())
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
         self.value_children.extend_from_slice(items);
-        self.alloc_val(Value::Tuple(ChildRange::new(start, len)))
+        Ok(self.alloc_val(Value::Tuple(ChildRange::new(start, len))))
     }
 
     fn alloc_object(&mut self, map: FxHashMap<&'ast str, ValueId>) -> ValueId {
@@ -740,17 +742,17 @@ impl<'ast> Evaluator<'ast> {
     fn import_config_field_or_err(&mut self, field: &str, span: Span) -> LowerResult<ValueId> {
         let grammar = self.modules[self.current_module].base_grammar.unwrap();
         match field {
-            "extras" => Ok(self.import_rules_as_list(&grammar.extra_symbols)),
-            "externals" => Ok(self.import_rules_as_list(&grammar.external_tokens)),
-            "inline" => Ok(self.import_names_as_list(&grammar.variables_to_inline)),
-            "supertypes" => Ok(self.import_names_as_list(&grammar.supertype_symbols)),
+            "extras" => self.import_rules_as_list(&grammar.extra_symbols, span),
+            "externals" => self.import_rules_as_list(&grammar.external_tokens, span),
+            "inline" => self.import_names_as_list(&grammar.variables_to_inline, span),
+            "supertypes" => self.import_names_as_list(&grammar.supertype_symbols, span),
             "conflicts" => {
                 let vals: Vec<ValueId> = grammar
                     .expected_conflicts
                     .iter()
-                    .map(|g| self.import_names_as_list(g))
-                    .collect();
-                Ok(self.alloc_list(&vals))
+                    .map(|g| self.import_names_as_list(g, span))
+                    .collect::<LowerResult<_>>()?;
+                self.alloc_list(&vals, span)
             }
             "precedences" => {
                 let vals: Vec<ValueId> = grammar
@@ -767,10 +769,10 @@ impl<'ast> Evaluator<'ast> {
                                 PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s.clone()),
                             })
                             .collect();
-                        self.alloc_list(&inner)
+                        self.alloc_list(&inner, span)
                     })
-                    .collect();
-                Ok(self.alloc_list(&vals))
+                    .collect::<LowerResult<_>>()?;
+                self.alloc_list(&vals, span)
             }
             "word" => {
                 if let Some(name) = &grammar.word_token {
@@ -786,12 +788,12 @@ impl<'ast> Evaluator<'ast> {
                     .map(|ctx| {
                         let name_sid = self.strings.intern_owned(ctx.name.clone());
                         let name_val = self.alloc_val(Value::Str(name_sid));
-                        let words = self.import_rules_as_list(&ctx.reserved_words);
+                        let words = self.import_rules_as_list(&ctx.reserved_words, span)?;
                         let map = FxHashMap::from_iter([("name", name_val), ("words", words)]);
-                        self.alloc_object(map)
+                        Ok(self.alloc_object(map))
                     })
-                    .collect();
-                Ok(self.alloc_list(&sets))
+                    .collect::<LowerResult<_>>()?;
+                self.alloc_list(&sets, span)
             }
             _ => Err(LowerError::new(
                 LowerErrorKind::ModuleMemberNotFound(field.to_string()),
@@ -800,7 +802,7 @@ impl<'ast> Evaluator<'ast> {
         }
     }
 
-    fn import_rules_as_list(&mut self, rules_data: &[Rule]) -> ValueId {
+    fn import_rules_as_list(&mut self, rules_data: &[Rule], span: Span) -> LowerResult<ValueId> {
         let vals: Vec<ValueId> = rules_data
             .iter()
             .map(|r| {
@@ -808,15 +810,15 @@ impl<'ast> Evaluator<'ast> {
                 self.alloc_val(Value::Rule(rid))
             })
             .collect();
-        self.alloc_list(&vals)
+        self.alloc_list(&vals, span)
     }
 
-    fn import_names_as_list(&mut self, names: &[String]) -> ValueId {
+    fn import_names_as_list(&mut self, names: &[String], span: Span) -> LowerResult<ValueId> {
         let vals: Vec<ValueId> = names
             .iter()
             .map(|name| self.owned_symbol_val(name.clone()))
             .collect();
-        self.alloc_list(&vals)
+        self.alloc_list(&vals, span)
     }
 
     fn import_rule(&mut self, rule: &Rule) -> RuleId {
@@ -957,7 +959,7 @@ impl<'ast> Evaluator<'ast> {
                 let mut combined = Vec::with_capacity(li.len() + ri.len());
                 combined.extend_from_slice(li);
                 combined.extend_from_slice(ri);
-                Ok(self.alloc_list(&combined))
+                self.alloc_list(&combined, span)
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
@@ -1012,12 +1014,11 @@ impl<'ast> Evaluator<'ast> {
                 for &item_id in items {
                     vals.push(self.eval_expr(item_id)?);
                 }
-                let val = if matches!(ast.node(id), Node::List(_)) {
-                    self.alloc_list(&vals)
+                if matches!(ast.node(id), Node::List(_)) {
+                    self.alloc_list(&vals, span)
                 } else {
-                    self.alloc_tuple(&vals)
-                };
-                Ok(val)
+                    self.alloc_tuple(&vals, span)
+                }
             }
             Node::Concat(range) => {
                 let mut result = String::new();

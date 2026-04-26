@@ -145,6 +145,11 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::ExpectedRuleName
     }
+    error_qualified_access_in_name_ref_config {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, inline: [base::_inline_rule] }"#,
+        TypeErrorKind::ExpectedRuleName
+    }
     error_int_literal_assigned_to_list_rule {
         r#"grammar { language: "test" }
         let x: list_t<rule_t> = [1, 2]

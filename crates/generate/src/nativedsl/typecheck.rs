@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -450,75 +450,70 @@ fn collect_decls<'a>(
     if let Some(config) = &ctx.grammar_config
         && let Some(ext_id) = config.externals
     {
-        collect_external_names_tc(
-            arena,
-            ctx,
-            ext_id,
-            &mut decls,
+        let mut ec = ExternalNameCtx {
+            decls: &mut decls,
             root_items,
             grammar_path,
             source,
-        )?;
+            visited: FxHashSet::default(),
+        };
+        collect_external_names(arena, ctx, ext_id, &mut ec)?;
     }
 
     Ok(decls)
 }
 
+/// Context for [`collect_external_names`].
+struct ExternalNameCtx<'src, 'a, 'b> {
+    decls: &'a mut Decls<'src>,
+    root_items: &'b [NodeId],
+    grammar_path: &'b Path,
+    source: &'src str,
+    visited: FxHashSet<NodeId>,
+}
+
 /// Recursively collect external token names from an expression.
-fn collect_external_names_tc<'a>(
+fn collect_external_names<'src>(
     arena: &NodeArena,
-    ctx: &'a AstContext,
+    ctx: &'src AstContext,
     id: NodeId,
-    decls: &mut Decls<'a>,
-    root_items: &[NodeId],
-    grammar_path: &Path,
-    source: &'a str,
+    ec: &mut ExternalNameCtx<'src, '_, '_>,
 ) -> Result<(), TypeError> {
+    if !ec.visited.insert(id) {
+        return Err(TypeError::new(
+            TypeErrorKind::InvalidExternalsExpression,
+            arena.span(id),
+        ));
+    }
     match arena.get(id) {
         // Bare identifier: either a let binding (follow it) or an external token name.
         Node::Ident(IdentKind::Unresolved) => {
             let name = ctx.text(arena.span(id));
-            if let Some(value_id) = find_let_value(arena, ctx, root_items, name) {
+            if let Some(value_id) = find_let_value(arena, ctx, ec.root_items, name) {
                 // It's a let binding - recurse into its value.
-                collect_external_names_tc(
-                    arena,
-                    ctx,
-                    value_id,
-                    decls,
-                    root_items,
-                    grammar_path,
-                    source,
-                )?;
-            } else if !decls.contains_key(name) {
+                collect_external_names(arena, ctx, value_id, ec)?;
+            } else if !ec.decls.contains_key(name) {
                 // Unknown bare identifier - register as external token.
                 insert_decl(
-                    decls,
+                    ec.decls,
                     name,
                     Decl::Rule,
                     arena.span(id),
-                    grammar_path,
-                    source,
+                    ec.grammar_path,
+                    ec.source,
                 )?;
             }
         }
         // List: scan children for identifiers.
         Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
             for &child in ctx.child_slice(*range) {
-                collect_external_names_tc(
-                    arena,
-                    ctx,
-                    child,
-                    decls,
-                    root_items,
-                    grammar_path,
-                    source,
-                )?;
+                collect_external_names(arena, ctx, child, ec)?;
             }
         }
         // Append: recurse into both arms.
         Node::Append { left, right } => {
-            collect_external_names_tc(arena, ctx, *left, decls, root_items, grammar_path, source)?;
-            collect_external_names_tc(arena, ctx, *right, decls, root_items, grammar_path, source)?;
+            collect_external_names(arena, ctx, *left, ec)?;
+            collect_external_names(arena, ctx, *right, ec)?;
         }
         // Literals don't introduce names.
         // grammar_config(base).externals - inherited values already registered.
@@ -1004,7 +999,7 @@ fn expect_reserved<'ast>(
     }
     // Non-literal: must be inherited (base.reserved -> Object(ListRule))
     let ty = type_of(ast, id, env, modules)?;
-    if ty == Ty::Object(InnerTy::ListRule) {
+    if ty.is_compatible(Ty::Object(InnerTy::ListRule)) {
         return Ok(());
     }
     Err(TypeError::new(
@@ -1131,10 +1126,10 @@ fn type_of<'ast>(
         Node::Alias { content, target } => {
             expect_rule(ast, *content, env, modules)?;
             let target_ty = type_of(ast, *target, env, modules)?;
-            let is_valid = matches!(
-                ast.node(*target),
-                Node::Ident(IdentKind::Rule | IdentKind::Var)
-            ) || target_ty == Ty::Str;
+            let is_valid = matches!(ast.node(*target), Node::Ident(IdentKind::Rule))
+                || (matches!(ast.node(*target), Node::Ident(IdentKind::Var))
+                    && target_ty.is_rule_like())
+                || target_ty == Ty::Str;
             if !is_valid {
                 return Err(TypeError::new(
                     TypeErrorKind::InvalidAliasTarget(target_ty),
