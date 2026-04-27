@@ -321,6 +321,11 @@ impl ChildRange {
     pub const fn new(start: u32, len: u16) -> Self {
         Self { start, len }
     }
+
+    #[must_use]
+    pub const fn as_range(self) -> std::ops::Range<usize> {
+        self.start as usize..self.start as usize + self.len as usize
+    }
 }
 
 #[derive(Clone)]
