@@ -118,7 +118,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         rule program { prec(identifier, "x") }
         rule identifier { "id" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Rule }
+        TypeErrorKind::PrecValueTypeMismatch(Ty::Rule)
     }
     error_list_inconsistent_types {
         r#"grammar { language: "test" }

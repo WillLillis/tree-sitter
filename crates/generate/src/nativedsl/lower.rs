@@ -143,6 +143,9 @@ struct Evaluator<'ast> {
     scopes: ScopeStack<'ast, ValueId>,
     // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
+    arg_scratch: Vec<ValueId>,
+    val_scratch: Vec<ValueId>,
+    rule_scratch: Vec<RuleId>,
     values: Vec<Value>,
     rules: Vec<ARule>,
     rule_children: Vec<RuleId>,
@@ -244,6 +247,9 @@ fn evaluate(
         current_module: 0,
         scopes: ScopeStack::new(),
         call_stack: Vec::new(),
+        arg_scratch: Vec::new(),
+        val_scratch: Vec::new(),
+        rule_scratch: Vec::new(),
         values: Vec::with_capacity(ast.arena.len()),
         rules: Vec::with_capacity(ast.arena.len()),
         rule_children: Vec::with_capacity(ast.arena.len()),
@@ -436,14 +442,6 @@ impl<'ast> Evaluator<'ast> {
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
-    fn alloc_tuple(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
-        let start = self.value_children.len() as u32;
-        let len = u16::try_from(items.len())
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-        self.value_children.extend_from_slice(items);
-        Ok(self.alloc_val(Value::Tuple(ChildRange::new(start, len))))
-    }
-
     fn alloc_object(&mut self, map: FxHashMap<&'ast str, ValueId>) -> ValueId {
         let idx = self.object_pool.len() as u32;
         self.object_pool.push(map);
@@ -459,10 +457,14 @@ impl<'ast> Evaluator<'ast> {
         ListVal(vid)
     }
     fn list_items(&self, v: ListVal) -> &[ValueId] {
+        &self.value_children[self.list_range(v).as_range()]
+    }
+
+    fn list_range(&self, v: ListVal) -> ChildRange {
         let Value::List(range) = *self.get_val(v.0) else {
             unreachable!()
         };
-        &self.value_children[range.start as usize..range.start as usize + range.len as usize]
+        range
     }
 
     const fn expect_rule(vid: ValueId) -> RuleVal {
@@ -954,12 +956,15 @@ impl<'ast> Evaluator<'ast> {
                 let lv = self.eval_expr(left)?;
                 let rv = self.eval_expr(right)?;
                 // Guarded by super::typecheck::type_of (Node::Append) - ensures both are lists
-                let li = self.list_items(Self::expect_list(lv));
-                let ri = self.list_items(Self::expect_list(rv));
-                let mut combined = Vec::with_capacity(li.len() + ri.len());
-                combined.extend_from_slice(li);
-                combined.extend_from_slice(ri);
-                self.alloc_list(&combined, span)
+                let lr = self.list_range(Self::expect_list(lv));
+                let rr = self.list_range(Self::expect_list(rv));
+                let start = self.value_children.len() as u32;
+                let total = lr.len as usize + rr.len as usize;
+                let len = u16::try_from(total)
+                    .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+                self.value_children.extend_from_within(lr.as_range());
+                self.value_children.extend_from_within(rr.as_range());
+                Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
             }
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
@@ -1010,14 +1015,22 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::List(range) | Node::Tuple(range) => {
                 let items = ast.ctx.child_slice(*range);
-                let mut vals = Vec::with_capacity(items.len());
+                let base = self.val_scratch.len();
                 for &item_id in items {
-                    vals.push(self.eval_expr(item_id)?);
+                    let v = self.eval_expr(item_id)?;
+                    self.val_scratch.push(v);
                 }
+                let start = self.value_children.len() as u32;
+                let len = u16::try_from(self.val_scratch.len() - base)
+                    .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+                self.value_children
+                    .extend_from_slice(&self.val_scratch[base..]);
+                self.val_scratch.truncate(base);
+                let range = ChildRange::new(start, len);
                 if matches!(ast.node(id), Node::List(_)) {
-                    self.alloc_list(&vals, span)
+                    Ok(self.alloc_val(Value::List(range)))
                 } else {
-                    self.alloc_tuple(&vals, span)
+                    Ok(self.alloc_val(Value::Tuple(range)))
                 }
             }
             Node::Concat(range) => {
@@ -1042,26 +1055,32 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::Call { name, args } => {
                 let (name, args) = (*name, *args);
-                let mut arg_vals = Vec::with_capacity(ast.ctx.child_slice(args).len());
+                let fn_name = ast.ctx.text(ast.span(name));
+                let base = self.arg_scratch.len();
                 for &arg_id in ast.ctx.child_slice(args) {
-                    arg_vals.push(self.eval_expr(arg_id)?);
+                    let v = self.eval_expr(arg_id)?;
+                    self.arg_scratch.push(v);
                 }
                 let module = self.current_module;
-                self.call_fn(module, ast.ctx.text(ast.span(name)), &arg_vals, span)
+                let result = self.call_fn(module, fn_name, base, span);
+                self.arg_scratch.truncate(base);
+                result
             }
             Node::QualifiedCall(range) => {
                 let (obj, name, args) = ast.ctx.get_qualified_call(*range);
+                let fn_name = ast.ctx.text(ast.span(name));
                 let obj_val = self.eval_expr(obj)?;
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                // Evaluate args in current AST context
-                let mut arg_vals = Vec::with_capacity(args.len());
+                let base = self.arg_scratch.len();
                 for &arg_id in args {
-                    arg_vals.push(self.eval_expr(arg_id)?);
+                    let v = self.eval_expr(arg_id)?;
+                    self.arg_scratch.push(v);
                 }
-                let fn_name = ast.ctx.text(ast.span(name));
-                self.call_fn(idx as usize, fn_name, &arg_vals, span)
+                let result = self.call_fn(idx as usize, fn_name, base, span);
+                self.arg_scratch.truncate(base);
+                result
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -1111,20 +1130,20 @@ impl<'ast> Evaluator<'ast> {
         match ast.node(id) {
             Node::SeqOrChoice { seq, range } => {
                 let children = ast.ctx.child_slice(*range);
-                // Collect into a temporary Vec before pushing to rule_children.
-                // We can't push directly because nested combinators (e.g.
-                // seq inside choice) also push their children to rule_children
-                // during lower_to_rule. The parent's children must go after.
-                let mut child_ids = Vec::with_capacity(children.len());
+                let base = self.rule_scratch.len();
                 for &member in children {
                     if let Node::For(idx) = ast.node(member) {
-                        child_ids.extend(self.eval_for_to_rules(ast.ctx.get_for(*idx))?);
+                        let for_rules = self.eval_for_to_rules(ast.ctx.get_for(*idx))?;
+                        self.rule_scratch.extend(for_rules);
                     } else {
-                        child_ids.push(self.lower_to_rule(member)?);
+                        let rid = self.lower_to_rule(member)?;
+                        self.rule_scratch.push(rid);
                     }
                 }
                 let start = self.children_start();
-                self.rule_children.extend_from_slice(&child_ids);
+                self.rule_children
+                    .extend_from_slice(&self.rule_scratch[base..]);
+                self.rule_scratch.truncate(base);
                 let (offset, len) = self.children_range(start, ast.span(id))?;
                 Ok(self.alloc_rule(ARule::SeqOrChoice(*seq, offset, len)))
             }
@@ -1245,7 +1264,7 @@ impl<'ast> Evaluator<'ast> {
         &mut self,
         table_id: usize,
         fn_name: &'ast str,
-        arg_vals: &[ValueId],
+        arg_base: usize,
         call_span: Span,
     ) -> LowerResult<ValueId> {
         self.push_call(fn_name, call_span)?;
@@ -1274,7 +1293,8 @@ impl<'ast> Evaluator<'ast> {
             }
         }
         for (i, param) in fn_config.params.iter().enumerate() {
-            self.scopes.insert(fn_ast.ctx.text(param.name), arg_vals[i]);
+            self.scopes
+                .insert(fn_ast.ctx.text(param.name), self.arg_scratch[arg_base + i]);
         }
 
         let result = self.eval_expr(body);
