@@ -200,9 +200,7 @@ fn import_function_uses_own_let_binding() {
         &helper,
         r#"
 let DELIM = ","
-fn delimited(item: rule_t) rule_t {
-    seq(item, repeat(seq(DELIM, item)))
-}
+macro delimited(item: rule_t) rule_t = seq(item, repeat(seq(DELIM, item)))
 "#,
     )
     .unwrap();
@@ -297,7 +295,7 @@ fn error_import_disallowed_items() {
             DisallowedItemKind::OverrideRule,
         ),
         (
-            "grammar { language: \"bad\" }\nfn f(x: rule_t) rule_t { x }",
+            "grammar { language: \"bad\" }\nmacro f(x: rule_t) rule_t = x",
             DisallowedItemKind::GrammarBlock,
         ),
     ] {
@@ -515,7 +513,7 @@ fn import_diamond() {
     std::fs::write(
         &b_path,
         format!(
-            "let h = import(\"{}\")\nfn b_fn(x: rule_t) rule_t {{ prec(h::VAL, x) }}",
+            "let h = import(\"{}\")\nmacro b_fn(x: rule_t) rule_t = prec(h::VAL, x)",
             dsl_path(&helpers_path)
         ),
     )
@@ -523,7 +521,7 @@ fn import_diamond() {
     std::fs::write(
         &c_path,
         format!(
-            "let h = import(\"{}\")\nfn c_fn(x: rule_t) rule_t {{ prec(h::VAL, x) }}",
+            "let h = import(\"{}\")\nmacro c_fn(x: rule_t) rule_t = prec(h::VAL, x)",
             dsl_path(&helpers_path)
         ),
     )
