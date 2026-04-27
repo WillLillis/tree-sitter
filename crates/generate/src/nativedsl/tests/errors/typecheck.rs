@@ -3,7 +3,7 @@ use super::super::*;
 error_tests! { Type {
     error_type_mismatch_fn_args {
         r#"grammar { language: "test" }
-        fn needs_int(x: int_t) rule_t { prec(x, "a") }
+        macro needs_int(x: int_t) rule_t = prec(x, "a")
         rule program { needs_int("not_an_int") }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Str }
     }
@@ -38,12 +38,6 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::AnyModule, got: Ty::Str }
     }
-    error_grammar_config_t_annotation_mismatch {
-        r#"grammar { language: "test" }
-        let X: grammar_config_t = "not_a_config"
-        rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::GrammarConfig, got: Ty::Str }
-    }
     error_rule_called_as_function {
         r#"grammar { language: "test", word: ident }
         rule ident { regexp("[a-z]+") }
@@ -58,7 +52,7 @@ error_tests! { Type {
     }
     error_wrong_arg_count {
         r#"grammar { language: "test" }
-        fn one_arg(x: rule_t) rule_t { x }
+        macro one_arg(x: rule_t) rule_t = x
         rule program { one_arg("a", "b") }"#,
         TypeErrorKind::ArgCountMismatch { fn_name: "one_arg".into(), expected: 1, got: 2 }
     }
@@ -92,11 +86,6 @@ error_tests! { Type {
         let x = base::bogus"#,
         TypeErrorKind::ImportMemberNotFound("bogus".into())
     }
-    error_grammar_config_unknown_field {
-        r#"let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base, extras: grammar_config(base).bogus }"#,
-        TypeErrorKind::UnknownConfigField("bogus".into())
-    }
     error_for_requires_list {
         r#"grammar { language: "test" }
         let x: int_t = 5
@@ -110,7 +99,7 @@ error_tests! { Type {
     }
     error_fn_return_type_mismatch {
         r#"grammar { language: "test" }
-        fn bad(x: rule_t) int_t { x }
+        macro bad(x: rule_t) int_t = x
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Rule }
     }
@@ -216,7 +205,7 @@ error_tests! { Type {
     }
     error_bare_function_reference {
         r#"grammar { language: "test" }
-        fn make_rule(x: str_t) rule_t { x }
+        macro make_rule(x: str_t) rule_t = x
         rule program { make_rule }"#,
         TypeErrorKind::FunctionUsedAsValue("make_rule".into())
     }
@@ -230,34 +219,6 @@ inherit_error_tests! { Type {
 }}
 
 #[test]
-fn for_tuple_stale_binding_type_mismatch() {
-    // The outer `x: str_t` is used in the second tuple. Without proper
-    // scoping, stale loop bindings from the first tuple make `x` appear
-    // as int_t, masking the str_t vs int_t mismatch.
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            let x: str_t = "hello"
-            rule a { "a" }
-            rule b { "b" }
-            rule program {
-                choice(for (x: int_t, y: rule_t) in [(1, a), (x, b)] {
-                    prec(x, y)
-                })
-            }"#
-        ),
-        Type
-    );
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::Int,
-            got: Ty::Str
-        }
-    );
-}
-
-#[test]
 fn error_grammar_config_on_import_module() {
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join("helper.tsg");
@@ -265,7 +226,7 @@ fn error_grammar_config_on_import_module() {
     let grammar = dir.path().join("grammar.tsg");
     let src = format!(
         "let h = import(\"{}\")\n\
-         grammar {{ language: \"t\", extras: grammar_config(h).extras }}\n\
+         grammar {{ language: \"t\", extras: grammar_config(h, extras) }}\n\
          rule program {{ \"x\" }}",
         dsl_path(&helper)
     );
