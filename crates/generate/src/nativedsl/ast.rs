@@ -191,7 +191,6 @@ pub struct Ast {
     pub ctx: AstContext,
 }
 
-/// Immutable context data split from nodes
 pub struct AstContext {
     pub grammar_config: Option<GrammarConfig>,
     pub fn_configs: Vec<FnConfig>,
