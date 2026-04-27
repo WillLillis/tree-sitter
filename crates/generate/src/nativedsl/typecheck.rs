@@ -1460,7 +1460,28 @@ fn check_for_expr<'ast>(
         if has_tuples {
             let mut scope = env.scoped();
             for &item_id in items {
-                check_for_tuple_element(ast, item_id, config, &mut scope, modules)?;
+                let Node::Tuple(range) = ast.node(item_id) else {
+                    return Err(TypeError::new(
+                        TypeErrorKind::ForRequiresTuples,
+                        ast.span(item_id),
+                    ));
+                };
+                let elems = ast.ctx.child_slice(*range);
+                if elems.len() != config.bindings.len() {
+                    return Err(TypeError::new(
+                        TypeErrorKind::ForBindingCountMismatch {
+                            bindings: config.bindings.len(),
+                            tuple_elements: elems.len(),
+                        },
+                        ast.span(item_id),
+                    ));
+                }
+                for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
+                    let actual = type_of(ast, elems[i], &mut scope, modules)?;
+                    if !actual.is_compatible(declared_ty) {
+                        return Err(mismatch(declared_ty, actual, name_span));
+                    }
+                }
             }
             // Insert bindings only after all tuples are validated, so
             // tuple elements are checked against the outer scope
@@ -1494,38 +1515,6 @@ fn check_for_expr<'ast>(
     let mut scope = env.scoped();
     scope.insert_var(ast.ctx.text(name_span), declared_ty);
     expect_rule(ast, config.body, &mut scope, modules)
-}
-
-fn check_for_tuple_element<'ast>(
-    ast: &'ast Ast,
-    item_id: NodeId,
-    config: &super::ast::ForConfig,
-    scope: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
-) -> Result<(), TypeError> {
-    let Node::Tuple(range) = ast.node(item_id) else {
-        return Err(TypeError::new(
-            TypeErrorKind::ForRequiresTuples,
-            ast.span(item_id),
-        ));
-    };
-    let elems = ast.ctx.child_slice(*range);
-    if elems.len() != config.bindings.len() {
-        return Err(TypeError::new(
-            TypeErrorKind::ForBindingCountMismatch {
-                bindings: config.bindings.len(),
-                tuple_elements: elems.len(),
-            },
-            ast.span(item_id),
-        ));
-    }
-    for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
-        let actual = type_of(ast, elems[i], scope, modules)?;
-        if !actual.is_compatible(declared_ty) {
-            return Err(mismatch(declared_ty, actual, name_span));
-        }
-    }
-    Ok(())
 }
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
