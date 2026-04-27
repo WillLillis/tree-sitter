@@ -108,9 +108,4 @@ compile_tests! {
         let aliases: obj_t<str_t> = { open: "<", close: ">" }
         rule program { seq(aliases.open, aliases.close) }"#
     }
-    grammar_config_t_annotation {
-        r#"let base = inherit("inherit_base/grammar.tsg")
-        let cfg: grammar_config_t = grammar_config(base)
-        grammar { language: "derived", inherits: base, word: cfg.word }"#
-    }
 }

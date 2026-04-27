@@ -58,7 +58,7 @@ rule_tests! {
     }
     function_expansion {
         r#"grammar { language: "test" }
-        fn comma_sep(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
+        macro comma_sep(item: rule_t) rule_t = seq(item, repeat(seq(",", item)))
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }"#,
         Rule::seq(vec![
@@ -73,9 +73,8 @@ rule_tests! {
     }
     function_multi_params {
         r#"grammar { language: "test" }
-        fn wrap(before: str_t, content: rule_t, after: str_t) rule_t {
+        macro wrap(before: str_t, content: rule_t, after: str_t) rule_t =
             seq(before, content, after)
-        }
         rule program { wrap("(", identifier, ")") }
         rule identifier { regexp("[a-z]+") }"#,
         Rule::seq(vec![
@@ -113,7 +112,7 @@ fn object_with_list_rule_values() {
 #[test]
 fn function_multiple_calls() {
     let g = dsl(r##"grammar { language: "test" }
-        fn make_if(content: rule_t) rule_t { seq("#if", content, "#endif") }
+        macro make_if(content: rule_t) rule_t = seq("#if", content, "#endif")
         rule preproc_if { make_if(_statement) }
         rule preproc_block_if { make_if(_block_item) }
         rule _statement { "stmt" }
@@ -139,8 +138,8 @@ fn function_multiple_calls() {
 #[test]
 fn nested_function_calls() {
     let g = dsl(r#"grammar { language: "test" }
-        fn comma_sep1(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
-        fn comma_sep(item: rule_t) rule_t { optional(comma_sep1(item)) }
+        macro comma_sep1(item: rule_t) rule_t = seq(item, repeat(seq(",", item)))
+        macro comma_sep(item: rule_t) rule_t = optional(comma_sep1(item))
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }"#);
     assert_eq!(g.variables[0].rule, comma_sep_rule("identifier"));
@@ -207,78 +206,55 @@ fn for_empty_list() {
 }
 
 #[test]
-fn fn_param_shadows_let_binding() {
-    let g = dsl(r#"grammar { language: "test" }
-        let X: str_t = "shadowed"
-        fn wrap(X: rule_t) rule_t { seq("(", X, ")") }
-        rule program { wrap(identifier) }
-        rule identifier { regexp("[a-z]+") }"#);
-    // Function parameter X should shadow the let binding X
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::NamedSymbol("identifier".into()),
-            Rule::String(")".into()),
-        ])
+fn error_macro_param_shadows_let() {
+    let e = assert_err!(
+        dsl_err(r#"grammar { language: "test" }
+            let X: str_t = "shadowed"
+            macro wrap(X: rule_t) rule_t = seq("(", X, ")")
+            rule program { wrap(identifier) }
+            rule identifier { regexp("[a-z]+") }"#),
+        Type
     );
+    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("X".into()));
 }
 
 #[test]
-fn fn_param_shadows_let_object_field_access() {
-    // The fn param `obj` shadows the let-bound object. Field access on the
-    // param should not be validated against the outer object's fields.
-    let g = dsl(r#"grammar { language: "test" }
-        let obj = { a: 1 }
-        fn get_val(obj: obj_t<int_t>) int_t { obj.x }
-        rule program { prec(get_val({ x: 5 }), "y") }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::prec(Precedence::Integer(5), Rule::String("y".into()))
+fn error_for_var_shadows_macro_param() {
+    let e = assert_err!(
+        dsl_err(r#"grammar { language: "test" }
+            macro make(item: str_t) rule_t =
+                choice(for (item: str_t) in ["a", "b"] { item })
+            rule program { make("ignored") }"#),
+        Type
     );
+    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("item".into()));
 }
 
 #[test]
-fn for_var_shadows_fn_param() {
-    let g = dsl(r#"grammar { language: "test" }
-        fn make(item: str_t) rule_t {
-            choice(for (item: str_t) in ["a", "b"] { item })
-        }
-        rule program { make("ignored") }"#);
-    // For-loop variable `item` should shadow the fn parameter `item`
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into()),])
+fn error_for_var_shadows_rule() {
+    let e = assert_err!(
+        dsl_err(r#"grammar { language: "test" }
+            rule program { choice(for (program: str_t) in ["a", "b"] { program }) }"#),
+        Type
     );
+    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("program".into()));
 }
 
 #[test]
-fn for_var_shadows_top_level_rule() {
-    let g = dsl(r#"grammar { language: "test" }
-        rule program { choice(for (program: str_t) in ["a", "b"] { program }) }"#);
-    // For-loop variable `program` should shadow the top-level rule `program`
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())])
+fn error_for_var_shadows_let() {
+    let e = assert_err!(
+        dsl_err(r#"grammar { language: "test" }
+            let X: str_t = "shadowed"
+            rule program { choice(for (X: str_t) in ["a", "b"] { X }) }"#),
+        Type
     );
-}
-
-#[test]
-fn for_var_shadows_let_binding() {
-    let g = dsl(r#"grammar { language: "test" }
-        let X: str_t = "shadowed"
-        rule program { choice(for (X: str_t) in ["a", "b"] { X }) }"#);
-    // For-loop variable `X` should shadow the let binding `X`
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())])
-    );
+    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("X".into()));
 }
 
 #[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
-        r#"grammar { language: "test" } fn f(x: rule_t) rule_t { f(x) } rule program { f("x") }"#,
+        r#"grammar { language: "test" } macro f(x: rule_t) rule_t = f(x) rule program { f("x") }"#,
     );
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));

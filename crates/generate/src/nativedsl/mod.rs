@@ -8,7 +8,6 @@ pub mod diagnostic;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
-mod scope_stack;
 pub mod serialize;
 #[cfg(test)]
 mod tests;
@@ -331,7 +330,7 @@ fn load_child_module(
                 )
             })?;
             Ok(Module {
-                ast: Ast::new(String::new()),
+                ast: Ast::new(String::new(), canonical.clone()),
                 path: canonical,
                 sub_modules: Vec::new(),
                 lowered: Some(grammar),
