@@ -140,10 +140,8 @@ fn json_roundtrip() {
             .expect("grammar JSON serialization should not fail");
     let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
     assert_eq!(grammar.name, reparsed.name);
-    assert_eq!(grammar.variables.len(), reparsed.variables.len());
-    for (orig, re) in grammar.variables.iter().zip(reparsed.variables.iter()) {
-        assert_eq!(orig.name, re.name);
-    }
+    assert_eq!(grammar.variables, reparsed.variables);
+    assert_eq!(grammar.extra_symbols, reparsed.extra_symbols);
 }
 
 #[test]

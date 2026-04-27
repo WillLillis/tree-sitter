@@ -101,10 +101,10 @@ pub fn load_module(
     let global_id = *next_global_id;
     *next_global_id = next_global_id
         .checked_add(1)
-        .ok_or_else(|| LowerError::new(LowerErrorKind::ModuleTooMany, Span::new(0, 0)))?;
+        .ok_or_else(|| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
 
     if source.len() >= u32::MAX as usize {
-        Err(LexError::new(LexErrorKind::InputTooLarge, Span::new(0, 0)))?;
+        Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
     }
 
     let module_dir = path.parent().unwrap();
@@ -193,7 +193,7 @@ pub fn load_module(
 /// Validate: grammar block exists, at most one `inherit()`, inherits field consistency.
 pub fn validate_grammar(ast: &Ast, inherit_node: Option<NodeId>) -> DslResult<()> {
     if ast.ctx.grammar_config.is_none() {
-        return Err(LowerError::new(LowerErrorKind::MissingGrammarBlock, Span::new(0, 0)).into());
+        return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
     }
     let config_inherits = ast.ctx.grammar_config.as_ref().and_then(|c| c.inherits);
 
