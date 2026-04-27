@@ -12,9 +12,9 @@ use crate::{
     rules::{Associativity, Precedence, Rule},
 };
 
-use super::{
-    ast::{Ast, ChildRange, ForConfig, IdentKind, Node, NodeId, PrecKind, RepeatKind, Span},
-    scope_stack::ScopeStack,
+use super::ast::{
+    Ast, ChildRange, ForConfig, IdentKind, Node, NodeId, PrecKind, QueryableField, RepeatKind,
+    Span,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -115,9 +115,6 @@ enum Value {
     /// Range into `Evaluator::value_children`.
     Tuple(ChildRange),
     Module(u8),
-    /// Grammar config accessor - lazily resolves fields on `.` access.
-    /// The `u8` is the module table index.
-    GrammarConfig(u8),
 }
 
 const MAX_CALL_DEPTH: u16 = 64;
@@ -132,14 +129,14 @@ struct ModuleInfo<'ast> {
 struct Evaluator<'ast> {
     // Flat module table (immutable after construction)
     modules: Vec<ModuleInfo<'ast>>,
-    module_fns: Vec<FxHashMap<&'ast str, NodeId>>,
+    module_macros: Vec<FxHashMap<&'ast str, NodeId>>,
     // Per-module let binding values (lazily populated on first access)
     module_values: Vec<Option<FxHashMap<&'ast str, ValueId>>>,
     // Offset: table index = global_id - base_id
     base_id: usize,
     // Current execution state
     current_module: usize,
-    scopes: ScopeStack<'ast, ValueId>,
+    scopes: FxHashMap<&'ast str, ValueId>,
     // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
     arg_scratch: Vec<ValueId>,
@@ -154,11 +151,11 @@ struct Evaluator<'ast> {
 }
 
 /// Collect all `fn` definitions from an AST into a name -> `NodeId` map.
-fn collect_fns(ast: &Ast) -> FxHashMap<&str, NodeId> {
+fn collect_macros(ast: &Ast) -> FxHashMap<&str, NodeId> {
     let mut fns = FxHashMap::default();
     for &item_id in &ast.root_items {
-        if let Node::Fn(fn_idx) = ast.node(item_id) {
-            let config = ast.ctx.get_fn(*fn_idx);
+        if let Node::Macro(fn_idx) = ast.node(item_id) {
+            let config = ast.ctx.get_macro(*fn_idx);
             fns.insert(ast.ctx.text(config.name), item_id);
         }
     }
@@ -194,7 +191,7 @@ fn build_module_table<'ast>(
         path: root_path,
         base_grammar: root_base_grammar,
     }];
-    let mut fns = vec![collect_fns(root_ast)];
+    let mut fns = vec![collect_macros(root_ast)];
 
     fn add_children<'a>(
         modules: &'a [super::Module],
@@ -207,7 +204,7 @@ fn build_module_table<'ast>(
                 path: &m.path,
                 base_grammar: m.lowered.as_ref(),
             });
-            fns.push(collect_fns(&m.ast));
+            fns.push(collect_macros(&m.ast));
             add_children(&m.sub_modules, infos, fns);
         }
     }
@@ -236,15 +233,15 @@ fn evaluate(
     root_global_id: u8,
     root_path: &Path,
 ) -> LowerResult<EvalResult> {
-    let (module_infos, module_fns) = build_module_table(ast, root_path, base_grammar, modules);
+    let (module_infos, module_macros) = build_module_table(ast, root_path, base_grammar, modules);
     let n = module_infos.len();
     let mut eval = Evaluator {
         modules: module_infos,
-        module_fns,
+        module_macros,
         module_values: vec![None; n],
         base_id: root_global_id as usize,
         current_module: 0,
-        scopes: ScopeStack::new(),
+        scopes: FxHashMap::default(),
         call_stack: Vec::new(),
         arg_scratch: Vec::new(),
         val_scratch: Vec::new(),
@@ -261,7 +258,7 @@ fn evaluate(
 
     for &item_id in &ast.root_items {
         match ast.node(item_id) {
-            Node::Grammar | Node::Fn(_) => {}
+            Node::Grammar | Node::Macro(_) => {}
             Node::Let { name, value, .. } => {
                 let val = eval.eval_expr(*value)?;
                 eval.scopes.insert(ast.ctx.text(*name), val);
@@ -738,20 +735,21 @@ impl<'ast> Evaluator<'ast> {
             .collect()
     }
 
-    /// Import a config field from a grammar module as a DSL value.
-    fn import_config_field(
+    /// Evaluate a `grammar_config(module, field)` expression.
+    fn eval_grammar_config(
         &mut self,
         mod_idx: usize,
-        field: &str,
+        field: QueryableField,
         span: Span,
     ) -> LowerResult<ValueId> {
+        use QueryableField as Q;
         let grammar = self.modules[mod_idx].base_grammar.unwrap();
         match field {
-            "extras" => self.import_rules_as_list(&grammar.extra_symbols, span),
-            "externals" => self.import_rules_as_list(&grammar.external_tokens, span),
-            "inline" => self.import_names_as_list(&grammar.variables_to_inline, span),
-            "supertypes" => self.import_names_as_list(&grammar.supertype_symbols, span),
-            "conflicts" => {
+            Q::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
+            Q::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
+            Q::Inline => self.import_names_as_list(&grammar.variables_to_inline, span),
+            Q::Supertypes => self.import_names_as_list(&grammar.supertype_symbols, span),
+            Q::Conflicts => {
                 let vals: Vec<ValueId> = grammar
                     .expected_conflicts
                     .iter()
@@ -759,7 +757,7 @@ impl<'ast> Evaluator<'ast> {
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
             }
-            "precedences" => {
+            Q::Precedences => {
                 let vals: Vec<ValueId> = grammar
                     .precedence_orderings
                     .iter()
@@ -779,14 +777,14 @@ impl<'ast> Evaluator<'ast> {
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
             }
-            "word" => {
+            Q::Word => {
                 if let Some(name) = &grammar.word_token {
                     Ok(self.owned_symbol_val(name.clone()))
                 } else {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
             }
-            "reserved" => {
+            Q::Reserved => {
                 let contexts: Vec<_> = grammar
                     .reserved_words
                     .iter()
@@ -800,10 +798,6 @@ impl<'ast> Evaluator<'ast> {
                 }
                 Ok(self.alloc_object(map))
             }
-            _ => Err(LowerError::new(
-                LowerErrorKind::ModuleMemberNotFound(field.to_string()),
-                span,
-            )),
         }
     }
 
@@ -933,20 +927,20 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_val(Value::Int(-n)))
             }
             // Guarded by super::resolve + typecheck
-            Node::Ident(IdentKind::Unresolved | IdentKind::Fn) => unreachable!(),
+            Node::Ident(IdentKind::Unresolved | IdentKind::Macro) => unreachable!(),
             Node::Ident(IdentKind::Rule) => {
                 let sid = self.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             // Guarded by super::resolve - all variable names validated
-            Node::Ident(IdentKind::Var) => Ok(self.scopes.get(ast.ctx.text(span)).unwrap()),
-            Node::GrammarConfig(inner) => {
-                let inner_val = self.eval_expr(*inner)?;
-                let Value::Module(idx) = *self.get_val(inner_val) else {
+            Node::Ident(IdentKind::Var) => Ok(*self.scopes.get(ast.ctx.text(span)).unwrap()),
+            Node::GrammarConfig { module, field } => {
+                let mod_val = self.eval_expr(*module)?;
+                let Value::Module(idx) = *self.get_val(mod_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                Ok(self.alloc_val(Value::GrammarConfig(idx)))
+                self.eval_grammar_config(idx as usize, *field, span)
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
@@ -976,9 +970,6 @@ impl<'ast> Evaluator<'ast> {
                 match *self.get_val(obj_val) {
                     Value::Object(idx) => {
                         Ok(*self.object_pool[idx as usize].get(field_name).unwrap())
-                    }
-                    Value::GrammarConfig(mod_idx) => {
-                        self.import_config_field(mod_idx as usize, field_name, field)
                     }
                     _ => unreachable!(), // guarded by typecheck
                 }
@@ -1275,9 +1266,9 @@ impl<'ast> Evaluator<'ast> {
         self.push_call(fn_name, call_span)?;
 
         let fn_ast = self.modules[table_id].ast;
-        let &fn_node_id = self.module_fns[table_id].get(fn_name).unwrap();
+        let &fn_node_id = self.module_macros[table_id].get(fn_name).unwrap();
         let fn_config = match fn_ast.node(fn_node_id) {
-            Node::Fn(fi) => fn_ast.ctx.get_fn(*fi),
+            Node::Macro(fi) => fn_ast.ctx.get_macro(*fi),
             _ => unreachable!(),
         };
         let body = fn_config.body;
@@ -1286,12 +1277,11 @@ impl<'ast> Evaluator<'ast> {
         let saved_module = self.current_module;
         let saved_scopes = if cross_module {
             self.current_module = table_id;
-            Some(std::mem::replace(&mut self.scopes, ScopeStack::new()))
+            Some(std::mem::replace(&mut self.scopes, FxHashMap::default()))
         } else {
             None
         };
 
-        self.scopes.push();
         if cross_module {
             for (&name, &val) in self.module_values[table_id].as_ref().unwrap() {
                 self.scopes.insert(name, val);
@@ -1304,7 +1294,11 @@ impl<'ast> Evaluator<'ast> {
 
         let result = self.eval_expr(body);
         self.call_stack.pop();
-        self.scopes.pop();
+
+        // Remove param bindings (no shadowing guarantees safe removal)
+        for param in &fn_config.params {
+            self.scopes.remove(fn_ast.ctx.text(param.name));
+        }
 
         if let Some(saved) = saved_scopes {
             self.current_module = saved_module;
@@ -1321,7 +1315,7 @@ impl<'ast> Evaluator<'ast> {
         }
 
         let saved_module = self.current_module;
-        let saved_scopes = std::mem::replace(&mut self.scopes, ScopeStack::new());
+        let saved_scopes = std::mem::replace(&mut self.scopes, FxHashMap::default());
         self.current_module = table_id;
 
         let result = self.eval_let_bindings();
@@ -1336,7 +1330,6 @@ impl<'ast> Evaluator<'ast> {
     /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> LowerResult<FxHashMap<&'ast str, ValueId>> {
         let n = self.ast().root_items.len();
-        self.scopes.push();
         let mut values = FxHashMap::default();
         for i in 0..n {
             let item_id = self.ast().root_items[i];
@@ -1348,7 +1341,6 @@ impl<'ast> Evaluator<'ast> {
                 values.insert(var_name, val);
             }
         }
-        self.scopes.pop();
         Ok(values)
     }
 
@@ -1358,7 +1350,7 @@ impl<'ast> Evaluator<'ast> {
         let mut results = Vec::with_capacity(n_items);
         for i in 0..n_items {
             let item_id = self.list_items(Self::expect_list(iter_vid))[i];
-            self.scopes.push();
+            // Insert bindings (overwrite per iteration, no shadowing)
             for (j, &(name_span, _)) in config.bindings.iter().enumerate() {
                 let value_id = match *self.get_val(item_id) {
                     Value::Tuple(range) => self.value_children[range.start as usize + j],
@@ -1367,7 +1359,10 @@ impl<'ast> Evaluator<'ast> {
                 self.scopes.insert(self.ast().ctx.text(name_span), value_id);
             }
             results.push(self.lower_to_rule(config.body)?);
-            self.scopes.pop();
+        }
+        // Remove bindings after loop
+        for &(name_span, _) in &config.bindings {
+            self.scopes.remove(self.ast().ctx.text(name_span));
         }
         Ok(results)
     }

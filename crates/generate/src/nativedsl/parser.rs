@@ -8,8 +8,8 @@ use thiserror::Error;
 use super::{
     InnerTy, Note, NoteMessage, ParseError,
     ast::{
-        Ast, ChildRange, FnConfig, ForConfig, GrammarConfig, IdentKind, Node, NodeId, Param,
-        PrecKind, RepeatKind, Span,
+        Ast, ChildRange, MacroConfig, ForConfig, GrammarConfig, IdentKind, Node, NodeId, Param,
+        PrecKind, QueryableField, RepeatKind, Span,
     },
     lexer::{Token, TokenKind},
     typecheck::Ty,
@@ -33,7 +33,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             tokens,
             pos: 0,
             grammar_path,
-            ast: Ast::new(source),
+            ast: Ast::new(source, grammar_path.to_path_buf()),
             scratch: Vec::new(),
             depth: 0,
         }
@@ -214,7 +214,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwRule => self.parse_rule_def(false),
             TokenKind::KwOverride => self.parse_rule_def(true),
             TokenKind::KwLet => self.parse_let_def(),
-            TokenKind::KwFn => self.parse_fn_def(),
+            TokenKind::KwMacro => self.parse_macro_def(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
@@ -324,8 +324,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         ))
     }
 
-    fn parse_fn_def(&mut self) -> ParseResult<NodeId> {
-        let start = self.expect(TokenKind::KwFn)?;
+    fn parse_macro_def(&mut self) -> ParseResult<NodeId> {
+        let start = self.expect(TokenKind::KwMacro)?;
         let name = self.expect_ident()?;
         self.expect(TokenKind::LParen)?;
         let params = self.comma_sep(TokenKind::RParen, |this| {
@@ -339,16 +339,17 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         self.expect(TokenKind::RParen)?;
         self.check_duplicate_names(&params, |p| p.name)?;
         let return_ty = self.parse_type()?.0;
-        self.expect(TokenKind::LBrace)?;
+        self.expect(TokenKind::Eq)?;
         let body = self.parse_expr()?;
-        let end = self.expect(TokenKind::RBrace)?;
-        let fn_idx = self.ast.push_fn(FnConfig {
+        let macro_idx = self.ast.push_macro(MacroConfig {
             name,
             params,
             return_ty,
             body,
         });
-        Ok(self.ast.push(Node::Fn(fn_idx), start.merge(end)))
+        Ok(self
+            .ast
+            .push(Node::Macro(macro_idx), start.merge(self.ast.span(body))))
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -376,7 +377,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                     let gt = self.expect(TokenKind::Gt)?;
                     Ok((ty?, id_span.merge(gt)))
                 }
-                "grammar_config_t" => Ok((Ty::GrammarConfig, id_span)),
                 "spread_t" => Err(ParseError::new(
                     ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
                     id_span,
@@ -470,9 +470,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
                 self.parse_module_path(start, kw, kw == TokenKind::KwImport)
             }
             TokenKind::KwAppend if next_lparen => self.parse_append(start),
-            TokenKind::KwGrammarConfig if next_lparen => {
-                self.parse_unary(start, TokenKind::KwGrammarConfig, Node::GrammarConfig)
-            }
+            TokenKind::KwGrammarConfig if next_lparen => self.parse_grammar_config(start),
             TokenKind::KwFor if next_lparen => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             _ if kw.is_keyword() => self.parse_ident_expr(start),
@@ -529,6 +527,27 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         self.expect_close_args(name, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.ast.push(make(inner), start.merge(end)))
+    }
+
+    /// Parse `grammar_config(module_expr, field_name)`.
+    fn parse_grammar_config(&mut self, start: Span) -> ParseResult<NodeId> {
+        self.advance_pos();
+        self.expect(TokenKind::LParen)?;
+        let module = self.parse_expr()?;
+        self.expect(TokenKind::Comma)?;
+        let field_span = self.expect_name()?;
+        let field_name = self.ast.ctx.text(field_span);
+        let field = QueryableField::try_from(field_name).map_err(|()| {
+            ParseError::new(
+                ParseErrorKind::UnknownGrammarField(field_name.to_string()),
+                field_span,
+            )
+        })?;
+        self.expect_close_args(TokenKind::KwGrammarConfig, 2, start)?;
+        let end = self.expect(TokenKind::RParen)?;
+        Ok(self
+            .ast
+            .push(Node::GrammarConfig { module, field }, start.merge(end)))
     }
 
     /// Parse a two-argument builtin: `name(first, second)`.
@@ -880,7 +899,7 @@ pub enum ParseErrorKind {
     ExpectedExpression,
     #[error("expected type")]
     ExpectedType,
-    #[error("expected 'grammar', 'rule', 'let', or 'fn'")]
+    #[error("expected 'grammar', 'rule', 'let', or 'macro'")]
     ExpectedItem,
     #[error("unknown type '{0}'")]
     UnknownType(String),

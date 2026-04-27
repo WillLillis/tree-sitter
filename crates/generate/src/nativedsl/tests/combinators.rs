@@ -49,7 +49,7 @@ rule_tests! {
     }
     alias_with_variable_target {
         r#"grammar { language: "test" }
-        fn make_alias(target: rule_t) rule_t { alias("x", target) }
+        macro make_alias(target: rule_t) rule_t = alias("x", target)
         rule program { make_alias(some_rule) }
         rule some_rule { "y" }"#,
         Rule::alias(Rule::String("x".into()), "some_rule".to_string(), true)
@@ -157,7 +157,7 @@ fn reserved_multiple_sets() {
 fn reserved_inherited() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
-        grammar { language: "derived", inherits: base, reserved: grammar_config(base).reserved }
+        grammar { language: "derived", inherits: base, reserved: grammar_config(base, reserved) }
     "#);
     assert_eq!(g.reserved_words.len(), 2);
     assert_eq!(g.reserved_words[0].name, "global");
@@ -180,7 +180,7 @@ fn reserved_inherited() {
 fn reserved_empty_inherited() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base, reserved: grammar_config(base).reserved }
+        grammar { language: "derived", inherits: base, reserved: grammar_config(base, reserved) }
     "#);
     assert!(g.reserved_words.is_empty());
 }
