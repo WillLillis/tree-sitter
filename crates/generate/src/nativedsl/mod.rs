@@ -76,7 +76,11 @@ pub enum ModuleKind {
 ///
 /// # Errors
 ///
-/// Returns `Err` if the imported module isn't valid tsg source
+/// Returns `Err` if the imported module isn't valid tsg source.
+///
+/// # Panics
+///
+/// Panics if `path` has no parent directory.
 pub fn load_module(
     source: &str,
     path: &Path,
