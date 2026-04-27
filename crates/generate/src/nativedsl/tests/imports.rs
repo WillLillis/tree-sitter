@@ -293,6 +293,10 @@ fn error_import_disallowed_items() {
     for (content, expected) in [
         ("rule foo { \"x\" }", DisallowedItemKind::Rule),
         (
+            "override rule foo { \"x\" }",
+            DisallowedItemKind::OverrideRule,
+        ),
+        (
             "grammar { language: \"bad\" }\nfn f(x: rule_t) rule_t { x }",
             DisallowedItemKind::GrammarBlock,
         ),

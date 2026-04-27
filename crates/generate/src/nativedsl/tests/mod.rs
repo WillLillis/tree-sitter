@@ -39,6 +39,7 @@ mod bindings;
 mod combinators;
 mod config;
 mod errors;
+mod hardening;
 mod imports;
 mod inheritance;
 mod types;

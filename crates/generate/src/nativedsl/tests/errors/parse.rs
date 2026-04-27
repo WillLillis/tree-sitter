@@ -212,6 +212,31 @@ fn keywords_as_identifiers() {
     assert_eq!(g.variables[0].name, "foo");
 }
 
+#[test]
+fn error_duplicate_fn_param() {
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            fn f(x: rule_t, x: str_t) rule_t { x }
+            rule program { f("a") }"#,
+        ),
+        Parse
+    );
+    assert_eq!(e.kind, ParseErrorKind::DuplicateParameter("x".into()));
+}
+
+#[test]
+fn error_duplicate_for_binding() {
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            rule program { choice(for (x: str_t, x: int_t) in [("a", 1)] { x }) }"#,
+        ),
+        Parse
+    );
+    assert_eq!(e.kind, ParseErrorKind::DuplicateParameter("x".into()));
+}
+
 inherit_error_tests! { Parse {
     error_inherited_parse_error {
         "grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n",

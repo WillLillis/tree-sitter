@@ -116,7 +116,8 @@ enum Value {
     Tuple(ChildRange),
     Module(u8),
     /// Grammar config accessor - lazily resolves fields on `.` access.
-    GrammarConfig,
+    /// The `u8` is the module table index.
+    GrammarConfig(u8),
 }
 
 const MAX_CALL_DEPTH: u16 = 64;
@@ -622,30 +623,38 @@ impl<'ast> Evaluator<'ast> {
         Ok(items.iter().map(|&v| self.value_to_owned_rule(v)).collect())
     }
 
-    fn rule_name_string(&self, v: ValueId) -> String {
+    fn rule_name_string(&self, v: ValueId, span: Span) -> LowerResult<String> {
         let rid = self.rule_id(Self::expect_rule(v));
         let ARule::NamedSymbol(sid) = self.get_rule(rid) else {
-            unreachable!("expect_name_ref guarantees NamedSymbol")
+            return Err(LowerError::new(LowerErrorKind::ExpectedRuleName, span));
         };
-        self.strings.to_string(*sid)
+        Ok(self.strings.to_string(*sid))
     }
 
     fn eval_name_list(&mut self, id: NodeId) -> LowerResult<Vec<String>> {
         let vid = self.eval_expr(id)?;
+        let span = self.ast().span(id);
         let items = self.list_items(Self::expect_list(vid));
-        Ok(items.iter().map(|&v| self.rule_name_string(v)).collect())
+        items
+            .iter()
+            .map(|&v| self.rule_name_string(v, span))
+            .collect()
     }
 
     /// Evaluate a `conflicts` expression into `Vec<Vec<String>>`. Each inner
     /// element must evaluate to a named rule reference.
     fn eval_conflicts(&mut self, id: NodeId) -> LowerResult<Vec<Vec<String>>> {
         let vid = self.eval_expr(id)?;
+        let span = self.ast().span(id);
         let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
             .map(|&group_vid| {
                 let inner = self.list_items(Self::expect_list(group_vid));
-                Ok(inner.iter().map(|&v| self.rule_name_string(v)).collect())
+                inner
+                    .iter()
+                    .map(|&v| self.rule_name_string(v, span))
+                    .collect()
             })
             .collect()
     }
@@ -655,6 +664,7 @@ impl<'ast> Evaluator<'ast> {
     /// or a named rule reference (`PrecedenceEntry::Symbol`).
     fn eval_precedences(&mut self, id: NodeId) -> LowerResult<Vec<Vec<PrecedenceEntry>>> {
         let vid = self.eval_expr(id)?;
+        let span = self.ast().span(id);
         let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
@@ -664,7 +674,9 @@ impl<'ast> Evaluator<'ast> {
                     .iter()
                     .map(|&v| match *self.get_val(v) {
                         Value::Str(sid) => Ok(PrecedenceEntry::Name(self.strings.to_string(sid))),
-                        Value::Rule(_) => Ok(PrecedenceEntry::Symbol(self.rule_name_string(v))),
+                        Value::Rule(_) => {
+                            Ok(PrecedenceEntry::Symbol(self.rule_name_string(v, span)?))
+                        }
                         _ => unreachable!(),
                     })
                     .collect()
@@ -707,35 +719,33 @@ impl<'ast> Evaluator<'ast> {
                 })
                 .collect();
         }
-        // Expression: evaluate to list of {name, words} objects
+        // Expression: evaluate to Object(ListRule), keyed by context name
         let vid = self.eval_expr(id)?;
-        let items = self.list_items(Self::expect_list(vid));
-        items
+        let fields = self.object_fields(Self::expect_object(vid));
+        fields
             .iter()
-            .map(|&v| {
-                let map = self.object_fields(Self::expect_object(v));
-                let name_vid = *map.get("name").unwrap();
-                let words_vid = *map.get("words").unwrap();
-                let name = self
-                    .strings
-                    .to_string(self.str_id(Self::expect_str(name_vid)));
+            .map(|(&name, &words_vid)| {
                 let word_vals = self.list_items(Self::expect_list(words_vid));
                 let words = word_vals
                     .iter()
                     .map(|&wv| self.value_to_owned_rule(wv))
                     .collect();
                 Ok(ReservedWordContext {
-                    name,
+                    name: name.to_string(),
                     reserved_words: words,
                 })
             })
             .collect()
     }
 
-    /// Import a config field from the base grammar as a DSL value.
-    /// Returns an error if the field name is not a known config field.
-    fn import_config_field_or_err(&mut self, field: &str, span: Span) -> LowerResult<ValueId> {
-        let grammar = self.modules[self.current_module].base_grammar.unwrap();
+    /// Import a config field from a grammar module as a DSL value.
+    fn import_config_field(
+        &mut self,
+        mod_idx: usize,
+        field: &str,
+        span: Span,
+    ) -> LowerResult<ValueId> {
+        let grammar = self.modules[mod_idx].base_grammar.unwrap();
         match field {
             "extras" => self.import_rules_as_list(&grammar.extra_symbols, span),
             "externals" => self.import_rules_as_list(&grammar.external_tokens, span),
@@ -777,18 +787,18 @@ impl<'ast> Evaluator<'ast> {
                 }
             }
             "reserved" => {
-                let sets: Vec<ValueId> = grammar
+                let contexts: Vec<_> = grammar
                     .reserved_words
                     .iter()
-                    .map(|ctx| {
-                        let name_sid = self.strings.intern_owned(ctx.name.clone());
-                        let name_val = self.alloc_val(Value::Str(name_sid));
-                        let words = self.import_rules_as_list(&ctx.reserved_words, span)?;
-                        let map = FxHashMap::from_iter([("name", name_val), ("words", words)]);
-                        Ok(self.alloc_object(map))
-                    })
-                    .collect::<LowerResult<_>>()?;
-                self.alloc_list(&sets, span)
+                    .map(|ctx| (ctx.name.as_str(), ctx.reserved_words.as_slice()))
+                    .collect();
+                let mut map =
+                    FxHashMap::with_capacity_and_hasher(contexts.len(), rustc_hash::FxBuildHasher);
+                for (name, words) in contexts {
+                    let words_vid = self.import_rules_as_list(words, span)?;
+                    map.insert(name, words_vid);
+                }
+                Ok(self.alloc_object(map))
             }
             _ => Err(LowerError::new(
                 LowerErrorKind::ModuleMemberNotFound(field.to_string()),
@@ -933,10 +943,10 @@ impl<'ast> Evaluator<'ast> {
             Node::Ident(IdentKind::Var) => Ok(self.scopes.get(ast.ctx.text(span)).unwrap()),
             Node::GrammarConfig(inner) => {
                 let inner_val = self.eval_expr(*inner)?;
-                let Value::Module(_) = *self.get_val(inner_val) else {
+                let Value::Module(idx) = *self.get_val(inner_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                Ok(self.alloc_val(Value::GrammarConfig))
+                Ok(self.alloc_val(Value::GrammarConfig(idx)))
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
@@ -967,7 +977,9 @@ impl<'ast> Evaluator<'ast> {
                     Value::Object(idx) => {
                         Ok(*self.object_pool[idx as usize].get(field_name).unwrap())
                     }
-                    Value::GrammarConfig => self.import_config_field_or_err(field_name, field),
+                    Value::GrammarConfig(mod_idx) => {
+                        self.import_config_field(mod_idx as usize, field_name, field)
+                    }
                     _ => unreachable!(), // guarded by typecheck
                 }
             }
@@ -1173,10 +1185,11 @@ impl<'ast> Evaluator<'ast> {
                     match self.get_val(vid) {
                         Value::Str(s) => Ok(self.alloc_rule(ARule::Alias(*s, false, inner))),
                         Value::Rule(rid) => {
-                            // Guarded by super::typecheck::type_of (Node::Alias) -
-                            // InvalidAliasTarget rejects non-name/non-str targets
                             let ARule::NamedSymbol(s) = self.get_rule(*rid) else {
-                                unreachable!()
+                                return Err(LowerError::new(
+                                    LowerErrorKind::ExpectedRuleName,
+                                    ast.span(target),
+                                ));
                             };
                             Ok(self.alloc_rule(ARule::Alias(*s, true, inner)))
                         }
