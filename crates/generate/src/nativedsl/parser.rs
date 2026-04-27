@@ -448,11 +448,8 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             TokenKind::KwReserved if next_lparen => self.parse_reserved_expr(start),
             TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
-            TokenKind::KwInherit if next_lparen => {
-                self.parse_module_path(start, TokenKind::KwInherit, false)
-            }
-            TokenKind::KwImport if next_lparen => {
-                self.parse_module_path(start, TokenKind::KwImport, true)
+            TokenKind::KwInherit | TokenKind::KwImport if next_lparen => {
+                self.parse_module_path(start, kw, kw == TokenKind::KwImport)
             }
             TokenKind::KwAppend if next_lparen => self.parse_append(start),
             TokenKind::KwGrammarConfig if next_lparen => {
@@ -460,8 +457,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             }
             TokenKind::KwFor if next_lparen => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
-            // Keyword used as identifier (e.g. `import` as a rule reference)
-            k if k.is_keyword() => self.parse_ident_expr(start),
+            _ if kw.is_keyword() => self.parse_ident_expr(start),
             TokenKind::StringLit => {
                 self.advance_pos();
                 Ok(self.ast.push(Node::StringLit, start.strip_quotes()))
@@ -557,7 +553,13 @@ impl<'tok, 'path> Parser<'tok, 'path> {
     }
 
     fn parse_prec(&mut self, start: Span, kind: PrecKind) -> ParseResult<NodeId> {
-        let (value, content, end) = self.parse_binary(start, kind.into(), Self::parse_expr)?;
+        let kw = match kind {
+            PrecKind::Default => TokenKind::KwPrec,
+            PrecKind::Left => TokenKind::KwPrecLeft,
+            PrecKind::Right => TokenKind::KwPrecRight,
+            PrecKind::Dynamic => TokenKind::KwPrecDynamic,
+        };
+        let (value, content, end) = self.parse_binary(start, kw, Self::parse_expr)?;
         Ok(self.ast.push(
             Node::Prec {
                 kind,
@@ -806,17 +808,6 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             }
         }
         Ok(items)
-    }
-}
-
-impl From<PrecKind> for TokenKind {
-    fn from(value: PrecKind) -> Self {
-        match value {
-            PrecKind::Default => Self::KwPrec,
-            PrecKind::Left => Self::KwPrecLeft,
-            PrecKind::Right => Self::KwPrecRight,
-            PrecKind::Dynamic => Self::KwPrecDynamic,
-        }
     }
 }
 

@@ -37,21 +37,31 @@ use crate::grammars::InputGrammar;
 use ast::{Ast, IdentKind, Node, NodeId, Span};
 use typecheck::TypeEnv;
 
+fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
+    dunce::canonicalize(path).map_err(|e| {
+        LowerError::new(
+            LowerErrorKind::ModuleResolveFailed {
+                path: path.to_path_buf(),
+                error: e.to_string(),
+            },
+            span,
+        )
+        .into()
+    })
+}
+
 /// Parse a native DSL source file into an [`InputGrammar`].
 ///
 /// # Errors
 ///
 /// Returns [`DslError`] if any pipeline stage fails.
+///
+/// # Panics
+///
+/// Panics if `grammar_path` cannot be canonicalized.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
-    let canonical = dunce::canonicalize(grammar_path).map_err(|e| {
-        LowerError::new(
-            LowerErrorKind::ModuleResolveFailed {
-                path: grammar_path.display().to_string(),
-                error: e.to_string(),
-            },
-            Span::new(0, 0),
-        )
-    })?;
+    let canonical = dunce::canonicalize(grammar_path)
+        .expect("grammar path should be canonicalizable (file was already read)");
     let module = load_module(
         input,
         grammar_path,
@@ -266,20 +276,12 @@ fn load_child_module(
     }
 
     let full_path = module_dir.join(path_str);
-    let canonical = dunce::canonicalize(&full_path).map_err(|e| {
-        LowerError::new(
-            LowerErrorKind::ModuleResolveFailed {
-                path: full_path.display().to_string(),
-                error: e.to_string(),
-            },
-            span,
-        )
-    })?;
+    let canonical = resolve_path(&full_path, span)?;
 
     let content = std::fs::read_to_string(&full_path).map_err(|e| {
         LowerError::new(
             LowerErrorKind::ModuleReadFailed {
-                path: full_path.display().to_string(),
+                path: full_path.clone(),
                 error: e.to_string(),
             },
             span,
@@ -322,7 +324,7 @@ fn load_child_module(
             let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
                     LowerErrorKind::ModuleJsonError {
-                        path: canonical.display().to_string(),
+                        path: canonical.clone(),
                         error: e,
                     },
                     span,
@@ -397,15 +399,7 @@ fn load_import_children(
         };
 
         let path_str = ast.ctx.text(path);
-        let canonical = dunce::canonicalize(module_dir.join(path_str)).map_err(|e| {
-            LowerError::new(
-                LowerErrorKind::ModuleResolveFailed {
-                    path: module_dir.join(path_str).display().to_string(),
-                    error: e.to_string(),
-                },
-                path,
-            )
-        })?;
+        let canonical = resolve_path(&module_dir.join(path_str), path)?;
 
         let idx = if let Some(&idx) = loaded.get(&canonical) {
             idx

@@ -1235,26 +1235,25 @@ impl<'ast> Evaluator<'ast> {
     fn push_call(&mut self, name: &'ast str, span: Span) -> LowerResult<()> {
         self.call_stack.push((name, span, self.current_module));
         if self.call_stack.len() > MAX_CALL_DEPTH as usize {
-            return Err(self.build_call_depth_error());
+            let trace = self
+                .call_stack
+                .iter()
+                .map(|(name, span, mod_idx)| {
+                    let info = &self.modules[*mod_idx];
+                    let offset = span.start as usize;
+                    let bytes = &info.ast.ctx.source.as_bytes()[..offset];
+                    let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
+                    let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
+                    (name.to_string(), info.path.to_path_buf(), line, col)
+                })
+                .collect();
+            let root_span = self.call_stack[0].1;
+            return Err(LowerError::new(
+                LowerErrorKind::CallDepthExceeded(trace),
+                root_span,
+            ));
         }
         Ok(())
-    }
-
-    fn build_call_depth_error(&self) -> LowerError {
-        let trace = self
-            .call_stack
-            .iter()
-            .map(|(name, span, mod_idx)| {
-                let info = &self.modules[*mod_idx];
-                let offset = span.start as usize;
-                let bytes = &info.ast.ctx.source.as_bytes()[..offset];
-                let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
-                let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
-                (name.to_string(), info.path.to_path_buf(), line, col)
-            })
-            .collect();
-        let root_span = self.call_stack[0].1;
-        LowerError::new(LowerErrorKind::CallDepthExceeded(trace), root_span)
     }
 
     /// Call a function, either in the current module or an imported one.
@@ -1409,13 +1408,13 @@ pub enum LowerErrorKind {
     OverrideRuleNotFound(Vec<String>),
     #[error("'override rule' requires a grammar with 'inherits'")]
     OverrideWithoutInherit,
-    #[error("failed to resolve '{path}': {error}")]
-    ModuleResolveFailed { path: String, error: String },
-    #[error("failed to read '{path}': {error}")]
-    ModuleReadFailed { path: String, error: String },
-    #[error("failed to parse '{path}': {error}")]
+    #[error("failed to resolve '{}': {error}", path.display())]
+    ModuleResolveFailed { path: PathBuf, error: String },
+    #[error("failed to read '{}': {error}", path.display())]
+    ModuleReadFailed { path: PathBuf, error: String },
+    #[error("failed to parse '{}': {error}", path.display())]
     ModuleJsonError {
-        path: String,
+        path: PathBuf,
         error: crate::parse_grammar::ParseGrammarError,
     },
     #[error("unsupported file extension, expected .tsg or .json")]
