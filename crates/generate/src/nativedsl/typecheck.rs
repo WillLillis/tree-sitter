@@ -1169,7 +1169,10 @@ fn type_of<'ast>(
                     return Err(mismatch(Ty::Int, vt, ast.span(*value)));
                 }
             } else if vt != Ty::Int && vt != Ty::Str {
-                return Err(mismatch(Ty::Int, vt, ast.span(*value)));
+                return Err(TypeError::new(
+                    TypeErrorKind::PrecValueTypeMismatch(vt),
+                    ast.span(*value),
+                ));
             }
             expect_rule(ast, *content, env, modules)?;
             Ok(Ty::Rule)
@@ -1574,6 +1577,8 @@ pub enum TypeErrorKind {
     UnknownConfigField(String),
     #[error("alias target must be a name or string, got {0}")]
     InvalidAliasTarget(Ty),
+    #[error("prec value must be int_t or str_t, got {0}")]
+    PrecValueTypeMismatch(Ty),
     #[error("expected a rule name")]
     ExpectedRuleName,
     #[error("reserved config must be an object literal or inherited")]

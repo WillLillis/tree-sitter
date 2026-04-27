@@ -20,87 +20,114 @@ pub struct NativeDslError {
 
 impl std::fmt::Display for NativeDslError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Module errors: render the inner error with the child file's context,
-        // then append a note pointing back to the import/inherit in the parent.
-        if let DslError::Module(e) = &self.error {
-            write!(f, "{e}")?;
-            render_note_snippet(
-                f,
-                e.reference_span,
-                &self.src,
-                &self.path,
-                &NoteMessage::ReferencedFromHere,
-            )?;
+        if let DslError::Module(_) = &self.error {
+            // Walk the Module chain to find the leaf error and collect
+            // intermediate ModuleErrors for the reference note chain.
+            let mut modules = Vec::new();
+            let mut current = &self.error;
+            while let DslError::Module(m) = current {
+                modules.push(m);
+                current = &m.inner;
+            }
+            let innermost = modules.last().unwrap();
+
+            // Render the leaf error with the innermost module's source context
+            render_error(f, current, &innermost.source_text, &innermost.path)?;
+
+            // Render "referenced from" notes from innermost to outermost
+            for i in (0..modules.len()).rev() {
+                let (parent_src, parent_path): (&str, &Path) = if i > 0 {
+                    (&modules[i - 1].source_text, &modules[i - 1].path)
+                } else {
+                    (&self.src, &self.path)
+                };
+                render_note_snippet(
+                    f,
+                    modules[i].reference_span,
+                    parent_src,
+                    parent_path,
+                    &NoteMessage::ReferencedFromHere,
+                )?;
+            }
             return Ok(());
         }
 
-        let ctx = SpanContext::new(self.error.span(), &self.src);
-        let path_display = self.path.display();
-        let gutter_width = digit_count(ctx.line_num);
-        let pipe = paint(AnsiColor::Cyan, "|");
-        let underline = paint(AnsiColor::Red, &"^".repeat(ctx.underline_len));
+        render_error(f, &self.error, &self.src, &self.path)
+    }
+}
 
-        writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), self.error)?;
+fn render_error(
+    f: &mut std::fmt::Formatter<'_>,
+    error: &DslError,
+    src: &str,
+    path: &Path,
+) -> std::fmt::Result {
+    let ctx = SpanContext::new(error.span(), src);
+    let path_display = path.display();
+    let gutter_width = digit_count(ctx.line_num);
+    let pipe = paint(AnsiColor::Cyan, "|");
+    let underline = paint(AnsiColor::Red, &"^".repeat(ctx.underline_len));
+
+    writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
+    writeln!(
+        f,
+        " {} {path_display}:{line_num}:{col}",
+        paint(AnsiColor::Cyan, "-->"),
+        line_num = ctx.line_num,
+        col = ctx.col,
+    )?;
+    writeln!(f, " {:>gutter_width$} {pipe}", "")?;
+    if let Some(prev_text) = ctx.prev_line_text {
         writeln!(
             f,
-            " {} {path_display}:{line_num}:{col}",
-            paint(AnsiColor::Cyan, "-->"),
-            line_num = ctx.line_num,
-            col = ctx.col,
+            " {} {pipe} {prev_text}",
+            paint(AnsiColor::Cyan, &ctx.prev_line_num.to_string()),
         )?;
-        writeln!(f, " {:>gutter_width$} {pipe}", "")?;
-        if let Some(prev_text) = ctx.prev_line_text {
-            writeln!(
-                f,
-                " {} {pipe} {prev_text}",
-                paint(AnsiColor::Cyan, &ctx.prev_line_num.to_string()),
-            )?;
-        }
-        writeln!(
-            f,
-            " {} {pipe} {}",
-            paint(AnsiColor::Cyan, &ctx.line_num.to_string()),
-            ctx.line_text,
-        )?;
-        write!(
-            f,
-            " {:>gutter_width$} {pipe} {:>width$}{underline}",
-            "",
-            "",
-            width = ctx.span_start_in_line,
-        )?;
+    }
+    writeln!(
+        f,
+        " {} {pipe} {}",
+        paint(AnsiColor::Cyan, &ctx.line_num.to_string()),
+        ctx.line_text,
+    )?;
+    write!(
+        f,
+        " {:>gutter_width$} {pipe} {:>width$}{underline}",
+        "",
+        "",
+        width = ctx.span_start_in_line,
+    )?;
 
-        if let Some(note) = self.error.note() {
-            render_note_snippet(f, note.span, &note.source, &note.path, &note.message)?;
-        }
+    if let Some(note) = error.note() {
+        render_note_snippet(f, note.span, &note.source, &note.path, &note.message)?;
+    }
 
-        if let Some(trace) = self.error.call_trace() {
-            let show = 3;
-            let elided = trace.len().saturating_sub(show * 2);
-            writeln!(f)?;
-            writeln!(f, " {} call trace:", paint(AnsiColor::Cyan, "="))?;
-            for (i, (name, path, line, col)) in trace.iter().enumerate() {
-                if elided > 0 && i == show {
-                    writeln!(
-                        f,
-                        "   {} ... {elided} more frames ...",
-                        paint(AnsiColor::Cyan, "...")
-                    )?;
-                }
-                if i >= show && i < trace.len() - show {
-                    continue;
-                }
+    if let Some(trace) = error.call_trace() {
+        let show = 3;
+        let elided = trace.len().saturating_sub(show * 2);
+        writeln!(f)?;
+        writeln!(f, " {} call trace:", paint(AnsiColor::Cyan, "="))?;
+        for (i, (name, path, line, col)) in trace.iter().enumerate() {
+            if elided > 0 && i == show {
                 writeln!(
                     f,
-                    "   {} {}:{line}:{col} in {name}()",
-                    paint(AnsiColor::Cyan, "-->"),
-                    path.display(),
+                    "   {} ... {elided} more frames ...",
+                    paint(AnsiColor::Cyan, "...")
                 )?;
             }
+            if i >= show && i < trace.len() - show {
+                continue;
+            }
+            writeln!(
+                f,
+                "   {} {}:{line}:{col} in {name}()",
+                paint(AnsiColor::Cyan, "-->"),
+                path.display(),
+            )?;
         }
-
-        Ok(())
     }
+
+    Ok(())
 }
 
 fn render_note_snippet(
