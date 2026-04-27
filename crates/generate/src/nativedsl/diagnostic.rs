@@ -62,7 +62,11 @@ fn render_error(
     src: &str,
     path: &Path,
 ) -> std::fmt::Result {
-    let ctx = SpanContext::new(error.span(), src);
+    let Some(span) = error.span() else {
+        write!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
+        return Ok(());
+    };
+    let ctx = SpanContext::new(span, src);
     let path_display = path.display();
     let gutter_width = digit_count(ctx.line_num);
     let pipe = paint(AnsiColor::Cyan, "|");

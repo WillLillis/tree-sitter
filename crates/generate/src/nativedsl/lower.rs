@@ -22,8 +22,6 @@ struct Str(NonZeroU32);
 
 enum StrEntry<'src> {
     Unreachable,
-    /// Span into a source string, captured at intern time so that entries
-    /// from different modules (import/inherit) resolve correctly.
     Source(Span, &'src str),
     Owned(String),
 }
@@ -447,11 +445,6 @@ impl<'ast> Evaluator<'ast> {
         self.object_pool.push(map);
         self.alloc_val(Value::Object(idx))
     }
-
-    // `expect_*` wraps a `ValueId` in a typed newtype. The compile-time
-    // safety comes from the wrapper: you can't call `list_items` without
-    // going through `expect_list`. Each accessor has a single `unreachable!`
-    // as the runtime safety net.
 
     const fn expect_list(vid: ValueId) -> ListVal {
         ListVal(vid)
