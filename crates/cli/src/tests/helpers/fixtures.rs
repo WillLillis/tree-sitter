@@ -63,7 +63,6 @@ fn get_test_fixture_language_internal(name: &str, wasm: bool) -> Language {
     get_test_language_internal(&parser_name, &parser_code, Some(&grammar_dir_path), wasm)
 }
 
-/// Find the grammar file in a directory, checking for `.tsg`, `.js`, and `.json` extensions.
 pub fn find_grammar_file(dir: &Path) -> Option<PathBuf> {
     for ext in ["tsg", "js", "json"] {
         let path = dir.join(format!("grammar.{ext}"));

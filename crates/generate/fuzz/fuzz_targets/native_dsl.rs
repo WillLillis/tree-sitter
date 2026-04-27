@@ -4,11 +4,17 @@ use libfuzzer_sys::fuzz_target;
 use std::path::Path;
 use std::sync::Once;
 
-static SEED: Once = Once::new();
+static INIT: Once = Once::new();
+static FUZZ_GRAMMAR: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+    let path = std::env::temp_dir().join("fuzz_grammar.tsg");
+    // parse_native_dsl requires the grammar path to be canonicalizable
+    std::fs::write(&path, "").unwrap();
+    path
+});
 
 fuzz_target!(|data: &str| {
-    SEED.call_once(seed_corpus);
-    let _ = tree_sitter_generate::nativedsl::parse_native_dsl(data, Path::new("/tmp/grammar.tsg"));
+    INIT.call_once(seed_corpus);
+    let _ = tree_sitter_generate::nativedsl::parse_native_dsl(data, &FUZZ_GRAMMAR);
 });
 
 /// Copy seed files into the corpus directory on first run.

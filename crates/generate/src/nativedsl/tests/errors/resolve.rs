@@ -91,7 +91,7 @@ fn error_duplicate_declaration_has_note() {
     // The note span should point to the first declaration, not the duplicate.
     // "rule foo { "a" }" starts at byte 29.
     assert!(
-        note.span.start < e.span.start,
+        note.span.start < e.span.unwrap().start,
         "note span should precede error span"
     );
 }

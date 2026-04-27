@@ -474,9 +474,7 @@ fn read_grammar_version(repo_path: &Path) -> Result<Option<Version>, ParseVersio
     }
 }
 
-/// Find the grammar file in a directory. Falls back to `grammar.js` if none
-/// are found (so that the existing error message about a missing file is
-/// preserved).
+/// Find the grammar file in a directory.
 #[cfg(feature = "load")]
 fn find_grammar_file(dir: &Path) -> PathBuf {
     #[cfg(feature = "nativedsl")]

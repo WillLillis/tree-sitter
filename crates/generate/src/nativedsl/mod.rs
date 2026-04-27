@@ -294,7 +294,7 @@ fn load_child_module(
             reason = "bad move semantics"
         )]
         return Err(ModuleError {
-            inner: Box::new(LowerError::new(LowerErrorKind::ModuleCycle, span).into()),
+            inner: Box::new(LowerError::without_span(LowerErrorKind::ModuleCycle).into()),
             source_text: content,
             path: canonical,
             reference_span: span,
@@ -474,7 +474,7 @@ pub type DslResult<T> = Result<T, DslError>;
 #[derive(Debug, Serialize)]
 pub struct Diagnostic<K> {
     pub kind: K,
-    pub span: Span,
+    pub span: Option<Span>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<Box<Note>>,
 }
@@ -483,7 +483,15 @@ impl<K> Diagnostic<K> {
     pub const fn new(kind: K, span: Span) -> Self {
         Self {
             kind,
-            span,
+            span: Some(span),
+            note: None,
+        }
+    }
+
+    pub const fn without_span(kind: K) -> Self {
+        Self {
+            kind,
+            span: None,
             note: None,
         }
     }
@@ -491,7 +499,7 @@ impl<K> Diagnostic<K> {
     pub fn with_note(kind: K, span: Span, note: Note) -> Self {
         Self {
             kind,
-            span,
+            span: Some(span),
             note: Some(Box::new(note)),
         }
     }
@@ -559,13 +567,13 @@ impl std::fmt::Display for NoteMessage {
 
 impl DslError {
     #[must_use]
-    pub const fn span(&self) -> Span {
+    pub const fn span(&self) -> Option<Span> {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
-            Self::Module(e) => e.reference_span,
+            Self::Module(e) => Some(e.reference_span),
         }
     }
 
