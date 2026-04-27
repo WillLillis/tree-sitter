@@ -143,8 +143,7 @@ fn nested_function_calls() {
         fn comma_sep(item: rule_t) rule_t { optional(comma_sep1(item)) }
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }"#);
-    assert_eq!(g.variables.len(), 2);
-    assert!(matches!(&g.variables[0].rule, Rule::Choice(_)));
+    assert_eq!(g.variables[0].rule, comma_sep_rule("identifier"));
 }
 
 #[test]

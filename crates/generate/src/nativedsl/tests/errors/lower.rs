@@ -162,3 +162,37 @@ fn error_inherit_rule_not_found() {
         TypeErrorKind::ImportMemberNotFound("nonexistent_rule".into())
     );
 }
+
+#[test]
+fn error_alias_non_name_rule_via_var() {
+    // A variable holding a non-name rule (e.g. seq) passed as alias target
+    // should produce a proper error, not panic.
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            fn make_alias(target: rule_t) rule_t { alias("x", target) }
+            rule a { "a" }
+            rule b { "b" }
+            rule program { make_alias(seq(a, b)) }"#
+        ),
+        Lower
+    );
+    assert_eq!(e.kind, LowerErrorKind::ExpectedRuleName);
+}
+
+#[test]
+fn error_inline_non_name_rule_via_var() {
+    // A variable holding a non-name rule in config name-lists (inline,
+    // supertypes, conflicts) should produce a proper error, not panic.
+    let e = assert_err!(
+        dsl_err(
+            r#"let x = seq(a, b)
+            grammar { language: "test", inline: [x] }
+            rule a { "a" }
+            rule b { "b" }
+            rule program { a }"#
+        ),
+        Lower
+    );
+    assert_eq!(e.kind, LowerErrorKind::ExpectedRuleName);
+}

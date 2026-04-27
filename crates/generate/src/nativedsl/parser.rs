@@ -158,6 +158,23 @@ impl<'tok, 'path> Parser<'tok, 'path> {
         }
     }
 
+    fn check_duplicate_names<T>(&self, items: &[T], name_of: fn(&T) -> Span) -> ParseResult<()> {
+        for i in 1..items.len() {
+            let span = name_of(&items[i]);
+            let name = self.ast.ctx.text(span);
+            for item in items.iter().take(i) {
+                if self.ast.ctx.text(name_of(item)) == name {
+                    return Err(ParseError::with_note(
+                        ParseErrorKind::DuplicateParameter(name.to_string()),
+                        span,
+                        self.first_defined_note(name_of(item)),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cold]
     fn err_arg_count(&self, name: TokenKind, expected: u8, got: usize, start: Span) -> ParseError {
         ParseError::new(
@@ -320,6 +337,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
+        self.check_duplicate_names(&params, |p| p.name)?;
         let return_ty = self.parse_type()?.0;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
@@ -642,6 +660,7 @@ impl<'tok, 'path> Parser<'tok, 'path> {
             Ok((name, this.parse_type()?.0))
         })?;
         self.expect(TokenKind::RParen)?;
+        self.check_duplicate_names(&bindings, |&(s, _)| s)?;
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
         self.expect(TokenKind::LBrace)?;
@@ -879,6 +898,8 @@ pub enum ParseErrorKind {
     DuplicateObjectKey(String),
     #[error("only identifiers can be used as function names")]
     ExpectedFunctionName,
+    #[error("duplicate parameter name '{0}'")]
+    DuplicateParameter(String),
     #[error("only one grammar block is allowed")]
     DuplicateGrammarBlock,
     #[error("grammar block must have a 'language' field")]

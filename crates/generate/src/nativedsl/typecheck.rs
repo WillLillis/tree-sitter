@@ -85,11 +85,14 @@ pub enum Ty {
     ListListRule,
     ListListStr,
     ListListInt,
-    /// Result of `inherit(...)` or `import(...)`: a loaded module namespace.
+    /// Result of `import(...)`: a helper module namespace.
     /// Members accessed via `::`. The `u8` indexes into the module list.
-    Module(u8),
+    ImportModule(u8),
+    /// Result of `inherit(...)`: a grammar module with rules and config.
+    /// Members accessed via `::`, config accessed via `grammar_config()`.
+    GrammarModule(u8),
     /// User-facing module type annotation (`module_t`). Matches any
-    /// concrete `Module(idx)` via `is_compatible`.
+    /// concrete module via `is_compatible`.
     AnyModule,
     /// Result of `grammar_config(module)`: the grammar config of a module.
     /// Field access (`.extras`, `.word`, etc.) returns per-field types.
@@ -115,7 +118,8 @@ impl Ty {
             || (self == Self::Str && expected == Self::Rule)
             || (self == Self::ListStr && expected == Self::ListRule)
             || (self == Self::ListListStr && expected == Self::ListListRule)
-            || (matches!(self, Self::Module(_)) && expected == Self::AnyModule)
+            || (matches!(self, Self::ImportModule(_) | Self::GrammarModule(_))
+                && expected == Self::AnyModule)
             || matches!(
                 (self, expected),
                 (Self::Object(InnerTy::Str), Self::Object(InnerTy::Rule))
@@ -175,7 +179,9 @@ impl std::fmt::Display for Ty {
             Self::ListListRule => f.write_str("list_t<list_t<rule_t>>"),
             Self::ListListStr => f.write_str("list_t<list_t<str_t>>"),
             Self::ListListInt => f.write_str("list_t<list_t<int_t>>"),
-            Self::Module(_) | Self::AnyModule => f.write_str("module_t"),
+            Self::ImportModule(_) | Self::GrammarModule(_) | Self::AnyModule => {
+                f.write_str("module_t")
+            }
             Self::GrammarConfig => f.write_str("grammar_config_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Object(inner) => write!(f, "obj_t<{inner}>"),
@@ -762,7 +768,7 @@ fn resolve_children_tc(
 /// Run typechecking and return the type environment.
 ///
 /// `modules` holds imported modules' type environments (indexed by
-/// `Ty::Module(idx)`), populated by the import pre-pass in `mod.rs`.
+/// `Ty::ImportModule(idx)` / `Ty::GrammarModule(idx)`), populated by the import pre-pass.
 pub fn check<'ast>(
     ast: &'ast Ast,
     modules: &[Option<TypeEnv<'ast>>],
@@ -1052,15 +1058,19 @@ fn type_of<'ast>(
         Node::IntLit(_) => Ok(Ty::Int),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
         Node::Ident(IdentKind::Rule) | Node::Blank => Ok(Ty::Rule),
-        Node::ModuleRef { module, .. } => {
+        Node::ModuleRef { import, module, .. } => {
             let idx = module.expect("module index not set by loading pre-pass");
-            Ok(Ty::Module(idx))
+            Ok(if *import {
+                Ty::ImportModule(idx)
+            } else {
+                Ty::GrammarModule(idx)
+            })
         }
         Node::GrammarConfig(inner) => {
             let inner_ty = type_of(ast, *inner, env, modules)?;
-            if !matches!(inner_ty, Ty::Module(_)) {
+            if !matches!(inner_ty, Ty::GrammarModule(_)) {
                 return Err(TypeError::new(
-                    TypeErrorKind::QualifiedAccessOnInvalidType(inner_ty),
+                    TypeErrorKind::GrammarConfigRequiresInherit,
                     ast.span(*inner),
                 ));
             }
@@ -1089,7 +1099,9 @@ fn type_of<'ast>(
         Node::QualifiedAccess { obj, member } => {
             let obj_ty = type_of(ast, *obj, env, modules)?;
             match obj_ty {
-                Ty::Module(idx) => type_of_import_access(ast, idx, *member, modules),
+                Ty::ImportModule(idx) | Ty::GrammarModule(idx) => {
+                    type_of_import_access(ast, idx, *member, modules)
+                }
                 _ => Err(TypeError::new(
                     TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
                     ast.span(*obj),
@@ -1315,7 +1327,7 @@ fn type_of_qualified_call<'a>(
 ) -> Result<Ty, TypeError> {
     let (obj, name, args) = ast.ctx.get_qualified_call(range);
     let obj_ty = type_of(ast, obj, env, modules)?;
-    let Ty::Module(idx) = obj_ty else {
+    let (Ty::ImportModule(idx) | Ty::GrammarModule(idx)) = obj_ty else {
         return Err(TypeError::new(
             TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
             ast.span(obj),
@@ -1572,6 +1584,8 @@ pub enum TypeErrorKind {
     ExpectedRuleName,
     #[error("reserved config must be an object literal or inherited")]
     ExpectedReservedConfig,
+    #[error("grammar_config() requires an inherited grammar, not an imported module")]
+    GrammarConfigRequiresInherit,
     #[error("cannot infer type of this expression")]
     CannotInferType,
     #[error("cannot bind a for-loop expansion to a variable: for-loops are expanded inline")]
