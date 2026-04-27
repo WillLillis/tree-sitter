@@ -37,7 +37,7 @@ error_tests! { Lower {
     }
     error_config_field_unset {
         r#"let base = inherit("inherit_base_no_word/grammar.tsg")
-        grammar { language: "test", inherits: base, word: grammar_config(base).word }
+        grammar { language: "test", inherits: base, word: grammar_config(base, word) }
         override rule program { "x" }"#,
         LowerErrorKind::ConfigFieldUnset
     }
@@ -170,7 +170,7 @@ fn error_alias_non_name_rule_via_var() {
     let e = assert_err!(
         dsl_err(
             r#"grammar { language: "test" }
-            fn make_alias(target: rule_t) rule_t { alias("x", target) }
+            macro make_alias(target: rule_t) rule_t = alias("x", target)
             rule a { "a" }
             rule b { "b" }
             rule program { make_alias(seq(a, b)) }"#

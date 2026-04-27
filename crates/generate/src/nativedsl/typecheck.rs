@@ -14,10 +14,9 @@ use crate::grammars::InputGrammar;
 use super::{
     Note, NoteMessage,
     ast::{
-        Ast, AstContext, ChildRange, ForId, IdentKind, Node, NodeArena, NodeId, Param, PrecKind,
+        Ast, AstContext, ChildRange, ForId, IdentKind, Node, NodeArena, NodeId, PrecKind,
         Span,
     },
-    scope_stack::ScopeStack,
 };
 
 /// Function pointer type for element/inner checkers passed to `expect_list` and
@@ -94,9 +93,6 @@ pub enum Ty {
     /// User-facing module type annotation (`module_t`). Matches any
     /// concrete module via `is_compatible`.
     AnyModule,
-    /// Result of `grammar_config(module)`: the grammar config of a module.
-    /// Field access (`.extras`, `.word`, etc.) returns per-field types.
-    GrammarConfig,
     Spread,
     /// Homogeneous object `{ field: T, ... }`. The inner type is what field
     /// access returns. Field name validation is done via `ObjectInfo` in the env.
@@ -182,7 +178,6 @@ impl std::fmt::Display for Ty {
             Self::ImportModule(_) | Self::GrammarModule(_) | Self::AnyModule => {
                 f.write_str("module_t")
             }
-            Self::GrammarConfig => f.write_str("grammar_config_t"),
             Self::Spread => f.write_str("spread_t"),
             Self::Object(inner) => write!(f, "obj_t<{inner}>"),
         }
@@ -190,15 +185,15 @@ impl std::fmt::Display for Ty {
 }
 
 #[derive(Clone)]
-pub struct FnSig {
+pub struct MacroSig {
     pub params: Vec<Ty>,
     pub return_ty: Ty,
 }
 
 #[derive(Clone)]
 pub struct TypeEnv<'src> {
-    pub vars: ScopeStack<'src, Ty>,
-    pub fns: FxHashMap<&'src str, FnSig>,
+    pub vars: FxHashMap<&'src str, Ty>,
+    pub fns: FxHashMap<&'src str, MacroSig>,
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
 }
@@ -206,7 +201,7 @@ pub struct TypeEnv<'src> {
 impl<'src> TypeEnv<'src> {
     fn new() -> Self {
         Self {
-            vars: ScopeStack::new(),
+            vars: FxHashMap::default(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
         }
@@ -223,111 +218,17 @@ impl<'src> TypeEnv<'src> {
         self.object_fields.get(name).map(Vec::as_slice)
     }
     fn get_var(&self, name: &str) -> Option<Ty> {
-        self.vars.get(name)
-    }
-    #[inline]
-    fn scoped(&mut self) -> ScopeGuard<'_, 'src> {
-        self.vars.push();
-        ScopeGuard {
-            env: self,
-            hidden_fields: Vec::new(),
-        }
+        self.vars.get(name).copied()
     }
 }
 
-struct ScopeGuard<'a, 'src> {
-    env: &'a mut TypeEnv<'src>,
-    /// `object_fields` entries removed by `insert_var`, restored on drop.
-    hidden_fields: Vec<(&'src str, Vec<&'src str>)>,
-}
-
-impl<'src> ScopeGuard<'_, 'src> {
-    /// Insert a variable, hiding any stale `object_fields` entry for the same name.
-    fn insert_var(&mut self, name: &'src str, ty: Ty) {
-        if let Some(fields) = self.env.object_fields.remove(name) {
-            self.hidden_fields.push((name, fields));
-        }
-        self.env.vars.insert(name, ty);
-    }
-}
-
-impl Drop for ScopeGuard<'_, '_> {
-    fn drop(&mut self) {
-        self.env.vars.pop();
-        for (name, fields) in self.hidden_fields.drain(..) {
-            self.env.object_fields.insert(name, fields);
-        }
-    }
-}
-
-impl<'src> std::ops::Deref for ScopeGuard<'_, 'src> {
-    type Target = TypeEnv<'src>;
-    fn deref(&self) -> &Self::Target {
-        self.env
-    }
-}
-
-impl std::ops::DerefMut for ScopeGuard<'_, '_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.env
-    }
-}
-
-/// Zero-allocation scope chain (linked list on stack, borrows from configs).
-struct Locals<'a> {
-    scope: LocalScope<'a>,
-    #[expect(clippy::use_self, reason = "no Self with generics")]
-    parent: Option<&'a Locals<'a>>,
-}
-
-enum LocalScope<'a> {
-    Empty,
-    FnParams(&'a [Param]),
-    ForBindings(&'a [(Span, Ty)]),
-}
-
-impl Locals<'_> {
-    const EMPTY: Locals<'static> = Locals {
-        scope: LocalScope::Empty,
-        parent: None,
-    };
-
-    /// Iterative walk + manual loops (instead of recursion + `.any()` closures)
-    /// to reduce register pressure in the inner loops.
-    fn contains(&self, ctx: &AstContext, name: &str) -> bool {
-        let source = &ctx.source;
-        let mut current = self;
-        loop {
-            match &current.scope {
-                LocalScope::Empty => {}
-                LocalScope::FnParams(params) => {
-                    for p in *params {
-                        if p.name.resolve(source) == name {
-                            return true;
-                        }
-                    }
-                }
-                LocalScope::ForBindings(bindings) => {
-                    for (span, _) in *bindings {
-                        if span.resolve(source) == name {
-                            return true;
-                        }
-                    }
-                }
-            }
-            match current.parent {
-                Some(p) => current = p,
-                None => return false,
-            }
-        }
-    }
-}
+type LocalNames<'a> = FxHashSet<&'a str>;
 
 #[derive(Clone, Copy)]
 enum Decl {
     Rule,
     Var,
-    Fn,
+    Macro,
 }
 
 /// Run name resolution and type checking in a single function.
@@ -441,12 +342,12 @@ fn collect_decls<'a>(
                     source,
                 )?;
             }
-            Node::Fn(fn_idx) => {
-                let config = ctx.get_fn(*fn_idx);
+            Node::Macro(fn_idx) => {
+                let config = ctx.get_macro(*fn_idx);
                 insert_decl(
                     &mut decls,
                     ctx.text(config.name),
-                    Decl::Fn,
+                    Decl::Macro,
                     span,
                     grammar_path,
                     source,
@@ -547,7 +448,7 @@ fn collect_external_names<'src>(
         | Node::RawStringLit { .. }
         | Node::IntLit(_)
         | Node::Blank
-        | Node::GrammarConfig(_)
+        | Node::GrammarConfig { .. }
         | Node::FieldAccess { .. }
         | Node::QualifiedAccess { .. } => {}
         // Anything else (function calls, for-loops, etc.) is not a valid
@@ -605,21 +506,38 @@ fn resolve_item_tc(
             .into_iter()
             .flatten()
             {
-                resolve_expr_tc(arena, ctx, decls, id, &Locals::EMPTY)?;
+                resolve_expr_tc(arena, ctx, decls, id, &LocalNames::default())?;
             }
             Ok(())
         }
         Node::Rule { body: inner, .. } | Node::Let { value: inner, .. } => {
             let inner = *inner;
-            resolve_expr_tc(arena, ctx, decls, inner, &Locals::EMPTY)
+            resolve_expr_tc(arena, ctx, decls, inner, &LocalNames::default())
         }
-        Node::Fn(fn_idx) => {
-            let fn_config = ctx.get_fn(*fn_idx);
+        Node::Macro(fn_idx) => {
+            let fn_config = ctx.get_macro(*fn_idx);
+            // Macro params must not shadow any top-level declaration
+            for param in &fn_config.params {
+                let name = ctx.text(param.name);
+                if let Some(&(_, first_span)) = decls.get(name) {
+                    return Err(TypeError::with_note(
+                        TypeErrorKind::ShadowedBinding(name.to_string()),
+                        param.name,
+                        Note {
+                            message: NoteMessage::FirstDefinedHere,
+                            span: first_span,
+                            path: ctx.path.clone(),
+                            source: ctx.source.clone(),
+                        },
+                    ));
+                }
+            }
             let body = fn_config.body;
-            let locals = Locals {
-                scope: LocalScope::FnParams(&fn_config.params),
-                parent: None,
-            };
+            let locals: LocalNames<'_> = fn_config
+                .params
+                .iter()
+                .map(|p| ctx.text(p.name))
+                .collect();
             resolve_expr_tc(arena, ctx, decls, body, &locals)
         }
         _ => Ok(()),
@@ -632,19 +550,19 @@ fn resolve_expr_tc(
     ctx: &AstContext,
     decls: &Decls,
     id: NodeId,
-    locals: &Locals<'_>,
+    locals: &LocalNames<'_>,
 ) -> Result<(), TypeError> {
     // Handle Ident mutation first
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = ctx.text(span);
-        if locals.contains(ctx, name) {
+        if locals.contains(name) {
             arena.resolve_as(id, IdentKind::Var);
         } else if let Some(&(decl, _)) = decls.get(name) {
             match decl {
                 Decl::Var => arena.resolve_as(id, IdentKind::Var),
                 Decl::Rule => arena.resolve_as(id, IdentKind::Rule),
-                Decl::Fn => arena.resolve_as(id, IdentKind::Fn),
+                Decl::Macro => arena.resolve_as(id, IdentKind::Macro),
             }
         } else {
             return Err(TypeError::new(
@@ -664,7 +582,7 @@ fn resolve_expr_tc(
         resolve_expr_tc(arena, ctx, decls, content, locals)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             let name = ctx.text(arena.span(target));
-            if locals.contains(ctx, name) {
+            if locals.contains(name) {
                 arena.resolve_as(target, IdentKind::Var);
             } else {
                 arena.resolve_as(target, IdentKind::Rule);
@@ -678,14 +596,36 @@ fn resolve_expr_tc(
     // For expressions need extended locals
     if let Node::For(for_idx) = arena.get(id) {
         let config = ctx.get_for(*for_idx);
+        // For-loop bindings must not shadow any outer name
+        for &(name_span, _) in &config.bindings {
+            let name = ctx.text(name_span);
+            if let Some(&(_, first_span)) = decls.get(name) {
+                return Err(TypeError::with_note(
+                    TypeErrorKind::ShadowedBinding(name.to_string()),
+                    name_span,
+                    Note {
+                        message: NoteMessage::FirstDefinedHere,
+                        span: first_span,
+                        path: ctx.path.clone(),
+                        source: ctx.source.clone(),
+                    },
+                ));
+            }
+            if locals.contains(name) {
+                return Err(TypeError::new(
+                    TypeErrorKind::ShadowedBinding(name.to_string()),
+                    name_span,
+                ));
+            }
+        }
         let iterable = config.iterable;
         let body = config.body;
         let bindings = &config.bindings;
         resolve_expr_tc(arena, ctx, decls, iterable, locals)?;
-        let inner = Locals {
-            scope: LocalScope::ForBindings(bindings),
-            parent: Some(locals),
-        };
+        let mut inner = locals.clone();
+        for &(name_span, _) in bindings {
+            inner.insert(ctx.text(name_span));
+        }
         return resolve_expr_tc(arena, ctx, decls, body, &inner);
     }
 
@@ -699,7 +639,7 @@ fn resolve_children_tc(
     ctx: &AstContext,
     decls: &Decls,
     id: NodeId,
-    locals: &Locals<'_>,
+    locals: &LocalNames<'_>,
 ) -> Result<(), TypeError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
@@ -727,7 +667,7 @@ fn resolve_children_tc(
         Node::Repeat { inner: c, .. }
         | Node::Token { inner: c, .. }
         | Node::Neg(c)
-        | Node::GrammarConfig(c)
+        | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
         | Node::Reserved { content: c, .. } => resolve_expr_tc(arena, ctx, decls, *c, locals),
         Node::Append { left: a, right: b }
@@ -779,12 +719,12 @@ pub fn check<'ast>(
             Node::Rule { name, .. } => {
                 env.insert_var(ast.ctx.text(*name), Ty::Rule);
             }
-            Node::Fn(fn_idx) => {
-                let config = ast.ctx.get_fn(*fn_idx);
+            Node::Macro(fn_idx) => {
+                let config = ast.ctx.get_macro(*fn_idx);
                 let params: Vec<Ty> = config.params.iter().map(|p| p.ty).collect();
                 let return_ty = config.return_ty;
                 env.fns
-                    .insert(ast.ctx.text(config.name), FnSig { params, return_ty });
+                    .insert(ast.ctx.text(config.name), MacroSig { params, return_ty });
             }
             _ => {}
         }
@@ -870,18 +810,20 @@ fn check_item<'ast>(
             }
             Ok(())
         }
-        Node::Fn(fn_idx) => {
-            let config = ast.ctx.get_fn(*fn_idx);
+        Node::Macro(fn_idx) => {
+            let config = ast.ctx.get_macro(*fn_idx);
             let fn_name = ast.ctx.text(config.name);
             let sig = &env.fns[fn_name];
             let return_ty = sig.return_ty;
             let n_params = sig.params.len();
-            let mut scope = env.scoped();
             for i in 0..n_params {
-                let ty = scope.fns[fn_name].params[i];
-                scope.insert_var(ast.ctx.text(config.params[i].name), ty);
+                let ty = env.fns[fn_name].params[i];
+                env.insert_var(ast.ctx.text(config.params[i].name), ty);
             }
-            let body_ty = type_of(ast, config.body, &mut scope, modules)?;
+            let body_ty = type_of(ast, config.body, env, modules)?;
+            for param in &config.params {
+                env.vars.remove(ast.ctx.text(param.name));
+            }
             if !body_ty.is_compatible(return_ty) {
                 return Err(mismatch(return_ty, body_ty, ast.span(config.body)));
             }
@@ -952,7 +894,7 @@ fn expect_name_ref<'ast>(
 ) -> Result<(), TypeError> {
     match ast.node(id) {
         Node::Ident(IdentKind::Rule) => Ok(()),
-        Node::Ident(IdentKind::Var) | Node::FieldAccess { .. } => {
+        Node::Ident(IdentKind::Var) | Node::FieldAccess { .. } | Node::GrammarConfig { .. } => {
             let ty = type_of(ast, id, env, modules)?;
             if ty != Ty::Rule {
                 return Err(mismatch(Ty::Rule, ty, ast.span(id)));
@@ -1066,18 +1008,24 @@ fn type_of<'ast>(
                 Ty::GrammarModule(idx)
             })
         }
-        Node::GrammarConfig(inner) => {
-            let inner_ty = type_of(ast, *inner, env, modules)?;
-            if !matches!(inner_ty, Ty::GrammarModule(_)) {
+        Node::GrammarConfig { module, field } => {
+            let module_ty = type_of(ast, *module, env, modules)?;
+            if !matches!(module_ty, Ty::GrammarModule(_)) {
                 return Err(TypeError::new(
                     TypeErrorKind::GrammarConfigRequiresInherit,
-                    ast.span(*inner),
+                    ast.span(*module),
                 ));
             }
-            Ok(Ty::GrammarConfig)
+            use super::ast::QueryableField as Q;
+            Ok(match field {
+                Q::Extras | Q::Externals | Q::Inline | Q::Supertypes => Ty::ListRule,
+                Q::Conflicts | Q::Precedences => Ty::ListListRule,
+                Q::Word => Ty::Rule,
+                Q::Reserved => Ty::Object(InnerTy::ListRule),
+            })
         }
         Node::Ident(IdentKind::Unresolved) => unreachable!(),
-        Node::Ident(IdentKind::Fn) => Err(TypeError::new(
+        Node::Ident(IdentKind::Macro) => Err(TypeError::new(
             TypeErrorKind::FunctionUsedAsValue(ast.ctx.text(span).to_string()),
             span,
         )),
@@ -1276,16 +1224,6 @@ fn type_of_field_access<'ast>(
             }
             Ok(Ty::from(inner))
         }
-        Ty::GrammarConfig => match field_name {
-            "extras" | "externals" | "inline" | "supertypes" => Ok(Ty::ListRule),
-            "conflicts" | "precedences" => Ok(Ty::ListListRule),
-            "word" => Ok(Ty::Rule),
-            "reserved" => Ok(Ty::Object(InnerTy::ListRule)),
-            _ => Err(TypeError::new(
-                TypeErrorKind::UnknownConfigField(field_name.to_string()),
-                field,
-            )),
-        },
         _ => Err(TypeError::new(
             TypeErrorKind::FieldAccessOnNonObject(obj_ty),
             ast.span(obj),
@@ -1303,7 +1241,7 @@ fn type_of_import_access(
     // Invariant: idx was assigned during loading and `typecheck_module` populates
     // the table before any module that references it is checked.
     let import_env = modules[idx as usize].as_ref().unwrap();
-    if let Some(ty) = import_env.vars.get(member_name) {
+    if let Some(&ty) = import_env.vars.get(member_name) {
         return Ok(ty);
     }
     if import_env.fns.contains_key(member_name) {
@@ -1470,7 +1408,6 @@ fn check_for_expr<'ast>(
             .first()
             .is_some_and(|&id| matches!(ast.node(id), Node::Tuple(_)));
         if has_tuples {
-            let mut scope = env.scoped();
             for &item_id in items {
                 let Node::Tuple(range) = ast.node(item_id) else {
                     return Err(TypeError::new(
@@ -1489,18 +1426,20 @@ fn check_for_expr<'ast>(
                     ));
                 }
                 for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
-                    let actual = type_of(ast, elems[i], &mut scope, modules)?;
+                    let actual = type_of(ast, elems[i], env, modules)?;
                     if !actual.is_compatible(declared_ty) {
                         return Err(mismatch(declared_ty, actual, name_span));
                     }
                 }
             }
-            // Insert bindings only after all tuples are validated, so
-            // tuple elements are checked against the outer scope
             for &(name_span, declared_ty) in &config.bindings {
-                scope.insert_var(ast.ctx.text(name_span), declared_ty);
+                env.insert_var(ast.ctx.text(name_span), declared_ty);
             }
-            return expect_rule(ast, config.body, &mut scope, modules);
+            let result = expect_rule(ast, config.body, env, modules);
+            for &(name_span, _) in &config.bindings {
+                env.vars.remove(ast.ctx.text(name_span));
+            }
+            return result;
         }
     }
 
@@ -1524,9 +1463,10 @@ fn check_for_expr<'ast>(
     if !elem_ty.is_compatible(declared_ty) {
         return Err(mismatch(declared_ty, elem_ty, name_span));
     }
-    let mut scope = env.scoped();
-    scope.insert_var(ast.ctx.text(name_span), declared_ty);
-    expect_rule(ast, config.body, &mut scope, modules)
+    env.insert_var(ast.ctx.text(name_span), declared_ty);
+    let result = expect_rule(ast, config.body, env, modules);
+    env.vars.remove(ast.ctx.text(name_span));
+    result
 }
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
@@ -1549,7 +1489,7 @@ pub enum TypeErrorKind {
     },
     #[error("no field '{field}' on {on_type}")]
     FieldNotFound { field: String, on_type: Ty },
-    #[error("field access requires obj_t or grammar_config_t, got {0}")]
+    #[error("field access requires obj_t, got {0}")]
     FieldAccessOnNonObject(Ty),
     #[error("list elements have inconsistent types: {first} vs {got}")]
     ListElementTypeMismatch { first: Ty, got: Ty },
@@ -1602,6 +1542,8 @@ pub enum TypeErrorKind {
     DuplicateDeclaration(String),
     #[error("unknown identifier '{0}'")]
     UnknownIdentifier(String),
+    #[error("'{0}' shadows an existing declaration")]
+    ShadowedBinding(String),
     #[error("externals must be a list literal, append(), or variable reference")]
     InvalidExternalsExpression,
 }

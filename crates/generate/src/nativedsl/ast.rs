@@ -1,6 +1,7 @@
 //! Arena-based AST for the native grammar DSL.
 
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 
 use serde::Serialize;
 
@@ -111,7 +112,7 @@ macro_rules! id_type {
     };
 }
 
-id_type!(FnId);
+id_type!(MacroId);
 id_type!(ForId);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -120,6 +121,37 @@ pub enum PrecKind {
     Left,
     Right,
     Dynamic,
+}
+
+/// Config fields queryable via `grammar_config(module, field)`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QueryableField {
+    Extras,
+    Externals,
+    Inline,
+    Supertypes,
+    Word,
+    Conflicts,
+    Precedences,
+    Reserved,
+}
+
+impl TryFrom<&str> for QueryableField {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Ok(match value {
+            "extras" => Self::Extras,
+            "externals" => Self::Externals,
+            "inline" => Self::Inline,
+            "supertypes" => Self::Supertypes,
+            "word" => Self::Word,
+            "conflicts" => Self::Conflicts,
+            "precedences" => Self::Precedences,
+            "reserved" => Self::Reserved,
+            _ => return Err(()),
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,7 +166,7 @@ pub enum IdentKind {
     Unresolved,
     Rule,
     Var,
-    Fn,
+    Macro,
 }
 
 /// Byte offset range `[start, end)` in the source text.
@@ -193,11 +225,12 @@ pub struct Ast {
 
 pub struct AstContext {
     pub grammar_config: Option<GrammarConfig>,
-    pub fn_configs: Vec<FnConfig>,
+    pub macro_configs: Vec<MacroConfig>,
     pub for_configs: Vec<ForConfig>,
     pub object_fields: Vec<(Span, NodeId)>,
     pub children: Vec<NodeId>,
     pub source: String,
+    pub path: PathBuf,
 }
 
 impl AstContext {
@@ -207,8 +240,8 @@ impl AstContext {
         span.resolve(&self.source)
     }
     #[must_use]
-    pub fn get_fn(&self, id: FnId) -> &FnConfig {
-        &self.fn_configs[id.index()]
+    pub fn get_macro(&self, id: MacroId) -> &MacroConfig {
+        &self.macro_configs[id.index()]
     }
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
@@ -252,18 +285,19 @@ impl AstContext {
 
 impl Ast {
     #[must_use]
-    pub fn new(source: String) -> Self {
+    pub fn new(source: String, path: PathBuf) -> Self {
         let cap = source.len() / 30;
         Self {
             arena: NodeArena::new(cap),
             root_items: Vec::new(),
             ctx: AstContext {
                 grammar_config: None,
-                fn_configs: Vec::new(),
+                macro_configs: Vec::new(),
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
                 children: Vec::with_capacity(cap),
                 source,
+                path,
             },
         }
     }
@@ -282,9 +316,9 @@ impl Ast {
         self.arena.span(id)
     }
 
-    pub fn push_fn(&mut self, config: FnConfig) -> FnId {
-        let id = FnId(self.ctx.fn_configs.len() as u32);
-        self.ctx.fn_configs.push(config);
+    pub fn push_macro(&mut self, config: MacroConfig) -> MacroId {
+        let id = MacroId(self.ctx.macro_configs.len() as u32);
+        self.ctx.macro_configs.push(config);
         id
     }
 
@@ -340,7 +374,7 @@ pub enum Node {
         ty: Option<Ty>,
         value: NodeId,
     },
-    Fn(FnId),
+    Macro(MacroId),
     StringLit,
     RawStringLit {
         hash_count: u8,
@@ -399,8 +433,12 @@ pub enum Node {
         path: Span,
         module: Option<u8>,
     },
-    /// `grammar_config(module)` - returns the grammar config of a module as an object.
-    GrammarConfig(NodeId),
+    /// `grammar_config(module, field)` - access a specific config field from
+    /// an inherited grammar module.
+    GrammarConfig {
+        module: NodeId,
+        field: QueryableField,
+    },
     /// `expr::name(args)` - function call through `::` access.
     /// Children layout: `[obj, name, arg0, arg1, ...]` where obj is the
     /// namespace value and name is the function identifier.
@@ -458,8 +496,9 @@ pub struct GrammarConfig {
     pub reserved: Option<NodeId>,
 }
 
+
 #[derive(Clone)]
-pub struct FnConfig {
+pub struct MacroConfig {
     pub name: Span,
     pub params: Vec<Param>,
     pub return_ty: Ty,

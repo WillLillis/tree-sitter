@@ -1,5 +1,4 @@
 // Self-recursive helper for testing cross-module call depth limits.
 
-fn recurse(x: rule_t) rule_t {
+macro recurse(x: rule_t) rule_t =
     recurse(x)
-}

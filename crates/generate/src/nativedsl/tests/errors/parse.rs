@@ -38,7 +38,7 @@ error_tests! { Parse {
         ParseErrorKind::ListInnerType(Ty::ListListRule)
     }
     error_missing_return_type {
-        r#"grammar { language: "test" } fn f(x: rule_t) { x } rule program { "x" }"#,
+        r#"grammar { language: "test" } macro f(x: rule_t) = x rule program { "x" }"#,
         ParseErrorKind::ExpectedType
     }
     error_missing_language_field {
@@ -93,6 +93,11 @@ error_tests! { Parse {
             format!("grammar {{ language: \"test\" }} rule foo {{ seq({args}) }}")
         },
         ParseErrorKind::TooManyChildren
+    }
+    error_grammar_config_unknown_field {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, extras: grammar_config(base, bogus) }"#,
+        ParseErrorKind::UnknownGrammarField("bogus".into())
     }
 }}
 
@@ -207,7 +212,7 @@ fn keywords_as_identifiers() {
     let g = dsl(r#"grammar { language: "test" } let token = "x" rule foo { token }"#);
     assert_eq!(g.variables[0].name, "foo");
     let g = dsl(
-        r#"grammar { language: "test" } fn repeat(x: rule_t) rule_t { x } rule foo { repeat("a") }"#,
+        r#"grammar { language: "test" } macro repeat(x: rule_t) rule_t = x rule foo { repeat("a") }"#,
     );
     assert_eq!(g.variables[0].name, "foo");
 }
@@ -217,7 +222,7 @@ fn error_duplicate_fn_param() {
     let e = assert_err!(
         dsl_err(
             r#"grammar { language: "test" }
-            fn f(x: rule_t, x: str_t) rule_t { x }
+            macro f(x: rule_t, x: str_t) rule_t = x
             rule program { f("a") }"#,
         ),
         Parse

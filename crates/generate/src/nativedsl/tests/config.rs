@@ -377,7 +377,7 @@ fn error_externals_via_function_call() {
     let e = assert_err!(
         dsl_err(
             r#"
-            fn mk_ext() list_t<rule_t> { [heredoc] }
+            macro mk_ext() list_t<rule_t> = [heredoc]
             grammar { language: "test", externals: mk_ext() }
             rule program { "x" }
         "#

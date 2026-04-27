@@ -30,7 +30,7 @@ fn inherit_config_append_inline() {
         grammar {
             language: "derived",
             inherits: base,
-            inline: append(grammar_config(base).inline, [_extra_inline]),
+            inline: append(grammar_config(base, inline), [_extra_inline]),
         }
         rule _extra_inline { "extra" }
     "#);
@@ -44,7 +44,7 @@ fn inherit_config_append_extras() {
         grammar {
             language: "derived",
             inherits: base,
-            extras: append(grammar_config(base).extras, [comment]),
+            extras: append(grammar_config(base, extras), [comment]),
         }
         rule comment { regexp(r"//.*") }
     "#);
@@ -69,7 +69,7 @@ fn config_expr_let_binding() {
 fn config_expr_word() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base, word: grammar_config(base).word }
+        grammar { language: "derived", inherits: base, word: grammar_config(base, word) }
     "#);
     assert_eq!(g.word_token.as_deref(), Some("identifier"));
 }
@@ -180,7 +180,7 @@ fn rule_inline_expands_base_rule_body() {
 fn config_access_extras() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base, extras: grammar_config(base).extras }
+        grammar { language: "derived", inherits: base, extras: grammar_config(base, extras) }
         override rule program { "x" }
     "#);
     assert_eq!(g.name, "derived");
@@ -199,13 +199,13 @@ fn config_all_fields_access_and_append() {
         grammar {
             language: "derived",
             inherits: base,
-            extras: grammar_config(base).extras,
-            externals: append(grammar_config(base).externals, [eof_marker]),
-            inline: grammar_config(base).inline,
-            supertypes: append(grammar_config(base).supertypes, [_statement]),
-            word: grammar_config(base).word,
-            conflicts: append(grammar_config(base).conflicts, [[keyword, _statement]]),
-            precedences: append(grammar_config(base).precedences, [["unary", "binary"]]),
+            extras: grammar_config(base, extras),
+            externals: append(grammar_config(base, externals), [eof_marker]),
+            inline: grammar_config(base, inline),
+            supertypes: append(grammar_config(base, supertypes), [_statement]),
+            word: grammar_config(base, word),
+            conflicts: append(grammar_config(base, conflicts), [[keyword, _statement]]),
+            precedences: append(grammar_config(base, precedences), [["unary", "binary"]]),
         }
         rule _statement { "stmt" }
         rule eof_marker { "EOF" }
@@ -254,7 +254,7 @@ fn externals_append_inherited_with_new_undeclared() {
         grammar {
             language: "derived",
             inherits: base,
-            externals: append(grammar_config(base).externals, [_eof_marker]),
+            externals: append(grammar_config(base, externals), [_eof_marker]),
         }
     "#);
     // base has [heredoc], we add [_eof_marker]
@@ -263,13 +263,13 @@ fn externals_append_inherited_with_new_undeclared() {
 
 #[test]
 fn externals_inherited_directly() {
-    // grammar_config(base).externals used directly (no append)
+    // grammar_config(base, externals) used directly (no append)
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_full_config.tsg")
         grammar {
             language: "derived",
             inherits: base,
-            externals: grammar_config(base).externals,
+            externals: grammar_config(base, externals),
         }
     "#);
     assert_eq!(g.external_tokens.len(), 1);
