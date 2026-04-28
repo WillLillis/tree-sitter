@@ -19,6 +19,16 @@ impl NodeId {
         self.0.get() as usize
     }
 
+    /// Create a `NodeId` from a 1-based index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is 0.
+    #[must_use]
+    pub const fn from_index(index: usize) -> Self {
+        Self(NonZeroU32::new(index as u32).unwrap())
+    }
+
     /// Return the next `NodeId` (index + 1).
     #[must_use]
     pub const fn next(self) -> Self {
@@ -217,44 +227,88 @@ impl Span {
     }
 }
 
-pub struct Ast {
+/// Shared AST data across all modules in a grammar. All `NodeId`, `MacroId`,
+/// `ForId`, and `ChildRange` values are globally valid within this structure.
+///
+/// The `arena` and `pools` fields are separate to allow split borrowing:
+/// resolve functions can mutate `arena` while reading `pools`.
+pub struct SharedAst {
     pub arena: NodeArena,
-    pub root_items: Vec<NodeId>,
-    pub ctx: AstContext,
+    pub pools: AstPools,
 }
 
-pub struct AstContext {
-    pub grammar_config: Option<GrammarConfig>,
+/// Indexed pool data backing `MacroId`, `ForId`, and `ChildRange`.
+/// Separated from `NodeArena` so that name resolution can hold
+/// `&mut arena` and `&pools` simultaneously.
+pub struct AstPools {
+    pub children: Vec<NodeId>,
     pub macro_configs: Vec<MacroConfig>,
     pub for_configs: Vec<ForConfig>,
     pub object_fields: Vec<(Span, NodeId)>,
-    pub children: Vec<NodeId>,
-    pub source: String,
-    pub path: PathBuf,
 }
 
-impl AstContext {
-    /// Resolve a span to the source text it covers.
+impl SharedAst {
     #[must_use]
-    pub fn text(&self, span: Span) -> &str {
-        span.resolve(&self.source)
+    pub fn new(estimated_cap: usize) -> Self {
+        Self {
+            arena: NodeArena::new(estimated_cap),
+            pools: AstPools {
+                children: Vec::with_capacity(estimated_cap),
+                macro_configs: Vec::new(),
+                for_configs: Vec::new(),
+                object_fields: Vec::new(),
+            },
+        }
     }
+}
+
+impl AstPools {
+    pub fn push_macro(&mut self, config: MacroConfig) -> MacroId {
+        let id = MacroId(self.macro_configs.len() as u32);
+        self.macro_configs.push(config);
+        id
+    }
+
+    pub fn push_for(&mut self, config: ForConfig) -> ForId {
+        let id = ForId(self.for_configs.len() as u32);
+        self.for_configs.push(config);
+        id
+    }
+
+    pub fn push_object(&mut self, fields: Vec<(Span, NodeId)>) -> Option<ChildRange> {
+        let start = self.object_fields.len() as u32;
+        let len = u16::try_from(fields.len()).ok()?;
+        self.object_fields.extend(fields);
+        Some(ChildRange::new(start, len))
+    }
+
+    pub fn push_children(&mut self, items: &[NodeId]) -> Option<ChildRange> {
+        let start = self.children.len() as u32;
+        let len = u16::try_from(items.len()).ok()?;
+        self.children.extend_from_slice(items);
+        Some(ChildRange::new(start, len))
+    }
+
     #[must_use]
     pub fn get_macro(&self, id: MacroId) -> &MacroConfig {
         &self.macro_configs[id.index()]
     }
+
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         &self.for_configs[id.index()]
     }
+
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
         &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
     }
+
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         &self.children[range.start as usize..range.start as usize + range.len as usize]
     }
+
     /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
@@ -275,6 +329,7 @@ impl AstContext {
             )
         }
     }
+
     /// Unpack a `DynRegex(range)` into `(pattern, Option<flags>)`.
     #[must_use]
     pub fn get_regex(&self, range: ChildRange) -> (NodeId, Option<NodeId>) {
@@ -283,63 +338,21 @@ impl AstContext {
     }
 }
 
-impl Ast {
+/// Per-module data produced by the parser. Each loaded module (root, inherited,
+/// imported) has its own `ModuleContext` containing source text and module-specific
+/// configuration, while sharing a single [`SharedAst`] for all node data.
+pub struct ModuleContext {
+    pub source: String,
+    pub path: PathBuf,
+    pub grammar_config: Option<GrammarConfig>,
+    pub root_items: Vec<NodeId>,
+}
+
+impl ModuleContext {
+    /// Resolve a span to the source text it covers.
     #[must_use]
-    pub fn new(source: String, path: PathBuf) -> Self {
-        let cap = source.len() / 30;
-        Self {
-            arena: NodeArena::new(cap),
-            root_items: Vec::new(),
-            ctx: AstContext {
-                grammar_config: None,
-                macro_configs: Vec::new(),
-                for_configs: Vec::new(),
-                object_fields: Vec::new(),
-                children: Vec::with_capacity(cap),
-                source,
-                path,
-            },
-        }
-    }
-
-    #[inline]
-    pub fn push(&mut self, node: Node, span: Span) -> NodeId {
-        self.arena.push(node, span)
-    }
-
-    #[must_use]
-    pub fn node(&self, id: NodeId) -> &Node {
-        self.arena.get(id)
-    }
-    #[must_use]
-    pub fn span(&self, id: NodeId) -> Span {
-        self.arena.span(id)
-    }
-
-    pub fn push_macro(&mut self, config: MacroConfig) -> MacroId {
-        let id = MacroId(self.ctx.macro_configs.len() as u32);
-        self.ctx.macro_configs.push(config);
-        id
-    }
-
-    pub fn push_for(&mut self, config: ForConfig) -> ForId {
-        let id = ForId(self.ctx.for_configs.len() as u32);
-        self.ctx.for_configs.push(config);
-        id
-    }
-
-    pub fn push_object(&mut self, fields: Vec<(Span, NodeId)>) -> Option<ChildRange> {
-        let start = self.ctx.object_fields.len() as u32;
-        let len = u16::try_from(fields.len()).ok()?;
-        self.ctx.object_fields.extend(fields);
-        Some(ChildRange::new(start, len))
-    }
-
-    pub fn push_children(&mut self, items: &[NodeId]) -> Option<ChildRange> {
-        let start = self.ctx.children.len() as u32;
-        let len = u16::try_from(items.len()).ok()?;
-        self.ctx.children.extend_from_slice(items);
-        Some(ChildRange::new(start, len))
+    pub fn text(&self, span: Span) -> &str {
+        span.resolve(&self.source)
     }
 }
 
@@ -457,7 +470,7 @@ pub enum Node {
     List(ChildRange),
     /// `(elem0, elem1, ...)`. Children: `[elem0, elem1, ...]`.
     Tuple(ChildRange),
-    /// `{ key0: val0, key1: val1, ... }`. Fields stored in `AstContext::object_fields`.
+    /// `{ key0: val0, key1: val1, ... }`. Fields stored in `SharedAst::object_fields`.
     Object(ChildRange),
     Neg(NodeId),
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
