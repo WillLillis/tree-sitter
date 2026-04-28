@@ -63,16 +63,18 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
         .expect("grammar path should be canonicalizable (file was already read)");
     let cap = input.len() / 30;
     let mut shared = SharedAst::new(cap);
-    let module = load_module(
+    let mut modules: Vec<Module> = Vec::new();
+    let root_id = load_module(
         &mut shared,
+        &mut modules,
         input,
         grammar_path,
         ModuleKind::Grammar,
         &[canonical],
-        &mut 0,
     )?;
-    Ok(module
+    Ok(modules[root_id as usize]
         .lowered
+        .take()
         .expect("Grammar module always has lowered grammar"))
 }
 
@@ -95,17 +97,12 @@ pub enum ModuleKind {
 /// Panics if `path` has no parent directory.
 pub fn load_module(
     shared: &mut SharedAst,
+    modules: &mut Vec<Module>,
     source: &str,
     path: &Path,
     kind: ModuleKind,
     ancestor_paths: &[PathBuf],
-    next_global_id: &mut u8,
-) -> DslResult<Module> {
-    let global_id = *next_global_id;
-    *next_global_id = next_global_id
-        .checked_add(1)
-        .ok_or_else(|| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
-
+) -> DslResult<u8> {
     if source.len() >= u32::MAX as usize {
         Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
     }
@@ -131,9 +128,6 @@ pub fn load_module(
         }
     };
 
-    // All child modules go into one list.
-    let mut sub_modules: Vec<Module> = Vec::new();
-
     // Load inherited grammar (Grammar kind only, must happen before typecheck).
     if let Some(inherit_id) = inherit_node {
         let Node::ModuleRef {
@@ -144,23 +138,21 @@ pub fn load_module(
         else {
             unreachable!()
         };
-        let child = load_child_module(
+        let child_id = load_child_module(
             shared,
+            modules,
             ctx.text(ref_path),
             module_dir,
             ref_path,
             ancestor_paths,
             ModuleKind::Grammar,
-            next_global_id,
         )?;
-        let child_gid = child.global_id;
-        sub_modules.push(child);
         shared.arena.set(
             inherit_id,
             Node::ModuleRef {
                 import: false,
                 path: ref_path,
-                module: Some(child_gid),
+                module: Some(child_id),
             },
         );
     }
@@ -170,32 +162,33 @@ pub fn load_module(
         &ctx,
         module_dir,
         ancestor_paths,
-        &mut sub_modules,
-        next_global_id,
+        modules,
         node_start..=node_end,
     )?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
-    let mut type_envs: Vec<Option<TypeEnv<'_>>> = vec![None; *next_global_id as usize];
-    typecheck_modules(shared, &sub_modules, &mut type_envs)?;
+    let mut type_envs: Vec<Option<TypeEnv<'_>>> = vec![None; modules.len()];
+    typecheck_modules(shared, &modules, &mut type_envs)?;
     let base = inherit_node.and_then(|id| {
-        let module = sub_modules.iter().find(|m| m.is_grammar())?;
+        let module = modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, shared.arena.span(id)))
     });
     let _ = typecheck::resolve_and_check(shared, &ctx, &type_envs, base, path)?;
 
+    let global_id = u8::try_from(modules.len())
+        .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
     let lowered = if matches!(kind, ModuleKind::Grammar) {
-        Some(lower::lower_with_base(shared, &ctx, &sub_modules, global_id)?)
+        Some(lower::lower_with_base(shared, &ctx, &modules, global_id)?)
     } else {
         None
     };
-
-    Ok(Module {
+    modules.push(Module {
         ctx,
-        sub_modules,
         lowered,
         global_id,
-    })
+    });
+
+    Ok(global_id)
 }
 
 /// Validate: grammar block exists, at most one `inherit()`, inherits field consistency.
@@ -216,7 +209,10 @@ pub fn validate_grammar(
     let mut inherit_let: Option<Span> = None;
     for &item_id in &ctx.root_items {
         if let Node::Let { value, .. } = shared.arena.get(item_id)
-            && matches!(shared.arena.get(*value), Node::ModuleRef { import: false, .. })
+            && matches!(
+                shared.arena.get(*value),
+                Node::ModuleRef { import: false, .. }
+            )
         {
             if inherit_let.is_some() || direct_in_config {
                 Err(LowerError::new(
@@ -259,7 +255,10 @@ fn find_inherit_node(shared: &SharedAst, ctx: &ModuleContext) -> Option<NodeId> 
             ctx.root_items.iter().find_map(|&item_id| {
                 if let Node::Let { name: n, value, .. } = shared.arena.get(item_id)
                     && ctx.text(*n) == name
-                    && matches!(shared.arena.get(*value), Node::ModuleRef { import: false, .. })
+                    && matches!(
+                        shared.arena.get(*value),
+                        Node::ModuleRef { import: false, .. }
+                    )
                 {
                     Some(*value)
                 } else {
@@ -277,13 +276,13 @@ const MAX_MODULE_DEPTH: usize = 256;
 
 fn load_child_module(
     shared: &mut SharedAst,
+    modules: &mut Vec<Module>,
     path_str: &str,
     module_dir: &Path,
     span: Span,
     ancestor_paths: &[PathBuf],
     kind: ModuleKind,
-    next_global_id: &mut u8,
-) -> DslResult<Module> {
+) -> DslResult<u8> {
     if ancestor_paths.len() >= MAX_MODULE_DEPTH {
         return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
     }
@@ -318,24 +317,24 @@ fn load_child_module(
     child_ancestors.push(canonical.clone());
 
     let ext = canonical.extension().and_then(|e| e.to_str());
-    match ext {
-        Some("tsg") => {
-            load_module(shared, &content, &canonical, kind, &child_ancestors, next_global_id)
-                .map_err(|inner| {
-                    ModuleError {
-                        inner: Box::new(inner),
-                        source_text: content,
-                        path: canonical,
-                        reference_span: span,
-                    }
-                    .into()
-                })
-        }
+    let module_id = match ext {
+        Some("tsg") => load_module(
+            shared,
+            modules,
+            &content,
+            &canonical,
+            kind,
+            &child_ancestors,
+        )
+        .map_err(|inner| {
+            ModuleError {
+                inner: Box::new(inner),
+                source_text: content,
+                path: canonical,
+                reference_span: span,
+            }
+        })?,
         Some("json") if matches!(kind, ModuleKind::Grammar) => {
-            let gid = *next_global_id;
-            *next_global_id = next_global_id
-                .checked_add(1)
-                .ok_or_else(|| LowerError::new(LowerErrorKind::ModuleTooMany, span))?;
             let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
                 LowerError::new(
                     LowerErrorKind::ModuleJsonError {
@@ -345,29 +344,33 @@ fn load_child_module(
                     span,
                 )
             })?;
-            Ok(Module {
+            let global_id = u8::try_from(modules.len())
+                .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+            modules.push(Module {
                 ctx: ModuleContext {
                     source: String::new(),
                     path: canonical,
                     grammar_config: None,
                     root_items: Vec::new(),
                 },
-                sub_modules: Vec::new(),
                 lowered: Some(grammar),
-                global_id: gid,
-            })
+                global_id,
+            });
+            global_id
         }
-        Some("json") => Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into()),
-        _ => Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
-    }
+        Some("json") => {
+            return Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into());
+        }
+        _ => return Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
+    };
+
+    Ok(module_id)
 }
 
 /// A loaded and resolved module (imported or inherited), ready for
 /// typechecking and lowering.
 pub struct Module {
     pub ctx: ModuleContext,
-    /// Child modules (imports within this module).
-    pub sub_modules: Vec<Self>,
     /// For inherited grammar modules: the fully lowered grammar, needed
     /// for rule merging and config access. `None` for import-only modules.
     pub lowered: Option<InputGrammar>,
@@ -391,7 +394,6 @@ fn load_import_children(
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
-    next_global_id: &mut u8,
     node_range: std::ops::RangeInclusive<usize>,
 ) -> Result<(), DslError> {
     // Cache: canonical path -> global module ID, so duplicate imports share one load.
@@ -424,18 +426,16 @@ fn load_import_children(
         let gid = if let Some(&gid) = loaded.get(&canonical) {
             gid
         } else {
-            let child = load_child_module(
+            let gid = load_child_module(
                 shared,
+                modules,
                 path_str,
                 module_dir,
                 path,
                 ancestor_paths,
                 kind,
-                next_global_id,
             )?;
-            let gid = child.global_id;
             loaded.insert(canonical, gid);
-            modules.push(child);
             gid
         };
 
@@ -476,14 +476,17 @@ fn validate_import_items(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<(
     Ok(())
 }
 
-/// Recursively typecheck modules, storing type envs in table by `global_id`.
+/// Typecheck child modules in loading order (children before parents).
+/// The flat `modules` vec is already in this order since children are
+/// pushed before their parents during loading.
+// TODO: eliminate this in favor of a single recursive typecheck pass
+// through the root module once we have a global TypeEnv.
 pub fn typecheck_modules<'m>(
     shared: &SharedAst,
     modules: &'m [Module],
     table: &mut Vec<Option<TypeEnv<'m>>>,
 ) -> DslResult<()> {
     for m in modules {
-        typecheck_modules(shared, &m.sub_modules, table)?;
         let env = typecheck::check(shared, &m.ctx, table)?;
         table[m.global_id as usize] = Some(env);
     }
