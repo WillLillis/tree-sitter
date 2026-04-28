@@ -225,8 +225,7 @@ fn evaluate(
     base_grammar: Option<&InputGrammar>,
     root_global_id: u8,
 ) -> LowerResult<EvalResult> {
-    let (module_infos, module_macros) =
-        build_module_table(shared, ctx, base_grammar, modules);
+    let (module_infos, module_macros) = build_module_table(shared, ctx, base_grammar, modules);
     let n = module_infos.len();
     let mut eval = Evaluator {
         shared,
@@ -1126,8 +1125,7 @@ impl<'ast> Evaluator<'ast> {
                 let base = self.rule_scratch.len();
                 for &member in children {
                     if let Node::For(idx) = self.shared.arena.get(member) {
-                        let for_rules =
-                            self.eval_for_to_rules(self.shared.pools.get_for(*idx))?;
+                        let for_rules = self.eval_for_to_rules(self.shared.pools.get_for(*idx))?;
                         self.rule_scratch.extend(for_rules);
                     } else {
                         let rid = self.lower_to_rule(member)?;
@@ -1424,8 +1422,6 @@ pub enum LowerErrorKind {
     },
     #[error("unsupported file extension, expected .tsg or .json")]
     ModuleUnsupportedExtension,
-    #[error("JSON files can only be used with inherit(), not import()")]
-    JsonImportNotAllowed,
     #[error("too many modules (max 256)")]
     ModuleTooMany,
     #[error("module import chain too deep (max 256)")]
