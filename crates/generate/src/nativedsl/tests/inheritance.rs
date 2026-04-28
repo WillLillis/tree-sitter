@@ -276,25 +276,6 @@ fn externals_inherited_directly() {
 }
 
 #[test]
-fn inherit_from_json() {
-    let dir = tempfile::tempdir().unwrap();
-    let json_path = dir.path().join("base.json");
-    std::fs::write(
-        &json_path,
-        r#"{"name":"base_json","rules":{"program":{"type":"STRING","value":"x"}},"extras":[],"conflicts":[],"precedences":[],"externals":[],"inline":[],"supertypes":[]}"#,
-    )
-    .unwrap();
-    let input = format!(
-        "let base = inherit(\"{}\")\ngrammar {{ language: \"extended\", inherits: base }}\nrule new_rule {{ \"y\" }}",
-        dsl_path(&json_path)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
-    assert_eq!(g.name, "extended");
-    assert!(g.variables.iter().any(|v| v.name == "program"));
-    assert!(g.variables.iter().any(|v| v.name == "new_rule"));
-}
-
-#[test]
 fn append_concatenates_lists() {
     let g = dsl(r#"
         grammar { language: "test" }

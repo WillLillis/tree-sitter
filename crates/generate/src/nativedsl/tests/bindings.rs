@@ -208,11 +208,13 @@ fn for_empty_list() {
 #[test]
 fn error_macro_param_shadows_let() {
     let e = assert_err!(
-        dsl_err(r#"grammar { language: "test" }
+        dsl_err(
+            r#"grammar { language: "test" }
             let X: str_t = "shadowed"
             macro wrap(X: rule_t) rule_t = seq("(", X, ")")
             rule program { wrap(identifier) }
-            rule identifier { regexp("[a-z]+") }"#),
+            rule identifier { regexp("[a-z]+") }"#
+        ),
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("X".into()));
@@ -221,10 +223,12 @@ fn error_macro_param_shadows_let() {
 #[test]
 fn error_for_var_shadows_macro_param() {
     let e = assert_err!(
-        dsl_err(r#"grammar { language: "test" }
+        dsl_err(
+            r#"grammar { language: "test" }
             macro make(item: str_t) rule_t =
                 choice(for (item: str_t) in ["a", "b"] { item })
-            rule program { make("ignored") }"#),
+            rule program { make("ignored") }"#
+        ),
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("item".into()));
@@ -233,8 +237,10 @@ fn error_for_var_shadows_macro_param() {
 #[test]
 fn error_for_var_shadows_rule() {
     let e = assert_err!(
-        dsl_err(r#"grammar { language: "test" }
-            rule program { choice(for (program: str_t) in ["a", "b"] { program }) }"#),
+        dsl_err(
+            r#"grammar { language: "test" }
+            rule program { choice(for (program: str_t) in ["a", "b"] { program }) }"#
+        ),
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("program".into()));
@@ -243,9 +249,11 @@ fn error_for_var_shadows_rule() {
 #[test]
 fn error_for_var_shadows_let() {
     let e = assert_err!(
-        dsl_err(r#"grammar { language: "test" }
+        dsl_err(
+            r#"grammar { language: "test" }
             let X: str_t = "shadowed"
-            rule program { choice(for (X: str_t) in ["a", "b"] { X }) }"#),
+            rule program { choice(for (X: str_t) in ["a", "b"] { X }) }"#
+        ),
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("X".into()));

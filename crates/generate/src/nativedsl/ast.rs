@@ -509,7 +509,6 @@ pub struct GrammarConfig {
     pub reserved: Option<NodeId>,
 }
 
-
 #[derive(Clone)]
 pub struct MacroConfig {
     pub name: Span,
