@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::ast::{
-    ChildRange, ForConfig, IdentKind, ModuleContext, Node, NodeId, PrecKind, QueryableField,
+    ChildRange, ForId, IdentKind, ModuleContext, Node, NodeId, PrecKind, QueryableField,
     RepeatKind, SharedAst, Span,
 };
 
@@ -138,6 +138,10 @@ struct Evaluator<'ast> {
     scopes: FxHashMap<&'ast str, ValueId>,
     // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
+    macro_args: Vec<ValueId>,
+    macro_arg_bases: Vec<usize>,
+    for_binding_values: Vec<ValueId>,
+    for_binding_frames: Vec<(ForId, usize)>,
     arg_scratch: Vec<ValueId>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
@@ -236,6 +240,10 @@ fn evaluate(
         current_module: root_global_id as usize,
         scopes: FxHashMap::default(),
         call_stack: Vec::new(),
+        macro_args: Vec::new(),
+        macro_arg_bases: Vec::new(),
+        for_binding_values: Vec::new(),
+        for_binding_frames: Vec::new(),
         arg_scratch: Vec::new(),
         val_scratch: Vec::new(),
         rule_scratch: Vec::new(),
@@ -922,6 +930,16 @@ impl<'ast> Evaluator<'ast> {
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
+            Node::MacroParam(i) => {
+                let base = *self.macro_arg_bases.last().unwrap();
+                Ok(self.macro_args[base + *i as usize])
+            }
+            Node::ForBinding { for_id, index } => {
+                let base = self.for_binding_frames.iter().rev()
+                    .find(|(id, _)| *id == *for_id)
+                    .unwrap().1;
+                Ok(self.for_binding_values[base + *index as usize])
+            }
             // Guarded by super::resolve - all variable names validated
             Node::Ident(IdentKind::Var) => Ok(*self.scopes.get(self.ctx().text(span)).unwrap()),
             Node::GrammarConfig { module, field } => {
@@ -1124,8 +1142,8 @@ impl<'ast> Evaluator<'ast> {
                 let children = self.shared.pools.child_slice(range);
                 let base = self.rule_scratch.len();
                 for &member in children {
-                    if let Node::For(idx) = self.shared.arena.get(member) {
-                        let for_rules = self.eval_for_to_rules(self.shared.pools.get_for(*idx))?;
+                    if let Node::For { for_id, body } = *self.shared.arena.get(member) {
+                        let for_rules = self.eval_for_to_rules(for_id, body)?;
                         self.rule_scratch.extend(for_rules);
                     } else {
                         let rid = self.lower_to_rule(member)?;
@@ -1288,13 +1306,18 @@ impl<'ast> Evaluator<'ast> {
                 self.scopes.insert(name, val);
             }
         }
+        let macro_arg_base = self.macro_args.len();
+        self.macro_arg_bases.push(macro_arg_base);
         for (i, param) in fn_config.params.iter().enumerate() {
-            self.scopes
-                .insert(fn_ctx.text(param.name), self.arg_scratch[arg_base + i]);
+            let val = self.arg_scratch[arg_base + i];
+            self.scopes.insert(fn_ctx.text(param.name), val);
+            self.macro_args.push(val);
         }
 
         let result = self.eval_expr(body);
         self.call_stack.pop();
+        self.macro_args.truncate(macro_arg_base);
+        self.macro_arg_bases.pop();
 
         // Remove param bindings (no shadowing guarantees safe removal)
         for param in &fn_config.params {
@@ -1346,26 +1369,31 @@ impl<'ast> Evaluator<'ast> {
         Ok(values)
     }
 
-    fn eval_for_to_rules(&mut self, config: &ForConfig) -> LowerResult<Vec<RuleId>> {
-        let iter_vid = self.eval_expr(config.iterable)?;
+    fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<Vec<RuleId>> {
+        let iterable = self.shared.pools.get_for(for_id).iterable;
+        let n_bindings = self.shared.pools.get_for(for_id).bindings.len();
+        let iter_vid = self.eval_expr(iterable)?;
         let n_items = self.list_items(Self::expect_list(iter_vid)).len();
+        let base = self.for_binding_values.len();
+        self.for_binding_frames.push((for_id, base));
         let mut results = Vec::with_capacity(n_items);
         for i in 0..n_items {
             let item_id = self.list_items(Self::expect_list(iter_vid))[i];
-            // Insert bindings (overwrite per iteration, no shadowing)
-            for (j, &(name_span, _)) in config.bindings.iter().enumerate() {
-                let value_id = match *self.get_val(item_id) {
+            for j in 0..n_bindings {
+                let val = match *self.get_val(item_id) {
                     Value::Tuple(range) => self.value_children[range.start as usize + j],
                     _ => item_id,
                 };
-                self.scopes.insert(self.ctx().text(name_span), value_id);
+                if i == 0 {
+                    self.for_binding_values.push(val);
+                } else {
+                    self.for_binding_values[base + j] = val;
+                }
             }
-            results.push(self.lower_to_rule(config.body)?);
+            results.push(self.lower_to_rule(body)?);
         }
-        // Remove bindings after loop
-        for &(name_span, _) in &config.bindings {
-            self.scopes.remove(self.ctx().text(name_span));
-        }
+        self.for_binding_frames.pop();
+        self.for_binding_values.truncate(base);
         Ok(results)
     }
 }
