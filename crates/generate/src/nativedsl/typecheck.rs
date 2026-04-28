@@ -21,8 +21,13 @@ use super::{
 
 /// Function pointer type for element/inner checkers passed to `expect_list` and
 /// `expect_list_list`. Checks a single node against the type environment.
-type CheckFn<'ast> =
-    fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv<'ast>, &[Option<TypeEnv<'ast>>]) -> Result<(), TypeError>;
+type CheckFn<'ast> = fn(
+    &SharedAst,
+    &'ast ModuleContext,
+    NodeId,
+    &mut TypeEnv<'ast>,
+    &[Option<TypeEnv<'ast>>],
+) -> Result<(), TypeError>;
 
 /// Types that can appear as homogeneous object field values.
 /// Each variant maps 1:1 to a `Ty` variant of the same name.
@@ -536,11 +541,8 @@ fn resolve_item_tc(
                 }
             }
             let body = fn_config.body;
-            let locals: LocalNames<'_> = fn_config
-                .params
-                .iter()
-                .map(|p| ctx.text(p.name))
-                .collect();
+            let locals: LocalNames<'_> =
+                fn_config.params.iter().map(|p| ctx.text(p.name)).collect();
             resolve_expr_tc(arena, pools, ctx, decls, body, &locals)
         }
         _ => Ok(()),
@@ -674,7 +676,9 @@ fn resolve_children_tc(
         | Node::Neg(c)
         | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
-        | Node::Reserved { content: c, .. } => resolve_expr_tc(arena, pools, ctx, decls, *c, locals),
+        | Node::Reserved { content: c, .. } => {
+            resolve_expr_tc(arena, pools, ctx, decls, *c, locals)
+        }
         Node::Append { left: a, right: b }
         | Node::Prec {
             value: a,
@@ -775,10 +779,8 @@ fn check_item<'ast>(
             let var_name = ctx.text(*name);
             let declared_ty = *ty;
             // For empty containers, the inner type comes from annotation only
-            let is_empty_list =
-                matches!(shared.arena.get(*value), Node::List(r) if shared.pools.child_slice(*r).is_empty());
-            let is_empty_obj =
-                matches!(shared.arena.get(*value), Node::Object(r) if shared.pools.get_object(*r).is_empty());
+            let is_empty_list = matches!(shared.arena.get(*value), Node::List(r) if shared.pools.child_slice(*r).is_empty());
+            let is_empty_obj = matches!(shared.arena.get(*value), Node::Object(r) if shared.pools.get_object(*r).is_empty());
             let resolved_ty = match (is_empty_list, is_empty_obj, declared_ty) {
                 (true, _, Some(ty)) if ty.is_list() => ty,
                 (_, true, Some(ty)) if matches!(ty, Ty::Object(_)) => ty,
@@ -805,7 +807,8 @@ fn check_item<'ast>(
             }
             // If the value is an object literal, register its field names
             if let Node::Object(range) = shared.arena.get(*value) {
-                let fields: Vec<&str> = shared.pools
+                let fields: Vec<&str> = shared
+                    .pools
                     .get_object(*range)
                     .iter()
                     .map(|(span, _)| ctx.text(*span))
@@ -948,7 +951,10 @@ fn expect_name_or_str<'ast>(
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
-    if matches!(shared.arena.get(id), Node::StringLit | Node::RawStringLit { .. }) {
+    if matches!(
+        shared.arena.get(id),
+        Node::StringLit | Node::RawStringLit { .. }
+    ) {
         return Ok(());
     }
     expect_name_ref(shared, ctx, id, env, modules)
@@ -1058,8 +1064,12 @@ fn type_of<'ast>(
             }
             Ok(Ty::Int)
         }
-        Node::Append { left, right } => type_of_append(shared, ctx, *left, *right, span, env, modules),
-        Node::FieldAccess { obj, field } => type_of_field_access(shared, ctx, *obj, *field, env, modules),
+        Node::Append { left, right } => {
+            type_of_append(shared, ctx, *left, *right, span, env, modules)
+        }
+        Node::FieldAccess { obj, field } => {
+            type_of_field_access(shared, ctx, *obj, *field, env, modules)
+        }
         Node::QualifiedAccess { obj, member } => {
             let obj_ty = type_of(shared, ctx, *obj, env, modules)?;
             match obj_ty {
@@ -1158,7 +1168,9 @@ fn type_of<'ast>(
             Ok(Ty::Spread)
         }
         Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env, modules),
-        Node::QualifiedCall(range) => type_of_qualified_call(shared, ctx, *range, span, env, modules),
+        Node::QualifiedCall(range) => {
+            type_of_qualified_call(shared, ctx, *range, span, env, modules)
+        }
         _ => Err(TypeError::new(TypeErrorKind::CannotInferType, span)),
     }
 }
@@ -1335,7 +1347,8 @@ fn type_of_object<'ast>(
     let mut widest = type_of(shared, ctx, fields[0].1, env, modules)?;
     for &(_, val_id) in &fields[1..] {
         let ty = type_of(shared, ctx, val_id, env, modules)?;
-        widest = widen_type(widest, ty).ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
+        widest = widen_type(widest, ty)
+            .ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
     }
     let inner = InnerTy::try_from(widest).map_err(|()| {
         TypeError::new(
@@ -1374,9 +1387,12 @@ fn type_of_list<'ast>(
             )
         })?;
     }
-    widest
-        .to_list()
-        .ok_or_else(|| TypeError::new(TypeErrorKind::InvalidListElement, shared.arena.span(items[0])))
+    widest.to_list().ok_or_else(|| {
+        TypeError::new(
+            TypeErrorKind::InvalidListElement,
+            shared.arena.span(items[0]),
+        )
+    })
 }
 
 fn type_of_call<'ast>(
