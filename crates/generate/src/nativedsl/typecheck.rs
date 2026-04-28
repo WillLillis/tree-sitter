@@ -14,7 +14,7 @@ use crate::grammars::InputGrammar;
 use super::{
     Note, NoteMessage,
     ast::{
-        AstPools, ChildRange, ForId, IdentKind, ModuleContext, Node, NodeArena, NodeId, PrecKind,
+        AstPools, ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, PrecKind,
         SharedAst, Span,
     },
 };
@@ -201,6 +201,7 @@ pub struct TypeEnv<'src> {
     pub fns: FxHashMap<&'src str, MacroSig>,
     /// Field names for Object variables, keyed by variable name.
     pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
+    current_macro: Option<MacroId>,
 }
 
 impl<'src> TypeEnv<'src> {
@@ -209,6 +210,7 @@ impl<'src> TypeEnv<'src> {
             vars: FxHashMap::default(),
             fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
+            current_macro: None,
         }
     }
     fn insert_var(&mut self, name: &'src str, ty: Ty) {
@@ -599,40 +601,13 @@ fn resolve_expr_tc(
         return Ok(());
     }
 
-    // For expressions need extended locals
-    if let Node::For(for_idx) = arena.get(id) {
-        let config = pools.get_for(*for_idx);
-        // For-loop bindings must not shadow any outer name
-        for &(name_span, _) in &config.bindings {
-            let name = ctx.text(name_span);
-            if let Some(&(_, first_span)) = decls.get(name) {
-                return Err(TypeError::with_note(
-                    TypeErrorKind::ShadowedBinding(name.to_string()),
-                    name_span,
-                    Note {
-                        message: NoteMessage::FirstDefinedHere,
-                        span: first_span,
-                        path: ctx.path.clone(),
-                        source: ctx.source.clone(),
-                    },
-                ));
-            }
-            if locals.contains(name) {
-                return Err(TypeError::new(
-                    TypeErrorKind::ShadowedBinding(name.to_string()),
-                    name_span,
-                ));
-            }
-        }
-        let iterable = config.iterable;
-        let body = config.body;
-        let bindings = &config.bindings;
+    // For-loop bindings are resolved by the parser (ForBinding nodes).
+    // Just recurse into iterable and body.
+    if let Node::For { for_id, body } = arena.get(id) {
+        let iterable = pools.get_for(*for_id).iterable;
+        let body = *body;
         resolve_expr_tc(arena, pools, ctx, decls, iterable, locals)?;
-        let mut inner = locals.clone();
-        for &(name_span, _) in bindings {
-            inner.insert(ctx.text(name_span));
-        }
-        return resolve_expr_tc(arena, pools, ctx, decls, body, &inner);
+        return resolve_expr_tc(arena, pools, ctx, decls, body, locals);
     }
 
     // All remaining cases
@@ -821,18 +796,10 @@ fn check_item<'ast>(
         }
         Node::Macro(fn_idx) => {
             let config = shared.pools.get_macro(*fn_idx);
-            let fn_name = ctx.text(config.name);
-            let sig = &env.fns[fn_name];
-            let return_ty = sig.return_ty;
-            let n_params = sig.params.len();
-            for i in 0..n_params {
-                let ty = env.fns[fn_name].params[i];
-                env.insert_var(ctx.text(config.params[i].name), ty);
-            }
+            let return_ty = config.return_ty;
+            let prev = env.current_macro.replace(*fn_idx);
             let body_ty = type_of(shared, ctx, config.body, env, modules)?;
-            for param in &config.params {
-                env.vars.remove(ctx.text(param.name));
-            }
+            env.current_macro = prev;
             if !body_ty.is_compatible(return_ty) {
                 return Err(mismatch(return_ty, body_ty, shared.arena.span(config.body)));
             }
@@ -1047,6 +1014,13 @@ fn type_of<'ast>(
             })
         }
         Node::Ident(IdentKind::Unresolved) => unreachable!(),
+        Node::MacroParam(i) => {
+            let macro_id = env.current_macro.unwrap();
+            Ok(shared.pools.get_macro(macro_id).params[*i as usize].ty)
+        }
+        Node::ForBinding { for_id, index } => {
+            Ok(shared.pools.get_for(*for_id).bindings[*index as usize].1)
+        }
         Node::Ident(IdentKind::Macro) => Err(TypeError::new(
             TypeErrorKind::FunctionUsedAsValue(ctx.text(span).to_string()),
             span,
@@ -1132,9 +1106,13 @@ fn type_of<'ast>(
         Node::Alias { content, target } => {
             expect_rule(shared, ctx, *content, env, modules)?;
             let target_ty = type_of(shared, ctx, *target, env, modules)?;
-            let is_valid = matches!(shared.arena.get(*target), Node::Ident(IdentKind::Rule))
-                || (matches!(shared.arena.get(*target), Node::Ident(IdentKind::Var))
-                    && target_ty.is_rule_like())
+            let is_valid = matches!(
+                shared.arena.get(*target),
+                Node::Ident(IdentKind::Rule)
+                    | Node::Ident(IdentKind::Var)
+                    | Node::MacroParam(_)
+                    | Node::ForBinding { .. }
+            ) && target_ty.is_rule_like()
                 || target_ty == Ty::Str;
             if !is_valid {
                 return Err(TypeError::new(
@@ -1163,8 +1141,8 @@ fn type_of<'ast>(
             expect_rule(shared, ctx, *content, env, modules)?;
             Ok(Ty::Rule)
         }
-        Node::For(for_idx) => {
-            check_for_expr(shared, ctx, *for_idx, env, modules)?;
+        Node::For { for_id, body } => {
+            check_for_expr(shared, ctx, *for_id, *body, env, modules)?;
             Ok(Ty::Spread)
         }
         Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env, modules),
@@ -1435,6 +1413,7 @@ fn check_for_expr<'ast>(
     shared: &SharedAst,
     ctx: &'ast ModuleContext,
     for_idx: ForId,
+    body: NodeId,
     env: &mut TypeEnv<'ast>,
     modules: &[Option<TypeEnv<'ast>>],
 ) -> Result<(), TypeError> {
@@ -1471,14 +1450,7 @@ fn check_for_expr<'ast>(
                     }
                 }
             }
-            for &(name_span, declared_ty) in &config.bindings {
-                env.insert_var(ctx.text(name_span), declared_ty);
-            }
-            let result = expect_rule(shared, ctx, config.body, env, modules);
-            for &(name_span, _) in &config.bindings {
-                env.vars.remove(ctx.text(name_span));
-            }
-            return result;
+            return expect_rule(shared, ctx, body, env, modules);
         }
     }
 
@@ -1502,10 +1474,7 @@ fn check_for_expr<'ast>(
     if !elem_ty.is_compatible(declared_ty) {
         return Err(mismatch(declared_ty, elem_ty, name_span));
     }
-    env.insert_var(ctx.text(name_span), declared_ty);
-    let result = expect_rule(shared, ctx, config.body, env, modules);
-    env.vars.remove(ctx.text(name_span));
-    result
+    expect_rule(shared, ctx, body, env, modules)
 }
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
