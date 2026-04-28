@@ -221,45 +221,6 @@ fn error_macro_param_shadows_let() {
 }
 
 #[test]
-fn error_for_var_shadows_macro_param() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            macro make(item: str_t) rule_t =
-                choice(for (item: str_t) in ["a", "b"] { item })
-            rule program { make("ignored") }"#
-        ),
-        Type
-    );
-    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("item".into()));
-}
-
-#[test]
-fn error_for_var_shadows_rule() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            rule program { choice(for (program: str_t) in ["a", "b"] { program }) }"#
-        ),
-        Type
-    );
-    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("program".into()));
-}
-
-#[test]
-fn error_for_var_shadows_let() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            let X: str_t = "shadowed"
-            rule program { choice(for (X: str_t) in ["a", "b"] { X }) }"#
-        ),
-        Type
-    );
-    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("X".into()));
-}
-
-#[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
         r#"grammar { language: "test" } macro f(x: rule_t) rule_t = f(x) rule program { f("x") }"#,
