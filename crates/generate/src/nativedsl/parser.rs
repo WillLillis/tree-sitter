@@ -8,7 +8,7 @@ use thiserror::Error;
 use super::{
     InnerTy, Note, NoteMessage, ParseError,
     ast::{
-        ChildRange, MacroConfig, ForConfig, GrammarConfig, IdentKind, ModuleContext, Node, NodeId,
+        ChildRange, ForConfig, GrammarConfig, IdentKind, MacroConfig, ModuleContext, Node, NodeId,
         Param, PrecKind, QueryableField, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
@@ -124,7 +124,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
 
     fn expect_ident_node(&mut self) -> ParseResult<NodeId> {
         let span = self.expect_ident()?;
-        Ok(self.shared.arena.push(Node::Ident(IdentKind::Unresolved), span))
+        Ok(self
+            .shared
+            .arena
+            .push(Node::Ident(IdentKind::Unresolved), span))
     }
 
     /// Accept an identifier or a keyword used as an identifier.
@@ -359,9 +362,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             return_ty,
             body,
         });
-        Ok(self
-            .shared
-            .arena.push(Node::Macro(macro_idx), start.merge(self.shared.arena.span(body))))
+        Ok(self.shared.arena.push(
+            Node::Macro(macro_idx),
+            start.merge(self.shared.arena.span(body)),
+        ))
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -416,7 +420,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             let field = self.expect_name()?;
             result = self
                 .shared
-                .arena.push(Node::FieldAccess { obj: result, field }, start.merge(field));
+                .arena
+                .push(Node::FieldAccess { obj: result, field }, start.merge(field));
         }
         self.depth -= 1;
         Ok(result)
@@ -488,7 +493,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             _ if kw.is_keyword() => self.parse_ident_expr(start),
             TokenKind::StringLit => {
                 self.advance_pos();
-                Ok(self.shared.arena.push(Node::StringLit, start.strip_quotes()))
+                Ok(self
+                    .shared
+                    .arena
+                    .push(Node::StringLit, start.strip_quotes()))
             }
             TokenKind::IntLit(n) => {
                 self.advance_pos();
@@ -496,14 +504,18 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             }
             TokenKind::RawStringLit { hash_count } => {
                 self.advance_pos();
-                Ok(self.shared.arena.push(Node::RawStringLit { hash_count }, start))
+                Ok(self
+                    .shared
+                    .arena
+                    .push(Node::RawStringLit { hash_count }, start))
             }
             TokenKind::Minus => {
                 self.advance_pos();
                 let inner = self.parse_expr()?;
                 Ok(self
                     .shared
-                    .arena.push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
+                    .arena
+                    .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
             }
             TokenKind::LBracket => self.parse_delimited(start, TokenKind::RBracket, Node::List),
             TokenKind::LParen => self.parse_delimited(start, TokenKind::RParen, Node::Tuple),
@@ -559,7 +571,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
             .shared
-            .arena.push(Node::GrammarConfig { module, field }, start.merge(end)))
+            .arena
+            .push(Node::GrammarConfig { module, field }, start.merge(end)))
     }
 
     /// Parse a two-argument builtin: `name(first, second)`.
@@ -590,7 +603,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             self.parse_binary(start, TokenKind::KwField, Self::expect_name)?;
         Ok(self
             .shared
-            .arena.push(Node::Field { name, content }, start.merge(end)))
+            .arena
+            .push(Node::Field { name, content }, start.merge(end)))
     }
 
     fn parse_alias(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -598,7 +612,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             self.parse_binary(start, TokenKind::KwAlias, Self::parse_expr)?;
         Ok(self
             .shared
-            .arena.push(Node::Alias { content, target }, start.merge(end)))
+            .arena
+            .push(Node::Alias { content, target }, start.merge(end)))
     }
 
     fn parse_prec(&mut self, start: Span, kind: PrecKind) -> ParseResult<NodeId> {
@@ -626,7 +641,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         })?;
         Ok(self
             .shared
-            .arena.push(Node::Reserved { context, content }, start.merge(end)))
+            .arena
+            .push(Node::Reserved { context, content }, start.merge(end)))
     }
 
     fn parse_regexp(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -648,7 +664,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         } else {
             self.shared.pools.push_children(&[pattern]).unwrap()
         };
-        Ok(self.shared.arena.push(Node::DynRegex(range), start.merge(end)))
+        Ok(self
+            .shared
+            .arena
+            .push(Node::DynRegex(range), start.merge(end)))
     }
 
     fn parse_module_path(
@@ -679,7 +698,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         let (left, right, end) = self.parse_binary(start, TokenKind::KwAppend, Self::parse_expr)?;
         Ok(self
             .shared
-            .arena.push(Node::Append { left, right }, start.merge(end)))
+            .arena
+            .push(Node::Append { left, right }, start.merge(end)))
     }
 
     fn parse_for(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -714,7 +734,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 let field = self.expect_name()?;
                 id = self
                     .shared
-                    .arena.push(Node::FieldAccess { obj: id, field }, start.merge(field));
+                    .arena
+                    .push(Node::FieldAccess { obj: id, field }, start.merge(field));
             } else if self.at(TokenKind::ColonColon) {
                 self.advance_pos();
                 let member_span = self.expect_ident()?;
@@ -722,7 +743,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                     // h::fn_name(args) - qualified call needs member as NodeId in ChildRange
                     let member_id = self
                         .shared
-                        .arena.push(Node::Ident(IdentKind::Unresolved), member_span);
+                        .arena
+                        .push(Node::Ident(IdentKind::Unresolved), member_span);
                     self.advance_pos();
                     let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
                     let end = self.expect(TokenKind::RParen)?;
@@ -731,9 +753,13 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                     children.extend(args);
                     let range = self
                         .shared
-                        .pools.push_children(&children)
+                        .pools
+                        .push_children(&children)
                         .ok_or_else(|| self.error(ParseErrorKind::NestingTooDeep))?;
-                    id = self.shared.arena.push(Node::QualifiedCall(range), start.merge(end));
+                    id = self
+                        .shared
+                        .arena
+                        .push(Node::QualifiedCall(range), start.merge(end));
                     break;
                 }
                 id = self.shared.arena.push(
@@ -744,7 +770,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                     start.merge(member_span),
                 );
             } else if self.at(TokenKind::LParen) {
-                if !matches!(self.shared.arena.get(id), Node::Ident(IdentKind::Unresolved)) {
+                if !matches!(
+                    self.shared.arena.get(id),
+                    Node::Ident(IdentKind::Unresolved)
+                ) {
                     return Err(self.error(ParseErrorKind::ExpectedFunctionName));
                 }
                 self.advance_pos();
@@ -802,9 +831,13 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         let end = self.expect(TokenKind::RBrace)?;
         let range = self
             .shared
-            .pools.push_object(fields)
+            .pools
+            .push_object(fields)
             .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
-        Ok(self.shared.arena.push(Node::Object(range), start.merge(end)))
+        Ok(self
+            .shared
+            .arena
+            .push(Node::Object(range), start.merge(end)))
     }
 
     /// Parse comma-separated children directly into a [`ChildRange`].
@@ -833,7 +866,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         }
         let range = self
             .shared
-            .pools.push_children(&self.scratch[saved..])
+            .pools
+            .push_children(&self.scratch[saved..])
             .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
         self.scratch.truncate(saved);
         Ok(range)

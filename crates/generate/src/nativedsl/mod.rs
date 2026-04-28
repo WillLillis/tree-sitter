@@ -326,41 +326,12 @@ fn load_child_module(
             kind,
             &child_ancestors,
         )
-        .map_err(|inner| {
-            ModuleError {
-                inner: Box::new(inner),
-                source_text: content,
-                path: canonical,
-                reference_span: span,
-            }
+        .map_err(|inner| ModuleError {
+            inner: Box::new(inner),
+            source_text: content,
+            path: canonical,
+            reference_span: span,
         })?,
-        Some("json") if matches!(kind, ModuleKind::Grammar) => {
-            let grammar = crate::parse_grammar::parse_grammar(&content).map_err(|e| {
-                LowerError::new(
-                    LowerErrorKind::ModuleJsonError {
-                        path: canonical.clone(),
-                        error: e,
-                    },
-                    span,
-                )
-            })?;
-            let global_id = u8::try_from(modules.len())
-                .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
-            modules.push(Module {
-                ctx: ModuleContext {
-                    source: String::new(),
-                    path: canonical,
-                    grammar_config: None,
-                    root_items: Vec::new(),
-                },
-                lowered: Some(grammar),
-                global_id,
-            });
-            global_id
-        }
-        Some("json") => {
-            return Err(LowerError::new(LowerErrorKind::JsonImportNotAllowed, span).into());
-        }
         _ => return Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
     };
 
