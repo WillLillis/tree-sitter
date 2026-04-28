@@ -133,8 +133,6 @@ struct Evaluator<'ast> {
     module_macros: Vec<FxHashMap<&'ast str, NodeId>>,
     // Per-module let binding values (lazily populated on first access)
     module_values: Vec<Option<FxHashMap<&'ast str, ValueId>>>,
-    // Offset: table index = global_id - base_id
-    base_id: usize,
     // Current execution state
     current_module: usize,
     scopes: FxHashMap<&'ast str, ValueId>,
@@ -179,37 +177,31 @@ struct EvalResult {
     reserved: Option<Vec<ReservedWordContext<Rule>>>,
 }
 
-/// Build a flat module table from a module and its descendants. The root
-/// module is placed at index 0; children follow in depth-first pre-order.
+/// Build the module info and macro tables from the flat module vec.
+// TODO: eliminate this function. Push the root module into the flat vec
+// before lowering (with lowered: None), then the evaluator can reference
+// the flat vec directly instead of building a separate ModuleInfo table.
 fn build_module_table<'ast>(
     shared: &'ast SharedAst,
     root_ctx: &'ast ModuleContext,
     root_base_grammar: Option<&'ast InputGrammar>,
-    sub_modules: &'ast [super::Module],
+    modules: &'ast [super::Module],
 ) -> (Vec<ModuleInfo<'ast>>, Vec<FxHashMap<&'ast str, NodeId>>) {
-    let mut infos = vec![ModuleInfo {
+    let mut infos = Vec::with_capacity(modules.len() + 1);
+    let mut fns = Vec::with_capacity(modules.len() + 1);
+    for m in modules {
+        infos.push(ModuleInfo {
+            ctx: &m.ctx,
+            base_grammar: m.lowered.as_ref(),
+        });
+        fns.push(collect_macros(shared, &m.ctx));
+    }
+    // Root module goes last (it has the highest global_id)
+    infos.push(ModuleInfo {
         ctx: root_ctx,
         base_grammar: root_base_grammar,
-    }];
-    let mut fns = vec![collect_macros(shared, root_ctx)];
-
-    fn add_children<'a>(
-        shared: &'a SharedAst,
-        modules: &'a [super::Module],
-        infos: &mut Vec<ModuleInfo<'a>>,
-        fns: &mut Vec<FxHashMap<&'a str, NodeId>>,
-    ) {
-        for m in modules {
-            infos.push(ModuleInfo {
-                ctx: &m.ctx,
-                base_grammar: m.lowered.as_ref(),
-            });
-            fns.push(collect_macros(shared, &m.ctx));
-            add_children(shared, &m.sub_modules, infos, fns);
-        }
-    }
-
-    add_children(shared, sub_modules, &mut infos, &mut fns);
+    });
+    fns.push(collect_macros(shared, root_ctx));
     (infos, fns)
 }
 
@@ -241,8 +233,8 @@ fn evaluate(
         modules: module_infos,
         module_macros,
         module_values: vec![None; n],
-        base_id: root_global_id as usize,
-        current_module: 0,
+
+        current_module: root_global_id as usize,
         scopes: FxHashMap::default(),
         call_stack: Vec::new(),
         arg_scratch: Vec::new(),
@@ -411,13 +403,9 @@ impl<'ast> Evaluator<'ast> {
         self.modules[self.current_module].ctx
     }
 
+    // TODO: delete this function, just use global_id as usize directly
     fn module_idx(&self, global_id: u8) -> usize {
-        debug_assert!(
-            global_id as usize >= self.base_id,
-            "global_id {global_id} is below base_id {}",
-            self.base_id
-        );
-        global_id as usize - self.base_id
+        global_id as usize
     }
 
     fn alloc_val(&mut self, val: Value) -> ValueId {
