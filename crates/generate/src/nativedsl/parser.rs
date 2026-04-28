@@ -8,7 +8,7 @@ use thiserror::Error;
 use super::{
     InnerTy, Note, NoteMessage, ParseError,
     ast::{
-        ChildRange, ForConfig, GrammarConfig, IdentKind, MacroConfig, ModuleContext, Node, NodeId,
+        ChildRange, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig, ModuleContext, Node, NodeId,
         Param, PrecKind, QueryableField, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
@@ -17,6 +17,12 @@ use super::{
 
 const MAX_PARSE_DEPTH: u16 = 256;
 
+#[derive(Clone, Copy)]
+enum LocalBinding {
+    MacroParam(u8),
+    ForBinding(ForId, u8),
+}
+
 pub struct Parser<'tok, 'path, 'shared> {
     tokens: &'tok [Token],
     pos: usize,
@@ -24,6 +30,10 @@ pub struct Parser<'tok, 'path, 'shared> {
     pub shared: &'shared mut SharedAst,
     pub ctx: ModuleContext,
     scratch: Vec<NodeId>,
+    /// Stack of local bindings (macro params and for-loop bindings).
+    /// Innermost scope is at the end. Pushed before parsing a body,
+    /// truncated after.
+    locals: Vec<(Span, LocalBinding)>,
     depth: u16,
 }
 
@@ -47,6 +57,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 root_items: Vec::new(),
             },
             scratch: Vec::new(),
+            locals: Vec::new(),
             depth: 0,
         }
     }
@@ -355,7 +366,12 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.check_duplicate_names(&params, |p| p.name)?;
         let return_ty = self.parse_type()?.0;
         self.expect(TokenKind::Eq)?;
+        let saved = self.locals.len();
+        for (i, p) in params.iter().enumerate() {
+            self.locals.push((p.name, LocalBinding::MacroParam(i as u8)));
+        }
         let body = self.parse_expr()?;
+        self.locals.truncate(saved);
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,
@@ -714,19 +730,39 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.check_duplicate_names(&bindings, |&(s, _)| s)?;
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
+        let for_id = self.shared.pools.push_for(ForConfig {
+            bindings,
+            iterable,
+        });
+        let saved = self.locals.len();
+        let config = self.shared.pools.get_for(for_id);
+        for (i, &(name_span, _)) in config.bindings.iter().enumerate() {
+            self.locals.push((name_span, LocalBinding::ForBinding(for_id, i as u8)));
+        }
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
-        let for_idx = self.shared.pools.push_for(ForConfig {
-            bindings,
-            iterable,
-            body,
-        });
-        Ok(self.shared.arena.push(Node::For(for_idx), start.merge(end)))
+        self.locals.truncate(saved);
+        Ok(self.shared.arena.push(Node::For { for_id, body }, start.merge(end)))
     }
 
     fn parse_ident_expr(&mut self, start: Span) -> ParseResult<NodeId> {
-        let name_id = self.expect_ident_node()?;
+        let span = self.expect_ident()?;
+        let name = self.ctx.text(span);
+        let name_id = if let Some(&(_, binding)) = self
+            .locals
+            .iter()
+            .rev()
+            .find(|(s, _)| self.ctx.text(*s) == name)
+        {
+            let node = match binding {
+                LocalBinding::MacroParam(i) => Node::MacroParam(i),
+                LocalBinding::ForBinding(for_id, i) => Node::ForBinding { for_id, index: i },
+            };
+            self.shared.arena.push(node, span)
+        } else {
+            self.shared.arena.push(Node::Ident(IdentKind::Unresolved), span)
+        };
         let mut id = name_id;
         loop {
             if self.at(TokenKind::Dot) {

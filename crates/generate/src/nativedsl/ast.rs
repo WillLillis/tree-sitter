@@ -460,7 +460,10 @@ pub enum Node {
         left: NodeId,
         right: NodeId,
     },
-    For(ForId),
+    For {
+        for_id: ForId,
+        body: NodeId,
+    },
     /// `name(arg0, arg1, ...)`. `args` children: `[arg0, arg1, ...]`.
     Call {
         name: NodeId,
@@ -473,6 +476,15 @@ pub enum Node {
     /// `{ key0: val0, key1: val1, ... }`. Fields stored in `SharedAst::object_fields`.
     Object(ChildRange),
     Neg(NodeId),
+    /// Parameter hole in a macro body. Emitted by the parser when an identifier
+    /// in a macro body matches a parameter name. The `u8` is the parameter index.
+    MacroParam(u8),
+    /// Binding reference in a for-loop body. Emitted by the parser when an
+    /// identifier in a for-loop body matches a binding name.
+    ForBinding {
+        for_id: ForId,
+        index: u8,
+    },
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
     #[doc(hidden)]
     Unreachable,
@@ -527,5 +539,4 @@ pub struct Param {
 pub struct ForConfig {
     pub bindings: Vec<(Span, Ty)>,
     pub iterable: NodeId,
-    pub body: NodeId,
 }
