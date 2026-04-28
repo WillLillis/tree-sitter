@@ -1,7 +1,7 @@
 //! Lowering pass: evaluates the typed AST into an [`InputGrammar`].
 
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -13,8 +13,8 @@ use crate::{
 };
 
 use super::ast::{
-    Ast, ChildRange, ForConfig, IdentKind, Node, NodeId, PrecKind, QueryableField, RepeatKind,
-    Span,
+    ChildRange, ForConfig, IdentKind, ModuleContext, Node, NodeId, PrecKind, QueryableField,
+    RepeatKind, SharedAst, Span,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,12 +121,13 @@ const MAX_CALL_DEPTH: u16 = 64;
 
 /// Flat entry for one module in the evaluator's module table.
 struct ModuleInfo<'ast> {
-    ast: &'ast Ast,
-    path: &'ast Path,
+    ctx: &'ast ModuleContext,
     base_grammar: Option<&'ast InputGrammar>,
 }
 
 struct Evaluator<'ast> {
+    // Shared AST data (arena + pools), immutable during evaluation
+    shared: &'ast SharedAst,
     // Flat module table (immutable after construction)
     modules: Vec<ModuleInfo<'ast>>,
     module_macros: Vec<FxHashMap<&'ast str, NodeId>>,
@@ -150,13 +151,13 @@ struct Evaluator<'ast> {
     strings: StringPool<'ast>,
 }
 
-/// Collect all `fn` definitions from an AST into a name -> `NodeId` map.
-fn collect_macros(ast: &Ast) -> FxHashMap<&str, NodeId> {
+/// Collect all `fn` definitions from a module into a name -> `NodeId` map.
+fn collect_macros<'a>(shared: &'a SharedAst, ctx: &'a ModuleContext) -> FxHashMap<&'a str, NodeId> {
     let mut fns = FxHashMap::default();
-    for &item_id in &ast.root_items {
-        if let Node::Macro(fn_idx) = ast.node(item_id) {
-            let config = ast.ctx.get_macro(*fn_idx);
-            fns.insert(ast.ctx.text(config.name), item_id);
+    for &item_id in &ctx.root_items {
+        if let Node::Macro(fn_idx) = shared.arena.get(item_id) {
+            let config = shared.pools.get_macro(*fn_idx);
+            fns.insert(ctx.text(config.name), item_id);
         }
     }
     fns
@@ -181,61 +182,62 @@ struct EvalResult {
 /// Build a flat module table from a module and its descendants. The root
 /// module is placed at index 0; children follow in depth-first pre-order.
 fn build_module_table<'ast>(
-    root_ast: &'ast Ast,
-    root_path: &'ast Path,
+    shared: &'ast SharedAst,
+    root_ctx: &'ast ModuleContext,
     root_base_grammar: Option<&'ast InputGrammar>,
     sub_modules: &'ast [super::Module],
 ) -> (Vec<ModuleInfo<'ast>>, Vec<FxHashMap<&'ast str, NodeId>>) {
     let mut infos = vec![ModuleInfo {
-        ast: root_ast,
-        path: root_path,
+        ctx: root_ctx,
         base_grammar: root_base_grammar,
     }];
-    let mut fns = vec![collect_macros(root_ast)];
+    let mut fns = vec![collect_macros(shared, root_ctx)];
 
     fn add_children<'a>(
+        shared: &'a SharedAst,
         modules: &'a [super::Module],
         infos: &mut Vec<ModuleInfo<'a>>,
         fns: &mut Vec<FxHashMap<&'a str, NodeId>>,
     ) {
         for m in modules {
             infos.push(ModuleInfo {
-                ast: &m.ast,
-                path: &m.path,
+                ctx: &m.ctx,
                 base_grammar: m.lowered.as_ref(),
             });
-            fns.push(collect_macros(&m.ast));
-            add_children(&m.sub_modules, infos, fns);
+            fns.push(collect_macros(shared, &m.ctx));
+            add_children(shared, &m.sub_modules, infos, fns);
         }
     }
 
-    add_children(sub_modules, &mut infos, &mut fns);
+    add_children(shared, sub_modules, &mut infos, &mut fns);
     (infos, fns)
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(
-    ast: &Ast,
+    shared: &SharedAst,
+    ctx: &ModuleContext,
     modules: &[super::Module],
     root_global_id: u8,
-    root_path: &Path,
 ) -> LowerResult<InputGrammar> {
     let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
-    let result = evaluate(ast, modules, base_grammar, root_global_id, root_path)?;
+    let result = evaluate(shared, ctx, modules, base_grammar, root_global_id)?;
     build_grammar(result, base_grammar)
 }
 
 /// Evaluate the AST, producing intermediate results.
 fn evaluate(
-    ast: &Ast,
+    shared: &SharedAst,
+    ctx: &ModuleContext,
     modules: &[super::Module],
     base_grammar: Option<&InputGrammar>,
     root_global_id: u8,
-    root_path: &Path,
 ) -> LowerResult<EvalResult> {
-    let (module_infos, module_macros) = build_module_table(ast, root_path, base_grammar, modules);
+    let (module_infos, module_macros) =
+        build_module_table(shared, ctx, base_grammar, modules);
     let n = module_infos.len();
     let mut eval = Evaluator {
+        shared,
         modules: module_infos,
         module_macros,
         module_values: vec![None; n],
@@ -246,22 +248,22 @@ fn evaluate(
         arg_scratch: Vec::new(),
         val_scratch: Vec::new(),
         rule_scratch: Vec::new(),
-        values: Vec::with_capacity(ast.arena.len()),
-        rules: Vec::with_capacity(ast.arena.len()),
-        rule_children: Vec::with_capacity(ast.arena.len()),
-        value_children: Vec::with_capacity(ast.arena.len()),
+        values: Vec::with_capacity(shared.arena.len()),
+        rules: Vec::with_capacity(shared.arena.len()),
+        rule_children: Vec::with_capacity(shared.arena.len()),
+        value_children: Vec::with_capacity(shared.arena.len()),
         object_pool: Vec::new(),
         strings: StringPool::new(),
     };
-    let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ast.root_items.len());
+    let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ctx.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
-    for &item_id in &ast.root_items {
-        match ast.node(item_id) {
+    for &item_id in &ctx.root_items {
+        match shared.arena.get(item_id) {
             Node::Grammar | Node::Macro(_) => {}
             Node::Let { name, value, .. } => {
                 let val = eval.eval_expr(*value)?;
-                eval.scopes.insert(ast.ctx.text(*name), val);
+                eval.scopes.insert(ctx.text(*name), val);
             }
             Node::Rule {
                 is_override,
@@ -270,9 +272,9 @@ fn evaluate(
             } => {
                 let rule_id = eval.lower_to_rule(*body)?;
                 if *is_override {
-                    override_entries.push((ast.ctx.text(*name), rule_id, *name));
+                    override_entries.push((ctx.text(*name), rule_id, *name));
                 } else {
-                    rule_entries.push((ast.ctx.text(*name), rule_id));
+                    rule_entries.push((ctx.text(*name), rule_id));
                 }
             }
             _ => unreachable!(),
@@ -281,7 +283,7 @@ fn evaluate(
 
     // grammar_config is guaranteed present by validate_grammar in mod.rs,
     // language is guaranteed present by the parser (MissingLanguageField error).
-    let config = ast.ctx.grammar_config.as_ref().unwrap();
+    let config = ctx.grammar_config.as_ref().unwrap();
     let language = config.language.as_ref().unwrap();
 
     let rules: Vec<(String, Rule)> = rule_entries
@@ -405,8 +407,8 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
 }
 
 impl<'ast> Evaluator<'ast> {
-    fn ast(&self) -> &'ast Ast {
-        self.modules[self.current_module].ast
+    fn ctx(&self) -> &'ast ModuleContext {
+        self.modules[self.current_module].ctx
     }
 
     fn module_idx(&self, global_id: u8) -> usize {
@@ -523,11 +525,11 @@ impl<'ast> Evaluator<'ast> {
 
     /// Intern a span using the current module's source text.
     fn intern_span(&mut self, span: Span) -> Str {
-        self.strings.intern_span(span, &self.ast().ctx.source)
+        self.strings.intern_span(span, &self.ctx().source)
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
-        let raw = self.ast().ctx.text(span);
+        let raw = self.ctx().text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
             self.strings.intern_owned(unescape_string(raw))
         } else {
@@ -630,7 +632,7 @@ impl<'ast> Evaluator<'ast> {
 
     fn eval_name_list(&mut self, id: NodeId) -> LowerResult<Vec<String>> {
         let vid = self.eval_expr(id)?;
-        let span = self.ast().span(id);
+        let span = self.shared.arena.span(id);
         let items = self.list_items(Self::expect_list(vid));
         items
             .iter()
@@ -642,7 +644,7 @@ impl<'ast> Evaluator<'ast> {
     /// element must evaluate to a named rule reference.
     fn eval_conflicts(&mut self, id: NodeId) -> LowerResult<Vec<Vec<String>>> {
         let vid = self.eval_expr(id)?;
-        let span = self.ast().span(id);
+        let span = self.shared.arena.span(id);
         let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
@@ -661,7 +663,7 @@ impl<'ast> Evaluator<'ast> {
     /// or a named rule reference (`PrecedenceEntry::Symbol`).
     fn eval_precedences(&mut self, id: NodeId) -> LowerResult<Vec<Vec<PrecedenceEntry>>> {
         let vid = self.eval_expr(id)?;
-        let span = self.ast().span(id);
+        let span = self.shared.arena.span(id);
         let outer = self.list_items(Self::expect_list(vid));
         outer
             .iter()
@@ -687,11 +689,11 @@ impl<'ast> Evaluator<'ast> {
             ARule::NamedSymbol(sid) => Ok(self.strings.to_string(*sid)),
             ARule::Blank => Err(LowerError::new(
                 LowerErrorKind::ConfigFieldUnset,
-                self.ast().span(id),
+                self.shared.arena.span(id),
             )),
             _ => Err(LowerError::new(
                 LowerErrorKind::ExpectedRuleName,
-                self.ast().span(id),
+                self.shared.arena.span(id),
             )),
         }
     }
@@ -700,17 +702,18 @@ impl<'ast> Evaluator<'ast> {
     /// Accepts either an object literal `{ name: [words] }` or an expression
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
     fn eval_reserved(&mut self, id: NodeId) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
-        let ast = self.ast();
+        let ctx = self.ctx();
         // Object literal: each field is a named word set
-        if let Node::Object(range) = ast.node(id) {
-            return ast
-                .ctx
+        if let Node::Object(range) = self.shared.arena.get(id) {
+            return self
+                .shared
+                .pools
                 .get_object(*range)
                 .iter()
                 .map(|&(name_span, val_id)| {
                     let words = self.eval_rule_list(val_id)?;
                     Ok(ReservedWordContext {
-                        name: ast.ctx.text(name_span).to_string(),
+                        name: ctx.text(name_span).to_string(),
                         reserved_words: words,
                     })
                 })
@@ -908,9 +911,8 @@ impl<'ast> Evaluator<'ast> {
 
 impl<'ast> Evaluator<'ast> {
     fn eval_expr(&mut self, id: NodeId) -> LowerResult<ValueId> {
-        let ast = self.ast();
-        let span = ast.span(id);
-        match ast.node(id) {
+        let span = self.shared.arena.span(id);
+        match self.shared.arena.get(id) {
             Node::IntLit(n) => Ok(self.alloc_val(Value::Int(*n))),
             Node::StringLit => {
                 let sid = self.intern_string_lit(span);
@@ -934,13 +936,14 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             // Guarded by super::resolve - all variable names validated
-            Node::Ident(IdentKind::Var) => Ok(*self.scopes.get(ast.ctx.text(span)).unwrap()),
+            Node::Ident(IdentKind::Var) => Ok(*self.scopes.get(self.ctx().text(span)).unwrap()),
             Node::GrammarConfig { module, field } => {
-                let mod_val = self.eval_expr(*module)?;
+                let (module, field) = (*module, *field);
+                let mod_val = self.eval_expr(module)?;
                 let Value::Module(idx) = *self.get_val(mod_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                self.eval_grammar_config(idx as usize, *field, span)
+                self.eval_grammar_config(idx as usize, field, span)
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
@@ -966,7 +969,7 @@ impl<'ast> Evaluator<'ast> {
             Node::FieldAccess { obj, field } => {
                 let (obj, field) = (*obj, *field);
                 let obj_val = self.eval_expr(obj)?;
-                let field_name = ast.ctx.text(field);
+                let field_name = self.ctx().text(field);
                 match *self.get_val(obj_val) {
                     Value::Object(idx) => {
                         Ok(*self.object_pool[idx as usize].get(field_name).unwrap())
@@ -977,7 +980,7 @@ impl<'ast> Evaluator<'ast> {
             Node::QualifiedAccess { obj, member } => {
                 let (obj, member) = (*obj, *member);
                 let obj_val = self.eval_expr(obj)?;
-                let member_name = ast.ctx.text(member);
+                let member_name = self.ctx().text(member);
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
@@ -1001,16 +1004,19 @@ impl<'ast> Evaluator<'ast> {
                 ))
             }
             Node::Object(range) => {
-                let fields = ast.ctx.get_object(*range);
+                let range = *range;
+                let fields = self.shared.pools.get_object(range);
                 let mut map =
                     FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
                 for &(key_span, value_id) in fields {
-                    map.insert(ast.ctx.text(key_span), self.eval_expr(value_id)?);
+                    map.insert(self.ctx().text(key_span), self.eval_expr(value_id)?);
                 }
                 Ok(self.alloc_object(map))
             }
             Node::List(range) | Node::Tuple(range) => {
-                let items = ast.ctx.child_slice(*range);
+                let range = *range;
+                let is_list = matches!(self.shared.arena.get(id), Node::List(_));
+                let items = self.shared.pools.child_slice(range);
                 let base = self.val_scratch.len();
                 for &item_id in items {
                     let v = self.eval_expr(item_id)?;
@@ -1023,15 +1029,16 @@ impl<'ast> Evaluator<'ast> {
                     .extend_from_slice(&self.val_scratch[base..]);
                 self.val_scratch.truncate(base);
                 let range = ChildRange::new(start, len);
-                if matches!(ast.node(id), Node::List(_)) {
+                if is_list {
                     Ok(self.alloc_val(Value::List(range)))
                 } else {
                     Ok(self.alloc_val(Value::Tuple(range)))
                 }
             }
             Node::Concat(range) => {
+                let range = *range;
                 let mut result = String::new();
-                for &part_id in ast.ctx.child_slice(*range) {
+                for &part_id in self.shared.pools.child_slice(range) {
                     let vid = self.eval_expr(part_id)?;
                     result.push_str(self.strings.resolve(self.get_str_val(vid)));
                 }
@@ -1039,7 +1046,7 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             Node::DynRegex(range) => {
-                let (pattern, flags) = ast.ctx.get_regex(*range);
+                let (pattern, flags) = self.shared.pools.get_regex(*range);
                 let pv = self.eval_expr(pattern)?;
                 let ps = self.get_str_val(pv);
                 let fs = flags
@@ -1051,9 +1058,9 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::Call { name, args } => {
                 let (name, args) = (*name, *args);
-                let fn_name = ast.ctx.text(ast.span(name));
+                let fn_name = self.ctx().text(self.shared.arena.span(name));
                 let base = self.arg_scratch.len();
-                for &arg_id in ast.ctx.child_slice(args) {
+                for &arg_id in self.shared.pools.child_slice(args) {
                     let v = self.eval_expr(arg_id)?;
                     self.arg_scratch.push(v);
                 }
@@ -1063,8 +1070,9 @@ impl<'ast> Evaluator<'ast> {
                 result
             }
             Node::QualifiedCall(range) => {
-                let (obj, name, args) = ast.ctx.get_qualified_call(*range);
-                let fn_name = ast.ctx.text(ast.span(name));
+                let range = *range;
+                let (obj, name, args) = self.shared.pools.get_qualified_call(range);
+                let fn_name = self.ctx().text(self.shared.arena.span(name));
                 let obj_val = self.eval_expr(obj)?;
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
@@ -1086,18 +1094,18 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn lower_to_rule(&mut self, id: NodeId) -> LowerResult<RuleId> {
-        let ast = self.ast();
-        match ast.node(id) {
+        let span = self.shared.arena.span(id);
+        match self.shared.arena.get(id) {
             Node::Ident(IdentKind::Rule) => {
-                let sid = self.intern_span(ast.span(id));
+                let sid = self.intern_span(span);
                 Ok(self.alloc_rule(ARule::NamedSymbol(sid)))
             }
             Node::StringLit => {
-                let sid = self.intern_string_lit(ast.span(id));
+                let sid = self.intern_string_lit(span);
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             Node::RawStringLit { hash_count } => {
-                let sid = self.intern_raw_string_lit(ast.span(id), *hash_count);
+                let sid = self.intern_raw_string_lit(span, *hash_count);
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             #[rustfmt::skip]
@@ -1122,14 +1130,16 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn eval_combinator(&mut self, id: NodeId) -> LowerResult<RuleId> {
-        let ast = self.ast();
-        match ast.node(id) {
+        let span = self.shared.arena.span(id);
+        match self.shared.arena.get(id) {
             Node::SeqOrChoice { seq, range } => {
-                let children = ast.ctx.child_slice(*range);
+                let (seq, range) = (*seq, *range);
+                let children = self.shared.pools.child_slice(range);
                 let base = self.rule_scratch.len();
                 for &member in children {
-                    if let Node::For(idx) = ast.node(member) {
-                        let for_rules = self.eval_for_to_rules(ast.ctx.get_for(*idx))?;
+                    if let Node::For(idx) = self.shared.arena.get(member) {
+                        let for_rules =
+                            self.eval_for_to_rules(self.shared.pools.get_for(*idx))?;
                         self.rule_scratch.extend(for_rules);
                     } else {
                         let rid = self.lower_to_rule(member)?;
@@ -1140,15 +1150,16 @@ impl<'ast> Evaluator<'ast> {
                 self.rule_children
                     .extend_from_slice(&self.rule_scratch[base..]);
                 self.rule_scratch.truncate(base);
-                let (offset, len) = self.children_range(start, ast.span(id))?;
-                Ok(self.alloc_rule(ARule::SeqOrChoice(*seq, offset, len)))
+                let (offset, len) = self.children_range(start, span)?;
+                Ok(self.alloc_rule(ARule::SeqOrChoice(seq, offset, len)))
             }
             Node::Repeat { kind, inner } => {
-                let inner = self.lower_to_rule(*inner)?;
-                if *kind == RepeatKind::OneOrMore {
+                let (kind, inner) = (*kind, *inner);
+                let inner = self.lower_to_rule(inner)?;
+                if kind == RepeatKind::OneOrMore {
                     return Ok(self.alloc_rule(ARule::Repeat(inner)));
                 }
-                let first = if *kind == RepeatKind::ZeroOrMore {
+                let first = if kind == RepeatKind::ZeroOrMore {
                     self.alloc_rule(ARule::Repeat(inner))
                 } else {
                     inner
@@ -1156,20 +1167,21 @@ impl<'ast> Evaluator<'ast> {
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.rule_children.extend_from_slice(&[first, blank]);
-                let (s, l) = self.children_range(start, ast.span(id)).unwrap();
+                let (s, l) = self.children_range(start, span).unwrap();
                 Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
             }
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             Node::Field { name, content } => {
-                let inner = self.lower_to_rule(*content)?;
-                let sid = self.intern_span(*name);
+                let (name, content) = (*name, *content);
+                let inner = self.lower_to_rule(content)?;
+                let sid = self.intern_span(name);
                 Ok(self.alloc_rule(ARule::Field(sid, inner)))
             }
             Node::Alias { content, target } => {
                 let (content, target) = (*content, *target);
                 let inner = self.lower_to_rule(content)?;
-                if matches!(ast.node(target), Node::Ident(IdentKind::Rule)) {
-                    let sid = self.intern_span(ast.span(target));
+                if matches!(self.shared.arena.get(target), Node::Ident(IdentKind::Rule)) {
+                    let sid = self.intern_span(self.shared.arena.span(target));
                     Ok(self.alloc_rule(ARule::Alias(sid, true, inner)))
                 } else {
                     let vid = self.eval_expr(target)?;
@@ -1179,7 +1191,7 @@ impl<'ast> Evaluator<'ast> {
                             let ARule::NamedSymbol(s) = self.get_rule(*rid) else {
                                 return Err(LowerError::new(
                                     LowerErrorKind::ExpectedRuleName,
-                                    ast.span(target),
+                                    self.shared.arena.span(target),
                                 ));
                             };
                             Ok(self.alloc_rule(ARule::Alias(*s, true, inner)))
@@ -1191,17 +1203,19 @@ impl<'ast> Evaluator<'ast> {
                 }
             }
             Node::Token { immediate, inner } => {
-                let inner = self.lower_to_rule(*inner)?;
-                Ok(self.alloc_rule(ARule::Token(*immediate, inner)))
+                let (immediate, inner) = (*immediate, *inner);
+                let inner = self.lower_to_rule(inner)?;
+                Ok(self.alloc_rule(ARule::Token(immediate, inner)))
             }
             Node::Prec {
                 kind,
                 value,
                 content,
             } => {
-                let vid = self.eval_expr(*value)?;
-                let inner = self.lower_to_rule(*content)?;
-                if *kind == PrecKind::Dynamic {
+                let (kind, value, content) = (*kind, *value, *content);
+                let vid = self.eval_expr(value)?;
+                let inner = self.lower_to_rule(content)?;
+                if kind == PrecKind::Dynamic {
                     let n = self.int_val(Self::expect_int(vid));
                     Ok(self.alloc_rule(ARule::PrecDynamic(n, inner)))
                 } else {
@@ -1220,8 +1234,9 @@ impl<'ast> Evaluator<'ast> {
                 }
             }
             Node::Reserved { context, content } => {
-                let inner = self.lower_to_rule(*content)?;
-                let sid = self.intern_span(*context);
+                let (context, content) = (*context, *content);
+                let inner = self.lower_to_rule(content)?;
+                let sid = self.intern_span(context);
                 Ok(self.alloc_rule(ARule::Reserved(sid, inner)))
             }
             // Guarded by lower_to_rule - only combinator nodes are dispatched here
@@ -1236,12 +1251,12 @@ impl<'ast> Evaluator<'ast> {
                 .call_stack
                 .iter()
                 .map(|(name, span, mod_idx)| {
-                    let info = &self.modules[*mod_idx];
+                    let ctx = self.modules[*mod_idx].ctx;
                     let offset = span.start as usize;
-                    let bytes = &info.ast.ctx.source.as_bytes()[..offset];
+                    let bytes = &ctx.source.as_bytes()[..offset];
                     let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
                     let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
-                    (name.to_string(), info.path.to_path_buf(), line, col)
+                    (name.to_string(), ctx.path.clone(), line, col)
                 })
                 .collect();
             let root_span = self.call_stack[0].1;
@@ -1265,10 +1280,10 @@ impl<'ast> Evaluator<'ast> {
     ) -> LowerResult<ValueId> {
         self.push_call(fn_name, call_span)?;
 
-        let fn_ast = self.modules[table_id].ast;
+        let fn_ctx = self.modules[table_id].ctx;
         let &fn_node_id = self.module_macros[table_id].get(fn_name).unwrap();
-        let fn_config = match fn_ast.node(fn_node_id) {
-            Node::Macro(fi) => fn_ast.ctx.get_macro(*fi),
+        let fn_config = match self.shared.arena.get(fn_node_id) {
+            Node::Macro(fi) => self.shared.pools.get_macro(*fi),
             _ => unreachable!(),
         };
         let body = fn_config.body;
@@ -1289,7 +1304,7 @@ impl<'ast> Evaluator<'ast> {
         }
         for (i, param) in fn_config.params.iter().enumerate() {
             self.scopes
-                .insert(fn_ast.ctx.text(param.name), self.arg_scratch[arg_base + i]);
+                .insert(fn_ctx.text(param.name), self.arg_scratch[arg_base + i]);
         }
 
         let result = self.eval_expr(body);
@@ -1297,7 +1312,7 @@ impl<'ast> Evaluator<'ast> {
 
         // Remove param bindings (no shadowing guarantees safe removal)
         for param in &fn_config.params {
-            self.scopes.remove(fn_ast.ctx.text(param.name));
+            self.scopes.remove(fn_ctx.text(param.name));
         }
 
         if let Some(saved) = saved_scopes {
@@ -1329,14 +1344,15 @@ impl<'ast> Evaluator<'ast> {
 
     /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> LowerResult<FxHashMap<&'ast str, ValueId>> {
-        let n = self.ast().root_items.len();
+        let ctx = self.modules[self.current_module].ctx;
+        let n = ctx.root_items.len();
         let mut values = FxHashMap::default();
         for i in 0..n {
-            let item_id = self.ast().root_items[i];
-            if let Node::Let { name, value, .. } = self.ast().node(item_id) {
+            let item_id = ctx.root_items[i];
+            if let Node::Let { name, value, .. } = self.shared.arena.get(item_id) {
                 let (name, value) = (*name, *value);
                 let val = self.eval_expr(value)?;
-                let var_name = self.ast().ctx.text(name);
+                let var_name = ctx.text(name);
                 self.scopes.insert(var_name, val);
                 values.insert(var_name, val);
             }
@@ -1356,13 +1372,13 @@ impl<'ast> Evaluator<'ast> {
                     Value::Tuple(range) => self.value_children[range.start as usize + j],
                     _ => item_id,
                 };
-                self.scopes.insert(self.ast().ctx.text(name_span), value_id);
+                self.scopes.insert(self.ctx().text(name_span), value_id);
             }
             results.push(self.lower_to_rule(config.body)?);
         }
         // Remove bindings after loop
         for &(name_span, _) in &config.bindings {
-            self.scopes.remove(self.ast().ctx.text(name_span));
+            self.scopes.remove(self.ctx().text(name_span));
         }
         Ok(results)
     }
