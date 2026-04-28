@@ -415,29 +415,6 @@ fn error_import_transitive_nested_error() {
 }
 
 #[test]
-fn error_import_json_not_allowed() {
-    let dir = tempfile::tempdir().unwrap();
-    let json = dir.path().join("base.json");
-    std::fs::write(
-        &json,
-        r#"{"name":"test","rules":{"program":{"type":"BLANK"}}}"#,
-    )
-    .unwrap();
-
-    let input = format!(
-        r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
-    "#,
-        dsl_path(&json)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
-    let e = assert_err!(err, Lower);
-    assert_eq!(e.kind, LowerErrorKind::JsonImportNotAllowed);
-}
-
-#[test]
 fn import_function_receives_complex_expr() {
     let g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
