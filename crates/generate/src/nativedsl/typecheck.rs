@@ -21,13 +21,8 @@ use super::{
 
 /// Function pointer type for element/inner checkers passed to `expect_list` and
 /// `expect_list_list`. Checks a single node against the type environment.
-type CheckFn<'ast> = fn(
-    &SharedAst,
-    &'ast ModuleContext,
-    NodeId,
-    &mut TypeEnv<'ast>,
-    &'ast [super::Module],
-) -> Result<(), TypeError>;
+type CheckFn<'ast> =
+    fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv<'ast>) -> Result<(), TypeError>;
 
 /// Types that can appear as homogeneous object field values.
 /// Each variant maps 1:1 to a `Ty` variant of the same name.
@@ -280,7 +275,7 @@ pub fn resolve_and_check<'ast>(
     }
 
     // Phase 2: Type checking
-    check(shared, ctx, env, modules)
+    check(shared, ctx, env)
 }
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
@@ -649,9 +644,20 @@ fn resolve_qualified_member(
             _ => {}
         }
     }
-    // Not resolved - leave as QualifiedAccess. The lowerer handles
-    // rule lookups via base_grammar.variables (name-based).
-    Ok(())
+    // Check inherited grammar rules (only for inherit modules with a lowered grammar)
+    if target
+        .lowered
+        .as_ref()
+        .is_some_and(|g| g.variables.iter().any(|v| v.name == member_name))
+    {
+        // Leave as QualifiedAccess - the lowerer handles inherited rule
+        // lookups via base_grammar.variables (name-based).
+        return Ok(());
+    }
+    Err(TypeError::new(
+        TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+        member_span,
+    ))
 }
 
 /// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
@@ -765,13 +771,11 @@ fn resolve_children_tc(
 
 /// Run typechecking and return the type environment.
 ///
-/// `modules` holds imported modules' type environments (indexed by
-/// `Ty::ImportModule(idx)` / `Ty::GrammarModule(idx)`), populated by the import pre-pass.
+/// Run typechecking on a single module, populating the shared type environment.
 pub fn check<'ast>(
     shared: &SharedAst,
     ctx: &'ast ModuleContext,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     // Pre-register rules (forward references allowed)
     for &item_id in &ctx.root_items {
@@ -780,7 +784,7 @@ pub fn check<'ast>(
         }
     }
     for &item_id in &ctx.root_items {
-        check_item(shared, ctx, item_id, env, modules)?;
+        check_item(shared, ctx, item_id, env)?;
     }
     Ok(())
 }
@@ -790,28 +794,27 @@ fn check_item<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     match shared.arena.get(id) {
         Node::Grammar => {
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_rule_list(shared, ctx, id, env, modules)?;
+                expect_rule_list(shared, ctx, id, env)?;
             }
             for id in [config.inline, config.supertypes].into_iter().flatten() {
-                expect_name_list(shared, ctx, id, env, modules)?;
+                expect_name_list(shared, ctx, id, env)?;
             }
             if let Some(id) = config.conflicts {
-                expect_list_of_groups(shared, ctx, id, env, modules, expect_name_list)?;
+                expect_list_of_groups(shared, ctx, id, env, expect_name_list)?;
             }
             if let Some(id) = config.precedences {
-                expect_list_of_groups(shared, ctx, id, env, modules, expect_precedence_group)?;
+                expect_list_of_groups(shared, ctx, id, env, expect_precedence_group)?;
             }
             if let Some(id) = config.word {
-                expect_name_ref(shared, ctx, id, env, modules)?;
+                expect_name_ref(shared, ctx, id, env)?;
             }
             if let Some(id) = config.reserved {
-                expect_reserved(shared, ctx, id, env, modules)?;
+                expect_reserved(shared, ctx, id, env)?;
             }
             Ok(())
         }
@@ -830,13 +833,13 @@ fn check_item<'ast>(
                     ));
                 }
                 (_, _, Some(ty)) => {
-                    let inferred = type_of(shared, ctx, *value, env, modules)?;
+                    let inferred = type_of(shared, ctx, *value, env)?;
                     if !inferred.is_compatible(ty) {
                         return Err(mismatch(ty, inferred, shared.arena.span(*value)));
                     }
                     inferred
                 }
-                (_, _, None) => type_of(shared, ctx, *value, env, modules)?,
+                (_, _, None) => type_of(shared, ctx, *value, env)?,
             };
             if !resolved_ty.is_bindable() {
                 return Err(TypeError::new(
@@ -862,14 +865,14 @@ fn check_item<'ast>(
             let config = shared.pools.get_macro(*macro_id);
             let return_ty = config.return_ty;
             let prev = env.current_macro.replace(*macro_id);
-            let body_ty = type_of(shared, ctx, config.body, env, modules)?;
+            let body_ty = type_of(shared, ctx, config.body, env)?;
             env.current_macro = prev;
             if !body_ty.is_compatible(return_ty) {
                 return Err(mismatch(return_ty, body_ty, shared.arena.span(config.body)));
             }
             Ok(())
         }
-        Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env, modules),
+        Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
         _ => unreachable!(),
     }
 }
@@ -892,17 +895,16 @@ fn expect_list<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
     check_elem: CheckFn<'ast>,
     accept_list_str: bool,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = shared.arena.get(id) {
         for &child in shared.pools.child_slice(*range) {
-            check_elem(shared, ctx, child, env, modules)?;
+            check_elem(shared, ctx, child, env)?;
         }
         return Ok(());
     }
-    let ty = type_of(shared, ctx, id, env, modules)?;
+    let ty = type_of(shared, ctx, id, env)?;
     if ty == Ty::ListRule || (accept_list_str && ty == Ty::ListStr) {
         return Ok(());
     }
@@ -914,9 +916,8 @@ fn expect_rule_list<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, modules, expect_rule, true)
+    expect_list(shared, ctx, id, env, expect_rule, true)
 }
 
 fn expect_name_list<'ast>(
@@ -924,9 +925,8 @@ fn expect_name_list<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, modules, expect_name_ref, false)
+    expect_list(shared, ctx, id, env, expect_name_ref, false)
 }
 
 fn expect_name_ref<'ast>(
@@ -934,12 +934,11 @@ fn expect_name_ref<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     match shared.arena.get(id) {
         Node::Ident(IdentKind::Rule) => Ok(()),
         Node::Ident(IdentKind::Var(_)) | Node::FieldAccess { .. } | Node::GrammarConfig { .. } => {
-            let ty = type_of(shared, ctx, id, env, modules)?;
+            let ty = type_of(shared, ctx, id, env)?;
             if ty != Ty::Rule {
                 return Err(mismatch(Ty::Rule, ty, shared.arena.span(id)));
             }
@@ -958,16 +957,15 @@ fn expect_list_of_groups<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
     check_inner: CheckFn<'ast>,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = shared.arena.get(id) {
         for &child in shared.pools.child_slice(*range) {
-            check_inner(shared, ctx, child, env, modules)?;
+            check_inner(shared, ctx, child, env)?;
         }
         return Ok(());
     }
-    let ty = type_of(shared, ctx, id, env, modules)?;
+    let ty = type_of(shared, ctx, id, env)?;
     if ty.is_compatible(Ty::ListListRule) {
         return Ok(());
     }
@@ -980,7 +978,6 @@ fn expect_name_or_str<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     if matches!(
         shared.arena.get(id),
@@ -988,7 +985,7 @@ fn expect_name_or_str<'ast>(
     ) {
         return Ok(());
     }
-    expect_name_ref(shared, ctx, id, env, modules)
+    expect_name_ref(shared, ctx, id, env)
 }
 
 /// Check a `precedences` inner list: each element must be a name-ref or string literal.
@@ -997,9 +994,8 @@ fn expect_precedence_group<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, modules, expect_name_or_str, true)
+    expect_list(shared, ctx, id, env, expect_name_or_str, true)
 }
 
 fn expect_reserved<'ast>(
@@ -1007,17 +1003,16 @@ fn expect_reserved<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
         for &(_, val_id) in shared.pools.get_object(*range) {
-            expect_rule_list(shared, ctx, val_id, env, modules)?;
+            expect_rule_list(shared, ctx, val_id, env)?;
         }
         return Ok(());
     }
     // Non-literal: must be inherited (base.reserved -> Object(ListRule))
-    let ty = type_of(shared, ctx, id, env, modules)?;
+    let ty = type_of(shared, ctx, id, env)?;
     if ty.is_compatible(Ty::Object(InnerTy::ListRule)) {
         return Ok(());
     }
@@ -1032,9 +1027,8 @@ fn expect_rule<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
-    let ty = type_of(shared, ctx, id, env, modules)?;
+    let ty = type_of(shared, ctx, id, env)?;
     if !ty.is_rule_like() {
         return Err(mismatch(Ty::Rule, ty, shared.arena.span(id)));
     }
@@ -1046,7 +1040,6 @@ fn type_of<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let span = shared.arena.span(id);
     match shared.arena.get(id) {
@@ -1062,7 +1055,7 @@ fn type_of<'ast>(
             })
         }
         Node::GrammarConfig { module, field } => {
-            let module_ty = type_of(shared, ctx, *module, env, modules)?;
+            let module_ty = type_of(shared, ctx, *module, env)?;
             if !matches!(module_ty, Ty::GrammarModule(_)) {
                 return Err(TypeError::new(
                     TypeErrorKind::GrammarConfigRequiresInherit,
@@ -1094,32 +1087,29 @@ fn type_of<'ast>(
             TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
         }),
         Node::Neg(inner) => {
-            let ty = type_of(shared, ctx, *inner, env, modules)?;
+            let ty = type_of(shared, ctx, *inner, env)?;
             if ty != Ty::Int {
                 return Err(mismatch(Ty::Int, ty, span));
             }
             Ok(Ty::Int)
         }
-        Node::Append { left, right } => {
-            type_of_append(shared, ctx, *left, *right, span, env, modules)
-        }
-        Node::FieldAccess { obj, field } => {
-            type_of_field_access(shared, ctx, *obj, *field, env, modules)
-        }
-        Node::QualifiedAccess { obj, member } => {
-            let obj_ty = type_of(shared, ctx, *obj, env, modules)?;
-            match obj_ty {
-                Ty::ImportModule(idx) | Ty::GrammarModule(idx) => {
-                    type_of_import_access(shared, ctx, idx, *member, env, modules)
-                }
-                _ => Err(TypeError::new(
+        Node::Append { left, right } => type_of_append(shared, ctx, *left, *right, span, env),
+        Node::FieldAccess { obj, field } => type_of_field_access(shared, ctx, *obj, *field, env),
+        // Only unresolved QualifiedAccess reaches type_of: inherited grammar
+        // rules that exist in base_grammar.variables but not in root_items.
+        // The resolver already resolved lets and caught macro-as-value errors.
+        Node::QualifiedAccess { obj, .. } => {
+            let obj_ty = type_of(shared, ctx, *obj, env)?;
+            if !matches!(obj_ty, Ty::ImportModule(_) | Ty::GrammarModule(_)) {
+                return Err(TypeError::new(
                     TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
                     shared.arena.span(*obj),
-                )),
+                ));
             }
+            Ok(Ty::Rule)
         }
-        Node::Object(range) => type_of_object(shared, ctx, *range, span, env, modules),
-        Node::List(range) => type_of_list(shared, ctx, *range, span, env, modules),
+        Node::Object(range) => type_of_object(shared, ctx, *range, span, env),
+        Node::List(range) => type_of_list(shared, ctx, *range, span, env),
         Node::Tuple(_) => {
             // Tuples are only valid as elements of for-loop lists.
             // They're checked structurally in check_for_expr.
@@ -1128,7 +1118,7 @@ fn type_of<'ast>(
         }
         Node::Concat(range) => {
             for &part in shared.pools.child_slice(*range) {
-                let ty = type_of(shared, ctx, part, env, modules)?;
+                let ty = type_of(shared, ctx, part, env)?;
                 if ty != Ty::Str {
                     return Err(mismatch(Ty::Str, ty, shared.arena.span(part)));
                 }
@@ -1137,12 +1127,12 @@ fn type_of<'ast>(
         }
         Node::DynRegex(range) => {
             let (pattern, flags) = shared.pools.get_regex(*range);
-            let pt = type_of(shared, ctx, pattern, env, modules)?;
+            let pt = type_of(shared, ctx, pattern, env)?;
             if pt != Ty::Str {
                 return Err(mismatch(Ty::Str, pt, shared.arena.span(pattern)));
             }
             if let Some(fid) = flags {
-                let ft = type_of(shared, ctx, fid, env, modules)?;
+                let ft = type_of(shared, ctx, fid, env)?;
                 if ft != Ty::Str {
                     return Err(mismatch(Ty::Str, ft, shared.arena.span(fid)));
                 }
@@ -1151,7 +1141,7 @@ fn type_of<'ast>(
         }
         Node::SeqOrChoice { range, .. } => {
             for &member in shared.pools.child_slice(*range) {
-                let ty = type_of(shared, ctx, member, env, modules)?;
+                let ty = type_of(shared, ctx, member, env)?;
                 if ty != Ty::Spread && !ty.is_rule_like() {
                     return Err(mismatch(Ty::Rule, ty, shared.arena.span(member)));
                 }
@@ -1162,12 +1152,12 @@ fn type_of<'ast>(
         | Node::Token { inner, .. }
         | Node::Field { content: inner, .. }
         | Node::Reserved { content: inner, .. } => {
-            expect_rule(shared, ctx, *inner, env, modules)?;
+            expect_rule(shared, ctx, *inner, env)?;
             Ok(Ty::Rule)
         }
         Node::Alias { content, target } => {
-            expect_rule(shared, ctx, *content, env, modules)?;
-            let target_ty = type_of(shared, ctx, *target, env, modules)?;
+            expect_rule(shared, ctx, *content, env)?;
+            let target_ty = type_of(shared, ctx, *target, env)?;
             let is_valid = matches!(
                 shared.arena.get(*target),
                 Node::Ident(IdentKind::Rule | IdentKind::Var(_))
@@ -1188,7 +1178,7 @@ fn type_of<'ast>(
             value,
             content,
         } => {
-            let vt = type_of(shared, ctx, *value, env, modules)?;
+            let vt = type_of(shared, ctx, *value, env)?;
             if *kind == PrecKind::Dynamic {
                 if vt != Ty::Int {
                     return Err(mismatch(Ty::Int, vt, shared.arena.span(*value)));
@@ -1199,17 +1189,15 @@ fn type_of<'ast>(
                     shared.arena.span(*value),
                 ));
             }
-            expect_rule(shared, ctx, *content, env, modules)?;
+            expect_rule(shared, ctx, *content, env)?;
             Ok(Ty::Rule)
         }
         Node::For { for_id, body } => {
-            check_for_expr(shared, ctx, *for_id, *body, env, modules)?;
+            check_for_expr(shared, ctx, *for_id, *body, env)?;
             Ok(Ty::Spread)
         }
-        Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env, modules),
-        Node::QualifiedCall(range) => {
-            type_of_qualified_call(shared, ctx, *range, span, env, modules)
-        }
+        Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env),
+        Node::QualifiedCall(range) => type_of_qualified_call(shared, ctx, *range, span, env),
         _ => Err(TypeError::new(TypeErrorKind::CannotInferType, span)),
     }
 }
@@ -1221,14 +1209,13 @@ fn type_of_append<'ast>(
     right: NodeId,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let is_empty = |id| matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty());
     let lt = (!is_empty(left))
-        .then(|| type_of(shared, ctx, left, env, modules))
+        .then(|| type_of(shared, ctx, left, env))
         .transpose()?;
     let rt = (!is_empty(right))
-        .then(|| type_of(shared, ctx, right, env, modules))
+        .then(|| type_of(shared, ctx, right, env))
         .transpose()?;
     match (lt, rt) {
         (Some(l), Some(r)) => {
@@ -1262,9 +1249,8 @@ fn type_of_field_access<'ast>(
     obj: NodeId,
     field: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
-    let obj_ty = type_of(shared, ctx, obj, env, modules)?;
+    let obj_ty = type_of(shared, ctx, obj, env)?;
     let field_name = ctx.text(field);
     match obj_ty {
         Ty::Object(inner) => {
@@ -1300,82 +1286,31 @@ fn type_of_field_access<'ast>(
     }
 }
 
-// TODO: replace linear root_items scan with a pre-built name->NodeId index per module
-fn type_of_import_access(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    idx: u8,
-    member: Span,
-    env: &TypeEnv<'_>,
-    modules: &[super::Module],
-) -> Result<Ty, TypeError> {
-    let member_name = ctx.text(member);
-    let target = &modules[idx as usize];
-    for &item_id in &target.ctx.root_items {
-        match shared.arena.get(item_id) {
-            Node::Let { name, .. } if target.ctx.text(*name) == member_name => {
-                return env.get_var(item_id).ok_or_else(|| {
-                    TypeError::new(
-                        TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
-                        member,
-                    )
-                });
-            }
-            Node::Rule { name, .. } if target.ctx.text(*name) == member_name => {
-                return Ok(Ty::Rule);
-            }
-            Node::Macro(macro_id) => {
-                let config = shared.pools.get_macro(*macro_id);
-                if target.ctx.text(config.name) == member_name {
-                    return Err(TypeError::new(
-                        TypeErrorKind::FunctionUsedAsValue(member_name.to_string()),
-                        member,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    Err(TypeError::new(
-        TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
-        member,
-    ))
-}
-
 fn type_of_qualified_call<'a>(
     shared: &SharedAst,
     ctx: &'a ModuleContext,
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'a>,
-    modules: &'a [super::Module],
 ) -> Result<Ty, TypeError> {
     let (obj, name, args) = shared.pools.get_qualified_call(range);
-    let obj_ty = type_of(shared, ctx, obj, env, modules)?;
-    let (Ty::ImportModule(idx) | Ty::GrammarModule(idx)) = obj_ty else {
+    let obj_ty = type_of(shared, ctx, obj, env)?;
+    if !matches!(obj_ty, Ty::ImportModule(_) | Ty::GrammarModule(_)) {
         return Err(TypeError::new(
             TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
             shared.arena.span(obj),
         ));
-    };
-    let fn_name = ctx.text(shared.arena.span(name));
-    let target = &modules[idx as usize];
-    // Find the macro in the target module's root items
-    let config = target.ctx.root_items.iter().find_map(|&item_id| {
-        if let Node::Macro(macro_id) = shared.arena.get(item_id) {
-            let cfg = shared.pools.get_macro(*macro_id);
-            if target.ctx.text(cfg.name) == fn_name {
-                return Some(cfg);
-            }
-        }
-        None
-    });
-    let Some(config) = config else {
+    }
+    // Name was resolved to Ident(Macro(macro_id)) by the resolver
+    let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
+        let fn_name = ctx.text(shared.arena.span(name));
         return Err(TypeError::new(
             TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
             shared.arena.span(name),
         ));
     };
+    let config = shared.pools.get_macro(*macro_id);
+    let fn_name = ctx.text(shared.arena.span(name));
     if args.len() != config.params.len() {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
@@ -1387,7 +1322,7 @@ fn type_of_qualified_call<'a>(
         ));
     }
     for (i, &arg_id) in args.iter().enumerate() {
-        let arg_ty = type_of(shared, ctx, arg_id, env, modules)?;
+        let arg_ty = type_of(shared, ctx, arg_id, env)?;
         if !arg_ty.is_compatible(config.params[i].ty) {
             return Err(mismatch(
                 config.params[i].ty,
@@ -1405,15 +1340,14 @@ fn type_of_object<'ast>(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let fields = shared.pools.get_object(range);
     if fields.is_empty() {
         return Err(TypeError::new(TypeErrorKind::CannotInferType, span));
     }
-    let mut widest = type_of(shared, ctx, fields[0].1, env, modules)?;
+    let mut widest = type_of(shared, ctx, fields[0].1, env)?;
     for &(_, val_id) in &fields[1..] {
-        let ty = type_of(shared, ctx, val_id, env, modules)?;
+        let ty = type_of(shared, ctx, val_id, env)?;
         widest = widen_type(widest, ty)
             .ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
     }
@@ -1432,7 +1366,6 @@ fn type_of_list<'ast>(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let items = shared.pools.child_slice(range);
     if items.is_empty() {
@@ -1441,9 +1374,9 @@ fn type_of_list<'ast>(
             span,
         ));
     }
-    let mut widest = type_of(shared, ctx, items[0], env, modules)?;
+    let mut widest = type_of(shared, ctx, items[0], env)?;
     for &item_id in &items[1..] {
-        let ty = type_of(shared, ctx, item_id, env, modules)?;
+        let ty = type_of(shared, ctx, item_id, env)?;
         widest = widen_type(widest, ty).ok_or_else(|| {
             TypeError::new(
                 TypeErrorKind::ListElementTypeMismatch {
@@ -1469,7 +1402,6 @@ fn type_of_call<'ast>(
     args: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
         let fn_name = ctx.text(shared.arena.span(name));
@@ -1492,7 +1424,7 @@ fn type_of_call<'ast>(
         ));
     }
     for (i, &arg_id) in args.iter().enumerate() {
-        let arg_ty = type_of(shared, ctx, arg_id, env, modules)?;
+        let arg_ty = type_of(shared, ctx, arg_id, env)?;
         if !arg_ty.is_compatible(config.params[i].ty) {
             return Err(mismatch(
                 config.params[i].ty,
@@ -1510,7 +1442,6 @@ fn check_for_expr<'ast>(
     for_idx: ForId,
     body: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     let config = shared.pools.get_for(for_idx);
 
@@ -1539,13 +1470,13 @@ fn check_for_expr<'ast>(
                     ));
                 }
                 for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
-                    let actual = type_of(shared, ctx, elems[i], env, modules)?;
+                    let actual = type_of(shared, ctx, elems[i], env)?;
                     if !actual.is_compatible(declared_ty) {
                         return Err(mismatch(declared_ty, actual, name_span));
                     }
                 }
             }
-            return expect_rule(shared, ctx, body, env, modules);
+            return expect_rule(shared, ctx, body, env);
         }
     }
 
@@ -1556,7 +1487,7 @@ fn check_for_expr<'ast>(
             shared.arena.span(config.iterable),
         ));
     }
-    let iter_ty = type_of(shared, ctx, config.iterable, env, modules)?;
+    let iter_ty = type_of(shared, ctx, config.iterable, env)?;
     if !iter_ty.is_list() {
         return Err(TypeError::new(
             TypeErrorKind::ForRequiresList(iter_ty),
@@ -1569,7 +1500,7 @@ fn check_for_expr<'ast>(
     if !elem_ty.is_compatible(declared_ty) {
         return Err(mismatch(declared_ty, elem_ty, name_span));
     }
-    expect_rule(shared, ctx, body, env, modules)
+    expect_rule(shared, ctx, body, env)
 }
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
