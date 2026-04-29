@@ -133,14 +133,6 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         })
     }
 
-    fn expect_ident_node(&mut self) -> ParseResult<NodeId> {
-        let span = self.expect_ident()?;
-        Ok(self
-            .shared
-            .arena
-            .push(Node::Ident(IdentKind::Unresolved), span))
-    }
-
     /// Accept an identifier or a keyword used as an identifier.
     /// Keywords are contextual: `seq(...)` is a builtin call, but `seq` as a
     /// bare name (e.g. a rule reference or binding name) is a valid identifier.
