@@ -178,38 +178,13 @@ pub fn load_module(
     Ok(global_id)
 }
 
-/// Validate: grammar block exists, at most one `inherit()`, inherits field consistency.
+/// Validate: grammar block exists, inherits field consistency.
+/// Multiple inherit() calls are caught by the parser.
 pub fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()> {
     if ctx.grammar_config.is_none() {
         return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
     }
     let config_inherits = ctx.grammar_config.as_ref().and_then(|c| c.inherits);
-
-    // Count inherit() calls - at most one allowed
-    let mut inherit_count: u32 = 0;
-    let mut last_inherit_span = Span::new(0, 0);
-    for &item_id in &ctx.root_items {
-        if let Node::Let { value, .. } = shared.arena.get(item_id)
-            && matches!(
-                shared.arena.get(*value),
-                Node::ModuleRef { import: false, .. }
-            )
-        {
-            inherit_count += 1;
-            last_inherit_span = shared.arena.span(item_id);
-        }
-    }
-    if matches!(config_inherits, Some(id) if matches!(shared.arena.get(id), Node::ModuleRef { import: false, .. }))
-    {
-        inherit_count += 1;
-        last_inherit_span = shared.arena.span(config_inherits.unwrap());
-    }
-    if inherit_count > 1 {
-        Err(LowerError::new(
-            LowerErrorKind::MultipleInherits,
-            last_inherit_span,
-        ))?;
-    }
 
     // inherit() exists but no `inherits` in grammar config
     if let Some(inherit_ref) = ctx.inherit_ref

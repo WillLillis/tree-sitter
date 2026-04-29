@@ -120,12 +120,10 @@ enum Value {
 const MAX_CALL_DEPTH: u16 = 64;
 
 /// Tracks which modules have had their let bindings evaluated.
+#[derive(Default)]
 struct LoadedModules([u64; 4]);
 
 impl LoadedModules {
-    const fn new() -> Self {
-        Self([0; 4])
-    }
     const fn is_loaded(&self, idx: usize) -> bool {
         self.0[idx / 64] & (1 << (idx % 64)) != 0
     }
@@ -187,8 +185,7 @@ fn evaluate(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<EvalRe
     let mut eval = Evaluator {
         shared,
         modules,
-        loaded: LoadedModules::new(),
-
+        loaded: LoadedModules::default(),
         current_module: root,
         let_values: FxHashMap::default(),
         call_stack: Vec::new(),
@@ -1360,8 +1357,6 @@ pub enum LowerErrorKind {
     ExpectedRuleName,
     #[error("config field is not set in the base grammar")]
     ConfigFieldUnset,
-    #[error("only one inherit() call is allowed per grammar")]
-    MultipleInherits,
     #[error("inherit() requires 'inherits' to be set in the grammar config")]
     InheritWithoutConfig,
     #[error("'inherits' must reference a variable bound to inherit()")]
