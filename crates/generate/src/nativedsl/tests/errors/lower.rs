@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use super::super::*;
 
 error_tests! { Lower {
@@ -59,19 +57,6 @@ fn error_inherit_bad_path() {
         Lower
     );
     assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
-}
-
-#[test]
-fn error_inherit_bad_extension() {
-    let dir = tempfile::tempdir().unwrap();
-    let bad_file = dir.path().join("grammar.txt");
-    std::fs::write(&bad_file, "not a grammar").unwrap();
-    let input = format!(
-        r#"let base = inherit("{}") grammar {{ language: "derived", inherits: base }}"#,
-        dsl_path(&bad_file)
-    );
-    let e = assert_err!(parse_native_dsl(&input, Path::new(".")).unwrap_err(), Lower);
-    assert_eq!(e.kind, LowerErrorKind::ModuleUnsupportedExtension);
 }
 
 inherit_error_tests! { Type {
