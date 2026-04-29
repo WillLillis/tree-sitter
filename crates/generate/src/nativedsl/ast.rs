@@ -348,6 +348,9 @@ pub struct ModuleContext {
     pub path: PathBuf,
     pub grammar_config: Option<GrammarConfig>,
     pub root_items: Vec<NodeId>,
+    /// The `inherit()` `ModuleRef` node, if this module has one.
+    /// Set by the parser when it encounters `inherit(...)`.
+    pub inherit_ref: Option<NodeId>,
 }
 
 impl ModuleContext {
