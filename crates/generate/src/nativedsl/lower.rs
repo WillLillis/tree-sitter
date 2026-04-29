@@ -123,27 +123,22 @@ const MAX_CALL_DEPTH: u16 = 64;
 struct ModuleInfo<'ast> {
     ctx: &'ast ModuleContext,
     base_grammar: Option<&'ast InputGrammar>,
+    loaded: bool,
 }
 
 struct Evaluator<'ast> {
     // Shared AST data (arena + pools), immutable during evaluation
     shared: &'ast SharedAst,
-    // Flat module table (immutable after construction)
+    // Flat module table
     modules: Vec<ModuleInfo<'ast>>,
-    module_macros: Vec<FxHashMap<&'ast str, NodeId>>,
-    // Per-module let binding values (lazily populated on first access)
-    module_values: Vec<Option<FxHashMap<&'ast str, ValueId>>>,
     // Current execution state
     current_module: usize,
-    scopes: FxHashMap<&'ast str, ValueId>,
     let_values: FxHashMap<NodeId, ValueId>,
-    // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
     for_binding_values: Vec<ValueId>,
     for_binding_frames: Vec<(ForId, usize)>,
-    arg_scratch: Vec<ValueId>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
     values: Vec<Value>,
@@ -152,18 +147,6 @@ struct Evaluator<'ast> {
     value_children: Vec<ValueId>,
     object_pool: Vec<FxHashMap<&'ast str, ValueId>>,
     strings: StringPool<'ast>,
-}
-
-/// Collect all `fn` definitions from a module into a name -> `NodeId` map.
-fn collect_macros<'a>(shared: &'a SharedAst, ctx: &'a ModuleContext) -> FxHashMap<&'a str, NodeId> {
-    let mut fns = FxHashMap::default();
-    for &item_id in &ctx.root_items {
-        if let Node::Macro(macro_id) = shared.arena.get(item_id) {
-            let config = shared.pools.get_macro(*macro_id);
-            fns.insert(ctx.text(config.name), item_id);
-        }
-    }
-    fns
 }
 
 /// Intermediate results from the evaluation phase, ready to be assembled
@@ -187,27 +170,25 @@ struct EvalResult {
 // before lowering (with lowered: None), then the evaluator can reference
 // the flat vec directly instead of building a separate ModuleInfo table.
 fn build_module_table<'ast>(
-    shared: &'ast SharedAst,
     root_ctx: &'ast ModuleContext,
     root_base_grammar: Option<&'ast InputGrammar>,
     modules: &'ast [super::Module],
-) -> (Vec<ModuleInfo<'ast>>, Vec<FxHashMap<&'ast str, NodeId>>) {
+) -> Vec<ModuleInfo<'ast>> {
     let mut infos = Vec::with_capacity(modules.len() + 1);
-    let mut fns = Vec::with_capacity(modules.len() + 1);
     for m in modules {
         infos.push(ModuleInfo {
             ctx: &m.ctx,
             base_grammar: m.lowered.as_ref(),
+            loaded: false,
         });
-        fns.push(collect_macros(shared, &m.ctx));
     }
     // Root module goes last (it has the highest global_id)
     infos.push(ModuleInfo {
         ctx: root_ctx,
         base_grammar: root_base_grammar,
+        loaded: false,
     });
-    fns.push(collect_macros(shared, root_ctx));
-    (infos, fns)
+    infos
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
@@ -230,23 +211,18 @@ fn evaluate(
     base_grammar: Option<&InputGrammar>,
     root_global_id: u8,
 ) -> LowerResult<EvalResult> {
-    let (module_infos, module_macros) = build_module_table(shared, ctx, base_grammar, modules);
-    let n = module_infos.len();
+    let module_infos = build_module_table(ctx, base_grammar, modules);
     let mut eval = Evaluator {
         shared,
         modules: module_infos,
-        module_macros,
-        module_values: vec![None; n],
 
         current_module: root_global_id as usize,
-        scopes: FxHashMap::default(),
         let_values: FxHashMap::default(),
         call_stack: Vec::new(),
         macro_args: Vec::new(),
         macro_arg_bases: Vec::new(),
         for_binding_values: Vec::new(),
         for_binding_frames: Vec::new(),
-        arg_scratch: Vec::new(),
         val_scratch: Vec::new(),
         rule_scratch: Vec::new(),
         values: Vec::with_capacity(shared.arena.len()),
@@ -262,9 +238,8 @@ fn evaluate(
     for &item_id in &ctx.root_items {
         match shared.arena.get(item_id) {
             Node::Grammar | Node::Macro(_) => {}
-            Node::Let { name, value, .. } => {
+            Node::Let { value, .. } => {
                 let val = eval.eval_expr(*value)?;
-                eval.scopes.insert(ctx.text(*name), val);
                 eval.let_values.insert(item_id, val);
             }
             Node::Rule {
@@ -987,6 +962,8 @@ impl<'ast> Evaluator<'ast> {
                     _ => unreachable!(), // guarded by typecheck
                 }
             }
+            // Only unresolved QualifiedAccess reaches here: inherited grammar
+            // rules looked up by name in base_grammar.variables.
             Node::QualifiedAccess { obj, member } => {
                 let (obj, member) = (*obj, *member);
                 let obj_val = self.eval_expr(obj)?;
@@ -995,12 +972,6 @@ impl<'ast> Evaluator<'ast> {
                     unreachable!() // guarded by typecheck
                 };
                 let table_id = idx as usize;
-                // Check pre-evaluated let values first
-                let values = self.module_values[table_id].as_ref().unwrap();
-                if let Some(&val) = values.get(member_name) {
-                    return Ok(val);
-                }
-                // For inherited grammar modules, fall back to rule bodies.
                 if let Some(var) = self.modules[table_id]
                     .base_grammar
                     .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
@@ -1068,32 +1039,55 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::Call { name, args } => {
                 let (name, args) = (*name, *args);
-                let fn_name = self.ctx().text(self.shared.arena.span(name));
-                let base = self.arg_scratch.len();
+                let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
+                    unreachable!() // guarded by resolver
+                };
+                let macro_id = *macro_id;
+                let config = self.shared.pools.get_macro(macro_id);
+                let fn_name = self.ctx().text(config.name);
+                self.push_call(fn_name, span)?;
+                // Evaluate args before pushing base - args are evaluated in
+                // the caller's macro context, not the callee's.
+                let base = self.macro_args.len();
                 for &arg_id in self.shared.pools.child_slice(args) {
                     let v = self.eval_expr(arg_id)?;
-                    self.arg_scratch.push(v);
+                    self.macro_args.push(v);
                 }
-                let module = self.current_module;
-                let result = self.call_fn(module, fn_name, base, span);
-                self.arg_scratch.truncate(base);
+                self.macro_arg_bases.push(base);
+                let result = self.eval_expr(config.body);
+                self.call_stack.pop();
+                self.macro_arg_bases.pop();
+                self.macro_args.truncate(base);
                 result
             }
             Node::QualifiedCall(range) => {
                 let range = *range;
                 let (obj, name, args) = self.shared.pools.get_qualified_call(range);
-                let fn_name = self.ctx().text(self.shared.arena.span(name));
                 let obj_val = self.eval_expr(obj)?;
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                let base = self.arg_scratch.len();
+                let table_id = idx as usize;
+                self.eval_import_module(table_id)?;
+                let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
+                    unreachable!() // guarded by resolver
+                };
+                let config = self.shared.pools.get_macro(*macro_id);
+                let fn_name = self.modules[table_id].ctx.text(config.name);
+                self.push_call(fn_name, span)?;
+                let base = self.macro_args.len();
                 for &arg_id in args {
                     let v = self.eval_expr(arg_id)?;
-                    self.arg_scratch.push(v);
+                    self.macro_args.push(v);
                 }
-                let result = self.call_fn(idx as usize, fn_name, base, span);
-                self.arg_scratch.truncate(base);
+                self.macro_arg_bases.push(base);
+                let saved = self.current_module;
+                self.current_module = table_id;
+                let result = self.eval_expr(config.body);
+                self.current_module = saved;
+                self.call_stack.pop();
+                self.macro_arg_bases.pop();
+                self.macro_args.truncate(base);
                 result
             }
             _ => {
@@ -1277,102 +1271,34 @@ impl<'ast> Evaluator<'ast> {
         Ok(())
     }
 
-    /// Call a function, either in the current module or an imported one.
-    /// For cross-module calls, saves/restores module context and binds
-    /// the target module's let values into scope.
-    fn call_fn(
-        &mut self,
-        table_id: usize,
-        fn_name: &'ast str,
-        arg_base: usize,
-        call_span: Span,
-    ) -> LowerResult<ValueId> {
-        self.push_call(fn_name, call_span)?;
-
-        let fn_ctx = self.modules[table_id].ctx;
-        let &fn_node_id = self.module_macros[table_id].get(fn_name).unwrap();
-        let fn_config = match self.shared.arena.get(fn_node_id) {
-            Node::Macro(fi) => self.shared.pools.get_macro(*fi),
-            _ => unreachable!(),
-        };
-        let body = fn_config.body;
-
-        let cross_module = table_id != self.current_module;
-        let saved_module = self.current_module;
-        let saved_scopes = if cross_module {
-            self.current_module = table_id;
-            Some(std::mem::replace(&mut self.scopes, FxHashMap::default()))
-        } else {
-            None
-        };
-
-        if cross_module {
-            for (&name, &val) in self.module_values[table_id].as_ref().unwrap() {
-                self.scopes.insert(name, val);
-            }
-        }
-        let macro_arg_base = self.macro_args.len();
-        self.macro_arg_bases.push(macro_arg_base);
-        for (i, param) in fn_config.params.iter().enumerate() {
-            let val = self.arg_scratch[arg_base + i];
-            self.scopes.insert(fn_ctx.text(param.name), val);
-            self.macro_args.push(val);
-        }
-
-        let result = self.eval_expr(body);
-        self.call_stack.pop();
-        self.macro_args.truncate(macro_arg_base);
-        self.macro_arg_bases.pop();
-
-        // Remove param bindings (no shadowing guarantees safe removal)
-        for param in &fn_config.params {
-            self.scopes.remove(fn_ctx.text(param.name));
-        }
-
-        if let Some(saved) = saved_scopes {
-            self.current_module = saved_module;
-            self.scopes = saved;
-        }
-
-        result
-    }
-
     /// Lazily evaluate an imported module's top-level let bindings.
     fn eval_import_module(&mut self, table_id: usize) -> LowerResult<()> {
-        if self.module_values[table_id].is_some() {
+        if self.modules[table_id].loaded {
             return Ok(());
         }
 
         let saved_module = self.current_module;
-        let saved_scopes = std::mem::replace(&mut self.scopes, FxHashMap::default());
         self.current_module = table_id;
-
-        let result = self.eval_let_bindings();
-
+        self.eval_let_bindings()?;
         self.current_module = saved_module;
-        self.scopes = saved_scopes;
 
-        self.module_values[table_id] = Some(result?);
+        self.modules[table_id].loaded = true;
         Ok(())
     }
 
     /// Evaluate top-level let bindings in the current module context.
-    fn eval_let_bindings(&mut self) -> LowerResult<FxHashMap<&'ast str, ValueId>> {
+    fn eval_let_bindings(&mut self) -> LowerResult<()> {
         let ctx = self.modules[self.current_module].ctx;
         let n = ctx.root_items.len();
-        let mut values = FxHashMap::default();
         for i in 0..n {
             let item_id = ctx.root_items[i];
-            if let Node::Let { name, value, .. } = self.shared.arena.get(item_id) {
-                let (name, value) = (*name, *value);
+            if let Node::Let { value, .. } = self.shared.arena.get(item_id) {
+                let value = *value;
                 let val = self.eval_expr(value)?;
-                let var_name = ctx.text(name);
-                self.scopes.insert(var_name, val);
                 self.let_values.insert(item_id, val);
-                values.insert(var_name, val);
             }
         }
-        Ok(values)
+        Ok(())
     }
 
     fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<Vec<RuleId>> {
