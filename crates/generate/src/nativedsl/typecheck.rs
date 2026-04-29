@@ -774,9 +774,9 @@ fn resolve_children_tc(
 /// Run typechecking on a single module. For grammar modules, pre-registers
 /// rules in `env` for forward reference support. Helper modules skip this
 /// since they cannot contain rules.
-pub fn check<'ast>(
+pub fn check(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     has_rules: bool,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
@@ -793,9 +793,9 @@ pub fn check<'ast>(
     Ok(())
 }
 
-fn check_item<'ast>(
+fn check_item(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
@@ -803,7 +803,7 @@ fn check_item<'ast>(
         Node::Grammar => {
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_rule_list(shared, ctx, id, env)?;
+                expect_list(shared, ctx, id, env, expect_rule, true)?;
             }
             for id in [config.inline, config.supertypes].into_iter().flatten() {
                 expect_name_list(shared, ctx, id, env)?;
@@ -915,27 +915,18 @@ fn expect_list<'ast>(
     Err(mismatch(Ty::ListRule, ty, shared.arena.span(id)))
 }
 
-fn expect_rule_list<'ast>(
+fn expect_name_list(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, expect_rule, true)
-}
-
-fn expect_name_list<'ast>(
-    shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
     expect_list(shared, ctx, id, env, expect_name_ref, false)
 }
 
-fn expect_name_ref<'ast>(
+fn expect_name_ref(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
@@ -977,9 +968,9 @@ fn expect_list_of_groups<'ast>(
 }
 
 /// Inner element for `precedences`: a name ref or a string literal.
-fn expect_name_or_str<'ast>(
+fn expect_name_or_str(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
@@ -993,25 +984,25 @@ fn expect_name_or_str<'ast>(
 }
 
 /// Check a `precedences` inner list: each element must be a name-ref or string literal.
-fn expect_precedence_group<'ast>(
+fn expect_precedence_group(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
     expect_list(shared, ctx, id, env, expect_name_or_str, true)
 }
 
-fn expect_reserved<'ast>(
+fn expect_reserved(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
         for &(_, val_id) in shared.pools.get_object(*range) {
-            expect_rule_list(shared, ctx, val_id, env)?;
+            expect_list(shared, ctx, val_id, env, expect_rule, true)?;
         }
         return Ok(());
     }
@@ -1026,9 +1017,9 @@ fn expect_reserved<'ast>(
     ))
 }
 
-fn expect_rule<'ast>(
+fn expect_rule(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
@@ -1039,9 +1030,9 @@ fn expect_rule<'ast>(
     Ok(())
 }
 
-fn type_of<'ast>(
+fn type_of(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<Ty, TypeError> {
@@ -1206,9 +1197,9 @@ fn type_of<'ast>(
     }
 }
 
-fn type_of_append<'ast>(
+fn type_of_append(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     left: NodeId,
     right: NodeId,
     span: Span,
@@ -1247,9 +1238,9 @@ fn type_of_append<'ast>(
     }
 }
 
-fn type_of_field_access<'ast>(
+fn type_of_field_access(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     obj: NodeId,
     field: Span,
     env: &mut TypeEnv,
@@ -1290,9 +1281,9 @@ fn type_of_field_access<'ast>(
     }
 }
 
-fn type_of_qualified_call<'a>(
+fn type_of_qualified_call(
     shared: &SharedAst,
-    ctx: &'a ModuleContext,
+    ctx: &ModuleContext,
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
@@ -1338,9 +1329,9 @@ fn type_of_qualified_call<'a>(
     Ok(config.return_ty)
 }
 
-fn type_of_object<'ast>(
+fn type_of_object(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
@@ -1364,9 +1355,9 @@ fn type_of_object<'ast>(
     Ok(Ty::Object(inner))
 }
 
-fn type_of_list<'ast>(
+fn type_of_list(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
@@ -1399,9 +1390,9 @@ fn type_of_list<'ast>(
     })
 }
 
-fn type_of_call<'ast>(
+fn type_of_call(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     name: NodeId,
     args: ChildRange,
     span: Span,
@@ -1440,9 +1431,9 @@ fn type_of_call<'ast>(
     Ok(config.return_ty)
 }
 
-fn check_for_expr<'ast>(
+fn check_for_expr(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     for_idx: ForId,
     body: NodeId,
     env: &mut TypeEnv,
