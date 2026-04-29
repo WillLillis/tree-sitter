@@ -1548,8 +1548,6 @@ pub enum TypeErrorKind {
     AppendRequiresList(Ty),
     #[error("'::' requires module_t, got {0}")]
     QualifiedAccessOnInvalidType(Ty),
-    #[error("unknown grammar config field '{0}'")]
-    UnknownConfigField(String),
     #[error("alias target must be a name or string, got {0}")]
     InvalidAliasTarget(Ty),
     #[error("prec value must be int_t or str_t, got {0}")]
