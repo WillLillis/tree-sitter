@@ -263,7 +263,7 @@ pub fn resolve_and_check<'ast>(
     let n_items = ctx.root_items.len();
     for i in 0..n_items {
         let item_id = ctx.root_items[i];
-        resolve_item_tc(&mut shared.arena, &shared.pools, ctx, &decls, item_id)?;
+        resolve_item_tc(&mut shared.arena, &shared.pools, ctx, &decls, modules, item_id)?;
         // Register let bindings in order so forward references are caught
         if let Node::Let { name, .. } = shared.arena.get(item_id) {
             let name_text = ctx.text(*name);
@@ -486,6 +486,7 @@ fn resolve_item_tc(
     pools: &AstPools,
     ctx: &ModuleContext,
     decls: &Decls,
+    modules: &[super::Module],
     item_id: NodeId,
 ) -> Result<(), TypeError> {
     match arena.get(item_id) {
@@ -506,13 +507,13 @@ fn resolve_item_tc(
             .into_iter()
             .flatten()
             {
-                resolve_expr_tc(arena, pools, ctx, decls, id)?;
+                resolve_expr_tc(arena, pools, ctx, decls, modules, id)?;
             }
             Ok(())
         }
         Node::Rule { body: inner, .. } | Node::Let { value: inner, .. } => {
             let inner = *inner;
-            resolve_expr_tc(arena, pools, ctx, decls, inner)
+            resolve_expr_tc(arena, pools, ctx, decls, modules, inner)
         }
         Node::Macro(macro_id) => {
             let macro_cfg = pools.get_macro(*macro_id);
@@ -533,7 +534,7 @@ fn resolve_item_tc(
                 }
             }
             let body = macro_cfg.body;
-            resolve_expr_tc(arena, pools, ctx, decls, body)
+            resolve_expr_tc(arena, pools, ctx, decls, modules, body)
         }
         _ => Ok(()),
     }
@@ -545,6 +546,7 @@ fn resolve_expr_tc(
     pools: &AstPools,
     ctx: &ModuleContext,
     decls: &Decls,
+    modules: &[super::Module],
     id: NodeId,
 ) -> Result<(), TypeError> {
     // Handle Ident mutation first
@@ -575,11 +577,11 @@ fn resolve_expr_tc(
     // so any remaining Ident(Unresolved) target is a rule name.
     if let Node::Alias { content, target } = arena.get(id) {
         let (content, target) = (*content, *target);
-        resolve_expr_tc(arena, pools, ctx, decls, content)?;
+        resolve_expr_tc(arena, pools, ctx, decls, modules, content)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             arena.resolve_as(target, IdentKind::Rule);
         } else {
-            resolve_expr_tc(arena, pools, ctx, decls, target)?;
+            resolve_expr_tc(arena, pools, ctx, decls, modules, target)?;
         }
         return Ok(());
     }
@@ -589,12 +591,85 @@ fn resolve_expr_tc(
     if let Node::For { for_id, body } = arena.get(id) {
         let iterable = pools.get_for(*for_id).iterable;
         let body = *body;
-        resolve_expr_tc(arena, pools, ctx, decls, iterable)?;
-        return resolve_expr_tc(arena, pools, ctx, decls, body);
+        resolve_expr_tc(arena, pools, ctx, decls, modules, iterable)?;
+        return resolve_expr_tc(arena, pools, ctx, decls, modules, body);
     }
 
     // All remaining cases
-    resolve_children_tc(arena, pools, ctx, decls, id)
+    resolve_children_tc(arena, pools, ctx, decls, modules, id)
+}
+
+/// Follow obj -> Ident(Var(let_id)) -> Let { value: ModuleRef { module } }
+/// to extract the module index. Returns `None` if the chain doesn't match.
+fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
+    let Node::Ident(IdentKind::Var(let_id)) = arena.get(obj) else {
+        return None;
+    };
+    let Node::Let { value, .. } = arena.get(*let_id) else {
+        return None;
+    };
+    let Node::ModuleRef { module: Some(idx), .. } = arena.get(*value) else {
+        return None;
+    };
+    Some(*idx as usize)
+}
+
+/// Resolve a `QualifiedAccess { obj, member }` node by looking up `member_name`
+/// in the target module's root items.
+/// - Let -> replace node with `Ident(Var(item_id))`
+/// - Rule -> replace with `Ident(Rule)`
+/// - Macro -> error (function used as value)
+/// - Not found -> leave as QualifiedAccess (inherited grammar rule for lowerer)
+fn resolve_qualified_member(
+    arena: &mut NodeArena,
+    pools: &AstPools,
+    target: &super::Module,
+    node_id: NodeId,
+    member_name: &str,
+    member_span: Span,
+) -> Result<(), TypeError> {
+    for &item_id in &target.ctx.root_items {
+        match arena.get(item_id) {
+            Node::Let { name, .. } if target.ctx.text(*name) == member_name => {
+                arena.set(node_id, Node::Ident(IdentKind::Var(item_id)));
+                return Ok(());
+            }
+            Node::Macro(macro_id) => {
+                let config = pools.get_macro(*macro_id);
+                if target.ctx.text(config.name) == member_name {
+                    return Err(TypeError::new(
+                        TypeErrorKind::FunctionUsedAsValue(member_name.to_string()),
+                        member_span,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Not resolved - leave as QualifiedAccess. The lowerer handles
+    // rule lookups via base_grammar.variables (name-based).
+    Ok(())
+}
+
+/// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
+fn resolve_qualified_call_name(
+    arena: &mut NodeArena,
+    pools: &AstPools,
+    target: &super::Module,
+    name_id: NodeId,
+    fn_name: &str,
+) -> Result<(), TypeError> {
+    for &item_id in &target.ctx.root_items {
+        if let Node::Macro(macro_id) = arena.get(item_id) {
+            let config = pools.get_macro(*macro_id);
+            if target.ctx.text(config.name) == fn_name {
+                arena.set(name_id, Node::Ident(IdentKind::Macro(*macro_id)));
+                return Ok(());
+            }
+        }
+    }
+    // Not found - leave unresolved, type checker will report the error
+    Ok(())
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
@@ -603,12 +678,13 @@ fn resolve_children_tc(
     pools: &AstPools,
     ctx: &ModuleContext,
     decls: &Decls,
+    modules: &[super::Module],
     id: NodeId,
 ) -> Result<(), TypeError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
         for child in pools.child_slice(range) {
-            resolve_expr_tc(arena, pools, ctx, decls, *child)?;
+            resolve_expr_tc(arena, pools, ctx, decls, modules, *child)?;
         }
         return Ok(());
     }
@@ -616,15 +692,15 @@ fn resolve_children_tc(
     match arena.get(id) {
         Node::Call { name, args } => {
             let (name, args) = (*name, *args);
-            resolve_expr_tc(arena, pools, ctx, decls, name)?;
+            resolve_expr_tc(arena, pools, ctx, decls, modules, name)?;
             for arg in pools.child_slice(args) {
-                resolve_expr_tc(arena, pools, ctx, decls, *arg)?;
+                resolve_expr_tc(arena, pools, ctx, decls, modules, *arg)?;
             }
             Ok(())
         }
         Node::Object(range) => {
             for field in pools.get_object(*range) {
-                resolve_expr_tc(arena, pools, ctx, decls, field.1)?;
+                resolve_expr_tc(arena, pools, ctx, decls, modules, field.1)?;
             }
             Ok(())
         }
@@ -634,7 +710,7 @@ fn resolve_children_tc(
         | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
         | Node::Reserved { content: c, .. } => {
-            resolve_expr_tc(arena, pools, ctx, decls, *c)
+            resolve_expr_tc(arena, pools, ctx, decls, modules, *c)
         }
         Node::Append { left: a, right: b }
         | Node::Prec {
@@ -643,27 +719,41 @@ fn resolve_children_tc(
             ..
         } => {
             let (a, b) = (*a, *b);
-            resolve_expr_tc(arena, pools, ctx, decls, a)?;
-            resolve_expr_tc(arena, pools, ctx, decls, b)
+            resolve_expr_tc(arena, pools, ctx, decls, modules, a)?;
+            resolve_expr_tc(arena, pools, ctx, decls, modules, b)
         }
         Node::DynRegex(range) => {
             let (pattern, flags) = pools.get_regex(*range);
-            resolve_expr_tc(arena, pools, ctx, decls, pattern)?;
+            resolve_expr_tc(arena, pools, ctx, decls, modules, pattern)?;
             if let Some(flags) = flags {
-                resolve_expr_tc(arena, pools, ctx, decls, flags)?;
+                resolve_expr_tc(arena, pools, ctx, decls, modules, flags)?;
             }
             Ok(())
         }
-        Node::FieldAccess { obj, .. } | Node::QualifiedAccess { obj, .. } => {
+        Node::FieldAccess { obj, .. } => {
             let obj = *obj;
-            resolve_expr_tc(arena, pools, ctx, decls, obj)
+            resolve_expr_tc(arena, pools, ctx, decls, modules, obj)
+        }
+        Node::QualifiedAccess { obj, member } => {
+            let (obj, member) = (*obj, *member);
+            resolve_expr_tc(arena, pools, ctx, decls, modules, obj)?;
+            // None when obj isn't a module ref - type checker reports the error
+            if let Some(idx) = resolve_module_index(arena, obj) {
+                let member_name = ctx.text(member);
+                resolve_qualified_member(arena, pools, &modules[idx], id, member_name, member)?;
+            }
+            Ok(())
         }
         Node::QualifiedCall(range) => {
-            let (obj, _name, args) = pools.get_qualified_call(*range);
-            resolve_expr_tc(arena, pools, ctx, decls, obj)?;
-            // name stays as Ident - it's a member of the import namespace
+            let (obj, name, args) = pools.get_qualified_call(*range);
+            resolve_expr_tc(arena, pools, ctx, decls, modules, obj)?;
+            // None when obj isn't a module ref - type checker reports the error
+            if let Some(idx) = resolve_module_index(arena, obj) {
+                let fn_name = ctx.text(arena.span(name));
+                resolve_qualified_call_name(arena, pools, &modules[idx], name, fn_name)?;
+            }
             for &arg in args {
-                resolve_expr_tc(arena, pools, ctx, decls, arg)?;
+                resolve_expr_tc(arena, pools, ctx, decls, modules, arg)?;
             }
             Ok(())
         }
