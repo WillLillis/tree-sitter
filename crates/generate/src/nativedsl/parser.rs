@@ -8,8 +8,8 @@ use thiserror::Error;
 use super::{
     InnerTy, Note, NoteMessage, ParseError,
     ast::{
-        ChildRange, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig, ModuleContext, Node, NodeId,
-        Param, PrecKind, QueryableField, RepeatKind, SharedAst, Span,
+        ChildRange, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig, ModuleContext, Node,
+        NodeId, Param, PrecKind, QueryableField, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
     typecheck::Ty,
@@ -55,6 +55,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 path: grammar_path.to_path_buf(),
                 grammar_config: None,
                 root_items: Vec::new(),
+                inherit_ref: None,
             },
             scratch: Vec::new(),
             locals: Vec::new(),
@@ -360,7 +361,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.expect(TokenKind::Eq)?;
         let saved = self.locals.len();
         for (i, p) in params.iter().enumerate() {
-            self.locals.push((p.name, LocalBinding::MacroParam(i as u8)));
+            self.locals
+                .push((p.name, LocalBinding::MacroParam(i as u8)));
         }
         let body = self.parse_expr()?;
         self.locals.truncate(saved);
@@ -692,14 +694,18 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         let path_span = self.expect_string()?;
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        Ok(self.shared.arena.push(
+        let id = self.shared.arena.push(
             Node::ModuleRef {
                 import: is_import,
                 path: path_span.strip_quotes(),
                 module: None,
             },
             start.merge(end),
-        ))
+        );
+        if !is_import {
+            self.ctx.inherit_ref = Some(id);
+        }
+        Ok(id)
     }
 
     fn parse_append(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -722,20 +728,21 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.check_duplicate_names(&bindings, |&(s, _)| s)?;
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
-        let for_id = self.shared.pools.push_for(ForConfig {
-            bindings,
-            iterable,
-        });
+        let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
         let saved = self.locals.len();
         let config = self.shared.pools.get_for(for_id);
         for (i, &(name_span, _)) in config.bindings.iter().enumerate() {
-            self.locals.push((name_span, LocalBinding::ForBinding(for_id, i as u8)));
+            self.locals
+                .push((name_span, LocalBinding::ForBinding(for_id, i as u8)));
         }
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
         self.locals.truncate(saved);
-        Ok(self.shared.arena.push(Node::For { for_id, body }, start.merge(end)))
+        Ok(self
+            .shared
+            .arena
+            .push(Node::For { for_id, body }, start.merge(end)))
     }
 
     fn parse_ident_expr(&mut self, start: Span) -> ParseResult<NodeId> {
@@ -753,7 +760,9 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             };
             self.shared.arena.push(node, span)
         } else {
-            self.shared.arena.push(Node::Ident(IdentKind::Unresolved), span)
+            self.shared
+                .arena
+                .push(Node::Ident(IdentKind::Unresolved), span)
         };
         let mut id = name_id;
         loop {
