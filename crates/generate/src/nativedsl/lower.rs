@@ -157,8 +157,8 @@ struct Evaluator<'ast> {
 fn collect_macros<'a>(shared: &'a SharedAst, ctx: &'a ModuleContext) -> FxHashMap<&'a str, NodeId> {
     let mut fns = FxHashMap::default();
     for &item_id in &ctx.root_items {
-        if let Node::Macro(fn_idx) = shared.arena.get(item_id) {
-            let config = shared.pools.get_macro(*fn_idx);
+        if let Node::Macro(macro_id) = shared.arena.get(item_id) {
+            let config = shared.pools.get_macro(*macro_id);
             fns.insert(ctx.text(config.name), item_id);
         }
     }
@@ -924,7 +924,7 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.alloc_val(Value::Int(-n)))
             }
             // Guarded by super::resolve + typecheck
-            Node::Ident(IdentKind::Unresolved | IdentKind::Macro) => unreachable!(),
+            Node::Ident(IdentKind::Unresolved | IdentKind::Macro(_)) => unreachable!(),
             Node::Ident(IdentKind::Rule) => {
                 let sid = self.intern_span(span);
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
@@ -941,7 +941,7 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.for_binding_values[base + *index as usize])
             }
             // Guarded by super::resolve - all variable names validated
-            Node::Ident(IdentKind::Var) => Ok(*self.scopes.get(self.ctx().text(span)).unwrap()),
+            Node::Ident(IdentKind::Var(_)) => Ok(*self.scopes.get(self.ctx().text(span)).unwrap()),
             Node::GrammarConfig { module, field } => {
                 let (module, field) = (*module, *field);
                 let mod_val = self.eval_expr(module)?;
