@@ -33,7 +33,7 @@ use thiserror::Error;
 
 use crate::grammars::InputGrammar;
 
-use ast::{IdentKind, ModuleContext, Node, NodeId, SharedAst, Span};
+use ast::{ModuleContext, Node, NodeId, SharedAst, Span};
 use typecheck::TypeEnv;
 
 fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
@@ -116,28 +116,19 @@ pub fn load_module(
     let ctx = parser::Parser::new(&tokens, source.to_string(), path, shared).parse()?;
     let node_end = shared.arena.len();
 
-    let inherit_node = match kind {
-        ModuleKind::Grammar => {
-            let node = find_inherit_node(shared, &ctx);
-            validate_grammar(shared, &ctx, node)?;
-            node
-        }
-        ModuleKind::Helper => {
-            validate_import_items(shared, &ctx)?;
-            None
-        }
-    };
+    match kind {
+        ModuleKind::Grammar => validate_grammar(shared, &ctx)?,
+        ModuleKind::Helper => validate_import_items(shared, &ctx)?,
+    }
 
     // Load inherited grammar (Grammar kind only, must happen before typecheck).
-    if let Some(inherit_id) = inherit_node {
-        let Node::ModuleRef {
+    if let Some(inherit_id) = ctx.inherit_ref
+        && let Node::ModuleRef {
             import: false,
             path: ref_path,
             ..
         } = *shared.arena.get(inherit_id)
-        else {
-            unreachable!()
-        };
+    {
         let child_id = load_child_module(
             shared,
             modules,
@@ -169,7 +160,7 @@ pub fn load_module(
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
     let mut env = TypeEnv::default();
     typecheck_modules(shared, modules, &mut env)?;
-    let base = inherit_node.and_then(|id| {
+    let base = ctx.inherit_ref.and_then(|id| {
         let module = modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, shared.arena.span(id)))
     });
@@ -177,36 +168,26 @@ pub fn load_module(
 
     let global_id = u8::try_from(modules.len())
         .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
-    let lowered = if matches!(kind, ModuleKind::Grammar) {
-        Some(lower::lower_with_base(shared, &ctx, modules, global_id)?)
-    } else {
-        None
-    };
-    modules.push(Module {
-        ctx,
-        lowered,
-        global_id,
-    });
+    // Push root before lowering so the evaluator sees all modules in one slice
+    modules.push(Module { ctx, lowered: None });
+    if matches!(kind, ModuleKind::Grammar) {
+        let lowered = lower::lower_with_base(shared, modules)?;
+        modules.last_mut().unwrap().lowered = Some(lowered);
+    }
 
     Ok(global_id)
 }
 
 /// Validate: grammar block exists, at most one `inherit()`, inherits field consistency.
-pub fn validate_grammar(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    inherit_node: Option<NodeId>,
-) -> DslResult<()> {
+pub fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()> {
     if ctx.grammar_config.is_none() {
         return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
     }
     let config_inherits = ctx.grammar_config.as_ref().and_then(|c| c.inherits);
 
-    let direct_in_config = config_inherits
-        .is_some_and(|id| matches!(shared.arena.get(id), Node::ModuleRef { import: false, .. }));
-
-    // Find all inherit() calls in let bindings, error if more than one
-    let mut inherit_let: Option<Span> = None;
+    // Count inherit() calls - at most one allowed
+    let mut inherit_count: u32 = 0;
+    let mut last_inherit_span = Span::new(0, 0);
     for &item_id in &ctx.root_items {
         if let Node::Let { value, .. } = shared.arena.get(item_id)
             && matches!(
@@ -214,26 +195,35 @@ pub fn validate_grammar(
                 Node::ModuleRef { import: false, .. }
             )
         {
-            if inherit_let.is_some() || direct_in_config {
-                Err(LowerError::new(
-                    LowerErrorKind::MultipleInherits,
-                    shared.arena.span(item_id),
-                ))?;
-            }
-            inherit_let = Some(shared.arena.span(item_id));
+            inherit_count += 1;
+            last_inherit_span = shared.arena.span(item_id);
         }
     }
+    if matches!(config_inherits, Some(id) if matches!(shared.arena.get(id), Node::ModuleRef { import: false, .. }))
+    {
+        inherit_count += 1;
+        last_inherit_span = shared.arena.span(config_inherits.unwrap());
+    }
+    if inherit_count > 1 {
+        Err(LowerError::new(
+            LowerErrorKind::MultipleInherits,
+            last_inherit_span,
+        ))?;
+    }
 
-    // inherit() in a let binding but no `inherits` in grammar config
-    if let Some(span) = inherit_let
+    // inherit() exists but no `inherits` in grammar config
+    if let Some(inherit_ref) = ctx.inherit_ref
         && config_inherits.is_none()
     {
-        Err(LowerError::new(LowerErrorKind::InheritWithoutConfig, span))?;
+        Err(LowerError::new(
+            LowerErrorKind::InheritWithoutConfig,
+            shared.arena.span(inherit_ref),
+        ))?;
     }
 
     // `inherits` in config but doesn't resolve to an inherit() call
     if let Some(id) = config_inherits
-        && inherit_node.is_none()
+        && ctx.inherit_ref.is_none()
     {
         Err(LowerError::new(
             LowerErrorKind::InheritsWithoutInherit,
@@ -242,32 +232,6 @@ pub fn validate_grammar(
     }
 
     Ok(())
-}
-
-/// Resolve the inherit node from the `inherits` config field, following
-/// let-binding indirection if needed.
-fn find_inherit_node(shared: &SharedAst, ctx: &ModuleContext) -> Option<NodeId> {
-    let inherits_id = ctx.grammar_config.as_ref()?.inherits?;
-    match shared.arena.get(inherits_id) {
-        Node::ModuleRef { import: false, .. } => Some(inherits_id),
-        Node::Ident(IdentKind::Unresolved) => {
-            let name = ctx.text(shared.arena.span(inherits_id));
-            ctx.root_items.iter().find_map(|&item_id| {
-                if let Node::Let { name: n, value, .. } = shared.arena.get(item_id)
-                    && ctx.text(*n) == name
-                    && matches!(
-                        shared.arena.get(*value),
-                        Node::ModuleRef { import: false, .. }
-                    )
-                {
-                    Some(*value)
-                } else {
-                    None
-                }
-            })
-        }
-        _ => None,
-    }
 }
 
 /// Load a child module from a path string. Handles .tsg and .json extensions,
@@ -316,24 +280,20 @@ fn load_child_module(
     let mut child_ancestors = ancestor_paths.to_vec();
     child_ancestors.push(canonical.clone());
 
-    let ext = canonical.extension().and_then(|e| e.to_str());
-    let module_id = match ext {
-        Some("tsg") => load_module(
-            shared,
-            modules,
-            &content,
-            &canonical,
-            kind,
-            &child_ancestors,
-        )
-        .map_err(|inner| ModuleError {
-            inner: Box::new(inner),
-            source_text: content,
-            path: canonical,
-            reference_span: span,
-        })?,
-        _ => return Err(LowerError::new(LowerErrorKind::ModuleUnsupportedExtension, span).into()),
-    };
+    let module_id = load_module(
+        shared,
+        modules,
+        &content,
+        &canonical,
+        kind,
+        &child_ancestors,
+    )
+    .map_err(|inner| ModuleError {
+        inner: Box::new(inner),
+        source_text: content,
+        path: canonical,
+        reference_span: span,
+    })?;
 
     Ok(module_id)
 }
@@ -345,8 +305,6 @@ pub struct Module {
     /// For inherited grammar modules: the fully lowered grammar, needed
     /// for rule merging and config access. `None` for import-only modules.
     pub lowered: Option<InputGrammar>,
-    /// Unique ID across the entire module tree, assigned during loading.
-    pub global_id: u8,
 }
 
 impl Module {
@@ -458,7 +416,7 @@ pub fn typecheck_modules<'m>(
     env: &mut TypeEnv<'m>,
 ) -> DslResult<()> {
     for m in modules {
-        typecheck::check(shared, &m.ctx, env, modules)?;
+        typecheck::check(shared, &m.ctx, env)?;
     }
     Ok(())
 }

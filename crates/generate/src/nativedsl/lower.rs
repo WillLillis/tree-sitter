@@ -119,18 +119,27 @@ enum Value {
 
 const MAX_CALL_DEPTH: u16 = 64;
 
-/// Flat entry for one module in the evaluator's module table.
-struct ModuleInfo<'ast> {
-    ctx: &'ast ModuleContext,
-    base_grammar: Option<&'ast InputGrammar>,
-    loaded: bool,
+/// Tracks which modules have had their let bindings evaluated.
+struct LoadedModules([u64; 4]);
+
+impl LoadedModules {
+    const fn new() -> Self {
+        Self([0; 4])
+    }
+    const fn is_loaded(&self, idx: usize) -> bool {
+        self.0[idx / 64] & (1 << (idx % 64)) != 0
+    }
+    const fn set_loaded(&mut self, idx: usize) {
+        self.0[idx / 64] |= 1 << (idx % 64);
+    }
 }
 
 struct Evaluator<'ast> {
     // Shared AST data (arena + pools), immutable during evaluation
     shared: &'ast SharedAst,
-    // Flat module table
-    modules: Vec<ModuleInfo<'ast>>,
+    // All modules including root (root is last, at index root_global_id)
+    modules: &'ast [super::Module],
+    loaded: LoadedModules,
     // Current execution state
     current_module: usize,
     let_values: FxHashMap<NodeId, ValueId>,
@@ -165,58 +174,22 @@ struct EvalResult {
     reserved: Option<Vec<ReservedWordContext<Rule>>>,
 }
 
-/// Build the module info and macro tables from the flat module vec.
-// TODO: eliminate this function. Push the root module into the flat vec
-// before lowering (with lowered: None), then the evaluator can reference
-// the flat vec directly instead of building a separate ModuleInfo table.
-fn build_module_table<'ast>(
-    root_ctx: &'ast ModuleContext,
-    root_base_grammar: Option<&'ast InputGrammar>,
-    modules: &'ast [super::Module],
-) -> Vec<ModuleInfo<'ast>> {
-    let mut infos = Vec::with_capacity(modules.len() + 1);
-    for m in modules {
-        infos.push(ModuleInfo {
-            ctx: &m.ctx,
-            base_grammar: m.lowered.as_ref(),
-            loaded: false,
-        });
-    }
-    // Root module goes last (it has the highest global_id)
-    infos.push(ModuleInfo {
-        ctx: root_ctx,
-        base_grammar: root_base_grammar,
-        loaded: false,
-    });
-    infos
-}
-
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
-pub fn lower_with_base(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    modules: &[super::Module],
-    root_global_id: u8,
-) -> LowerResult<InputGrammar> {
+pub fn lower_with_base(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<InputGrammar> {
     let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
-    let result = evaluate(shared, ctx, modules, base_grammar, root_global_id)?;
+    let result = evaluate(shared, modules)?;
     build_grammar(result, base_grammar)
 }
 
 /// Evaluate the AST, producing intermediate results.
-fn evaluate(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    modules: &[super::Module],
-    base_grammar: Option<&InputGrammar>,
-    root_global_id: u8,
-) -> LowerResult<EvalResult> {
-    let module_infos = build_module_table(ctx, base_grammar, modules);
+fn evaluate(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<EvalResult> {
+    let root = modules.len() - 1;
     let mut eval = Evaluator {
         shared,
-        modules: module_infos,
+        modules,
+        loaded: LoadedModules::new(),
 
-        current_module: root_global_id as usize,
+        current_module: root,
         let_values: FxHashMap::default(),
         call_stack: Vec::new(),
         macro_args: Vec::new(),
@@ -232,6 +205,7 @@ fn evaluate(
         object_pool: Vec::new(),
         strings: StringPool::new(),
     };
+    let ctx = &modules[root].ctx;
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ctx.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
@@ -385,7 +359,7 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
 
 impl<'ast> Evaluator<'ast> {
     fn ctx(&self) -> &'ast ModuleContext {
-        self.modules[self.current_module].ctx
+        &self.modules[self.current_module].ctx
     }
 
     fn alloc_val(&mut self, val: Value) -> ValueId {
@@ -714,7 +688,7 @@ impl<'ast> Evaluator<'ast> {
         span: Span,
     ) -> LowerResult<ValueId> {
         use QueryableField as Q;
-        let grammar = self.modules[mod_idx].base_grammar.unwrap();
+        let grammar = self.modules[mod_idx].lowered.as_ref().unwrap();
         match field {
             Q::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
             Q::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
@@ -969,7 +943,8 @@ impl<'ast> Evaluator<'ast> {
                 };
                 let table_id = idx as usize;
                 if let Some(var) = self.modules[table_id]
-                    .base_grammar
+                    .lowered
+                    .as_ref()
                     .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
                 {
                     let rid = self.import_rule(&var.rule);
@@ -1250,7 +1225,7 @@ impl<'ast> Evaluator<'ast> {
                 .call_stack
                 .iter()
                 .map(|(name, span, mod_idx)| {
-                    let ctx = self.modules[*mod_idx].ctx;
+                    let ctx = &self.modules[*mod_idx].ctx;
                     let offset = span.start as usize;
                     let bytes = &ctx.source.as_bytes()[..offset];
                     let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
@@ -1269,7 +1244,7 @@ impl<'ast> Evaluator<'ast> {
 
     /// Lazily evaluate an imported module's top-level let bindings.
     fn eval_import_module(&mut self, table_id: usize) -> LowerResult<()> {
-        if self.modules[table_id].loaded {
+        if self.loaded.is_loaded(table_id) {
             return Ok(());
         }
 
@@ -1278,13 +1253,13 @@ impl<'ast> Evaluator<'ast> {
         self.eval_let_bindings()?;
         self.current_module = saved_module;
 
-        self.modules[table_id].loaded = true;
+        self.loaded.set_loaded(table_id);
         Ok(())
     }
 
     /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> LowerResult<()> {
-        let ctx = self.modules[self.current_module].ctx;
+        let ctx = &self.modules[self.current_module].ctx;
         let n = ctx.root_items.len();
         for i in 0..n {
             let item_id = ctx.root_items[i];
@@ -1371,13 +1346,6 @@ pub enum LowerErrorKind {
     ModuleResolveFailed { path: PathBuf, error: String },
     #[error("failed to read '{}': {error}", path.display())]
     ModuleReadFailed { path: PathBuf, error: String },
-    #[error("failed to parse '{}': {error}", path.display())]
-    ModuleJsonError {
-        path: PathBuf,
-        error: crate::parse_grammar::ParseGrammarError,
-    },
-    #[error("unsupported file extension, expected .tsg or .json")]
-    ModuleUnsupportedExtension,
     #[error("too many modules (max 256)")]
     ModuleTooMany,
     #[error("module import chain too deep (max 256)")]
