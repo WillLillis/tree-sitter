@@ -70,6 +70,23 @@ fn import_string_value() {
 }
 
 #[test]
+fn import_let_name_does_not_collide_with_local() {
+    let g = dsl(r#"
+        let h = import("import_helpers/helpers.tsg")
+        let GREETING: str_t = "goodbye"
+        grammar { language: "test" }
+        rule program { seq(h::GREETING, GREETING) }
+    "#);
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            Rule::String("hello".into()),
+            Rule::String("goodbye".into()),
+        ])
+    );
+}
+
+#[test]
 fn import_int_value_in_prec() {
     let g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
@@ -231,6 +248,22 @@ fn error_import_member_not_found() {
     assert_eq!(
         e.kind,
         TypeErrorKind::ImportMemberNotFound("nonexistent".into())
+    );
+}
+
+#[test]
+fn error_import_macro_used_as_value() {
+    let err = dsl_err(
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::comma_sep1 }
+    "#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::FunctionUsedAsValue("comma_sep1".into())
     );
 }
 
