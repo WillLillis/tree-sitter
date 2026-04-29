@@ -338,9 +338,11 @@ impl AstPools {
     }
 }
 
-/// Per-module data produced by the parser. Each loaded module (root, inherited,
-/// imported) has its own `ModuleContext` containing source text and module-specific
-/// configuration, while sharing a single [`SharedAst`] for all node data.
+/// Per-module data produced by the parser.
+///
+/// Each loaded module (root, inherited, imported) has its own `ModuleContext`
+/// containing source text and module-specific configuration, while sharing a
+/// single [`SharedAst`] for all node data.
 pub struct ModuleContext {
     pub source: String,
     pub path: PathBuf,

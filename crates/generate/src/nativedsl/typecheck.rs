@@ -14,8 +14,8 @@ use crate::grammars::InputGrammar;
 use super::{
     Note, NoteMessage,
     ast::{
-        AstPools, ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, PrecKind,
-        SharedAst, Span,
+        AstPools, ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId,
+        PrecKind, SharedAst, Span,
     },
 };
 
@@ -189,22 +189,15 @@ impl std::fmt::Display for Ty {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct TypeEnv<'a> {
     pub vars: FxHashMap<NodeId, Ty>,
-    /// Field names for Object variables, keyed by the Let node's NodeId.
+    /// Field names for Object variables, keyed by the Let node's `NodeId`.
     pub object_fields: FxHashMap<NodeId, Vec<&'a str>>,
     current_macro: Option<MacroId>,
 }
 
 impl<'a> TypeEnv<'a> {
-    pub fn new() -> Self {
-        Self {
-            vars: FxHashMap::default(),
-            object_fields: FxHashMap::default(),
-            current_macro: None,
-        }
-    }
     fn insert_var(&mut self, id: NodeId, ty: Ty) {
         self.vars.insert(id, ty);
     }
@@ -263,7 +256,14 @@ pub fn resolve_and_check<'ast>(
     let n_items = ctx.root_items.len();
     for i in 0..n_items {
         let item_id = ctx.root_items[i];
-        resolve_item_tc(&mut shared.arena, &shared.pools, ctx, &decls, modules, item_id)?;
+        resolve_item_tc(
+            &mut shared.arena,
+            &shared.pools,
+            ctx,
+            &decls,
+            modules,
+            item_id,
+        )?;
         // Register let bindings in order so forward references are caught
         if let Node::Let { name, .. } = shared.arena.get(item_id) {
             let name_text = ctx.text(*name);
@@ -599,7 +599,7 @@ fn resolve_expr_tc(
     resolve_children_tc(arena, pools, ctx, decls, modules, id)
 }
 
-/// Follow obj -> Ident(Var(let_id)) -> Let { value: ModuleRef { module } }
+/// Follow `obj` -> `Ident(Var(let_id))` -> `Let { value: ModuleRef { module } }`
 /// to extract the module index. Returns `None` if the chain doesn't match.
 fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
     let Node::Ident(IdentKind::Var(let_id)) = arena.get(obj) else {
@@ -608,7 +608,10 @@ fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
     let Node::Let { value, .. } = arena.get(*let_id) else {
         return None;
     };
-    let Node::ModuleRef { module: Some(idx), .. } = arena.get(*value) else {
+    let Node::ModuleRef {
+        module: Some(idx), ..
+    } = arena.get(*value)
+    else {
         return None;
     };
     Some(*idx as usize)
@@ -619,7 +622,7 @@ fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
 /// - Let -> replace node with `Ident(Var(item_id))`
 /// - Rule -> replace with `Ident(Rule)`
 /// - Macro -> error (function used as value)
-/// - Not found -> leave as QualifiedAccess (inherited grammar rule for lowerer)
+/// - Not found -> leave as `QualifiedAccess` (inherited grammar rule for lowerer)
 fn resolve_qualified_member(
     arena: &mut NodeArena,
     pools: &AstPools,
@@ -658,18 +661,17 @@ fn resolve_qualified_call_name(
     target: &super::Module,
     name_id: NodeId,
     fn_name: &str,
-) -> Result<(), TypeError> {
+) {
     for &item_id in &target.ctx.root_items {
         if let Node::Macro(macro_id) = arena.get(item_id) {
             let config = pools.get_macro(*macro_id);
             if target.ctx.text(config.name) == fn_name {
                 arena.set(name_id, Node::Ident(IdentKind::Macro(*macro_id)));
-                return Ok(());
+                return;
             }
         }
     }
     // Not found - leave unresolved, type checker will report the error
-    Ok(())
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
@@ -750,7 +752,7 @@ fn resolve_children_tc(
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let fn_name = ctx.text(arena.span(name));
-                resolve_qualified_call_name(arena, pools, &modules[idx], name, fn_name)?;
+                resolve_qualified_call_name(arena, pools, &modules[idx], name, fn_name);
             }
             for &arg in args {
                 resolve_expr_tc(arena, pools, ctx, decls, modules, arg)?;
@@ -1087,12 +1089,10 @@ fn type_of<'ast>(
             TypeErrorKind::FunctionUsedAsValue(ctx.text(span).to_string()),
             span,
         )),
-        Node::Ident(IdentKind::Var(let_id)) => {
-            env.get_var(*let_id).ok_or_else(|| {
-                let name = ctx.text(span);
-                TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
-            })
-        }
+        Node::Ident(IdentKind::Var(let_id)) => env.get_var(*let_id).ok_or_else(|| {
+            let name = ctx.text(span);
+            TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
+        }),
         Node::Neg(inner) => {
             let ty = type_of(shared, ctx, *inner, env, modules)?;
             if ty != Ty::Int {
@@ -1170,8 +1170,7 @@ fn type_of<'ast>(
             let target_ty = type_of(shared, ctx, *target, env, modules)?;
             let is_valid = matches!(
                 shared.arena.get(*target),
-                Node::Ident(IdentKind::Rule)
-                    | Node::Ident(IdentKind::Var(_))
+                Node::Ident(IdentKind::Rule | IdentKind::Var(_))
                     | Node::MacroParam(_)
                     | Node::ForBinding { .. }
             ) && target_ty.is_rule_like()
@@ -1273,7 +1272,7 @@ fn type_of_field_access<'ast>(
                 Node::Ident(IdentKind::Var(let_id)) => {
                     // None = not an object literal, can't validate field names
                     env.get_object_fields(*let_id)
-                        .is_none_or(|fields| fields.iter().any(|f| *f == field_name))
+                        .is_none_or(|fields| fields.contains(&field_name))
                 }
                 Node::Object(range) => {
                     let fields = shared.pools.get_object(*range);
@@ -1390,7 +1389,11 @@ fn type_of_qualified_call<'a>(
     for (i, &arg_id) in args.iter().enumerate() {
         let arg_ty = type_of(shared, ctx, arg_id, env, modules)?;
         if !arg_ty.is_compatible(config.params[i].ty) {
-            return Err(mismatch(config.params[i].ty, arg_ty, shared.arena.span(arg_id)));
+            return Err(mismatch(
+                config.params[i].ty,
+                arg_ty,
+                shared.arena.span(arg_id),
+            ));
         }
     }
     Ok(config.return_ty)
@@ -1491,7 +1494,11 @@ fn type_of_call<'ast>(
     for (i, &arg_id) in args.iter().enumerate() {
         let arg_ty = type_of(shared, ctx, arg_id, env, modules)?;
         if !arg_ty.is_compatible(config.params[i].ty) {
-            return Err(mismatch(config.params[i].ty, arg_ty, shared.arena.span(arg_id)));
+            return Err(mismatch(
+                config.params[i].ty,
+                arg_ty,
+                shared.arena.span(arg_id),
+            ));
         }
     }
     Ok(config.return_ty)

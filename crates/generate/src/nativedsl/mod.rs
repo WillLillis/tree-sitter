@@ -167,18 +167,18 @@ pub fn load_module(
     )?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
-    let mut env = TypeEnv::new();
-    typecheck_modules(shared, &modules, &mut env)?;
+    let mut env = TypeEnv::default();
+    typecheck_modules(shared, modules, &mut env)?;
     let base = inherit_node.and_then(|id| {
         let module = modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, shared.arena.span(id)))
     });
-    typecheck::resolve_and_check(shared, &ctx, &mut env, &modules, base, path)?;
+    typecheck::resolve_and_check(shared, &ctx, &mut env, modules, base, path)?;
 
     let global_id = u8::try_from(modules.len())
         .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
     let lowered = if matches!(kind, ModuleKind::Grammar) {
-        Some(lower::lower_with_base(shared, &ctx, &modules, global_id)?)
+        Some(lower::lower_with_base(shared, &ctx, modules, global_id)?)
     } else {
         None
     };
