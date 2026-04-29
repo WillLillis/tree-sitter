@@ -15,13 +15,6 @@ error_tests! { Lower {
         r#"rule program { "x" }"#,
         LowerErrorKind::MissingGrammarBlock
     }
-    multiple_inherit_bindings_rejected {
-        r#"let a = inherit("inherit_base/grammar.tsg")
-        let b = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: a }
-        rule extra { "x" }"#,
-        LowerErrorKind::MultipleInherits
-    }
     error_inherit_without_config {
         r#"let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "test" }

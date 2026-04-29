@@ -251,4 +251,11 @@ inherit_error_tests! { Parse {
         "grammar { extras: [] }\nrule program { \"x\" }\n",
         ParseErrorKind::MissingLanguageField
     }
+    multiple_inherit_bindings_rejected {
+        r#"let a = inherit("inherit_base/grammar.tsg")
+        let b = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: a }
+        rule extra { "x" }"#,
+        ParseErrorKind::MultipleInherits
+    }
 }}
