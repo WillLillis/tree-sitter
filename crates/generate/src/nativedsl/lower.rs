@@ -388,11 +388,6 @@ impl<'ast> Evaluator<'ast> {
         self.modules[self.current_module].ctx
     }
 
-    // TODO: delete this function, just use global_id as usize directly
-    fn module_idx(&self, global_id: u8) -> usize {
-        global_id as usize
-    }
-
     fn alloc_val(&mut self, val: Value) -> ValueId {
         let id = ValueId(self.values.len() as u32);
         self.values.push(val);
@@ -913,15 +908,17 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.macro_args[base + *i as usize])
             }
             Node::ForBinding { for_id, index } => {
-                let base = self.for_binding_frames.iter().rev()
+                let base = self
+                    .for_binding_frames
+                    .iter()
+                    .rev()
                     .find(|(id, _)| *id == *for_id)
-                    .unwrap().1;
+                    .unwrap()
+                    .1;
                 Ok(self.for_binding_values[base + *index as usize])
             }
             // Guarded by super::resolve - all variable names validated
-            Node::Ident(IdentKind::Var(let_id)) => {
-                Ok(*self.let_values.get(let_id).unwrap())
-            }
+            Node::Ident(IdentKind::Var(let_id)) => Ok(*self.let_values.get(let_id).unwrap()),
             Node::GrammarConfig { module, field } => {
                 let (module, field) = (*module, *field);
                 let mod_val = self.eval_expr(module)?;
@@ -932,9 +929,8 @@ impl<'ast> Evaluator<'ast> {
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
-                let table_id = self.module_idx(global_id);
-                self.eval_import_module(table_id)?;
-                Ok(self.alloc_val(Value::Module(table_id as u8)))
+                self.eval_import_module(usize::from(global_id))?;
+                Ok(self.alloc_val(Value::Module(global_id)))
             }
             Node::Append { left, right } => {
                 let (left, right) = (*left, *right);
