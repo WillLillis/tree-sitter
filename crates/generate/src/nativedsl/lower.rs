@@ -228,7 +228,6 @@ fn evaluate(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<EvalRe
             _ => unreachable!(),
         }
     }
-
     // grammar_config is guaranteed present by validate_grammar in mod.rs,
     // language is guaranteed present by the parser (MissingLanguageField error).
     let config = ctx.grammar_config.as_ref().unwrap();
@@ -704,17 +703,19 @@ impl<'ast> Evaluator<'ast> {
                     .precedence_orderings
                     .iter()
                     .map(|group| {
-                        let inner: Vec<ValueId> = group
-                            .iter()
-                            .map(|entry| match entry {
+                        let inner_start = self.value_children.len() as u32;
+                        for entry in group {
+                            let vid = match entry {
                                 PrecedenceEntry::Name(s) => {
                                     let sid = self.strings.intern_owned(s.clone());
                                     self.alloc_val(Value::Str(sid))
                                 }
                                 PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s.clone()),
-                            })
-                            .collect();
-                        self.alloc_list(&inner, span)
+                            };
+                            self.value_children.push(vid);
+                        }
+                        let inner_len = group.len() as u16;
+                        Ok(self.alloc_val(Value::List(ChildRange::new(inner_start, inner_len))))
                     })
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
@@ -727,16 +728,11 @@ impl<'ast> Evaluator<'ast> {
                 }
             }
             Q::Reserved => {
-                let contexts: Vec<_> = grammar
-                    .reserved_words
-                    .iter()
-                    .map(|ctx| (ctx.name.as_str(), ctx.reserved_words.as_slice()))
-                    .collect();
-                let mut map =
-                    FxHashMap::with_capacity_and_hasher(contexts.len(), rustc_hash::FxBuildHasher);
-                for (name, words) in contexts {
-                    let words_vid = self.import_rules_as_list(words, span)?;
-                    map.insert(name, words_vid);
+                let n = grammar.reserved_words.len();
+                let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
+                for rwc in &grammar.reserved_words {
+                    let words_vid = self.import_rules_as_list(&rwc.reserved_words, span)?;
+                    map.insert(rwc.name.as_str(), words_vid);
                 }
                 Ok(self.alloc_object(map))
             }
@@ -744,22 +740,26 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn import_rules_as_list(&mut self, rules_data: &[Rule], span: Span) -> LowerResult<ValueId> {
-        let vals: Vec<ValueId> = rules_data
-            .iter()
-            .map(|r| {
-                let rid = self.import_rule(r);
-                self.alloc_val(Value::Rule(rid))
-            })
-            .collect();
-        self.alloc_list(&vals, span)
+        let start = self.value_children.len() as u32;
+        for r in rules_data {
+            let rid = self.import_rule(r);
+            let vid = self.alloc_val(Value::Rule(rid));
+            self.value_children.push(vid);
+        }
+        let len = u16::try_from(rules_data.len())
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
     fn import_names_as_list(&mut self, names: &[String], span: Span) -> LowerResult<ValueId> {
-        let vals: Vec<ValueId> = names
-            .iter()
-            .map(|name| self.owned_symbol_val(name.clone()))
-            .collect();
-        self.alloc_list(&vals, span)
+        let start = self.value_children.len() as u32;
+        for name in names {
+            let vid = self.owned_symbol_val(name.clone());
+            self.value_children.push(vid);
+        }
+        let len = u16::try_from(names.len())
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
     fn import_rule(&mut self, rule: &Rule) -> RuleId {
@@ -1110,8 +1110,7 @@ impl<'ast> Evaluator<'ast> {
                 let base = self.rule_scratch.len();
                 for &member in children {
                     if let Node::For { for_id, body } = *self.shared.arena.get(member) {
-                        let for_rules = self.eval_for_to_rules(for_id, body)?;
-                        self.rule_scratch.extend(for_rules);
+                        self.eval_for_to_rules(for_id, body)?;
                     } else {
                         let rid = self.lower_to_rule(member)?;
                         self.rule_scratch.push(rid);
@@ -1269,14 +1268,14 @@ impl<'ast> Evaluator<'ast> {
         Ok(())
     }
 
-    fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<Vec<RuleId>> {
+    /// Evaluate a for-loop, pushing each iteration's rule into `rule_scratch`.
+    fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
         let iterable = self.shared.pools.get_for(for_id).iterable;
         let n_bindings = self.shared.pools.get_for(for_id).bindings.len();
         let iter_vid = self.eval_expr(iterable)?;
         let n_items = self.list_items(Self::expect_list(iter_vid)).len();
         let base = self.for_binding_values.len();
         self.for_binding_frames.push((for_id, base));
-        let mut results = Vec::with_capacity(n_items);
         for i in 0..n_items {
             let item_id = self.list_items(Self::expect_list(iter_vid))[i];
             for j in 0..n_bindings {
@@ -1290,11 +1289,12 @@ impl<'ast> Evaluator<'ast> {
                     self.for_binding_values[base + j] = val;
                 }
             }
-            results.push(self.lower_to_rule(body)?);
+            let rid = self.lower_to_rule(body)?;
+            self.rule_scratch.push(rid);
         }
         self.for_binding_frames.pop();
         self.for_binding_values.truncate(base);
-        Ok(results)
+        Ok(())
     }
 }
 
