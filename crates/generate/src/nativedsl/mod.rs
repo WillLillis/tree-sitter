@@ -27,7 +27,6 @@ pub type LowerError = Diagnostic<LowerErrorKind>;
 
 use std::path::{Path, PathBuf};
 
-use rustc_hash::FxHashMap;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -132,12 +131,12 @@ pub fn load_module<'m>(
             ..
         } = *shared.arena.get(inherit_id)
     {
+        let child_path = resolve_path(&module_dir.join(ctx.text(ref_path)), ref_path)?;
         let child_id = load_child_module(
             shared,
             modules,
             env,
-            ctx.text(ref_path),
-            module_dir,
+            &child_path,
             ref_path,
             ancestor_paths,
             ModuleKind::Grammar,
@@ -183,7 +182,7 @@ pub fn load_module<'m>(
 }
 
 /// Validate: grammar block exists, inherits field consistency.
-/// Multiple inherit() calls are caught by the parser.
+/// Multiple `inherit()` calls are caught by the parser.
 pub fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()> {
     if ctx.grammar_config.is_none() {
         return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
@@ -213,16 +212,13 @@ pub fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()
     Ok(())
 }
 
-/// Load a child module from a path string. Handles .tsg and .json extensions,
-/// cycle detection, and error wrapping.
 const MAX_MODULE_DEPTH: usize = 256;
 
-fn load_child_module<'m>(
+fn load_child_module(
     shared: &mut SharedAst,
-    modules: &'m mut Vec<Module>,
+    modules: &mut Vec<Module>,
     env: &mut TypeEnv,
-    path_str: &str,
-    module_dir: &Path,
+    module_path: &Path,
     span: Span,
     ancestor_paths: &[PathBuf],
     kind: ModuleKind,
@@ -231,48 +227,42 @@ fn load_child_module<'m>(
         return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
     }
 
-    let full_path = module_dir.join(path_str);
-    let canonical = resolve_path(&full_path, span)?;
-
-    let content = std::fs::read_to_string(&full_path).map_err(|e| {
+    let content = std::fs::read_to_string(module_path).map_err(|e| {
         LowerError::new(
             LowerErrorKind::ModuleReadFailed {
-                path: full_path.clone(),
+                path: module_path.to_path_buf(),
                 error: e.to_string(),
             },
             span,
         )
     })?;
 
-    if ancestor_paths.iter().any(|p| p == &canonical) {
-        #[expect(
-            clippy::needless_return_with_question_mark,
-            reason = "bad move semantics"
-        )]
+    if ancestor_paths.iter().any(|p| p == module_path) {
+        #[expect(clippy::needless_return_with_question_mark)]
         return Err(ModuleError {
             inner: Box::new(LowerError::without_span(LowerErrorKind::ModuleCycle).into()),
             source_text: content,
-            path: canonical,
+            path: module_path.to_path_buf(),
             reference_span: span,
         })?;
     }
 
     let mut child_ancestors = ancestor_paths.to_vec();
-    child_ancestors.push(canonical.clone());
+    child_ancestors.push(module_path.to_path_buf());
 
     let module_id = load_module(
         shared,
         modules,
         env,
         &content,
-        &canonical,
+        module_path,
         kind,
         &child_ancestors,
     )
     .map_err(|inner| ModuleError {
         inner: Box::new(inner),
         source_text: content,
-        path: canonical,
+        path: module_path.to_path_buf(),
         reference_span: span,
     })?;
 
@@ -298,23 +288,24 @@ impl Module {
 
 /// Scan AST for unresolved module refs, load files, and set indices.
 /// Deduplicates: same file imported multiple times is loaded once.
-fn load_import_children<'m>(
+fn load_import_children(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
-    modules: &'m mut Vec<Module>,
+    modules: &mut Vec<Module>,
     env: &mut TypeEnv,
     node_range: std::ops::RangeInclusive<usize>,
 ) -> Result<(), DslError> {
-    // Cache: canonical path -> global module ID, so duplicate imports share one load.
-    let mut loaded: FxHashMap<PathBuf, u8> = FxHashMap::default();
+    // Dedup cache: canonical path -> module index. Typically 0-3 entries,
+    // so linear search beats hashing.
+    let mut loaded: Vec<(PathBuf, u8)> = Vec::new();
 
     // Only scan nodes belonging to this module (not parent or child modules).
     let mut node_id = NodeId::from_index(*node_range.start());
     let end = *node_range.end();
     while node_id.index() <= end {
-        let (path, is_import, kind) = if let Node::ModuleRef {
+        let (path_span, is_import, kind) = if let Node::ModuleRef {
             import: is_import,
             path,
             module: None,
@@ -331,23 +322,22 @@ fn load_import_children<'m>(
             continue;
         };
 
-        let path_str = ctx.text(path);
-        let canonical = resolve_path(&module_dir.join(path_str), path)?;
+        let path_str = ctx.text(path_span);
+        let canonical = resolve_path(&module_dir.join(path_str), path_span)?;
 
-        let gid = if let Some(&gid) = loaded.get(&canonical) {
+        let gid = if let Some(&(_, gid)) = loaded.iter().find(|(p, _)| p == &canonical) {
             gid
         } else {
             let gid = load_child_module(
                 shared,
                 modules,
                 env,
-                path_str,
-                module_dir,
-                path,
+                &canonical,
+                path_span,
                 ancestor_paths,
                 kind,
             )?;
-            loaded.insert(canonical, gid);
+            loaded.push((canonical, gid));
             gid
         };
 
@@ -355,7 +345,7 @@ fn load_import_children<'m>(
             node_id,
             Node::ModuleRef {
                 import: is_import,
-                path,
+                path: path_span,
                 module: Some(gid),
             },
         );
