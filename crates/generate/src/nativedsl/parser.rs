@@ -703,6 +703,13 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             start.merge(end),
         );
         if !is_import {
+            if let Some(first) = self.ctx.inherit_ref {
+                return Err(ParseError::with_note(
+                    ParseErrorKind::MultipleInherits,
+                    start.merge(end),
+                    self.first_defined_note(self.shared.arena.span(first)),
+                ));
+            }
             self.ctx.inherit_ref = Some(id);
         }
         Ok(id)
@@ -1006,6 +1013,8 @@ pub enum ParseErrorKind {
     DuplicateGrammarBlock,
     #[error("grammar block must have a 'language' field")]
     MissingLanguageField,
+    #[error("only one inherit() call is allowed per grammar")]
+    MultipleInherits,
     #[error("expression nesting too deep (maximum {MAX_PARSE_DEPTH})")]
     NestingTooDeep,
     #[error("too many elements (maximum 65535)")]
