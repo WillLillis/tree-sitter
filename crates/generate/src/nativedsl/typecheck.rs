@@ -26,7 +26,7 @@ type CheckFn<'ast> = fn(
     &'ast ModuleContext,
     NodeId,
     &mut TypeEnv<'ast>,
-    &[Option<TypeEnv<'ast>>],
+    &'ast [super::Module],
 ) -> Result<(), TypeError>;
 
 /// Types that can appear as homogeneous object field values.
@@ -190,52 +190,41 @@ impl std::fmt::Display for Ty {
 }
 
 #[derive(Clone)]
-pub struct MacroSig {
-    pub params: Vec<Ty>,
-    pub return_ty: Ty,
-}
-
-#[derive(Clone)]
-pub struct TypeEnv<'src> {
-    pub vars: FxHashMap<&'src str, Ty>,
-    pub fns: FxHashMap<&'src str, MacroSig>,
-    /// Field names for Object variables, keyed by variable name.
-    pub object_fields: FxHashMap<&'src str, Vec<&'src str>>,
+pub struct TypeEnv<'a> {
+    pub vars: FxHashMap<NodeId, Ty>,
+    /// Field names for Object variables, keyed by the Let node's NodeId.
+    pub object_fields: FxHashMap<NodeId, Vec<&'a str>>,
     current_macro: Option<MacroId>,
 }
 
-impl<'src> TypeEnv<'src> {
-    fn new() -> Self {
+impl<'a> TypeEnv<'a> {
+    pub fn new() -> Self {
         Self {
             vars: FxHashMap::default(),
-            fns: FxHashMap::default(),
             object_fields: FxHashMap::default(),
             current_macro: None,
         }
     }
-    fn insert_var(&mut self, name: &'src str, ty: Ty) {
-        self.vars.insert(name, ty);
+    fn insert_var(&mut self, id: NodeId, ty: Ty) {
+        self.vars.insert(id, ty);
     }
-    fn insert_object(&mut self, name: &'src str, ty: Ty, fields: Vec<&'src str>) {
-        self.insert_var(name, ty);
-        self.object_fields.insert(name, fields);
+    fn insert_object(&mut self, id: NodeId, ty: Ty, fields: Vec<&'a str>) {
+        self.insert_var(id, ty);
+        self.object_fields.insert(id, fields);
     }
-    #[inline]
-    fn get_object_fields(&self, name: &str) -> Option<&[&'src str]> {
-        self.object_fields.get(name).map(Vec::as_slice)
+    fn get_object_fields(&self, id: NodeId) -> Option<&[&'a str]> {
+        self.object_fields.get(&id).map(Vec::as_slice)
     }
-    fn get_var(&self, name: &str) -> Option<Ty> {
-        self.vars.get(name).copied()
+    fn get_var(&self, id: NodeId) -> Option<Ty> {
+        self.vars.get(&id).copied()
     }
 }
-
-type LocalNames<'a> = FxHashSet<&'a str>;
 
 #[derive(Clone, Copy)]
 enum Decl {
     Rule,
-    Var,
-    Macro,
+    Var(NodeId),
+    Macro(MacroId),
 }
 
 /// Run name resolution and type checking in a single function.
@@ -253,10 +242,11 @@ enum Decl {
 pub fn resolve_and_check<'ast>(
     shared: &'ast mut SharedAst,
     ctx: &'ast ModuleContext,
-    modules: &[Option<TypeEnv<'ast>>],
+    env: &mut TypeEnv<'ast>,
+    modules: &'ast [super::Module],
     base: Option<(&'ast InputGrammar, Span)>,
     grammar_path: &Path,
-) -> Result<TypeEnv<'ast>, TypeError> {
+) -> Result<(), TypeError> {
     // Phase 1: Name resolution
     let mut decls = collect_decls(shared, ctx, &ctx.root_items, grammar_path)?;
 
@@ -281,7 +271,7 @@ pub fn resolve_and_check<'ast>(
             insert_decl(
                 &mut decls,
                 name_text,
-                Decl::Var,
+                Decl::Var(item_id),
                 span,
                 grammar_path,
                 &ctx.source,
@@ -290,7 +280,7 @@ pub fn resolve_and_check<'ast>(
     }
 
     // Phase 2: Type checking
-    check(shared, ctx, modules)
+    check(shared, ctx, env, modules)
 }
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
@@ -350,12 +340,12 @@ fn collect_decls<'a>(
                     source,
                 )?;
             }
-            Node::Macro(fn_idx) => {
-                let config = shared.pools.get_macro(*fn_idx);
+            Node::Macro(macro_id) => {
+                let config = shared.pools.get_macro(*macro_id);
                 insert_decl(
                     &mut decls,
                     ctx.text(config.name),
-                    Decl::Macro,
+                    Decl::Macro(*macro_id),
                     span,
                     grammar_path,
                     source,
@@ -516,18 +506,18 @@ fn resolve_item_tc(
             .into_iter()
             .flatten()
             {
-                resolve_expr_tc(arena, pools, ctx, decls, id, &LocalNames::default())?;
+                resolve_expr_tc(arena, pools, ctx, decls, id)?;
             }
             Ok(())
         }
         Node::Rule { body: inner, .. } | Node::Let { value: inner, .. } => {
             let inner = *inner;
-            resolve_expr_tc(arena, pools, ctx, decls, inner, &LocalNames::default())
+            resolve_expr_tc(arena, pools, ctx, decls, inner)
         }
-        Node::Macro(fn_idx) => {
-            let fn_config = pools.get_macro(*fn_idx);
+        Node::Macro(macro_id) => {
+            let macro_cfg = pools.get_macro(*macro_id);
             // Macro params must not shadow any top-level declaration
-            for param in &fn_config.params {
+            for param in &macro_cfg.params {
                 let name = ctx.text(param.name);
                 if let Some(&(_, first_span)) = decls.get(name) {
                     return Err(TypeError::with_note(
@@ -542,10 +532,8 @@ fn resolve_item_tc(
                     ));
                 }
             }
-            let body = fn_config.body;
-            let locals: LocalNames<'_> =
-                fn_config.params.iter().map(|p| ctx.text(p.name)).collect();
-            resolve_expr_tc(arena, pools, ctx, decls, body, &locals)
+            let body = macro_cfg.body;
+            resolve_expr_tc(arena, pools, ctx, decls, body)
         }
         _ => Ok(()),
     }
@@ -558,19 +546,18 @@ fn resolve_expr_tc(
     ctx: &ModuleContext,
     decls: &Decls,
     id: NodeId,
-    locals: &LocalNames<'_>,
 ) -> Result<(), TypeError> {
     // Handle Ident mutation first
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = ctx.text(span);
-        if locals.contains(name) {
-            arena.resolve_as(id, IdentKind::Var);
-        } else if let Some(&(decl, _)) = decls.get(name) {
+        // locals check removed: parser emits MacroParam/ForBinding directly,
+        // so no Ident(Unresolved) can be a local binding at this point.
+        if let Some(&(decl, _)) = decls.get(name) {
             match decl {
-                Decl::Var => arena.resolve_as(id, IdentKind::Var),
+                Decl::Var(let_id) => arena.resolve_as(id, IdentKind::Var(let_id)),
                 Decl::Rule => arena.resolve_as(id, IdentKind::Rule),
-                Decl::Macro => arena.resolve_as(id, IdentKind::Macro),
+                Decl::Macro(macro_id) => arena.resolve_as(id, IdentKind::Macro(macro_id)),
             }
         } else {
             return Err(TypeError::new(
@@ -581,22 +568,18 @@ fn resolve_expr_tc(
         return Ok(());
     }
 
-    // Alias target: bare identifiers resolve as Rule (named alias) unless
-    // they refer to a local variable (Var for fn params / for bindings).
+    // Alias target: bare identifiers resolve as Rule (named alias).
     // Targets don't require the name to be declared - they're just node names,
     // same as grammar.js `alias($.x, $.undeclared_name)`.
+    // Parser already emits MacroParam/ForBinding for local bindings,
+    // so any remaining Ident(Unresolved) target is a rule name.
     if let Node::Alias { content, target } = arena.get(id) {
         let (content, target) = (*content, *target);
-        resolve_expr_tc(arena, pools, ctx, decls, content, locals)?;
+        resolve_expr_tc(arena, pools, ctx, decls, content)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
-            let name = ctx.text(arena.span(target));
-            if locals.contains(name) {
-                arena.resolve_as(target, IdentKind::Var);
-            } else {
-                arena.resolve_as(target, IdentKind::Rule);
-            }
+            arena.resolve_as(target, IdentKind::Rule);
         } else {
-            resolve_expr_tc(arena, pools, ctx, decls, target, locals)?;
+            resolve_expr_tc(arena, pools, ctx, decls, target)?;
         }
         return Ok(());
     }
@@ -606,12 +589,12 @@ fn resolve_expr_tc(
     if let Node::For { for_id, body } = arena.get(id) {
         let iterable = pools.get_for(*for_id).iterable;
         let body = *body;
-        resolve_expr_tc(arena, pools, ctx, decls, iterable, locals)?;
-        return resolve_expr_tc(arena, pools, ctx, decls, body, locals);
+        resolve_expr_tc(arena, pools, ctx, decls, iterable)?;
+        return resolve_expr_tc(arena, pools, ctx, decls, body);
     }
 
     // All remaining cases
-    resolve_children_tc(arena, pools, ctx, decls, id, locals)
+    resolve_children_tc(arena, pools, ctx, decls, id)
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
@@ -621,12 +604,11 @@ fn resolve_children_tc(
     ctx: &ModuleContext,
     decls: &Decls,
     id: NodeId,
-    locals: &LocalNames<'_>,
 ) -> Result<(), TypeError> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
         for child in pools.child_slice(range) {
-            resolve_expr_tc(arena, pools, ctx, decls, *child, locals)?;
+            resolve_expr_tc(arena, pools, ctx, decls, *child)?;
         }
         return Ok(());
     }
@@ -634,15 +616,15 @@ fn resolve_children_tc(
     match arena.get(id) {
         Node::Call { name, args } => {
             let (name, args) = (*name, *args);
-            resolve_expr_tc(arena, pools, ctx, decls, name, locals)?;
+            resolve_expr_tc(arena, pools, ctx, decls, name)?;
             for arg in pools.child_slice(args) {
-                resolve_expr_tc(arena, pools, ctx, decls, *arg, locals)?;
+                resolve_expr_tc(arena, pools, ctx, decls, *arg)?;
             }
             Ok(())
         }
         Node::Object(range) => {
             for field in pools.get_object(*range) {
-                resolve_expr_tc(arena, pools, ctx, decls, field.1, locals)?;
+                resolve_expr_tc(arena, pools, ctx, decls, field.1)?;
             }
             Ok(())
         }
@@ -652,7 +634,7 @@ fn resolve_children_tc(
         | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
         | Node::Reserved { content: c, .. } => {
-            resolve_expr_tc(arena, pools, ctx, decls, *c, locals)
+            resolve_expr_tc(arena, pools, ctx, decls, *c)
         }
         Node::Append { left: a, right: b }
         | Node::Prec {
@@ -661,27 +643,27 @@ fn resolve_children_tc(
             ..
         } => {
             let (a, b) = (*a, *b);
-            resolve_expr_tc(arena, pools, ctx, decls, a, locals)?;
-            resolve_expr_tc(arena, pools, ctx, decls, b, locals)
+            resolve_expr_tc(arena, pools, ctx, decls, a)?;
+            resolve_expr_tc(arena, pools, ctx, decls, b)
         }
         Node::DynRegex(range) => {
             let (pattern, flags) = pools.get_regex(*range);
-            resolve_expr_tc(arena, pools, ctx, decls, pattern, locals)?;
+            resolve_expr_tc(arena, pools, ctx, decls, pattern)?;
             if let Some(flags) = flags {
-                resolve_expr_tc(arena, pools, ctx, decls, flags, locals)?;
+                resolve_expr_tc(arena, pools, ctx, decls, flags)?;
             }
             Ok(())
         }
         Node::FieldAccess { obj, .. } | Node::QualifiedAccess { obj, .. } => {
             let obj = *obj;
-            resolve_expr_tc(arena, pools, ctx, decls, obj, locals)
+            resolve_expr_tc(arena, pools, ctx, decls, obj)
         }
         Node::QualifiedCall(range) => {
             let (obj, _name, args) = pools.get_qualified_call(*range);
-            resolve_expr_tc(arena, pools, ctx, decls, obj, locals)?;
+            resolve_expr_tc(arena, pools, ctx, decls, obj)?;
             // name stays as Ident - it's a member of the import namespace
             for &arg in args {
-                resolve_expr_tc(arena, pools, ctx, decls, arg, locals)?;
+                resolve_expr_tc(arena, pools, ctx, decls, arg)?;
             }
             Ok(())
         }
@@ -696,28 +678,19 @@ fn resolve_children_tc(
 pub fn check<'ast>(
     shared: &SharedAst,
     ctx: &'ast ModuleContext,
-    modules: &[Option<TypeEnv<'ast>>],
-) -> Result<TypeEnv<'ast>, TypeError> {
-    let mut env = TypeEnv::new();
+    env: &mut TypeEnv<'ast>,
+    modules: &'ast [super::Module],
+) -> Result<(), TypeError> {
+    // Pre-register rules (forward references allowed)
     for &item_id in &ctx.root_items {
-        match shared.arena.get(item_id) {
-            Node::Rule { name, .. } => {
-                env.insert_var(ctx.text(*name), Ty::Rule);
-            }
-            Node::Macro(fn_idx) => {
-                let config = shared.pools.get_macro(*fn_idx);
-                let params: Vec<Ty> = config.params.iter().map(|p| p.ty).collect();
-                let return_ty = config.return_ty;
-                env.fns
-                    .insert(ctx.text(config.name), MacroSig { params, return_ty });
-            }
-            _ => {}
+        if let Node::Rule { .. } = shared.arena.get(item_id) {
+            env.insert_var(item_id, Ty::Rule);
         }
     }
     for &item_id in &ctx.root_items {
-        check_item(shared, ctx, item_id, &mut env, modules)?;
+        check_item(shared, ctx, item_id, env, modules)?;
     }
-    Ok(env)
+    Ok(())
 }
 
 fn check_item<'ast>(
@@ -725,7 +698,7 @@ fn check_item<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     match shared.arena.get(id) {
         Node::Grammar => {
@@ -750,8 +723,7 @@ fn check_item<'ast>(
             }
             Ok(())
         }
-        Node::Let { name, ty, value } => {
-            let var_name = ctx.text(*name);
+        Node::Let { ty, value, .. } => {
             let declared_ty = *ty;
             // For empty containers, the inner type comes from annotation only
             let is_empty_list = matches!(shared.arena.get(*value), Node::List(r) if shared.pools.child_slice(*r).is_empty());
@@ -788,16 +760,16 @@ fn check_item<'ast>(
                     .iter()
                     .map(|(span, _)| ctx.text(*span))
                     .collect();
-                env.insert_object(var_name, resolved_ty, fields);
+                env.insert_object(id, resolved_ty, fields);
             } else {
-                env.insert_var(var_name, resolved_ty);
+                env.insert_var(id, resolved_ty);
             }
             Ok(())
         }
-        Node::Macro(fn_idx) => {
-            let config = shared.pools.get_macro(*fn_idx);
+        Node::Macro(macro_id) => {
+            let config = shared.pools.get_macro(*macro_id);
             let return_ty = config.return_ty;
-            let prev = env.current_macro.replace(*fn_idx);
+            let prev = env.current_macro.replace(*macro_id);
             let body_ty = type_of(shared, ctx, config.body, env, modules)?;
             env.current_macro = prev;
             if !body_ty.is_compatible(return_ty) {
@@ -828,7 +800,7 @@ fn expect_list<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
     check_elem: CheckFn<'ast>,
     accept_list_str: bool,
 ) -> Result<(), TypeError> {
@@ -850,7 +822,7 @@ fn expect_rule_list<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     expect_list(shared, ctx, id, env, modules, expect_rule, true)
 }
@@ -860,7 +832,7 @@ fn expect_name_list<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     expect_list(shared, ctx, id, env, modules, expect_name_ref, false)
 }
@@ -870,11 +842,11 @@ fn expect_name_ref<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     match shared.arena.get(id) {
         Node::Ident(IdentKind::Rule) => Ok(()),
-        Node::Ident(IdentKind::Var) | Node::FieldAccess { .. } | Node::GrammarConfig { .. } => {
+        Node::Ident(IdentKind::Var(_)) | Node::FieldAccess { .. } | Node::GrammarConfig { .. } => {
             let ty = type_of(shared, ctx, id, env, modules)?;
             if ty != Ty::Rule {
                 return Err(mismatch(Ty::Rule, ty, shared.arena.span(id)));
@@ -894,7 +866,7 @@ fn expect_list_of_groups<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
     check_inner: CheckFn<'ast>,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = shared.arena.get(id) {
@@ -916,7 +888,7 @@ fn expect_name_or_str<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     if matches!(
         shared.arena.get(id),
@@ -933,7 +905,7 @@ fn expect_precedence_group<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     expect_list(shared, ctx, id, env, modules, expect_name_or_str, true)
 }
@@ -943,7 +915,7 @@ fn expect_reserved<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
@@ -968,7 +940,7 @@ fn expect_rule<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     let ty = type_of(shared, ctx, id, env, modules)?;
     if !ty.is_rule_like() {
@@ -982,7 +954,7 @@ fn type_of<'ast>(
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let span = shared.arena.span(id);
     match shared.arena.get(id) {
@@ -1021,13 +993,13 @@ fn type_of<'ast>(
         Node::ForBinding { for_id, index } => {
             Ok(shared.pools.get_for(*for_id).bindings[*index as usize].1)
         }
-        Node::Ident(IdentKind::Macro) => Err(TypeError::new(
+        Node::Ident(IdentKind::Macro(_)) => Err(TypeError::new(
             TypeErrorKind::FunctionUsedAsValue(ctx.text(span).to_string()),
             span,
         )),
-        Node::Ident(IdentKind::Var) => {
-            let name = ctx.text(span);
-            env.get_var(name).ok_or_else(|| {
+        Node::Ident(IdentKind::Var(let_id)) => {
+            env.get_var(*let_id).ok_or_else(|| {
+                let name = ctx.text(span);
                 TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
             })
         }
@@ -1048,7 +1020,7 @@ fn type_of<'ast>(
             let obj_ty = type_of(shared, ctx, *obj, env, modules)?;
             match obj_ty {
                 Ty::ImportModule(idx) | Ty::GrammarModule(idx) => {
-                    type_of_import_access(ctx, idx, *member, modules)
+                    type_of_import_access(shared, ctx, idx, *member, env, modules)
                 }
                 _ => Err(TypeError::new(
                     TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
@@ -1109,7 +1081,7 @@ fn type_of<'ast>(
             let is_valid = matches!(
                 shared.arena.get(*target),
                 Node::Ident(IdentKind::Rule)
-                    | Node::Ident(IdentKind::Var)
+                    | Node::Ident(IdentKind::Var(_))
                     | Node::MacroParam(_)
                     | Node::ForBinding { .. }
             ) && target_ty.is_rule_like()
@@ -1160,7 +1132,7 @@ fn type_of_append<'ast>(
     right: NodeId,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let is_empty = |id| matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty());
     let lt = (!is_empty(left))
@@ -1201,17 +1173,17 @@ fn type_of_field_access<'ast>(
     obj: NodeId,
     field: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let obj_ty = type_of(shared, ctx, obj, env, modules)?;
     let field_name = ctx.text(field);
     match obj_ty {
         Ty::Object(inner) => {
             let field_known = match shared.arena.get(obj) {
-                Node::Ident(IdentKind::Var) => {
-                    let var_name = ctx.text(shared.arena.span(obj));
-                    env.get_object_fields(var_name)
-                        .is_none_or(|fields| fields.contains(&field_name))
+                Node::Ident(IdentKind::Var(let_id)) => {
+                    // None = not an object literal, can't validate field names
+                    env.get_object_fields(*let_id)
+                        .is_none_or(|fields| fields.iter().any(|f| *f == field_name))
                 }
                 Node::Object(range) => {
                     let fields = shared.pools.get_object(*range);
@@ -1239,24 +1211,41 @@ fn type_of_field_access<'ast>(
     }
 }
 
+// TODO: replace linear root_items scan with a pre-built name->NodeId index per module
 fn type_of_import_access(
+    shared: &SharedAst,
     ctx: &ModuleContext,
     idx: u8,
     member: Span,
-    modules: &[Option<TypeEnv<'_>>],
+    env: &TypeEnv<'_>,
+    modules: &[super::Module],
 ) -> Result<Ty, TypeError> {
     let member_name = ctx.text(member);
-    // Invariant: idx was assigned during loading and `typecheck_module` populates
-    // the table before any module that references it is checked.
-    let import_env = modules[idx as usize].as_ref().unwrap();
-    if let Some(&ty) = import_env.vars.get(member_name) {
-        return Ok(ty);
-    }
-    if import_env.fns.contains_key(member_name) {
-        return Err(TypeError::new(
-            TypeErrorKind::FunctionUsedAsValue(member_name.to_string()),
-            member,
-        ));
+    let target = &modules[idx as usize];
+    for &item_id in &target.ctx.root_items {
+        match shared.arena.get(item_id) {
+            Node::Let { name, .. } if target.ctx.text(*name) == member_name => {
+                return env.get_var(item_id).ok_or_else(|| {
+                    TypeError::new(
+                        TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
+                        member,
+                    )
+                });
+            }
+            Node::Rule { name, .. } if target.ctx.text(*name) == member_name => {
+                return Ok(Ty::Rule);
+            }
+            Node::Macro(macro_id) => {
+                let config = shared.pools.get_macro(*macro_id);
+                if target.ctx.text(config.name) == member_name {
+                    return Err(TypeError::new(
+                        TypeErrorKind::FunctionUsedAsValue(member_name.to_string()),
+                        member,
+                    ));
+                }
+            }
+            _ => {}
+        }
     }
     Err(TypeError::new(
         TypeErrorKind::ImportMemberNotFound(member_name.to_string()),
@@ -1270,7 +1259,7 @@ fn type_of_qualified_call<'a>(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'a>,
-    modules: &[Option<TypeEnv<'a>>],
+    modules: &'a [super::Module],
 ) -> Result<Ty, TypeError> {
     let (obj, name, args) = shared.pools.get_qualified_call(range);
     let obj_ty = type_of(shared, ctx, obj, env, modules)?;
@@ -1281,33 +1270,40 @@ fn type_of_qualified_call<'a>(
         ));
     };
     let fn_name = ctx.text(shared.arena.span(name));
-    let import_env = modules[idx as usize].as_ref().unwrap();
-    let Some(sig) = import_env.fns.get(fn_name) else {
+    let target = &modules[idx as usize];
+    // Find the macro in the target module's root items
+    let config = target.ctx.root_items.iter().find_map(|&item_id| {
+        if let Node::Macro(macro_id) = shared.arena.get(item_id) {
+            let cfg = shared.pools.get_macro(*macro_id);
+            if target.ctx.text(cfg.name) == fn_name {
+                return Some(cfg);
+            }
+        }
+        None
+    });
+    let Some(config) = config else {
         return Err(TypeError::new(
             TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
             shared.arena.span(name),
         ));
     };
-    if args.len() != sig.params.len() {
+    if args.len() != config.params.len() {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
                 fn_name: fn_name.to_string(),
-                expected: sig.params.len(),
+                expected: config.params.len(),
                 got: args.len(),
             },
             span,
         ));
     }
-    let return_ty = sig.return_ty;
-    let params = &sig.params;
     for (i, &arg_id) in args.iter().enumerate() {
-        let expected = params[i];
         let arg_ty = type_of(shared, ctx, arg_id, env, modules)?;
-        if !arg_ty.is_compatible(expected) {
-            return Err(mismatch(expected, arg_ty, shared.arena.span(arg_id)));
+        if !arg_ty.is_compatible(config.params[i].ty) {
+            return Err(mismatch(config.params[i].ty, arg_ty, shared.arena.span(arg_id)));
         }
     }
-    Ok(return_ty)
+    Ok(config.return_ty)
 }
 
 fn type_of_object<'ast>(
@@ -1316,7 +1312,7 @@ fn type_of_object<'ast>(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let fields = shared.pools.get_object(range);
     if fields.is_empty() {
@@ -1343,7 +1339,7 @@ fn type_of_list<'ast>(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
     let items = shared.pools.child_slice(range);
     if items.is_empty() {
@@ -1380,20 +1376,23 @@ fn type_of_call<'ast>(
     args: ChildRange,
     span: Span,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<Ty, TypeError> {
-    let fn_name = ctx.text(shared.arena.span(name));
-    let sig = env.fns.get(fn_name).ok_or_else(|| {
-        TypeError::new(TypeErrorKind::UndefinedFunction(fn_name.to_string()), span)
-    })?;
-    let return_ty = sig.return_ty;
-    let n_params = sig.params.len();
+    let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
+        let fn_name = ctx.text(shared.arena.span(name));
+        return Err(TypeError::new(
+            TypeErrorKind::UndefinedFunction(fn_name.to_string()),
+            span,
+        ));
+    };
+    let config = shared.pools.get_macro(*macro_id);
+    let fn_name = ctx.text(config.name);
     let args = shared.pools.child_slice(args);
-    if args.len() != n_params {
+    if args.len() != config.params.len() {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
                 fn_name: fn_name.to_string(),
-                expected: n_params,
+                expected: config.params.len(),
                 got: args.len(),
             },
             span,
@@ -1401,12 +1400,11 @@ fn type_of_call<'ast>(
     }
     for (i, &arg_id) in args.iter().enumerate() {
         let arg_ty = type_of(shared, ctx, arg_id, env, modules)?;
-        let param_ty = env.fns[fn_name].params[i];
-        if !arg_ty.is_compatible(param_ty) {
-            return Err(mismatch(param_ty, arg_ty, shared.arena.span(arg_id)));
+        if !arg_ty.is_compatible(config.params[i].ty) {
+            return Err(mismatch(config.params[i].ty, arg_ty, shared.arena.span(arg_id)));
         }
     }
-    Ok(return_ty)
+    Ok(config.return_ty)
 }
 
 fn check_for_expr<'ast>(
@@ -1415,7 +1413,7 @@ fn check_for_expr<'ast>(
     for_idx: ForId,
     body: NodeId,
     env: &mut TypeEnv<'ast>,
-    modules: &[Option<TypeEnv<'ast>>],
+    modules: &'ast [super::Module],
 ) -> Result<(), TypeError> {
     let config = shared.pools.get_for(for_idx);
 

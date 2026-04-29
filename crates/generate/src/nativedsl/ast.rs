@@ -175,8 +175,8 @@ pub enum RepeatKind {
 pub enum IdentKind {
     Unresolved,
     Rule,
-    Var,
-    Macro,
+    Var(NodeId),
+    Macro(MacroId),
 }
 
 /// Byte offset range `[start, end)` in the source text.
