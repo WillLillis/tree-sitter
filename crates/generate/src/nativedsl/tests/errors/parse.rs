@@ -258,4 +258,10 @@ inherit_error_tests! { Parse {
         rule extra { "x" }"#,
         ParseErrorKind::MultipleInherits
     }
+    inherit_in_let_and_config_rejected {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: inherit("inherit_base/grammar.tsg") }
+        rule extra { "x" }"#,
+        ParseErrorKind::MultipleInherits
+    }
 }}
