@@ -64,9 +64,11 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let cap = input.len() / 30;
     let mut shared = SharedAst::new(cap);
     let mut modules: Vec<Module> = Vec::new();
+    let mut env = TypeEnv::default();
     let root_id = load_module(
         &mut shared,
         &mut modules,
+        &mut env,
         input,
         grammar_path,
         ModuleKind::Grammar,
@@ -95,9 +97,10 @@ pub enum ModuleKind {
 /// # Panics
 ///
 /// Panics if `path` has no parent directory.
-pub fn load_module(
-    shared: &mut SharedAst,
-    modules: &mut Vec<Module>,
+pub fn load_module<'m>(
+    shared: &'m mut SharedAst,
+    modules: &'m mut Vec<Module>,
+    env: &mut TypeEnv,
     source: &str,
     path: &Path,
     kind: ModuleKind,
@@ -132,6 +135,7 @@ pub fn load_module(
         let child_id = load_child_module(
             shared,
             modules,
+            env,
             ctx.text(ref_path),
             module_dir,
             ref_path,
@@ -154,17 +158,17 @@ pub fn load_module(
         module_dir,
         ancestor_paths,
         modules,
+        env,
         node_start..=node_end,
     )?;
 
-    // Resolve identifiers + typecheck. For Grammar modules, also lower.
-    let mut env = TypeEnv::default();
-    typecheck_modules(shared, modules, &mut env)?;
+    // Resolve identifiers + typecheck. Child modules already populated env
+    // during their own load_module calls.
     let base = ctx.inherit_ref.and_then(|id| {
         let module = modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, shared.arena.span(id)))
     });
-    typecheck::resolve_and_check(shared, &ctx, &mut env, modules, base, path)?;
+    typecheck::resolve_and_check(shared, &ctx, env, modules, base, path)?;
 
     let global_id = u8::try_from(modules.len())
         .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
@@ -213,9 +217,10 @@ pub fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()
 /// cycle detection, and error wrapping.
 const MAX_MODULE_DEPTH: usize = 256;
 
-fn load_child_module(
+fn load_child_module<'m>(
     shared: &mut SharedAst,
-    modules: &mut Vec<Module>,
+    modules: &'m mut Vec<Module>,
+    env: &mut TypeEnv,
     path_str: &str,
     module_dir: &Path,
     span: Span,
@@ -258,6 +263,7 @@ fn load_child_module(
     let module_id = load_module(
         shared,
         modules,
+        env,
         &content,
         &canonical,
         kind,
@@ -292,12 +298,13 @@ impl Module {
 
 /// Scan AST for unresolved module refs, load files, and set indices.
 /// Deduplicates: same file imported multiple times is loaded once.
-fn load_import_children(
+fn load_import_children<'m>(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
     module_dir: &Path,
     ancestor_paths: &[PathBuf],
-    modules: &mut Vec<Module>,
+    modules: &'m mut Vec<Module>,
+    env: &mut TypeEnv,
     node_range: std::ops::RangeInclusive<usize>,
 ) -> Result<(), DslError> {
     // Cache: canonical path -> global module ID, so duplicate imports share one load.
@@ -333,6 +340,7 @@ fn load_import_children(
             let gid = load_child_module(
                 shared,
                 modules,
+                env,
                 path_str,
                 module_dir,
                 path,
@@ -376,22 +384,6 @@ fn validate_import_items(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<(
             LowerErrorKind::ModuleDisallowedItem(kind),
             shared.arena.span(item_id),
         ))?;
-    }
-    Ok(())
-}
-
-/// Typecheck child modules in loading order (children before parents).
-/// The flat `modules` vec is already in this order since children are
-/// pushed before their parents during loading.
-// TODO: eliminate this in favor of a single recursive typecheck pass
-// through the root module once we have a global TypeEnv.
-pub fn typecheck_modules<'m>(
-    shared: &SharedAst,
-    modules: &'m [Module],
-    env: &mut TypeEnv<'m>,
-) -> DslResult<()> {
-    for m in modules {
-        typecheck::check(shared, &m.ctx, env)?;
     }
     Ok(())
 }
