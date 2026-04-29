@@ -136,6 +136,7 @@ struct Evaluator<'ast> {
     // Current execution state
     current_module: usize,
     scopes: FxHashMap<&'ast str, ValueId>,
+    let_values: FxHashMap<NodeId, ValueId>,
     // Shared across module boundaries
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
     macro_args: Vec<ValueId>,
@@ -239,6 +240,7 @@ fn evaluate(
 
         current_module: root_global_id as usize,
         scopes: FxHashMap::default(),
+        let_values: FxHashMap::default(),
         call_stack: Vec::new(),
         macro_args: Vec::new(),
         macro_arg_bases: Vec::new(),
@@ -263,6 +265,7 @@ fn evaluate(
             Node::Let { name, value, .. } => {
                 let val = eval.eval_expr(*value)?;
                 eval.scopes.insert(ctx.text(*name), val);
+                eval.let_values.insert(item_id, val);
             }
             Node::Rule {
                 is_override,
@@ -941,7 +944,9 @@ impl<'ast> Evaluator<'ast> {
                 Ok(self.for_binding_values[base + *index as usize])
             }
             // Guarded by super::resolve - all variable names validated
-            Node::Ident(IdentKind::Var(_)) => Ok(*self.scopes.get(self.ctx().text(span)).unwrap()),
+            Node::Ident(IdentKind::Var(let_id)) => {
+                Ok(*self.let_values.get(let_id).unwrap())
+            }
             Node::GrammarConfig { module, field } => {
                 let (module, field) = (*module, *field);
                 let mod_val = self.eval_expr(module)?;
@@ -1363,6 +1368,7 @@ impl<'ast> Evaluator<'ast> {
                 let val = self.eval_expr(value)?;
                 let var_name = ctx.text(name);
                 self.scopes.insert(var_name, val);
+                self.let_values.insert(item_id, val);
                 values.insert(var_name, val);
             }
         }
