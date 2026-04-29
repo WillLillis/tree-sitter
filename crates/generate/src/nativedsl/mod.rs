@@ -167,13 +167,13 @@ pub fn load_module(
     )?;
 
     // Resolve identifiers + typecheck. For Grammar modules, also lower.
-    let mut type_envs: Vec<Option<TypeEnv<'_>>> = vec![None; modules.len()];
-    typecheck_modules(shared, &modules, &mut type_envs)?;
+    let mut env = TypeEnv::new();
+    typecheck_modules(shared, &modules, &mut env)?;
     let base = inherit_node.and_then(|id| {
         let module = modules.iter().find(|m| m.is_grammar())?;
         Some((module.lowered.as_ref()?, shared.arena.span(id)))
     });
-    let _ = typecheck::resolve_and_check(shared, &ctx, &type_envs, base, path)?;
+    typecheck::resolve_and_check(shared, &ctx, &mut env, &modules, base, path)?;
 
     let global_id = u8::try_from(modules.len())
         .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
@@ -455,11 +455,10 @@ fn validate_import_items(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<(
 pub fn typecheck_modules<'m>(
     shared: &SharedAst,
     modules: &'m [Module],
-    table: &mut Vec<Option<TypeEnv<'m>>>,
+    env: &mut TypeEnv<'m>,
 ) -> DslResult<()> {
     for m in modules {
-        let env = typecheck::check(shared, &m.ctx, table)?;
-        table[m.global_id as usize] = Some(env);
+        typecheck::check(shared, &m.ctx, env, modules)?;
     }
     Ok(())
 }
