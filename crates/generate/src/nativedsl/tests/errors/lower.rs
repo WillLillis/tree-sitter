@@ -148,7 +148,7 @@ fn error_alias_non_name_rule_via_var() {
     let e = assert_err!(
         dsl_err(
             r#"grammar { language: "test" }
-            macro make_alias(target: rule_t) rule_t = alias("x", target)
+            macro make_alias(target: rule_t) rule_t { alias("x", target) }
             rule a { "a" }
             rule b { "b" }
             rule program { make_alias(seq(a, b)) }"#

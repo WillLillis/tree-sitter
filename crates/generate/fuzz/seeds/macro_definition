@@ -1,5 +1,5 @@
 grammar { language: "test" }
-macro comma_sep(item: rule_t) rule_t = seq(item, repeat(seq(",", item)))
-macro wrap(inner: rule_t) rule_t = seq("(", inner, ")")
+macro comma_sep(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
+macro wrap(inner: rule_t) rule_t { seq("(", inner, ")") }
 rule program { comma_sep(wrap(identifier)) }
 rule identifier { regexp("[a-z]+") }

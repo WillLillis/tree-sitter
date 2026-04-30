@@ -1,4 +1,4 @@
 grammar { language: "test" }
-macro wrap(r: rule_t) rule_t = seq("(", r, ")")
-macro id(x: str_t) str_t = x
+macro wrap(r: rule_t) rule_t { seq("(", r, ")") }
+macro id(x: str_t) str_t { x }
 rule program { wrap("x") }

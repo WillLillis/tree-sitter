@@ -3,7 +3,7 @@ use super::super::*;
 error_tests! { Type {
     error_type_mismatch_fn_args {
         r#"grammar { language: "test" }
-        macro needs_int(x: int_t) rule_t = prec(x, "a")
+        macro needs_int(x: int_t) rule_t { prec(x, "a") }
         rule program { needs_int("not_an_int") }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Str }
     }
@@ -52,7 +52,7 @@ error_tests! { Type {
     }
     error_wrong_arg_count {
         r#"grammar { language: "test" }
-        macro one_arg(x: rule_t) rule_t = x
+        macro one_arg(x: rule_t) rule_t { x }
         rule program { one_arg("a", "b") }"#,
         TypeErrorKind::ArgCountMismatch { macro_name: "one_arg".into(), expected: 1, got: 2 }
     }
@@ -99,7 +99,7 @@ error_tests! { Type {
     }
     error_fn_return_type_mismatch {
         r#"grammar { language: "test" }
-        macro bad(x: rule_t) int_t = x
+        macro bad(x: rule_t) int_t { x }
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Rule }
     }
@@ -205,7 +205,7 @@ error_tests! { Type {
     }
     error_bare_function_reference {
         r#"grammar { language: "test" }
-        macro make_rule(x: str_t) rule_t = x
+        macro make_rule(x: str_t) rule_t { x }
         rule program { make_rule }"#,
         TypeErrorKind::MacroUsedAsValue("make_rule".into())
     }
