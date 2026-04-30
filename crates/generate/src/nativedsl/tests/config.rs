@@ -41,8 +41,13 @@ fn config_precedences() {
         rule program { "x" }
         rule multiply { "y" }
     "#);
-    assert_eq!(g.precedence_orderings.len(), 1);
-    assert_eq!(g.precedence_orderings[0].len(), 2);
+    assert_eq!(
+        g.precedence_orderings,
+        vec![vec![
+            crate::grammars::PrecedenceEntry::Name("add".into()),
+            crate::grammars::PrecedenceEntry::Symbol("multiply".into()),
+        ]]
+    );
 }
 
 #[test]

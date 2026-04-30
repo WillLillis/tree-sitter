@@ -164,8 +164,18 @@ pub fn load_module<'m>(
     // Resolve identifiers + typecheck. Child modules already populated env
     // during their own load_module calls.
     let base = ctx.inherit_ref.and_then(|id| {
-        let module = modules.iter().find(|m| m.is_grammar())?;
-        Some((module.lowered.as_ref()?, shared.arena.span(id)))
+        if let Node::ModuleRef {
+            module: Some(child_id),
+            ..
+        } = shared.arena.get(id)
+        {
+            Some((
+                modules[*child_id as usize].lowered.as_ref()?,
+                shared.arena.span(id),
+            ))
+        } else {
+            None
+        }
     });
     typecheck::resolve_and_check(shared, &ctx, env, modules, base, path)?;
 

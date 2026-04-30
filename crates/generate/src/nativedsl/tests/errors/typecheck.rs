@@ -42,7 +42,7 @@ error_tests! { Type {
         r#"grammar { language: "test", word: ident }
         rule ident { regexp("[a-z]+") }
         rule program { ident("default", regexp("[a-z]+")) }"#,
-        TypeErrorKind::UndefinedFunction("ident".into())
+        TypeErrorKind::UndefinedMacro("ident".into())
     }
     error_self_referential_let {
         r#"grammar { language: "test" }
@@ -54,7 +54,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         macro one_arg(x: rule_t) rule_t = x
         rule program { one_arg("a", "b") }"#,
-        TypeErrorKind::ArgCountMismatch { fn_name: "one_arg".into(), expected: 1, got: 2 }
+        TypeErrorKind::ArgCountMismatch { macro_name: "one_arg".into(), expected: 1, got: 2 }
     }
     error_rule_inline_on_non_grammar {
         r#"grammar { language: "test" }
@@ -207,7 +207,29 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         macro make_rule(x: str_t) rule_t = x
         rule program { make_rule }"#,
-        TypeErrorKind::FunctionUsedAsValue("make_rule".into())
+        TypeErrorKind::MacroUsedAsValue("make_rule".into())
+    }
+    error_concat_with_non_string_arg {
+        r#"grammar { language: "test" }
+        rule program { regexp(concat("a", 1)) }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::Str, got: Ty::Int }
+    }
+    error_regexp_with_non_string_pattern {
+        r#"grammar { language: "test" }
+        let x: int_t = 1
+        rule program { regexp(x) }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::Str, got: Ty::Int }
+    }
+    error_regexp_with_non_string_flags {
+        r#"grammar { language: "test" }
+        let f: int_t = 1
+        rule program { regexp("[a-z]+", f) }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::Str, got: Ty::Int }
+    }
+    error_prec_dynamic_with_string_value {
+        r#"grammar { language: "test" }
+        rule program { prec_dynamic("high", "x") }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Str }
     }
 }}
 
