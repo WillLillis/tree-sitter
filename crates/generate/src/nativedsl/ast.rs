@@ -32,7 +32,9 @@ impl NodeId {
     /// Return the next `NodeId` (index + 1).
     #[must_use]
     pub const fn next(self) -> Self {
-        // SAFETY: self.0 >= 1, so self.0 + 1 >= 2, always non-zero.
+        // SAFETY: self.0 >= 1 and < u32::MAX (arena is bounded well below that),
+        // so self.0 + 1 >= 2 and fits in u32. Always non-zero.
+        debug_assert!(self.0.get() < u32::MAX);
         Self(unsafe { NonZeroU32::new_unchecked(self.0.get() + 1) })
     }
 }
@@ -457,9 +459,9 @@ pub enum Node {
         module: NodeId,
         field: QueryableField,
     },
-    /// `expr::name(args)` - function call through `::` access.
+    /// `expr::name(args)` - macro call through `::` access.
     /// Children layout: `[obj, name, arg0, arg1, ...]` where obj is the
-    /// namespace value and name is the function identifier.
+    /// namespace value and name is the macro identifier.
     QualifiedCall(ChildRange),
     Append {
         left: NodeId,

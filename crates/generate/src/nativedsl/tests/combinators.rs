@@ -97,20 +97,29 @@ rule_tests! {
 #[test]
 fn regexp_combinator() {
     let g = dsl(r#"grammar { language: "test" } rule program { regexp("[a-z]+") }"#);
-    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == "[a-z]+"));
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::Pattern("[a-z]+".into(), String::new())
+    );
 }
 
 #[test]
 fn regexp_with_flags() {
     let g = dsl(r#"grammar { language: "test" } rule program { regexp("[a-z]+", "i") }"#);
-    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, f) if p == "[a-z]+" && f == "i"));
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::Pattern("[a-z]+".into(), "i".into())
+    );
 }
 
 #[test]
 fn concat_combinator() {
     let g =
         dsl(r#"grammar { language: "test" } rule program { regexp(concat("[", "a-z", "]+")) }"#);
-    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == "[a-z]+"));
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::Pattern("[a-z]+".into(), String::new())
+    );
 }
 
 #[test]

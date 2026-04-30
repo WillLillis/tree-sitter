@@ -1,5 +1,0 @@
-grammar { language: "test" }
-let xs: list<(str, rule)> = [("a", "b"), ("c", "d")]
-let ops: list<str> = ["+", "-", "*"]
-rule program { seq(for (k: str, v: rule) in xs { seq(k, v) }) }
-rule other { choice(for (op: str) in ops { op }) }

@@ -6,7 +6,7 @@ use anstyle::{AnsiColor, Style};
 use serde::Serialize;
 use thiserror::Error;
 
-use super::{DslError, NoteMessage, ast::Span};
+use super::{Diagnostic, DslError, NoteMessage, ast::Span, lower::LowerErrorKind};
 
 /// A [`DslError`] bundled with source text and file path for diagnostic rendering.
 #[derive(Debug, Error, Serialize)]
@@ -41,12 +41,16 @@ impl std::fmt::Display for NativeDslError {
                 } else {
                     (&self.src, &self.path)
                 };
-                render_note_snippet(
+                writeln!(f)?;
+                let label = format!("note: {}", NoteMessage::ReferencedFromHere);
+                render_snippet(
                     f,
                     modules[i].reference_span,
                     parent_src,
                     parent_path,
-                    &NoteMessage::ReferencedFromHere,
+                    NOTE_STYLE,
+                    false,
+                    Some(&label),
                 )?;
             }
             return Ok(());
@@ -63,47 +67,35 @@ fn render_error(
     path: &Path,
 ) -> std::fmt::Result {
     let Some(span) = error.span() else {
-        write!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
+        writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
+        // Render per-entry spans for errors that carry their own locations
+        if let DslError::Lower(Diagnostic {
+            kind: LowerErrorKind::OverrideRuleNotFound(entries),
+            ..
+        }) = error
+        {
+            for (_, entry_span) in entries {
+                render_snippet(f, *entry_span, src, path, ERROR_STYLE, false, None)?;
+            }
+        }
         return Ok(());
     };
-    let ctx = SpanContext::new(span, src);
-    let path_display = path.display();
-    let gutter_width = digit_count(ctx.line_num);
-    let pipe = paint(AnsiColor::Cyan, "|");
-    let underline = paint(AnsiColor::Red, &"^".repeat(ctx.underline_len));
 
     writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
-    writeln!(
-        f,
-        " {} {path_display}:{line_num}:{col}",
-        paint(AnsiColor::Cyan, "-->"),
-        line_num = ctx.line_num,
-        col = ctx.col,
-    )?;
-    writeln!(f, " {:>gutter_width$} {pipe}", "")?;
-    if let Some(prev_text) = ctx.prev_line_text {
-        writeln!(
-            f,
-            " {} {pipe} {prev_text}",
-            paint(AnsiColor::Cyan, &ctx.prev_line_num.to_string()),
-        )?;
-    }
-    writeln!(
-        f,
-        " {} {pipe} {}",
-        paint(AnsiColor::Cyan, &ctx.line_num.to_string()),
-        ctx.line_text,
-    )?;
-    write!(
-        f,
-        " {:>gutter_width$} {pipe} {:>width$}{underline}",
-        "",
-        "",
-        width = ctx.span_start_in_line,
-    )?;
+    render_snippet(f, span, src, path, ERROR_STYLE, true, None)?;
 
     if let Some(note) = error.note() {
-        render_note_snippet(f, note.span, &note.source, &note.path, &note.message)?;
+        writeln!(f)?;
+        let label = format!("note: {}", note.message);
+        render_snippet(
+            f,
+            note.span,
+            &note.source,
+            &note.path,
+            NOTE_STYLE,
+            false,
+            Some(&label),
+        )?;
     }
 
     if let Some(trace) = error.call_trace() {
@@ -119,7 +111,7 @@ fn render_error(
                     paint(AnsiColor::Cyan, "...")
                 )?;
             }
-            if i >= show && i < trace.len() - show {
+            if i >= show && i < trace.len().saturating_sub(show) {
                 continue;
             }
             writeln!(
@@ -134,44 +126,60 @@ fn render_error(
     Ok(())
 }
 
-fn render_note_snippet(
+/// Render a source snippet with a location header, source line, and underline.
+fn render_snippet(
     f: &mut std::fmt::Formatter<'_>,
     span: Span,
-    source_text: &str,
+    src: &str,
     path: &Path,
-    message: &NoteMessage,
+    style: (AnsiColor, char),
+    show_prev_line: bool,
+    label: Option<&str>,
 ) -> std::fmt::Result {
-    let nctx = SpanContext::new(span, source_text);
-    let note_gutter = digit_count(nctx.line_num);
-    let note_pipe = paint(AnsiColor::Cyan, "|");
-    let note_underline = paint(AnsiColor::Cyan, &"-".repeat(nctx.underline_len));
-    let note_path = path.display();
+    let ctx = SpanContext::new(span, src);
+    let gutter_width = digit_count(ctx.line_num);
+    let pipe = paint(AnsiColor::Cyan, "|");
+    let underline = paint(style.0, &style.1.to_string().repeat(ctx.underline_len));
 
-    writeln!(f)?;
     writeln!(
         f,
-        " {} {note_path}:{line_num}:{col}",
+        " {} {}:{}:{}",
         paint(AnsiColor::Cyan, "-->"),
-        line_num = nctx.line_num,
-        col = nctx.col,
+        path.display(),
+        ctx.line_num,
+        ctx.col,
     )?;
-    writeln!(f, " {:>note_gutter$} {note_pipe}", "")?;
+    writeln!(f, " {:>gutter_width$} {pipe}", "")?;
+    if show_prev_line && let Some(prev_text) = ctx.prev_line_text {
+        writeln!(
+            f,
+            " {} {pipe} {prev_text}",
+            paint(AnsiColor::Cyan, &ctx.prev_line_num.to_string()),
+        )?;
+    }
     writeln!(
         f,
-        " {} {note_pipe} {}",
-        paint(AnsiColor::Cyan, &nctx.line_num.to_string()),
-        nctx.line_text,
+        " {} {pipe} {}",
+        paint(AnsiColor::Cyan, &ctx.line_num.to_string()),
+        ctx.line_text,
     )?;
-    write!(
-        f,
-        " {:>note_gutter$} {note_pipe} {:>width$}{note_underline} {}",
-        "",
-        "",
-        paint(AnsiColor::Cyan, &format!("note: {message}")),
-        width = nctx.span_start_in_line,
-    )?;
-
-    Ok(())
+    match label {
+        Some(label) => write!(
+            f,
+            " {:>gutter_width$} {pipe} {:>width$}{underline} {}",
+            "",
+            "",
+            paint(style.0, label),
+            width = ctx.span_start_in_line,
+        ),
+        None => write!(
+            f,
+            " {:>gutter_width$} {pipe} {:>width$}{underline}",
+            "",
+            "",
+            width = ctx.span_start_in_line,
+        ),
+    }
 }
 
 struct SpanContext<'a> {
@@ -220,6 +228,9 @@ impl SpanContext<'_> {
         }
     }
 }
+
+const ERROR_STYLE: (AnsiColor, char) = (AnsiColor::Red, '^');
+const NOTE_STYLE: (AnsiColor, char) = (AnsiColor::Cyan, '-');
 
 fn digit_count(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)

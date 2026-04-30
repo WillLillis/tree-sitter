@@ -784,7 +784,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 self.advance_pos();
                 let member_span = self.expect_ident()?;
                 if self.at(TokenKind::LParen) {
-                    // h::fn_name(args) - qualified call needs member as NodeId in ChildRange
+                    // h::macro_name(args) - qualified call needs member as NodeId in ChildRange
                     let member_id = self
                         .shared
                         .arena
@@ -799,7 +799,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                         .shared
                         .pools
                         .push_children(&children)
-                        .ok_or_else(|| self.error(ParseErrorKind::NestingTooDeep))?;
+                        .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
                     id = self
                         .shared
                         .arena
@@ -818,7 +818,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                     self.shared.arena.get(id),
                     Node::Ident(IdentKind::Unresolved)
                 ) {
-                    return Err(self.error(ParseErrorKind::ExpectedFunctionName));
+                    return Err(self.error(ParseErrorKind::ExpectedMacroName));
                 }
                 self.advance_pos();
                 let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
@@ -1005,8 +1005,8 @@ pub enum ParseErrorKind {
     DuplicateGrammarField(String),
     #[error("duplicate object key '{0}'")]
     DuplicateObjectKey(String),
-    #[error("only identifiers can be used as function names")]
-    ExpectedFunctionName,
+    #[error("only identifiers can be used as macro names")]
+    ExpectedMacroName,
     #[error("duplicate parameter name '{0}'")]
     DuplicateParameter(String),
     #[error("only one grammar block is allowed")]

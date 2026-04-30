@@ -1,1 +1,2 @@
-grammar { language: "test" } rule program { "\n\t\r\\\"\0" }
+grammar { language: "test" }
+rule program { seq("\n\t\r\\\"\0", "", r"raw string", r#"raw with "quotes""#) }

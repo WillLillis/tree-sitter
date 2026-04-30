@@ -261,10 +261,7 @@ fn error_import_macro_used_as_value() {
     "#,
     );
     let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::FunctionUsedAsValue("comma_sep1".into())
-    );
+    assert_eq!(e.kind, TypeErrorKind::MacroUsedAsValue("comma_sep1".into()));
 }
 
 #[test]
@@ -279,7 +276,7 @@ fn error_import_function_not_found() {
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
-        TypeErrorKind::ImportFunctionNotFound("nonexistent".into())
+        TypeErrorKind::ImportMacroNotFound("nonexistent".into())
     );
 }
 
@@ -312,7 +309,7 @@ fn error_import_wrong_arg_count() {
     assert_eq!(
         e.kind,
         TypeErrorKind::ArgCountMismatch {
-            fn_name: "comma_sep1".into(),
+            macro_name: "comma_sep1".into(),
             expected: 1,
             got: 2,
         }
