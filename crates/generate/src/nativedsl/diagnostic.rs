@@ -76,6 +76,7 @@ fn render_error(
         {
             for (_, entry_span) in entries {
                 render_snippet(f, *entry_span, src, path, ERROR_STYLE, false, None)?;
+                writeln!(f)?;
             }
         }
         return Ok(());
