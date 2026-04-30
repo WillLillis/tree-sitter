@@ -59,6 +59,7 @@ impl NodeArena {
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
         let index = self.nodes.len() as u32;
         // SAFETY: nodes[0] is always the Unreachable sentinel, so len() >= 1.
+        debug_assert!(index >= 1);
         let id = NodeId(unsafe { NonZeroU32::new_unchecked(index) });
         self.nodes.push(node);
         self.spans.push(span);

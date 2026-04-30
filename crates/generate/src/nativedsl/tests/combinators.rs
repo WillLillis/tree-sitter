@@ -49,7 +49,7 @@ rule_tests! {
     }
     alias_with_variable_target {
         r#"grammar { language: "test" }
-        macro make_alias(target: rule_t) rule_t = alias("x", target)
+        macro make_alias(target: rule_t) rule_t { alias("x", target) }
         rule program { make_alias(some_rule) }
         rule some_rule { "y" }"#,
         Rule::alias(Rule::String("x".into()), "some_rule".to_string(), true)
