@@ -9,7 +9,7 @@ error_tests! { Lower {
         r#"let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule nonexistent { "oops" }"#,
-        LowerErrorKind::OverrideRuleNotFound(vec!["nonexistent".into()])
+        LowerErrorKind::OverrideRuleNotFound(vec![("nonexistent".into(), Span::new(125, 136))])
     }
     error_missing_grammar_block {
         r#"rule program { "x" }"#,

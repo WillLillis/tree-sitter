@@ -305,7 +305,7 @@ fn inherit_from_grammar_that_imports() {
         rule extra { "extra" }
     "#);
     assert_eq!(g.name, "derived");
-    // Inherited rule from base uses the imported helper function
+    // Inherited rule from base uses the imported helper macro
     assert!(rule_names(&g).contains(&"program"));
     assert!(rule_names(&g).contains(&"extra"));
 }

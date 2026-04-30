@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::ast::{
-    ChildRange, ForId, IdentKind, ModuleContext, Node, NodeId, PrecKind, QueryableField,
+    ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind, QueryableField,
     RepeatKind, SharedAst, Span,
 };
 
@@ -117,7 +117,18 @@ enum Value {
     Module(u8),
 }
 
-const MAX_CALL_DEPTH: u16 = 64;
+const MAX_CALL_DEPTH: u16 = 128;
+
+/// Save the current length of a scratch buffer, run a block, then truncate
+/// back. The block receives `base` (the saved length) for slicing.
+macro_rules! scratch_scope {
+    ($buf:expr, |$base:ident| $body:expr) => {{
+        let $base = $buf.len();
+        let result = $body;
+        $buf.truncate($base);
+        result
+    }};
+}
 
 /// Tracks which modules have had their let bindings evaluated.
 #[derive(Default)]
@@ -174,7 +185,18 @@ struct EvalResult {
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 pub fn lower_with_base(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<InputGrammar> {
-    let base_grammar = modules.iter().find_map(|m| m.lowered.as_ref());
+    let root_ctx = &modules.last().unwrap().ctx;
+    let base_grammar = root_ctx.inherit_ref.and_then(|id| {
+        if let Node::ModuleRef {
+            module: Some(child_id),
+            ..
+        } = shared.arena.get(id)
+        {
+            modules[*child_id as usize].lowered.as_ref()
+        } else {
+            None
+        }
+    });
     let result = evaluate(shared, modules)?;
     build_grammar(result, base_grammar)
 }
@@ -303,12 +325,12 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
         }
         // Any remaining overrides reference rules that don't exist in the base.
         if !overrides.is_empty() {
-            let entries: Vec<_> = overrides.into_iter().collect();
-            let span = entries[0].1.1;
-            let names = entries.into_iter().map(|(n, _)| n).collect();
-            return Err(LowerError::new(
-                LowerErrorKind::OverrideRuleNotFound(names),
-                span,
+            let entries = overrides
+                .into_iter()
+                .map(|(name, (_, span))| (name, span))
+                .collect();
+            return Err(LowerError::without_span(
+                LowerErrorKind::OverrideRuleNotFound(entries),
             ));
         }
         vars
@@ -714,7 +736,8 @@ impl<'ast> Evaluator<'ast> {
                             };
                             self.value_children.push(vid);
                         }
-                        let inner_len = group.len() as u16;
+                        let inner_len = u16::try_from(group.len())
+                            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
                         Ok(self.alloc_val(Value::List(ChildRange::new(inner_start, inner_len))))
                     })
                     .collect::<LowerResult<_>>()?;
@@ -780,10 +803,16 @@ impl<'ast> Evaluator<'ast> {
             }
             Rule::Choice(members) | Rule::Seq(members) => {
                 let is_seq = matches!(rule, Rule::Seq(_));
-                let imported: Vec<RuleId> = members.iter().map(|m| self.import_rule(m)).collect();
-                let start = self.children_start();
-                self.rule_children.extend_from_slice(&imported);
-                let count = self.rule_children.len() as u32 - start;
+                let (start, count) = scratch_scope!(self.rule_scratch, |base| {
+                    for m in members {
+                        let rid = self.import_rule(m);
+                        self.rule_scratch.push(rid);
+                    }
+                    let start = self.children_start();
+                    self.rule_children
+                        .extend_from_slice(&self.rule_scratch[base..]);
+                    (start, self.rule_children.len() as u32 - start)
+                });
                 debug_assert!(
                     u16::try_from(count).is_ok(),
                     "inherited rule has too many children"
@@ -966,18 +995,18 @@ impl<'ast> Evaluator<'ast> {
                 let range = *range;
                 let is_list = matches!(self.shared.arena.get(id), Node::List(_));
                 let items = self.shared.pools.child_slice(range);
-                let base = self.val_scratch.len();
-                for &item_id in items {
-                    let v = self.eval_expr(item_id)?;
-                    self.val_scratch.push(v);
-                }
-                let start = self.value_children.len() as u32;
-                let len = u16::try_from(self.val_scratch.len() - base)
-                    .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-                self.value_children
-                    .extend_from_slice(&self.val_scratch[base..]);
-                self.val_scratch.truncate(base);
-                let range = ChildRange::new(start, len);
+                let range = scratch_scope!(self.val_scratch, |base| {
+                    for &item_id in items {
+                        let v = self.eval_expr(item_id)?;
+                        self.val_scratch.push(v);
+                    }
+                    let start = self.value_children.len() as u32;
+                    let len = u16::try_from(self.val_scratch.len() - base)
+                        .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+                    self.value_children
+                        .extend_from_slice(&self.val_scratch[base..]);
+                    Ok(ChildRange::new(start, len))
+                })?;
                 if is_list {
                     Ok(self.alloc_val(Value::List(range)))
                 } else {
@@ -1010,27 +1039,12 @@ impl<'ast> Evaluator<'ast> {
                 let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
                     unreachable!() // guarded by resolver
                 };
-                let macro_id = *macro_id;
-                let config = self.shared.pools.get_macro(macro_id);
-                let fn_name = self.ctx().text(config.name);
-                self.push_call(fn_name, span)?;
-                // Evaluate args before pushing base - args are evaluated in
-                // the caller's macro context, not the callee's.
-                let base = self.macro_args.len();
-                for &arg_id in self.shared.pools.child_slice(args) {
-                    let v = self.eval_expr(arg_id)?;
-                    self.macro_args.push(v);
-                }
-                self.macro_arg_bases.push(base);
-                let result = self.eval_expr(config.body);
-                self.call_stack.pop();
-                self.macro_arg_bases.pop();
-                self.macro_args.truncate(base);
-                result
+                self.invoke_macro(*macro_id, args, span, None)
             }
             Node::QualifiedCall(range) => {
                 let range = *range;
-                let (obj, name, args) = self.shared.pools.get_qualified_call(range);
+                let children = self.shared.pools.child_slice(range);
+                let (obj, name) = (children[0], children[1]);
                 let obj_val = self.eval_expr(obj)?;
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
@@ -1040,23 +1054,8 @@ impl<'ast> Evaluator<'ast> {
                 let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
                     unreachable!() // guarded by resolver
                 };
-                let config = self.shared.pools.get_macro(*macro_id);
-                let fn_name = self.modules[table_id].ctx.text(config.name);
-                self.push_call(fn_name, span)?;
-                let base = self.macro_args.len();
-                for &arg_id in args {
-                    let v = self.eval_expr(arg_id)?;
-                    self.macro_args.push(v);
-                }
-                self.macro_arg_bases.push(base);
-                let saved = self.current_module;
-                self.current_module = table_id;
-                let result = self.eval_expr(config.body);
-                self.current_module = saved;
-                self.call_stack.pop();
-                self.macro_arg_bases.pop();
-                self.macro_args.truncate(base);
-                result
+                let args = ChildRange::new(range.start + 2, range.len - 2);
+                self.invoke_macro(*macro_id, args, span, Some(table_id))
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -1107,20 +1106,20 @@ impl<'ast> Evaluator<'ast> {
             Node::SeqOrChoice { seq, range } => {
                 let (seq, range) = (*seq, *range);
                 let children = self.shared.pools.child_slice(range);
-                let base = self.rule_scratch.len();
-                for &member in children {
-                    if let Node::For { for_id, body } = *self.shared.arena.get(member) {
-                        self.eval_for_to_rules(for_id, body)?;
-                    } else {
-                        let rid = self.lower_to_rule(member)?;
-                        self.rule_scratch.push(rid);
+                let (offset, len) = scratch_scope!(self.rule_scratch, |base| {
+                    for &member in children {
+                        if let Node::For { for_id, body } = *self.shared.arena.get(member) {
+                            self.eval_for_to_rules(for_id, body)?;
+                        } else {
+                            let rid = self.lower_to_rule(member)?;
+                            self.rule_scratch.push(rid);
+                        }
                     }
-                }
-                let start = self.children_start();
-                self.rule_children
-                    .extend_from_slice(&self.rule_scratch[base..]);
-                self.rule_scratch.truncate(base);
-                let (offset, len) = self.children_range(start, span)?;
+                    let start = self.children_start();
+                    self.rule_children
+                        .extend_from_slice(&self.rule_scratch[base..]);
+                    self.children_range(start, span)
+                })?;
                 Ok(self.alloc_rule(ARule::SeqOrChoice(seq, offset, len)))
             }
             Node::Repeat { kind, inner } => {
@@ -1238,19 +1237,53 @@ impl<'ast> Evaluator<'ast> {
         Ok(())
     }
 
+    /// Evaluate a macro call. If `module` is `Some`, switches to that module
+    /// for the body evaluation (cross-module call).
+    fn invoke_macro(
+        &mut self,
+        macro_id: MacroId,
+        args: ChildRange,
+        span: Span,
+        module: Option<usize>,
+    ) -> LowerResult<ValueId> {
+        let config = self.shared.pools.get_macro(macro_id);
+        let macro_name = match module {
+            Some(id) => self.modules[id].ctx.text(config.name),
+            None => self.ctx().text(config.name),
+        };
+        self.push_call(macro_name, span)?;
+        // Evaluate args before pushing base - args are evaluated in
+        // the caller's macro context, not the callee's.
+        scratch_scope!(self.macro_args, |base| {
+            for &arg_id in self.shared.pools.child_slice(args) {
+                let v = self.eval_expr(arg_id)?;
+                self.macro_args.push(v);
+            }
+            self.macro_arg_bases.push(base);
+            let saved = self.current_module;
+            if let Some(id) = module {
+                self.current_module = id;
+            }
+            let result = self.eval_expr(config.body);
+            self.current_module = saved;
+            self.call_stack.pop();
+            self.macro_arg_bases.pop();
+            result
+        })
+    }
+
     /// Lazily evaluate an imported module's top-level let bindings.
     fn eval_import_module(&mut self, table_id: usize) -> LowerResult<()> {
         if self.loaded.is_loaded(table_id) {
             return Ok(());
         }
+        self.loaded.set_loaded(table_id);
 
         let saved_module = self.current_module;
         self.current_module = table_id;
-        self.eval_let_bindings()?;
+        let result = self.eval_let_bindings();
         self.current_module = saved_module;
-
-        self.loaded.set_loaded(table_id);
-        Ok(())
+        result
     }
 
     /// Evaluate top-level let bindings in the current module context.
@@ -1270,31 +1303,33 @@ impl<'ast> Evaluator<'ast> {
 
     /// Evaluate a for-loop, pushing each iteration's rule into `rule_scratch`.
     fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
-        let iterable = self.shared.pools.get_for(for_id).iterable;
-        let n_bindings = self.shared.pools.get_for(for_id).bindings.len();
+        let for_config = self.shared.pools.get_for(for_id);
+        let iterable = for_config.iterable;
+        let n_bindings = for_config.bindings.len();
         let iter_vid = self.eval_expr(iterable)?;
-        let n_items = self.list_items(Self::expect_list(iter_vid)).len();
-        let base = self.for_binding_values.len();
-        self.for_binding_frames.push((for_id, base));
-        for i in 0..n_items {
-            let item_id = self.list_items(Self::expect_list(iter_vid))[i];
-            for j in 0..n_bindings {
-                let val = match *self.get_val(item_id) {
-                    Value::Tuple(range) => self.value_children[range.start as usize + j],
-                    _ => item_id,
-                };
-                if i == 0 {
-                    self.for_binding_values.push(val);
-                } else {
-                    self.for_binding_values[base + j] = val;
+        let iter_range = self.list_range(Self::expect_list(iter_vid));
+        let n_items = iter_range.len as usize;
+        scratch_scope!(self.for_binding_values, |base| {
+            self.for_binding_frames.push((for_id, base));
+            for i in 0..n_items {
+                let item_id = self.value_children[iter_range.start as usize + i];
+                for j in 0..n_bindings {
+                    let val = match *self.get_val(item_id) {
+                        Value::Tuple(range) => self.value_children[range.start as usize + j],
+                        _ => item_id,
+                    };
+                    if i == 0 {
+                        self.for_binding_values.push(val);
+                    } else {
+                        self.for_binding_values[base + j] = val;
+                    }
                 }
+                let rid = self.lower_to_rule(body)?;
+                self.rule_scratch.push(rid);
             }
-            let rid = self.lower_to_rule(body)?;
-            self.rule_scratch.push(rid);
-        }
-        self.for_binding_frames.pop();
-        self.for_binding_values.truncate(base);
-        Ok(())
+            self.for_binding_frames.pop();
+            Ok(())
+        })
     }
 }
 
@@ -1335,8 +1370,8 @@ pub enum DisallowedItemKind {
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
-    #[error("override rule(s) not found in base grammar: {}", .0.join(", "))]
-    OverrideRuleNotFound(Vec<String>),
+    #[error("override rule(s) not found in base grammar: {}", format_override_names(.0))]
+    OverrideRuleNotFound(Vec<(String, Span)>),
     #[error("'override rule' requires a grammar with 'inherits'")]
     OverrideWithoutInherit,
     #[error("failed to resolve '{}': {error}", path.display())]
@@ -1363,8 +1398,16 @@ pub enum LowerErrorKind {
     InheritsWithoutInherit,
     #[error("too many elements (maximum 65535)")]
     TooManyChildren,
-    #[error("maximum function call depth ({MAX_CALL_DEPTH}) exceeded")]
+    #[error("maximum macro call depth ({MAX_CALL_DEPTH}) exceeded")]
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
+}
+
+fn format_override_names(entries: &[(String, Span)]) -> String {
+    entries
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {

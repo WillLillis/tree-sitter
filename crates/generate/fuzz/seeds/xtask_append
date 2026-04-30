@@ -1,3 +1,0 @@
-grammar { language: "test" }
-let xs = ["a", "b"]
-rule program { seq(for (x: str) in append(xs, ["c"]) { x }) }
