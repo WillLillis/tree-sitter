@@ -679,12 +679,15 @@ impl<'ast> Evaluator<'ast> {
                 })
                 .collect();
         }
-        // Expression: evaluate to Object(ListRule), keyed by context name
+        // Expression: evaluate to Object(ListRule), keyed by context name.
+        // Sort by key for deterministic output (FxHashMap iteration is unordered).
         let vid = self.eval_expr(id)?;
         let fields = self.object_fields(Self::expect_object(vid));
-        fields
-            .iter()
-            .map(|(&name, &words_vid)| {
+        let mut keys: Vec<&str> = fields.keys().copied().collect();
+        keys.sort_unstable();
+        keys.iter()
+            .map(|&name| {
+                let words_vid = fields[name];
                 let word_vals = self.list_items(Self::expect_list(words_vid));
                 let words = word_vals
                     .iter()
@@ -991,9 +994,9 @@ impl<'ast> Evaluator<'ast> {
                 }
                 Ok(self.alloc_object(map))
             }
-            Node::List(range) | Node::Tuple(range) => {
+            node @ (Node::List(range) | Node::Tuple(range)) => {
                 let range = *range;
-                let is_list = matches!(self.shared.arena.get(id), Node::List(_));
+                let is_list = matches!(node, Node::List(_));
                 let items = self.shared.pools.child_slice(range);
                 let range = scratch_scope!(self.val_scratch, |base| {
                     for &item_id in items {
@@ -1311,24 +1314,27 @@ impl<'ast> Evaluator<'ast> {
         let n_items = iter_range.len as usize;
         scratch_scope!(self.for_binding_values, |base| {
             self.for_binding_frames.push((for_id, base));
-            for i in 0..n_items {
-                let item_id = self.value_children[iter_range.start as usize + i];
-                for j in 0..n_bindings {
-                    let val = match *self.get_val(item_id) {
-                        Value::Tuple(range) => self.value_children[range.start as usize + j],
-                        _ => item_id,
-                    };
-                    if i == 0 {
-                        self.for_binding_values.push(val);
-                    } else {
-                        self.for_binding_values[base + j] = val;
+            let iter_result = (|| -> LowerResult<()> {
+                for i in 0..n_items {
+                    let item_id = self.value_children[iter_range.start as usize + i];
+                    for j in 0..n_bindings {
+                        let val = match *self.get_val(item_id) {
+                            Value::Tuple(range) => self.value_children[range.start as usize + j],
+                            _ => item_id,
+                        };
+                        if i == 0 {
+                            self.for_binding_values.push(val);
+                        } else {
+                            self.for_binding_values[base + j] = val;
+                        }
                     }
+                    let rid = self.lower_to_rule(body)?;
+                    self.rule_scratch.push(rid);
                 }
-                let rid = self.lower_to_rule(body)?;
-                self.rule_scratch.push(rid);
-            }
+                Ok(())
+            })();
             self.for_binding_frames.pop();
-            Ok(())
+            iter_result
         })
     }
 }
