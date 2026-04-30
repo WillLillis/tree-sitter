@@ -20,7 +20,7 @@ use super::{
 };
 
 /// Function pointer type for element/inner checkers passed to `expect_list` and
-/// `expect_list_list`. Checks a single node against the type environment.
+/// `expect_list_of_groups`. Checks a single node against the type environment.
 type CheckFn<'ast> =
     fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> Result<(), TypeError>;
 
@@ -215,12 +215,12 @@ enum Decl {
     Macro(MacroId),
 }
 
-/// Run name resolution and type checking in a single function.
+/// Run name resolution and type checking.
 ///
 /// **Phase 1** (resolve): collects declarations, registers inherited names,
 /// and resolves `Node::Ident` nodes from `Unresolved` to `Rule` / `Var`.
 ///
-/// **Phase 2** (typecheck): calls the existing `check()` function on the
+/// **Phase 2** (typecheck): walks root items and type-checks the
 /// now-resolved AST.
 ///
 /// # Errors
@@ -275,7 +275,10 @@ pub fn resolve_and_check<'ast>(
     }
 
     // Phase 2: Type checking (rules already registered by collect_decls)
-    check(shared, ctx, false, env)
+    for &item_id in &ctx.root_items {
+        check_item(shared, ctx, item_id, env)?;
+    }
+    Ok(())
 }
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
@@ -447,7 +450,7 @@ fn collect_external_names<'src>(
         | Node::GrammarConfig { .. }
         | Node::FieldAccess { .. }
         | Node::QualifiedAccess { .. } => {}
-        // Anything else (function calls, for-loops, etc.) is not a valid
+        // Anything else (macro calls, for-loops, etc.) is not a valid
         // externals expression. Externals must be a list literal, append,
         // or variable reference.
         _ => {
@@ -618,7 +621,7 @@ fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
 /// in the target module's root items.
 /// - Let -> replace node with `Ident(Var(item_id))`
 /// - Rule -> replace with `Ident(Rule)`
-/// - Macro -> error (function used as value)
+/// - Macro -> error (macro used as value)
 /// - Not found -> leave as `QualifiedAccess` (inherited grammar rule for lowerer)
 fn resolve_qualified_member(
     arena: &mut NodeArena,
@@ -638,7 +641,7 @@ fn resolve_qualified_member(
                 let config = pools.get_macro(*macro_id);
                 if target.ctx.text(config.name) == member_name {
                     return Err(TypeError::new(
-                        TypeErrorKind::FunctionUsedAsValue(member_name.to_string()),
+                        TypeErrorKind::MacroUsedAsValue(member_name.to_string()),
                         member_span,
                     ));
                 }
@@ -668,12 +671,12 @@ fn resolve_qualified_call_name(
     pools: &AstPools,
     target: &super::Module,
     name_id: NodeId,
-    fn_name: &str,
+    macro_name: &str,
 ) {
     for &item_id in &target.ctx.root_items {
         if let Node::Macro(macro_id) = arena.get(item_id) {
             let config = pools.get_macro(*macro_id);
-            if target.ctx.text(config.name) == fn_name {
+            if target.ctx.text(config.name) == macro_name {
                 arena.set(name_id, Node::Ident(IdentKind::Macro(*macro_id)));
                 return;
             }
@@ -759,8 +762,8 @@ fn resolve_children_tc(
             resolve_expr_tc(arena, pools, ctx, decls, modules, obj)?;
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
-                let fn_name = ctx.text(arena.span(name));
-                resolve_qualified_call_name(arena, pools, &modules[idx], name, fn_name);
+                let macro_name = ctx.text(arena.span(name));
+                resolve_qualified_call_name(arena, pools, &modules[idx], name, macro_name);
             }
             for &arg in args {
                 resolve_expr_tc(arena, pools, ctx, decls, modules, arg)?;
@@ -769,28 +772,6 @@ fn resolve_children_tc(
         }
         _ => Ok(()),
     }
-}
-
-/// Run typechecking on a single module. For grammar modules, pre-registers
-/// rules in `env` for forward reference support. Helper modules skip this
-/// since they cannot contain rules.
-pub fn check(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    has_rules: bool,
-    env: &mut TypeEnv,
-) -> Result<(), TypeError> {
-    if has_rules {
-        for &item_id in &ctx.root_items {
-            if matches!(shared.arena.get(item_id), Node::Rule { .. }) {
-                env.insert_var(item_id, Ty::Rule);
-            }
-        }
-    }
-    for &item_id in &ctx.root_items {
-        check_item(shared, ctx, item_id, env)?;
-    }
-    Ok(())
 }
 
 fn check_item(
@@ -932,7 +913,11 @@ fn expect_name_ref(
 ) -> Result<(), TypeError> {
     match shared.arena.get(id) {
         Node::Ident(IdentKind::Rule) => Ok(()),
-        Node::Ident(IdentKind::Var(_)) | Node::FieldAccess { .. } | Node::GrammarConfig { .. } => {
+        Node::Ident(IdentKind::Var(_))
+        | Node::FieldAccess { .. }
+        | Node::GrammarConfig { .. }
+        | Node::MacroParam(_)
+        | Node::ForBinding { .. } => {
             let ty = type_of(shared, ctx, id, env)?;
             if ty != Ty::Rule {
                 return Err(mismatch(Ty::Rule, ty, shared.arena.span(id)));
@@ -1074,7 +1059,7 @@ fn type_of(
             Ok(shared.pools.get_for(*for_id).bindings[*index as usize].1)
         }
         Node::Ident(IdentKind::Macro(_)) => Err(TypeError::new(
-            TypeErrorKind::FunctionUsedAsValue(ctx.text(span).to_string()),
+            TypeErrorKind::MacroUsedAsValue(ctx.text(span).to_string()),
             span,
         )),
         Node::Ident(IdentKind::Var(let_id)) => env.get_var(*let_id).ok_or_else(|| {
@@ -1158,6 +1143,7 @@ fn type_of(
                 Node::Ident(IdentKind::Rule | IdentKind::Var(_))
                     | Node::MacroParam(_)
                     | Node::ForBinding { .. }
+                    | Node::QualifiedAccess { .. }
             ) && target_ty.is_rule_like()
                 || target_ty == Ty::Str;
             if !is_valid {
@@ -1297,19 +1283,30 @@ fn type_of_qualified_call(
         ));
     }
     // Name was resolved to Ident(Macro(macro_id)) by the resolver
+    let macro_name = ctx.text(shared.arena.span(name));
     let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
-        let fn_name = ctx.text(shared.arena.span(name));
         return Err(TypeError::new(
-            TypeErrorKind::ImportFunctionNotFound(fn_name.to_string()),
+            TypeErrorKind::ImportMacroNotFound(macro_name.to_string()),
             shared.arena.span(name),
         ));
     };
-    let config = shared.pools.get_macro(*macro_id);
-    let fn_name = ctx.text(shared.arena.span(name));
+    check_macro_args(shared, ctx, *macro_id, macro_name, args, span, env)
+}
+
+fn check_macro_args(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    macro_id: MacroId,
+    macro_name: &str,
+    args: &[NodeId],
+    span: Span,
+    env: &mut TypeEnv,
+) -> Result<Ty, TypeError> {
+    let config = shared.pools.get_macro(macro_id);
     if args.len() != config.params.len() {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
-                fn_name: fn_name.to_string(),
+                macro_name: macro_name.to_string(),
                 expected: config.params.len(),
                 got: args.len(),
             },
@@ -1399,36 +1396,15 @@ fn type_of_call(
     env: &mut TypeEnv,
 ) -> Result<Ty, TypeError> {
     let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
-        let fn_name = ctx.text(shared.arena.span(name));
+        let macro_name = ctx.text(shared.arena.span(name));
         return Err(TypeError::new(
-            TypeErrorKind::UndefinedFunction(fn_name.to_string()),
+            TypeErrorKind::UndefinedMacro(macro_name.to_string()),
             span,
         ));
     };
-    let config = shared.pools.get_macro(*macro_id);
-    let fn_name = ctx.text(config.name);
+    let macro_name = ctx.text(shared.arena.span(name));
     let args = shared.pools.child_slice(args);
-    if args.len() != config.params.len() {
-        return Err(TypeError::new(
-            TypeErrorKind::ArgCountMismatch {
-                fn_name: fn_name.to_string(),
-                expected: config.params.len(),
-                got: args.len(),
-            },
-            span,
-        ));
-    }
-    for (i, &arg_id) in args.iter().enumerate() {
-        let arg_ty = type_of(shared, ctx, arg_id, env)?;
-        if !arg_ty.is_compatible(config.params[i].ty) {
-            return Err(mismatch(
-                config.params[i].ty,
-                arg_ty,
-                shared.arena.span(arg_id),
-            ));
-        }
-    }
-    Ok(config.return_ty)
+    check_macro_args(shared, ctx, *macro_id, macro_name, args, span, env)
 }
 
 fn check_for_expr(
@@ -1508,11 +1484,11 @@ use super::TypeError;
 pub enum TypeErrorKind {
     #[error("expected {expected}, got {got}")]
     TypeMismatch { expected: Ty, got: Ty },
-    #[error("undefined function '{0}'")]
-    UndefinedFunction(String),
-    #[error("fn '{fn_name}': expected {expected} arguments, got {got}")]
+    #[error("undefined macro '{0}'")]
+    UndefinedMacro(String),
+    #[error("macro '{macro_name}': expected {expected} arguments, got {got}")]
     ArgCountMismatch {
-        fn_name: String,
+        macro_name: String,
         expected: usize,
         got: usize,
     },
@@ -1559,12 +1535,12 @@ pub enum TypeErrorKind {
     NonBindableType(Ty),
     #[error("imported module has no member '{0}'")]
     ImportMemberNotFound(String),
-    #[error("imported module has no function '{0}'")]
-    ImportFunctionNotFound(String),
+    #[error("imported module has no macro '{0}'")]
+    ImportMacroNotFound(String),
     #[error("'::' call requires module_t, got {0}")]
     QualifiedCallOnNonModule(Ty),
-    #[error("'{0}' is a function, not a value; call it with {0}(...)")]
-    FunctionUsedAsValue(String),
+    #[error("'{0}' is a macro, not a value; call it with {0}(...)")]
+    MacroUsedAsValue(String),
     #[error("duplicate declaration '{0}'")]
     DuplicateDeclaration(String),
     #[error("unknown identifier '{0}'")]

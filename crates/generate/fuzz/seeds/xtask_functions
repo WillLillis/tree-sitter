@@ -1,4 +1,0 @@
-grammar { language: "test" }
-fn wrap(r: rule) rule { seq("(", r, ")") }
-fn id(x: str) str { x }
-rule program { wrap("x") }

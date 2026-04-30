@@ -55,7 +55,7 @@ error_tests! { Parse {
         r#"grammar { language: "test" }
         let x = { a: 1 }
         rule program { x.a("y") }"#,
-        ParseErrorKind::ExpectedFunctionName
+        ParseErrorKind::ExpectedMacroName
     }
     error_expected_ident {
         r#"grammar { language: "test" } rule { "x" }"#,

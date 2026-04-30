@@ -1,0 +1,5 @@
+grammar { language: "test" }
+let xs: list_t<(str_t, rule_t)> = [("a", "b"), ("c", "d")]
+let ops: list_t<str_t> = ["+", "-", "*"]
+rule program { seq(for (k: str_t, v: rule_t) in xs { seq(k, v) }) }
+rule other { choice(for (op: str_t) in ops { op }) }

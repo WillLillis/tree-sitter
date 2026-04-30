@@ -14,7 +14,9 @@ static FUZZ_GRAMMAR: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLo
 
 fuzz_target!(|data: &str| {
     INIT.call_once(seed_corpus);
-    let _ = tree_sitter_generate::nativedsl::parse_native_dsl(data, &FUZZ_GRAMMAR);
+    if let Ok(grammar) = tree_sitter_generate::nativedsl::parse_native_dsl(data, &FUZZ_GRAMMAR) {
+        let _ = tree_sitter_generate::nativedsl::grammar_to_json(&grammar);
+    }
 });
 
 /// Copy seed files into the corpus directory on first run.
