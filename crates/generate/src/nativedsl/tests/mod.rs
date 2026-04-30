@@ -6,7 +6,7 @@ use crate::rules::{Precedence, Rule};
 
 use super::{
     DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, NoteMessage,
-    ParseErrorKind, Ty, TypeErrorKind, parse_native_dsl,
+    ParseErrorKind, Span, Ty, TypeErrorKind, parse_native_dsl,
 };
 
 /// Generate tests that parse a grammar and assert on the first variable's rule.
