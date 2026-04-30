@@ -136,28 +136,36 @@ pub enum PrecKind {
     Dynamic,
 }
 
-/// Config fields queryable via `grammar_config(module, field)`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum QueryableField {
+/// All grammar config fields. Used for parsing the grammar block, `grammar_config()`
+/// access (Language/Inherits excluded by the parser), and iterating config node fields.
+#[derive(Clone, Copy)]
+pub enum ConfigField {
+    Language,
+    Inherits,
     Extras,
     Externals,
-    Inline,
     Supertypes,
+    Inline,
     Word,
     Conflicts,
     Precedences,
     Reserved,
 }
 
-impl TryFrom<&str> for QueryableField {
-    type Error = ();
+impl ConfigField {
+    pub const COUNT: usize = 10;
+}
 
+impl TryFrom<&str> for ConfigField {
+    type Error = ();
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Ok(match value {
+            "language" => Self::Language,
+            "inherits" => Self::Inherits,
             "extras" => Self::Extras,
             "externals" => Self::Externals,
-            "inline" => Self::Inline,
             "supertypes" => Self::Supertypes,
+            "inline" => Self::Inline,
             "word" => Self::Word,
             "conflicts" => Self::Conflicts,
             "precedences" => Self::Precedences,
@@ -458,7 +466,7 @@ pub enum Node {
     /// an inherited grammar module.
     GrammarConfig {
         module: NodeId,
-        field: QueryableField,
+        field: ConfigField,
     },
     /// `expr::name(args)` - macro call through `::` access.
     /// Children layout: `[obj, name, arg0, arg1, ...]` where obj is the
@@ -527,6 +535,24 @@ pub struct GrammarConfig {
     pub conflicts: Option<NodeId>,
     pub precedences: Option<NodeId>,
     pub reserved: Option<NodeId>,
+}
+
+impl GrammarConfig {
+    /// Iterate all node-valued config fields with their kind (excludes `language`).
+    pub fn node_fields(&self) -> impl Iterator<Item = (ConfigField, NodeId)> + '_ {
+        use ConfigField as F;
+        #[rustfmt::skip]
+        let fields = [
+            (F::Inherits, self.inherits),       (F::Extras, self.extras),
+            (F::Externals, self.externals),      (F::Inline, self.inline),
+            (F::Supertypes, self.supertypes),    (F::Word, self.word),
+            (F::Conflicts, self.conflicts),      (F::Precedences, self.precedences),
+            (F::Reserved, self.reserved),
+        ];
+        fields
+            .into_iter()
+            .filter_map(|(f, opt)| opt.map(|id| (f, id)))
+    }
 }
 
 #[derive(Clone)]

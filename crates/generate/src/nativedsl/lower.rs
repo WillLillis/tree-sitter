@@ -13,7 +13,7 @@ use crate::{
 };
 
 use super::ast::{
-    ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind, QueryableField,
+    ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind,
     RepeatKind, SharedAst, Span,
 };
 
@@ -705,17 +705,17 @@ impl<'ast> Evaluator<'ast> {
     fn eval_grammar_config(
         &mut self,
         mod_idx: usize,
-        field: QueryableField,
+        field: ConfigField,
         span: Span,
     ) -> LowerResult<ValueId> {
-        use QueryableField as Q;
+        use ConfigField as C;
         let grammar = self.modules[mod_idx].lowered.as_ref().unwrap();
         match field {
-            Q::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
-            Q::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
-            Q::Inline => self.import_names_as_list(&grammar.variables_to_inline, span),
-            Q::Supertypes => self.import_names_as_list(&grammar.supertype_symbols, span),
-            Q::Conflicts => {
+            C::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
+            C::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
+            C::Inline => self.import_names_as_list(&grammar.variables_to_inline, span),
+            C::Supertypes => self.import_names_as_list(&grammar.supertype_symbols, span),
+            C::Conflicts => {
                 let vals: Vec<ValueId> = grammar
                     .expected_conflicts
                     .iter()
@@ -723,7 +723,7 @@ impl<'ast> Evaluator<'ast> {
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
             }
-            Q::Precedences => {
+            C::Precedences => {
                 let vals: Vec<ValueId> = grammar
                     .precedence_orderings
                     .iter()
@@ -746,14 +746,14 @@ impl<'ast> Evaluator<'ast> {
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
             }
-            Q::Word => {
+            C::Word => {
                 if let Some(name) = &grammar.word_token {
                     Ok(self.owned_symbol_val(name.clone()))
                 } else {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
             }
-            Q::Reserved => {
+            C::Reserved => {
                 let n = grammar.reserved_words.len();
                 let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
                 for rwc in &grammar.reserved_words {
@@ -762,6 +762,7 @@ impl<'ast> Evaluator<'ast> {
                 }
                 Ok(self.alloc_object(map))
             }
+            C::Language | C::Inherits => unreachable!(),
         }
     }
 
