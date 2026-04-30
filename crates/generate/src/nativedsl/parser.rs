@@ -357,8 +357,11 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         })?;
         self.expect(TokenKind::RParen)?;
         self.check_duplicate_names(&params, |p| p.name)?;
+        if params.len() > u8::MAX as usize {
+            return Err(self.error(ParseErrorKind::TooManyChildren));
+        }
         let return_ty = self.parse_type()?.0;
-        self.expect(TokenKind::Eq)?;
+        self.expect(TokenKind::LBrace)?;
         let saved = self.locals.len();
         for (i, p) in params.iter().enumerate() {
             self.locals
@@ -366,6 +369,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         }
         let body = self.parse_expr()?;
         self.locals.truncate(saved);
+        self.expect(TokenKind::RBrace)?;
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,
@@ -733,6 +737,12 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         })?;
         self.expect(TokenKind::RParen)?;
         self.check_duplicate_names(&bindings, |&(s, _)| s)?;
+        if bindings.is_empty() {
+            return Err(self.error(ParseErrorKind::EmptyForBindings));
+        }
+        if bindings.len() > u8::MAX as usize {
+            return Err(self.error(ParseErrorKind::TooManyChildren));
+        }
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
         let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
@@ -1019,6 +1029,8 @@ pub enum ParseErrorKind {
     NestingTooDeep,
     #[error("too many elements (maximum 65535)")]
     TooManyChildren,
+    #[error("for-loop requires at least one binding")]
+    EmptyForBindings,
     #[error("{}", format_arg_count(*.expected, .name, *.got))]
     WrongArgumentCount {
         name: TokenKind,

@@ -83,7 +83,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
 pub enum ModuleKind {
     /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
-    /// Helper file (imported). Only let/fn/import allowed.
+    /// Helper file (imported). Only let/macro/import allowed.
     Helper,
 }
 
@@ -238,13 +238,21 @@ fn load_child_module(
     }
 
     let content = std::fs::read_to_string(module_path).map_err(|e| {
-        LowerError::new(
-            LowerErrorKind::ModuleReadFailed {
-                path: module_path.to_path_buf(),
-                error: e.to_string(),
-            },
-            span,
-        )
+        DslError::from(ModuleError {
+            inner: Box::new(
+                LowerError::new(
+                    LowerErrorKind::ModuleReadFailed {
+                        path: module_path.to_path_buf(),
+                        error: e.to_string(),
+                    },
+                    span,
+                )
+                .into(),
+            ),
+            source_text: String::new(),
+            path: module_path.to_path_buf(),
+            reference_span: span,
+        })
     })?;
 
     if ancestor_paths.iter().any(|p| p == module_path) {
@@ -286,14 +294,6 @@ pub struct Module {
     /// For inherited grammar modules: the fully lowered grammar, needed
     /// for rule merging and config access. `None` for import-only modules.
     pub lowered: Option<InputGrammar>,
-}
-
-impl Module {
-    /// Whether this module is a grammar (inherited) rather than a helper (imported).
-    #[must_use]
-    pub const fn is_grammar(&self) -> bool {
-        self.lowered.is_some()
-    }
 }
 
 /// Scan AST for unresolved module refs, load files, and set indices.
@@ -474,6 +474,7 @@ pub struct Note {
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,
+    DefinedLater,
 }
 
 impl std::fmt::Display for NoteMessage {
@@ -481,6 +482,7 @@ impl std::fmt::Display for NoteMessage {
         match self {
             Self::FirstDefinedHere => write!(f, "first defined here"),
             Self::ReferencedFromHere => write!(f, "referenced from here"),
+            Self::DefinedLater => write!(f, "let binding defined here (move it before the usage)"),
         }
     }
 }
