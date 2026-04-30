@@ -312,7 +312,7 @@ fn insert_decl<'src>(
 
 /// Pass 1: scan top-level items and register all declared names.
 ///
-/// Rules, let-bindings, functions, and external tokens in the grammar block
+/// Rules, let-bindings, macros, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
 fn collect_decls<'a>(
     shared: &SharedAst,
@@ -324,7 +324,7 @@ fn collect_decls<'a>(
     let mut decls = Decls::default();
     let source = &ctx.source;
 
-    // Register rules and fns upfront (forward references allowed).
+    // Register rules and macros upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
     for &item_id in root_items {
         let span = shared.arena.span(item_id);
@@ -540,6 +540,39 @@ fn resolve_item_tc(
     }
 }
 
+/// Build an `UnknownIdentifier` error, attaching a "defined later" note if the
+/// name matches a let binding that appears later in the same module.
+fn unknown_ident_error(
+    arena: &NodeArena,
+    ctx: &ModuleContext,
+    name: &str,
+    span: Span,
+) -> TypeError {
+    let forward_span = ctx.root_items.iter().find_map(|&rid| {
+        if let Node::Let { name: let_name, .. } = arena.get(rid)
+            && ctx.text(*let_name) == name
+        {
+            return Some(arena.span(rid));
+        }
+        None
+    });
+    let kind = TypeErrorKind::UnknownIdentifier(name.to_string());
+    if let Some(let_span) = forward_span {
+        TypeError::with_note(
+            kind,
+            span,
+            Note {
+                message: NoteMessage::DefinedLater,
+                span: let_span,
+                path: ctx.path.clone(),
+                source: ctx.source.clone(),
+            },
+        )
+    } else {
+        TypeError::new(kind, span)
+    }
+}
+
 /// Resolve identifiers within a single expression.
 fn resolve_expr_tc(
     arena: &mut NodeArena,
@@ -562,10 +595,7 @@ fn resolve_expr_tc(
                 Decl::Macro(macro_id) => arena.resolve_as(id, IdentKind::Macro(macro_id)),
             }
         } else {
-            return Err(TypeError::new(
-                TypeErrorKind::UnknownIdentifier(name.to_string()),
-                span,
-            ));
+            return Err(unknown_ident_error(arena, ctx, name, span));
         }
         return Ok(());
     }
@@ -1144,6 +1174,8 @@ fn type_of(
                     | Node::MacroParam(_)
                     | Node::ForBinding { .. }
                     | Node::QualifiedAccess { .. }
+                    | Node::FieldAccess { .. }
+                    | Node::GrammarConfig { .. }
             ) && target_ty.is_rule_like()
                 || target_ty == Ty::Str;
             if !is_valid {

@@ -212,7 +212,7 @@ fn keywords_as_identifiers() {
     let g = dsl(r#"grammar { language: "test" } let token = "x" rule foo { token }"#);
     assert_eq!(g.variables[0].name, "foo");
     let g = dsl(
-        r#"grammar { language: "test" } macro repeat(x: rule_t) rule_t = x rule foo { repeat("a") }"#,
+        r#"grammar { language: "test" } macro repeat(x: rule_t) rule_t { x } rule foo { repeat("a") }"#,
     );
     assert_eq!(g.variables[0].name, "foo");
 }
@@ -222,7 +222,7 @@ fn error_duplicate_fn_param() {
     let e = assert_err!(
         dsl_err(
             r#"grammar { language: "test" }
-            macro f(x: rule_t, x: str_t) rule_t = x
+            macro f(x: rule_t, x: str_t) rule_t { x }
             rule program { f("a") }"#,
         ),
         Parse

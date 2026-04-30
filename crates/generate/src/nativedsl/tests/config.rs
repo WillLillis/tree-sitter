@@ -130,12 +130,25 @@ fn string_with_escapes() {
 
 #[test]
 fn json_roundtrip() {
-    #[expect(clippy::needless_raw_string_hashes, reason = "false positive")]
     let input = r##"
-        grammar { language: "test", extras: [regexp(r"\s")] }
-        rule program { repeat(pair) }
-        rule pair { seq(field(key, string), ":", field(value, string)) }
-        rule string { regexp(r#""[^"]*""#) }
+        grammar {
+            language: "test",
+            extras: [regexp(r"\s")],
+            externals: [heredoc],
+            inline: [_inline],
+            supertypes: [_expression],
+            word: identifier,
+            conflicts: [[primary, call]],
+            precedences: [["add", multiply]],
+            reserved: { default: ["if", "else"] },
+        }
+        rule program { repeat(choice(_expression, blank())) }
+        rule _expression { choice(primary, call, prec_left("add", seq(_expression, "+", _expression))) }
+        rule primary { identifier }
+        rule call { seq(identifier, "(", ")") }
+        rule multiply { seq(_expression, "*", _expression) }
+        rule _inline { "x" }
+        rule identifier { regexp(r#"[a-z]+"#) }
     "##;
     let path = test_fixtures_dir().join("grammar.tsg");
     let mut grammar = parse_native_dsl(input, &path).unwrap();
@@ -144,9 +157,7 @@ fn json_roundtrip() {
         serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
             .expect("grammar JSON serialization should not fail");
     let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
-    assert_eq!(grammar.name, reparsed.name);
-    assert_eq!(grammar.variables, reparsed.variables);
-    assert_eq!(grammar.extra_symbols, reparsed.extra_symbols);
+    assert_eq!(grammar, reparsed);
 }
 
 #[test]
@@ -382,7 +393,7 @@ fn error_externals_via_function_call() {
     let e = assert_err!(
         dsl_err(
             r#"
-            macro mk_ext() list_t<rule_t> = [heredoc]
+            macro mk_ext() list_t<rule_t> { [heredoc] }
             grammar { language: "test", externals: mk_ext() }
             rule program { "x" }
         "#
