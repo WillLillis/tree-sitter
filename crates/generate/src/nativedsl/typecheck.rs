@@ -19,8 +19,7 @@ use super::{
     },
 };
 
-/// Function pointer type for element/inner checkers passed to `expect_list` and
-/// `expect_list_of_groups`. Checks a single node against the type environment.
+/// Function pointer type for element checkers passed to `expect_list`.
 type CheckFn<'ast> =
     fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> Result<(), TypeError>;
 
@@ -108,30 +107,42 @@ impl Ty {
         self.elem_type().is_some()
     }
 
+    fn is_bindable(self) -> bool {
+        self != Self::Spread
+    }
+
     /// Check if `self` is assignable to `expected`.
     fn is_compatible(self, expected: Self) -> bool {
-        self == expected
-            || (self == Self::Str && expected == Self::Rule)
-            || (self == Self::ListStr && expected == Self::ListRule)
-            || (self == Self::ListListStr && expected == Self::ListListRule)
+        self.widens_to(expected)
             || (matches!(self, Self::ImportModule(_) | Self::GrammarModule(_))
                 && expected == Self::AnyModule)
             || matches!(
                 (self, expected),
-                (Self::Object(InnerTy::Str), Self::Object(InnerTy::Rule))
-                    | (
-                        Self::Object(InnerTy::ListStr),
-                        Self::Object(InnerTy::ListRule)
-                    )
-                    | (
-                        Self::Object(InnerTy::ListListStr),
-                        Self::Object(InnerTy::ListListRule)
-                    )
+                (Self::Object(a), Self::Object(b)) if Self::from(a).widens_to(Self::from(b))
             )
     }
 
-    fn is_bindable(self) -> bool {
-        self != Self::Spread
+    /// Whether `self` is assignable to `target` via equality or Str->Rule widening.
+    fn widens_to(self, target: Self) -> bool {
+        self == target
+            || matches!(
+                (self, target),
+                (Self::Str, Self::Rule)
+                    | (Self::ListStr, Self::ListRule)
+                    | (Self::ListListStr, Self::ListListRule)
+            )
+    }
+
+    /// Widen `self` to accommodate `other`. Returns the wider type, or `None`
+    /// if the types are incompatible.
+    fn widen(self, other: Self) -> Option<Self> {
+        if other.is_compatible(self) {
+            Some(self)
+        } else if self.is_compatible(other) {
+            Some(other)
+        } else {
+            None
+        }
     }
 
     /// Promote a type to its list wrapper (e.g. `Rule` -> `ListRule`).
@@ -493,20 +504,7 @@ fn resolve_item_tc(
         Node::Grammar => {
             // INVARIANT: set during grammar block parsing, always present here
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
-            for id in [
-                grammar_config.inherits,
-                grammar_config.extras,
-                grammar_config.externals,
-                grammar_config.inline,
-                grammar_config.supertypes,
-                grammar_config.word,
-                grammar_config.conflicts,
-                grammar_config.precedences,
-                grammar_config.reserved,
-            ]
-            .into_iter()
-            .flatten()
-            {
+            for (_, id) in grammar_config.node_fields() {
                 resolve_expr_tc(arena, pools, ctx, decls, modules, id)?;
             }
             Ok(())
@@ -814,16 +812,25 @@ fn check_item(
         Node::Grammar => {
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_list(shared, ctx, id, env, expect_rule, true)?;
+                expect_list(shared, ctx, id, env, expect_rule, Ty::ListRule)?;
             }
             for id in [config.inline, config.supertypes].into_iter().flatten() {
                 expect_name_list(shared, ctx, id, env)?;
             }
             if let Some(id) = config.conflicts {
-                expect_list_of_groups(shared, ctx, id, env, expect_name_list)?;
+                expect_list(shared, ctx, id, env, expect_name_list, Ty::ListListRule)?;
             }
             if let Some(id) = config.precedences {
-                expect_list_of_groups(shared, ctx, id, env, expect_precedence_group)?;
+                expect_list(
+                    shared,
+                    ctx,
+                    id,
+                    env,
+                    |shared, ctx, id, env| {
+                        expect_list(shared, ctx, id, env, expect_name_or_str, Ty::ListRule)
+                    },
+                    Ty::ListListRule,
+                )?;
             }
             if let Some(id) = config.word {
                 expect_name_ref(shared, ctx, id, env)?;
@@ -892,26 +899,15 @@ fn check_item(
     }
 }
 
-/// Widen `widest` to accommodate `ty`. Returns the wider type, or `None` if incompatible.
-fn widen_type(widest: Ty, ty: Ty) -> Option<Ty> {
-    if ty == widest || ty.is_compatible(widest) {
-        Some(widest)
-    } else if widest.is_compatible(ty) {
-        Some(ty)
-    } else {
-        None
-    }
-}
-
 /// Check a list config field. For literal lists, checks each element with `check_elem`.
-/// For non-literal expressions, checks the overall type is a list type.
+/// For non-literal expressions, checks the overall type is compatible with `expected`.
 fn expect_list<'ast>(
     shared: &SharedAst,
     ctx: &'ast ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
     check_elem: CheckFn<'ast>,
-    accept_list_str: bool,
+    expected: Ty,
 ) -> Result<(), TypeError> {
     if let Node::List(range) = shared.arena.get(id) {
         for &child in shared.pools.child_slice(*range) {
@@ -920,10 +916,10 @@ fn expect_list<'ast>(
         return Ok(());
     }
     let ty = type_of(shared, ctx, id, env)?;
-    if ty == Ty::ListRule || (accept_list_str && ty == Ty::ListStr) {
+    if ty.is_compatible(expected) {
         return Ok(());
     }
-    Err(mismatch(Ty::ListRule, ty, shared.arena.span(id)))
+    Err(mismatch(expected, ty, shared.arena.span(id)))
 }
 
 fn expect_name_list(
@@ -932,7 +928,7 @@ fn expect_name_list(
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, expect_name_ref, false)
+    expect_list(shared, ctx, id, env, expect_name_ref, Ty::ListRule)
 }
 
 fn expect_name_ref(
@@ -961,27 +957,6 @@ fn expect_name_ref(
     }
 }
 
-/// Check a `list_list_rule_t` config field, validating inner elements.
-fn expect_list_of_groups<'ast>(
-    shared: &SharedAst,
-    ctx: &'ast ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-    check_inner: CheckFn<'ast>,
-) -> Result<(), TypeError> {
-    if let Node::List(range) = shared.arena.get(id) {
-        for &child in shared.pools.child_slice(*range) {
-            check_inner(shared, ctx, child, env)?;
-        }
-        return Ok(());
-    }
-    let ty = type_of(shared, ctx, id, env)?;
-    if ty.is_compatible(Ty::ListListRule) {
-        return Ok(());
-    }
-    Err(mismatch(Ty::ListListRule, ty, shared.arena.span(id)))
-}
-
 /// Inner element for `precedences`: a name ref or a string literal.
 fn expect_name_or_str(
     shared: &SharedAst,
@@ -999,15 +974,6 @@ fn expect_name_or_str(
 }
 
 /// Check a `precedences` inner list: each element must be a name-ref or string literal.
-fn expect_precedence_group(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, expect_name_or_str, true)
-}
-
 fn expect_reserved(
     shared: &SharedAst,
     ctx: &ModuleContext,
@@ -1017,7 +983,7 @@ fn expect_reserved(
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
         for &(_, val_id) in shared.pools.get_object(*range) {
-            expect_list(shared, ctx, val_id, env, expect_rule, true)?;
+            expect_list(shared, ctx, val_id, env, expect_rule, Ty::ListRule)?;
         }
         return Ok(());
     }
@@ -1072,12 +1038,13 @@ fn type_of(
                     shared.arena.span(*module),
                 ));
             }
-            use super::ast::QueryableField as Q;
+            use super::ast::ConfigField as C;
             Ok(match field {
-                Q::Extras | Q::Externals | Q::Inline | Q::Supertypes => Ty::ListRule,
-                Q::Conflicts | Q::Precedences => Ty::ListListRule,
-                Q::Word => Ty::Rule,
-                Q::Reserved => Ty::Object(InnerTy::ListRule),
+                C::Extras | C::Externals | C::Inline | C::Supertypes => Ty::ListRule,
+                C::Conflicts | C::Precedences => Ty::ListListRule,
+                C::Word => Ty::Rule,
+                C::Reserved => Ty::Object(InnerTy::ListRule),
+                C::Language | C::Inherits => unreachable!(),
             })
         }
         Node::Ident(IdentKind::Unresolved) => unreachable!(),
@@ -1241,7 +1208,8 @@ fn type_of_append(
             if !r.is_list() {
                 return Err(mismatch(l, r, shared.arena.span(right)));
             }
-            widen_type(l, r).ok_or_else(|| mismatch(l, r, shared.arena.span(right)))
+            l.widen(r)
+                .ok_or_else(|| mismatch(l, r, shared.arena.span(right)))
         }
         (Some(t), None) | (None, Some(t)) => {
             if !t.is_list() {
@@ -1372,7 +1340,8 @@ fn type_of_object(
     let mut widest = type_of(shared, ctx, fields[0].1, env)?;
     for &(_, val_id) in &fields[1..] {
         let ty = type_of(shared, ctx, val_id, env)?;
-        widest = widen_type(widest, ty)
+        widest = widest
+            .widen(ty)
             .ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
     }
     let inner = InnerTy::try_from(widest).map_err(|()| {
@@ -1401,7 +1370,7 @@ fn type_of_list(
     let mut widest = type_of(shared, ctx, items[0], env)?;
     for &item_id in &items[1..] {
         let ty = type_of(shared, ctx, item_id, env)?;
-        widest = widen_type(widest, ty).ok_or_else(|| {
+        widest = widest.widen(ty).ok_or_else(|| {
             TypeError::new(
                 TypeErrorKind::ListElementTypeMismatch {
                     first: widest,
@@ -1427,14 +1396,13 @@ fn type_of_call(
     span: Span,
     env: &mut TypeEnv,
 ) -> Result<Ty, TypeError> {
+    let macro_name = ctx.text(shared.arena.span(name));
     let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
-        let macro_name = ctx.text(shared.arena.span(name));
         return Err(TypeError::new(
             TypeErrorKind::UndefinedMacro(macro_name.to_string()),
             span,
         ));
     };
-    let macro_name = ctx.text(shared.arena.span(name));
     let args = shared.pools.child_slice(args);
     check_macro_args(shared, ctx, *macro_id, macro_name, args, span, env)
 }
