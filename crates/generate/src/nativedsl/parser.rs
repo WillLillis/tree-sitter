@@ -8,8 +8,8 @@ use thiserror::Error;
 use super::{
     InnerTy, Note, NoteMessage, ParseError,
     ast::{
-        ChildRange, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig, ModuleContext, Node,
-        NodeId, Param, PrecKind, QueryableField, RepeatKind, SharedAst, Span,
+        ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
+        ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
     typecheck::Ty,
@@ -271,7 +271,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             let key_span = self.expect_name()?;
             self.expect(TokenKind::Colon)?;
             let key = self.ctx.text(key_span);
-            let field = ConfigField::from_str(key).ok_or_else(|| {
+            let field = ConfigField::try_from(key).map_err(|()| {
                 ParseError::new(
                     ParseErrorKind::UnknownGrammarField(key.to_string()),
                     key_span,
@@ -575,12 +575,15 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.expect(TokenKind::Comma)?;
         let field_span = self.expect_name()?;
         let field_name = self.ctx.text(field_span);
-        let field = QueryableField::try_from(field_name).map_err(|()| {
-            ParseError::new(
-                ParseErrorKind::UnknownGrammarField(field_name.to_string()),
-                field_span,
-            )
-        })?;
+        let field = ConfigField::try_from(field_name)
+            .ok()
+            .filter(|f| !matches!(f, ConfigField::Language | ConfigField::Inherits))
+            .ok_or_else(|| {
+                ParseError::new(
+                    ParseErrorKind::UnknownGrammarField(field_name.to_string()),
+                    field_span,
+                )
+            })?;
         self.expect_close_args(TokenKind::KwGrammarConfig, 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
@@ -946,40 +949,6 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             }
         }
         Ok(items)
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ConfigField {
-    Language,
-    Inherits,
-    Extras,
-    Externals,
-    Supertypes,
-    Inline,
-    Word,
-    Conflicts,
-    Precedences,
-    Reserved,
-}
-
-impl ConfigField {
-    const COUNT: usize = 10; // `std::mem::variant_count` once stabilized
-
-    fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
-            "language" => Self::Language,
-            "inherits" => Self::Inherits,
-            "extras" => Self::Extras,
-            "externals" => Self::Externals,
-            "supertypes" => Self::Supertypes,
-            "inline" => Self::Inline,
-            "word" => Self::Word,
-            "conflicts" => Self::Conflicts,
-            "precedences" => Self::Precedences,
-            "reserved" => Self::Reserved,
-            _ => return None,
-        })
     }
 }
 
