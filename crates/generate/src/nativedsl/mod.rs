@@ -65,7 +65,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut shared = SharedAst::new(cap);
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
-    let root_id = load_module(
+    load_module(
         &mut shared,
         &mut modules,
         &mut env,
@@ -74,10 +74,11 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
         ModuleKind::Grammar,
         &[canonical],
     )?;
-    Ok(modules[root_id as usize]
-        .lowered
-        .take()
-        .expect("Grammar module always has lowered grammar"))
+    // Root is the last-pushed module by construction.
+    let Module::Grammar { lowered, .. } = modules.pop().unwrap() else {
+        unreachable!("root module is always loaded as Grammar");
+    };
+    Ok(*lowered)
 }
 
 #[derive(Clone, Copy)]
@@ -154,17 +155,19 @@ pub fn load_module<'m>(
     // during their own load_module calls.
     let base = ctx
         .inherit_module(&shared.arena)
-        .and_then(|(idx, span)| Some((modules[idx as usize].lowered.as_ref()?, span)));
+        .and_then(|(idx, span)| Some((modules[idx as usize].lowered()?, span)));
     typecheck::resolve_and_check(shared, &ctx, env, modules, base, path)?;
 
     let global_id = u8::try_from(modules.len())
         .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
-    // Push root before lowering so the evaluator sees all modules in one slice
-    modules.push(Module { ctx, lowered: None });
-    if matches!(kind, ModuleKind::Grammar) {
-        let lowered = lower::lower_with_base(shared, modules)?;
-        modules.last_mut().unwrap().lowered = Some(lowered);
-    }
+    let module = match kind {
+        ModuleKind::Grammar => {
+            let lowered = Box::new(lower::lower_with_base(shared, modules, &ctx)?);
+            Module::Grammar { ctx, lowered }
+        }
+        ModuleKind::Helper => Module::Helper { ctx },
+    };
+    modules.push(module);
 
     Ok(global_id)
 }
@@ -265,13 +268,38 @@ fn load_child_module(
     Ok(module_id)
 }
 
-/// A loaded and resolved module (imported or inherited), ready for
-/// typechecking and lowering.
-pub struct Module {
-    pub ctx: ModuleContext,
-    /// For inherited grammar modules: the fully lowered grammar, needed
-    /// for rule merging and config access. `None` for import-only modules.
-    pub lowered: Option<InputGrammar>,
+/// A loaded and resolved module.
+///
+/// `Helper` modules come from `import(...)` and expose only let/macro bindings.
+/// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
+/// a fully lowered grammar for rule merging and `grammar_config` access. The
+/// `lowered` field is boxed because `InputGrammar` is far larger than
+/// `ModuleContext`, and most modules are `Helper`s.
+pub enum Module {
+    Helper {
+        ctx: ModuleContext,
+    },
+    Grammar {
+        ctx: ModuleContext,
+        lowered: Box<InputGrammar>,
+    },
+}
+
+impl Module {
+    #[must_use]
+    pub const fn ctx(&self) -> &ModuleContext {
+        match self {
+            Self::Helper { ctx } | Self::Grammar { ctx, .. } => ctx,
+        }
+    }
+
+    #[must_use]
+    pub fn lowered(&self) -> Option<&InputGrammar> {
+        match self {
+            Self::Grammar { lowered, .. } => Some(lowered),
+            Self::Helper { .. } => None,
+        }
+    }
 }
 
 /// Resolve unresolved `ModuleRef` nodes (those still `module: None`),
