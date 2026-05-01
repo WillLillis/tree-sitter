@@ -13,6 +13,24 @@ rule_tests! {
         rule program { prec(P, "x") }"#,
         Rule::prec(Precedence::Integer(-1), Rule::String("x".into()))
     }
+    let_binding_i32_min {
+        r#"grammar { language: "test" }
+        let P: int_t = -2147483648
+        rule program { prec(P, "x") }"#,
+        Rule::prec(Precedence::Integer(i32::MIN), Rule::String("x".into()))
+    }
+    let_binding_i32_max {
+        r#"grammar { language: "test" }
+        let P: int_t = 2147483647
+        rule program { prec(P, "x") }"#,
+        Rule::prec(Precedence::Integer(i32::MAX), Rule::String("x".into()))
+    }
+    int_double_negation {
+        r#"grammar { language: "test" }
+        let P: int_t = --5
+        rule program { prec(P, "x") }"#,
+        Rule::prec(Precedence::Integer(5), Rule::String("x".into()))
+    }
     let_binding_typed_str {
         r#"grammar { language: "test" }
         let SEP: str_t = ","

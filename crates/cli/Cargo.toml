@@ -30,8 +30,9 @@ harness = false
 name    = "benchmark"
 
 [features]
-default = [ "qjs-rt" ]
+default = [ "qjs-rt", "nativedsl" ]
 qjs-rt  = [ "tree-sitter-generate/qjs-rt" ]
+nativedsl = [ "tree-sitter-generate/nativedsl" ]
 wasm    = [ "tree-sitter/wasm", "tree-sitter-loader/wasm" ]
 
 [dependencies]

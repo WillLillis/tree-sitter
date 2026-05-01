@@ -58,7 +58,7 @@ pub enum TokenKind {
     RawStringLit {
         hash_count: u8,
     },
-    IntLit(i32),
+    IntLit(u32),
     // Structural keywords
     KwGrammar,
     KwRule,
@@ -180,21 +180,18 @@ impl std::fmt::Display for TokenKind {
     }
 }
 
-/// A token produced by the lexer, pairing a kind with its source span.
 #[derive(Clone)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
 }
 
-/// Lexer state: a byte-level cursor over the source text.
 pub struct Lexer<'src> {
     source: &'src [u8],
     pos: usize,
 }
 
 impl<'src> Lexer<'src> {
-    /// Create a new lexer for the given source text.
     #[must_use]
     pub const fn new(source: &'src str) -> Self {
         Self {
@@ -431,7 +428,7 @@ impl<'src> Lexer<'src> {
         self.pos = pos;
         // SAFETY: the slice contains only ASCII digits (b'0'..=b'9'), which are valid UTF-8.
         let text = unsafe { std::str::from_utf8_unchecked(&source[start..pos]) };
-        let value: i32 = text.parse().map_err(|_| {
+        let value: u32 = text.parse().map_err(|_| {
             LexError::new(
                 LexErrorKind::IntegerOverflow,
                 Span::from_usize(start, self.pos),

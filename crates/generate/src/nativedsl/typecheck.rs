@@ -23,99 +23,149 @@ use super::{
 type CheckFn<'ast> =
     fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> Result<(), TypeError>;
 
-/// Types that can appear as homogeneous object field values.
-/// Each variant maps 1:1 to a `Ty` variant of the same name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub enum InnerTy {
-    Rule,
-    Str,
-    Int,
-    ListRule,
-    ListStr,
-    ListInt,
-    ListListRule,
-    ListListStr,
-    ListListInt,
-}
-
-impl std::fmt::Display for InnerTy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Ty::from(*self).fmt(f)
-    }
-}
-
-macro_rules! inner_ty_conversions {
-    ($($variant:ident),+ $(,)?) => {
-        impl From<InnerTy> for Ty {
-            fn from(inner: InnerTy) -> Self {
-                match inner { $(InnerTy::$variant => Self::$variant),+ }
-            }
-        }
-        impl TryFrom<Ty> for InnerTy {
-            type Error = ();
-            fn try_from(ty: Ty) -> Result<Self, ()> {
-                match ty { $(Ty::$variant => Ok(Self::$variant),)+ _ => Err(()) }
-            }
-        }
-    };
-}
-inner_ty_conversions!(
-    Rule,
-    Str,
-    Int,
-    ListRule,
-    ListStr,
-    ListInt,
-    ListListRule,
-    ListListStr,
-    ListListInt
-);
-
-/// The type of a DSL expression.
+/// Top-level type of any DSL expression. Splits into three structural classes:
+/// first-class data values, module references, and non-bindable sentinels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Ty {
-    Rule,
-    Str,
-    Int,
-    ListRule,
-    ListStr,
-    ListInt,
-    ListListRule,
-    ListListStr,
-    ListListInt,
-    /// Result of `import(...)`: a helper module namespace.
-    /// Members accessed via `::`. The `u8` indexes into the module list.
-    ImportModule(u8),
-    /// Result of `inherit(...)`: a grammar module with rules and config.
-    /// Members accessed via `::`, config accessed via `grammar_config()`.
-    GrammarModule(u8),
-    /// User-facing module type annotation (`module_t`). Matches any
-    /// concrete module via `is_compatible`.
-    AnyModule,
+    Data(DataTy),
+    Module(ModuleTy),
+    /// Result of for-loop expansion. Inlines into the surrounding list; not
+    /// a value, can't be bound to a variable.
     Spread,
-    /// Homogeneous object `{ field: T, ... }`. The inner type is what field
-    /// access returns. Field name validation is done via `ObjectInfo` in the env.
+    /// Syntactic tuple. Only valid as a direct element of a for-loop
+    /// iterable's literal list. Not a value, can't be bound or returned.
+    Tuple,
+}
+
+/// First-class data values: things that can be bound to a let, returned from
+/// a macro, passed as an argument, or stored in a list/object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum DataTy {
+    Scalar(ScalarTy),
+    /// `list_t<X>` for `X` in `{Rule, Str, Int}`.
+    List(ScalarTy),
+    /// `list_t<list_t<X>>`. Triple nesting is rejected at parse time.
+    ListList(ScalarTy),
+    /// `obj_t<X>`. The inner type is structurally non-Object, so
+    /// `obj_t<obj_t<X>>` is impossible.
     Object(InnerTy),
 }
 
+/// Atomic data types: `rule_t`, `str_t`, `int_t`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ScalarTy {
+    Rule,
+    Str,
+    Int,
+}
+
+/// Element types allowed inside `obj_t<...>`. Mirrors [`DataTy`] minus the
+/// `Object` variant, so `obj_t<obj_t<X>>` is structurally impossible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum InnerTy {
+    Scalar(ScalarTy),
+    List(ScalarTy),
+    ListList(ScalarTy),
+}
+
+/// Module types: results of `import(...)` / `inherit(...)` and the user-facing
+/// `module_t` annotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum ModuleTy {
+    /// Result of `import(...)`. The `u8` indexes into the module list.
+    Import(u8),
+    /// Result of `inherit(...)`. The `u8` indexes into the module list.
+    Grammar(u8),
+    /// User-facing `module_t` annotation. Matches any concrete module via
+    /// [`Ty::is_compatible`].
+    Any,
+}
+
 impl Ty {
-    fn is_rule_like(self) -> bool {
-        self == Self::Rule || self == Self::Str
+    /// Common scalar shorthands. Pattern matching still requires the long
+    /// form, but value construction (errors, equality checks, mismatch)
+    /// stays terse.
+    pub const RULE: Self = Self::Data(DataTy::Scalar(ScalarTy::Rule));
+    pub const STR: Self = Self::Data(DataTy::Scalar(ScalarTy::Str));
+    pub const INT: Self = Self::Data(DataTy::Scalar(ScalarTy::Int));
+    pub const LIST_RULE: Self = Self::Data(DataTy::List(ScalarTy::Rule));
+    pub const LIST_STR: Self = Self::Data(DataTy::List(ScalarTy::Str));
+    pub const LIST_INT: Self = Self::Data(DataTy::List(ScalarTy::Int));
+    pub const LIST_LIST_RULE: Self = Self::Data(DataTy::ListList(ScalarTy::Rule));
+    pub const LIST_LIST_STR: Self = Self::Data(DataTy::ListList(ScalarTy::Str));
+    pub const LIST_LIST_INT: Self = Self::Data(DataTy::ListList(ScalarTy::Int));
+    pub const ANY_MODULE: Self = Self::Module(ModuleTy::Any);
+
+    /// True for `rule_t` or `str_t` (str widens to rule).
+    const fn is_rule_like(self) -> bool {
+        matches!(
+            self,
+            Self::Data(DataTy::Scalar(ScalarTy::Rule | ScalarTy::Str))
+        )
     }
 
+    const fn is_bindable(self) -> bool {
+        matches!(self, Self::Data(_) | Self::Module(_))
+    }
+
+    /// Check if `self` is assignable to `expected`.
+    ///
+    /// Any module satisfies any module-typed expectation. The surface
+    /// language only exposes `module_t` (= [`ModuleTy::Any`]) as an
+    /// annotation, so specific-vs-specific module checks aren't reachable
+    /// today; the broader rule keeps things simple and won't trip future
+    /// macro signatures that declare specific module shapes.
+    fn is_compatible(self, expected: Self) -> bool {
+        match (self, expected) {
+            (Self::Data(a), Self::Data(b)) => a.is_compatible(b),
+            (Self::Module(_), Self::Module(_)) => true,
+            _ => self == expected,
+        }
+    }
+
+    /// True if this is any list type. Non-data types are never lists.
     const fn is_list(self) -> bool {
-        self.elem_type().is_some()
+        matches!(self, Self::Data(d) if d.is_list())
     }
 
-    fn is_bindable(self) -> bool {
-        self != Self::Spread
+    /// Widen two types, delegating to [`DataTy::widen`] for data pairs.
+    /// Equal non-data types widen to themselves; otherwise `None`.
+    fn widen(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (Self::Data(a), Self::Data(b)) => a.widen(b).map(Self::Data),
+            _ if self == other => Some(self),
+            _ => None,
+        }
+    }
+
+    /// Promote a data type to its list wrapper. Returns `None` for non-data
+    /// or non-list-able types.
+    pub(super) fn to_list(self) -> Option<Self> {
+        match self {
+            Self::Data(d) => d.to_list().map(Self::Data),
+            _ => None,
+        }
+    }
+
+    /// Unwrap a list type to its element type. Returns `None` for non-data
+    /// or non-list types.
+    fn elem_type(self) -> Option<Self> {
+        match self {
+            Self::Data(d) => d.elem_type().map(Self::Data),
+            _ => None,
+        }
+    }
+}
+
+impl DataTy {
+    /// True if this is a list type at any depth.
+    const fn is_list(self) -> bool {
+        matches!(self, Self::List(_) | Self::ListList(_))
     }
 
     /// Check if `self` is assignable to `expected`.
     fn is_compatible(self, expected: Self) -> bool {
         self.widens_to(expected)
-            || (matches!(self, Self::ImportModule(_) | Self::GrammarModule(_))
-                && expected == Self::AnyModule)
             || matches!(
                 (self, expected),
                 (Self::Object(a), Self::Object(b)) if Self::from(a).widens_to(Self::from(b))
@@ -127,9 +177,12 @@ impl Ty {
         self == target
             || matches!(
                 (self, target),
-                (Self::Str, Self::Rule)
-                    | (Self::ListStr, Self::ListRule)
-                    | (Self::ListListStr, Self::ListListRule)
+                (Self::Scalar(ScalarTy::Str), Self::Scalar(ScalarTy::Rule))
+                    | (Self::List(ScalarTy::Str), Self::List(ScalarTy::Rule))
+                    | (
+                        Self::ListList(ScalarTy::Str),
+                        Self::ListList(ScalarTy::Rule)
+                    )
             )
     }
 
@@ -145,53 +198,96 @@ impl Ty {
         }
     }
 
-    /// Promote a type to its list wrapper (e.g. `Rule` -> `ListRule`).
-    /// Returns `None` for types that can't be list elements.
+    /// Promote to the list wrapper (e.g. `Scalar(Rule)` -> `List(Rule)`).
+    /// Returns `None` for types that can't be list elements (objects, or
+    /// list-of-list which would be triple-nested).
     pub(super) const fn to_list(self) -> Option<Self> {
         Some(match self {
-            Self::Rule => Self::ListRule,
-            Self::Str => Self::ListStr,
-            Self::Int => Self::ListInt,
-            Self::ListRule => Self::ListListRule,
-            Self::ListStr => Self::ListListStr,
-            Self::ListInt => Self::ListListInt,
-            _ => return None,
+            Self::Scalar(s) => Self::List(s),
+            Self::List(s) => Self::ListList(s),
+            Self::ListList(_) | Self::Object(_) => return None,
         })
     }
 
-    /// Unwrap a list type to its element type (e.g. `ListRule` -> `Rule`).
-    /// Returns `None` for non-list types.
+    /// Unwrap a list type to its element type. Returns `None` for non-list types.
     const fn elem_type(self) -> Option<Self> {
         Some(match self {
-            Self::ListRule => Self::Rule,
-            Self::ListStr => Self::Str,
-            Self::ListInt => Self::Int,
-            Self::ListListRule => Self::ListRule,
-            Self::ListListStr => Self::ListStr,
-            Self::ListListInt => Self::ListInt,
-            _ => return None,
+            Self::List(s) => Self::Scalar(s),
+            Self::ListList(s) => Self::List(s),
+            Self::Scalar(_) | Self::Object(_) => return None,
         })
+    }
+}
+
+impl From<InnerTy> for DataTy {
+    fn from(i: InnerTy) -> Self {
+        match i {
+            InnerTy::Scalar(s) => Self::Scalar(s),
+            InnerTy::List(s) => Self::List(s),
+            InnerTy::ListList(s) => Self::ListList(s),
+        }
+    }
+}
+
+impl TryFrom<DataTy> for InnerTy {
+    type Error = ();
+    fn try_from(d: DataTy) -> Result<Self, ()> {
+        Ok(match d {
+            DataTy::Scalar(s) => Self::Scalar(s),
+            DataTy::List(s) => Self::List(s),
+            DataTy::ListList(s) => Self::ListList(s),
+            DataTy::Object(_) => return Err(()),
+        })
+    }
+}
+
+impl From<DataTy> for Ty {
+    fn from(d: DataTy) -> Self {
+        Self::Data(d)
+    }
+}
+
+impl From<InnerTy> for Ty {
+    fn from(i: InnerTy) -> Self {
+        Self::Data(DataTy::from(i))
     }
 }
 
 impl std::fmt::Display for Ty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rule => f.write_str("rule_t"),
-            Self::Str => f.write_str("str_t"),
-            Self::Int => f.write_str("int_t"),
-            Self::ListRule => f.write_str("list_t<rule_t>"),
-            Self::ListStr => f.write_str("list_t<str_t>"),
-            Self::ListInt => f.write_str("list_t<int_t>"),
-            Self::ListListRule => f.write_str("list_t<list_t<rule_t>>"),
-            Self::ListListStr => f.write_str("list_t<list_t<str_t>>"),
-            Self::ListListInt => f.write_str("list_t<list_t<int_t>>"),
-            Self::ImportModule(_) | Self::GrammarModule(_) | Self::AnyModule => {
-                f.write_str("module_t")
-            }
+            Self::Data(d) => d.fmt(f),
+            Self::Module(_) => f.write_str("module_t"),
             Self::Spread => f.write_str("spread_t"),
-            Self::Object(inner) => write!(f, "obj_t<{inner}>"),
+            Self::Tuple => f.write_str("tuple"),
         }
+    }
+}
+
+impl std::fmt::Display for DataTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Scalar(s) => s.fmt(f),
+            Self::List(s) => write!(f, "list_t<{s}>"),
+            Self::ListList(s) => write!(f, "list_t<list_t<{s}>>"),
+            Self::Object(i) => write!(f, "obj_t<{i}>"),
+        }
+    }
+}
+
+impl std::fmt::Display for ScalarTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Rule => "rule_t",
+            Self::Str => "str_t",
+            Self::Int => "int_t",
+        })
+    }
+}
+
+impl std::fmt::Display for InnerTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        DataTy::from(*self).fmt(f)
     }
 }
 
@@ -236,8 +332,7 @@ enum Decl {
 ///
 /// # Errors
 ///
-/// Returns [`TypeError`] for duplicate declarations, unknown identifiers,
-/// or any type error.
+/// Returns [`TypeError`] on resolve or typecheck failure.
 pub fn resolve_and_check<'ast>(
     shared: &'ast mut SharedAst,
     ctx: &'ast ModuleContext,
@@ -246,18 +341,9 @@ pub fn resolve_and_check<'ast>(
     base: Option<(&'ast InputGrammar, Span)>,
     grammar_path: &Path,
 ) -> Result<(), TypeError> {
-    // Phase 1: Name resolution
-    let mut decls = collect_decls(shared, ctx, &ctx.root_items, env, grammar_path)?;
-
-    // Register inherited rule names so they resolve as rules.
-    // Use the inherit statement's span so "first defined here" points there.
-    if let Some((base_grammar, inherit_span)) = base {
-        for var in &base_grammar.variables {
-            if !decls.contains_key(var.name.as_str()) {
-                decls.insert(&var.name, (Decl::Rule, inherit_span));
-            }
-        }
-    }
+    // Phase 1: Name resolution. Inherited rule names are registered inside
+    // collect_decls before its externals walk, so that ordering is explicit.
+    let mut decls = collect_decls(shared, ctx, &ctx.root_items, env, grammar_path, base)?;
 
     let n_items = ctx.root_items.len();
     for i in 0..n_items {
@@ -325,12 +411,18 @@ fn insert_decl<'src>(
 ///
 /// Rules, let-bindings, macros, and external tokens in the grammar block
 /// all occupy the same namespace. Duplicate names are rejected.
+///
+/// `base` is the inherited grammar (if any). Its rule names are registered
+/// before the externals walk so that an `externals` field referencing an
+/// inherited rule is correctly identified as a known name rather than being
+/// re-registered as a fresh external token.
 fn collect_decls<'a>(
     shared: &SharedAst,
     ctx: &'a ModuleContext,
     root_items: &[NodeId],
     env: &mut TypeEnv,
     grammar_path: &Path,
+    base: Option<(&'a InputGrammar, Span)>,
 ) -> Result<Decls<'a>, TypeError> {
     let mut decls = Decls::default();
     let source = &ctx.source;
@@ -349,7 +441,7 @@ fn collect_decls<'a>(
                     grammar_path,
                     source,
                 )?;
-                env.insert_var(item_id, Ty::Rule);
+                env.insert_var(item_id, Ty::RULE);
             }
             Node::Macro(macro_id) => {
                 let config = shared.pools.get_macro(*macro_id);
@@ -377,6 +469,18 @@ fn collect_decls<'a>(
                 }
             }
             _ => {}
+        }
+    }
+
+    // Register inherited rule names before walking externals, so that an
+    // externals field referencing an inherited rule sees it as already declared
+    // rather than re-registering it as a fresh external token. The inherit
+    // statement's span gives "first defined here" notes a sensible target.
+    if let Some((base_grammar, inherit_span)) = base {
+        for var in &base_grammar.variables {
+            if !decls.contains_key(var.name.as_str()) {
+                decls.insert(&var.name, (Decl::Rule, inherit_span));
+            }
         }
     }
 
@@ -509,8 +613,7 @@ fn resolve_item_tc(
             }
             Ok(())
         }
-        Node::Rule { body: inner, .. } | Node::Let { value: inner, .. } => {
-            let inner = *inner;
+        &Node::Rule { body: inner, .. } | &Node::Let { value: inner, .. } => {
             resolve_expr_tc(arena, pools, ctx, decls, modules, inner)
         }
         Node::Macro(macro_id) => {
@@ -603,8 +706,7 @@ fn resolve_expr_tc(
     // same as grammar.js `alias($.x, $.undeclared_name)`.
     // Parser already emits MacroParam/ForBinding for local bindings,
     // so any remaining Ident(Unresolved) target is a rule name.
-    if let Node::Alias { content, target } = arena.get(id) {
-        let (content, target) = (*content, *target);
+    if let &Node::Alias { content, target } = arena.get(id) {
         resolve_expr_tc(arena, pools, ctx, decls, modules, content)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             arena.resolve_as(target, IdentKind::Rule);
@@ -616,9 +718,8 @@ fn resolve_expr_tc(
 
     // For-loop bindings are resolved by the parser (ForBinding nodes).
     // Just recurse into iterable and body.
-    if let Node::For { for_id, body } = arena.get(id) {
-        let iterable = pools.get_for(*for_id).iterable;
-        let body = *body;
+    if let &Node::For { for_id, body } = arena.get(id) {
+        let iterable = pools.get_for(for_id).iterable;
         resolve_expr_tc(arena, pools, ctx, decls, modules, iterable)?;
         return resolve_expr_tc(arena, pools, ctx, decls, modules, body);
     }
@@ -627,22 +728,24 @@ fn resolve_expr_tc(
     resolve_children_tc(arena, pools, ctx, decls, modules, id)
 }
 
-/// Follow `obj` -> `Ident(Var(let_id))` -> `Let { value: ModuleRef { module } }`
-/// to extract the module index. Returns `None` if the chain doesn't match.
-fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
-    let Node::Ident(IdentKind::Var(let_id)) = arena.get(obj) else {
-        return None;
-    };
-    let Node::Let { value, .. } = arena.get(*let_id) else {
-        return None;
-    };
-    let Node::ModuleRef {
-        module: Some(idx), ..
-    } = arena.get(*value)
-    else {
-        return None;
-    };
-    Some(*idx as usize)
+/// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
+/// a `ModuleRef`, returning its module index. Handles `let h = import(...)`
+/// directly as well as chained aliases like `let h2 = h`.
+fn resolve_module_index(arena: &NodeArena, mut obj: NodeId) -> Option<usize> {
+    loop {
+        match arena.get(obj) {
+            Node::Ident(IdentKind::Var(let_id)) => {
+                let Node::Let { value, .. } = arena.get(*let_id) else {
+                    return None;
+                };
+                obj = *value;
+            }
+            Node::ModuleRef {
+                module: Some(idx), ..
+            } => return Some(*idx as usize),
+            _ => return None,
+        }
+    }
 }
 
 /// Resolve a `QualifiedAccess { obj, member }` node by looking up `member_name`
@@ -731,8 +834,7 @@ fn resolve_children_tc(
     }
 
     match arena.get(id) {
-        Node::Call { name, args } => {
-            let (name, args) = (*name, *args);
+        &Node::Call { name, args } => {
             resolve_expr_tc(arena, pools, ctx, decls, modules, name)?;
             for arg in pools.child_slice(args) {
                 resolve_expr_tc(arena, pools, ctx, decls, modules, *arg)?;
@@ -753,13 +855,12 @@ fn resolve_children_tc(
         | Node::Reserved { content: c, .. } => {
             resolve_expr_tc(arena, pools, ctx, decls, modules, *c)
         }
-        Node::Append { left: a, right: b }
-        | Node::Prec {
+        &Node::Append { left: a, right: b }
+        | &Node::Prec {
             value: a,
             content: b,
             ..
         } => {
-            let (a, b) = (*a, *b);
             resolve_expr_tc(arena, pools, ctx, decls, modules, a)?;
             resolve_expr_tc(arena, pools, ctx, decls, modules, b)
         }
@@ -771,12 +872,8 @@ fn resolve_children_tc(
             }
             Ok(())
         }
-        Node::FieldAccess { obj, .. } => {
-            let obj = *obj;
-            resolve_expr_tc(arena, pools, ctx, decls, modules, obj)
-        }
-        Node::QualifiedAccess { obj, member } => {
-            let (obj, member) = (*obj, *member);
+        &Node::FieldAccess { obj, .. } => resolve_expr_tc(arena, pools, ctx, decls, modules, obj),
+        &Node::QualifiedAccess { obj, member } => {
             resolve_expr_tc(arena, pools, ctx, decls, modules, obj)?;
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
@@ -812,13 +909,13 @@ fn check_item(
         Node::Grammar => {
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_list(shared, ctx, id, env, expect_rule, Ty::ListRule)?;
+                expect_list(shared, ctx, id, env, expect_rule, Ty::LIST_RULE)?;
             }
             for id in [config.inline, config.supertypes].into_iter().flatten() {
                 expect_name_list(shared, ctx, id, env)?;
             }
             if let Some(id) = config.conflicts {
-                expect_list(shared, ctx, id, env, expect_name_list, Ty::ListListRule)?;
+                expect_list(shared, ctx, id, env, expect_name_list, Ty::LIST_LIST_RULE)?;
             }
             if let Some(id) = config.precedences {
                 expect_list(
@@ -827,9 +924,9 @@ fn check_item(
                     id,
                     env,
                     |shared, ctx, id, env| {
-                        expect_list(shared, ctx, id, env, expect_name_or_str, Ty::ListRule)
+                        expect_list(shared, ctx, id, env, expect_name_or_str, Ty::LIST_RULE)
                     },
-                    Ty::ListListRule,
+                    Ty::LIST_LIST_RULE,
                 )?;
             }
             if let Some(id) = config.word {
@@ -847,7 +944,7 @@ fn check_item(
             let is_empty_obj = matches!(shared.arena.get(*value), Node::Object(r) if shared.pools.get_object(*r).is_empty());
             let resolved_ty = match (is_empty_list, is_empty_obj, declared_ty) {
                 (true, _, Some(ty)) if ty.is_list() => ty,
-                (_, true, Some(ty)) if matches!(ty, Ty::Object(_)) => ty,
+                (_, true, Some(ty)) if matches!(ty, Ty::Data(DataTy::Object(_))) => ty,
                 (true, _, None) | (_, true, None) => {
                     return Err(TypeError::new(
                         TypeErrorKind::EmptyContainerNeedsAnnotation,
@@ -928,7 +1025,7 @@ fn expect_name_list(
     id: NodeId,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
-    expect_list(shared, ctx, id, env, expect_name_ref, Ty::ListRule)
+    expect_list(shared, ctx, id, env, expect_name_ref, Ty::LIST_RULE)
 }
 
 fn expect_name_ref(
@@ -945,8 +1042,8 @@ fn expect_name_ref(
         | Node::MacroParam(_)
         | Node::ForBinding { .. } => {
             let ty = type_of(shared, ctx, id, env)?;
-            if ty != Ty::Rule {
-                return Err(mismatch(Ty::Rule, ty, shared.arena.span(id)));
+            if ty != Ty::RULE {
+                return Err(mismatch(Ty::RULE, ty, shared.arena.span(id)));
             }
             Ok(())
         }
@@ -983,13 +1080,13 @@ fn expect_reserved(
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
         for &(_, val_id) in shared.pools.get_object(*range) {
-            expect_list(shared, ctx, val_id, env, expect_rule, Ty::ListRule)?;
+            expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
         }
         return Ok(());
     }
     // Non-literal: must be inherited (base.reserved -> Object(ListRule))
     let ty = type_of(shared, ctx, id, env)?;
-    if ty.is_compatible(Ty::Object(InnerTy::ListRule)) {
+    if ty.is_compatible(Ty::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule)))) {
         return Ok(());
     }
     Err(TypeError::new(
@@ -1006,7 +1103,7 @@ fn expect_rule(
 ) -> Result<(), TypeError> {
     let ty = type_of(shared, ctx, id, env)?;
     if !ty.is_rule_like() {
-        return Err(mismatch(Ty::Rule, ty, shared.arena.span(id)));
+        return Err(mismatch(Ty::RULE, ty, shared.arena.span(id)));
     }
     Ok(())
 }
@@ -1019,20 +1116,20 @@ fn type_of(
 ) -> Result<Ty, TypeError> {
     let span = shared.arena.span(id);
     match shared.arena.get(id) {
-        Node::IntLit(_) => Ok(Ty::Int),
-        Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::Str),
-        Node::Ident(IdentKind::Rule) | Node::Blank => Ok(Ty::Rule),
+        Node::IntLit(_) => Ok(Ty::INT),
+        Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::STR),
+        Node::Ident(IdentKind::Rule) | Node::Blank => Ok(Ty::RULE),
         Node::ModuleRef { import, module, .. } => {
             let idx = module.expect("module index not set by loading pre-pass");
-            Ok(if *import {
-                Ty::ImportModule(idx)
+            Ok(Ty::Module(if *import {
+                ModuleTy::Import(idx)
             } else {
-                Ty::GrammarModule(idx)
-            })
+                ModuleTy::Grammar(idx)
+            }))
         }
         Node::GrammarConfig { module, field } => {
             let module_ty = type_of(shared, ctx, *module, env)?;
-            if !matches!(module_ty, Ty::GrammarModule(_)) {
+            if !matches!(module_ty, Ty::Module(ModuleTy::Grammar(_))) {
                 return Err(TypeError::new(
                     TypeErrorKind::GrammarConfigRequiresInherit,
                     shared.arena.span(*module),
@@ -1040,10 +1137,10 @@ fn type_of(
             }
             use super::ast::ConfigField as C;
             Ok(match field {
-                C::Extras | C::Externals | C::Inline | C::Supertypes => Ty::ListRule,
-                C::Conflicts | C::Precedences => Ty::ListListRule,
-                C::Word => Ty::Rule,
-                C::Reserved => Ty::Object(InnerTy::ListRule),
+                C::Extras | C::Externals | C::Inline | C::Supertypes => Ty::LIST_RULE,
+                C::Conflicts | C::Precedences => Ty::LIST_LIST_RULE,
+                C::Word => Ty::RULE,
+                C::Reserved => Ty::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule))),
                 C::Language | C::Inherits => unreachable!(),
             })
         }
@@ -1065,10 +1162,10 @@ fn type_of(
         }),
         Node::Neg(inner) => {
             let ty = type_of(shared, ctx, *inner, env)?;
-            if ty != Ty::Int {
-                return Err(mismatch(Ty::Int, ty, span));
+            if ty != Ty::INT {
+                return Err(mismatch(Ty::INT, ty, span));
             }
-            Ok(Ty::Int)
+            Ok(Ty::INT)
         }
         Node::Append { left, right } => type_of_append(shared, ctx, *left, *right, span, env),
         Node::FieldAccess { obj, field } => type_of_field_access(shared, ctx, *obj, *field, env),
@@ -1077,60 +1174,64 @@ fn type_of(
         // The resolver already resolved lets and caught macro-as-value errors.
         Node::QualifiedAccess { obj, .. } => {
             let obj_ty = type_of(shared, ctx, *obj, env)?;
-            if !matches!(obj_ty, Ty::ImportModule(_) | Ty::GrammarModule(_)) {
+            if !matches!(
+                obj_ty,
+                Ty::Module(ModuleTy::Import(_) | ModuleTy::Grammar(_))
+            ) {
                 return Err(TypeError::new(
                     TypeErrorKind::QualifiedAccessOnInvalidType(obj_ty),
                     shared.arena.span(*obj),
                 ));
             }
-            Ok(Ty::Rule)
+            Ok(Ty::RULE)
         }
         Node::Object(range) => type_of_object(shared, ctx, *range, span, env),
         Node::List(range) => type_of_list(shared, ctx, *range, span, env),
-        Node::Tuple(_) => {
-            // Tuples are only valid as elements of for-loop lists.
-            // They're checked structurally in check_for_expr.
-            // If we reach here, it's a tuple in an invalid context.
-            Err(TypeError::new(TypeErrorKind::CannotInferType, span))
-        }
+        // Tuples are only first-class as direct elements of a for-loop
+        // iterable's literal list (handled in check_for_expr without going
+        // through type_of). Anywhere else, returning Ty::Tuple lets the
+        // surrounding context surface the appropriate error: a let binding
+        // produces NonBindableType, a containing list produces InvalidListElement,
+        // a rule body produces TypeMismatch.
+        Node::Tuple(_) => Ok(Ty::Tuple),
         Node::Concat(range) => {
             for &part in shared.pools.child_slice(*range) {
                 let ty = type_of(shared, ctx, part, env)?;
-                if ty != Ty::Str {
-                    return Err(mismatch(Ty::Str, ty, shared.arena.span(part)));
+                if ty != Ty::STR {
+                    return Err(mismatch(Ty::STR, ty, shared.arena.span(part)));
                 }
             }
-            Ok(Ty::Str)
+            Ok(Ty::STR)
         }
         Node::DynRegex(range) => {
             let (pattern, flags) = shared.pools.get_regex(*range);
             let pt = type_of(shared, ctx, pattern, env)?;
-            if pt != Ty::Str {
-                return Err(mismatch(Ty::Str, pt, shared.arena.span(pattern)));
+            if pt != Ty::STR {
+                return Err(mismatch(Ty::STR, pt, shared.arena.span(pattern)));
             }
             if let Some(fid) = flags {
                 let ft = type_of(shared, ctx, fid, env)?;
-                if ft != Ty::Str {
-                    return Err(mismatch(Ty::Str, ft, shared.arena.span(fid)));
+                if ft != Ty::STR {
+                    return Err(mismatch(Ty::STR, ft, shared.arena.span(fid)));
                 }
             }
-            Ok(Ty::Rule)
+            Ok(Ty::RULE)
         }
         Node::SeqOrChoice { range, .. } => {
             for &member in shared.pools.child_slice(*range) {
                 let ty = type_of(shared, ctx, member, env)?;
                 if ty != Ty::Spread && !ty.is_rule_like() {
-                    return Err(mismatch(Ty::Rule, ty, shared.arena.span(member)));
+                    return Err(mismatch(Ty::RULE, ty, shared.arena.span(member)));
                 }
             }
-            Ok(Ty::Rule)
+            Ok(Ty::RULE)
         }
         Node::Repeat { inner, .. }
         | Node::Token { inner, .. }
         | Node::Field { content: inner, .. }
         | Node::Reserved { content: inner, .. } => {
             expect_rule(shared, ctx, *inner, env)?;
-            Ok(Ty::Rule)
+            Ok(Ty::RULE)
         }
         Node::Alias { content, target } => {
             expect_rule(shared, ctx, *content, env)?;
@@ -1144,14 +1245,14 @@ fn type_of(
                     | Node::FieldAccess { .. }
                     | Node::GrammarConfig { .. }
             ) && target_ty.is_rule_like()
-                || target_ty == Ty::Str;
+                || target_ty == Ty::STR;
             if !is_valid {
                 return Err(TypeError::new(
                     TypeErrorKind::InvalidAliasTarget(target_ty),
                     shared.arena.span(*target),
                 ));
             }
-            Ok(Ty::Rule)
+            Ok(Ty::RULE)
         }
         Node::Prec {
             kind,
@@ -1160,17 +1261,17 @@ fn type_of(
         } => {
             let vt = type_of(shared, ctx, *value, env)?;
             if *kind == PrecKind::Dynamic {
-                if vt != Ty::Int {
-                    return Err(mismatch(Ty::Int, vt, shared.arena.span(*value)));
+                if vt != Ty::INT {
+                    return Err(mismatch(Ty::INT, vt, shared.arena.span(*value)));
                 }
-            } else if vt != Ty::Int && vt != Ty::Str {
+            } else if vt != Ty::INT && vt != Ty::STR {
                 return Err(TypeError::new(
                     TypeErrorKind::PrecValueTypeMismatch(vt),
                     shared.arena.span(*value),
                 ));
             }
             expect_rule(shared, ctx, *content, env)?;
-            Ok(Ty::Rule)
+            Ok(Ty::RULE)
         }
         Node::For { for_id, body } => {
             check_for_expr(shared, ctx, *for_id, *body, env)?;
@@ -1234,7 +1335,7 @@ fn type_of_field_access(
     let obj_ty = type_of(shared, ctx, obj, env)?;
     let field_name = ctx.text(field);
     match obj_ty {
-        Ty::Object(inner) => {
+        Ty::Data(DataTy::Object(inner)) => {
             let field_known = match shared.arena.get(obj) {
                 Node::Ident(IdentKind::Var(let_id)) => {
                     // None = not an object literal, can't validate field names
@@ -1276,7 +1377,10 @@ fn type_of_qualified_call(
 ) -> Result<Ty, TypeError> {
     let (obj, name, args) = shared.pools.get_qualified_call(range);
     let obj_ty = type_of(shared, ctx, obj, env)?;
-    if !matches!(obj_ty, Ty::ImportModule(_) | Ty::GrammarModule(_)) {
+    if !matches!(
+        obj_ty,
+        Ty::Module(ModuleTy::Import(_) | ModuleTy::Grammar(_))
+    ) {
         return Err(TypeError::new(
             TypeErrorKind::QualifiedCallOnNonModule(obj_ty),
             shared.arena.span(obj),
@@ -1344,13 +1448,17 @@ fn type_of_object(
             .widen(ty)
             .ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
     }
-    let inner = InnerTy::try_from(widest).map_err(|()| {
+    let invalid = || {
         TypeError::new(
             TypeErrorKind::InvalidObjectValue(widest),
             shared.arena.span(fields[0].1),
         )
-    })?;
-    Ok(Ty::Object(inner))
+    };
+    let Ty::Data(d) = widest else {
+        return Err(invalid());
+    };
+    let inner = InnerTy::try_from(d).map_err(|()| invalid())?;
+    Ok(Ty::Data(DataTy::Object(inner)))
 }
 
 fn type_of_list(
@@ -1380,12 +1488,9 @@ fn type_of_list(
             )
         })?;
     }
-    widest.to_list().ok_or_else(|| {
-        TypeError::new(
-            TypeErrorKind::InvalidListElement,
-            shared.arena.span(items[0]),
-        )
-    })
+    widest
+        .to_list()
+        .ok_or_else(|| TypeError::new(TypeErrorKind::InvalidListElement(widest), span))
 }
 
 fn type_of_call(
@@ -1478,6 +1583,18 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
 }
 
+const fn non_bindable_message(ty: Ty) -> &'static str {
+    match ty {
+        Ty::Spread => {
+            "cannot bind a for-loop expansion to a variable: for-loops are expanded inline"
+        }
+        Ty::Tuple => {
+            "tuples can only appear as elements of a for-loop iterable, not as standalone values"
+        }
+        _ => "this expression cannot be bound to a variable",
+    }
+}
+
 use super::TypeError;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
@@ -1500,8 +1617,10 @@ pub enum TypeErrorKind {
     ListElementTypeMismatch { first: Ty, got: Ty },
     #[error("object values must be rule_t, str_t, or int_t, got {0}")]
     InvalidObjectValue(Ty),
-    #[error("list elements must be rule_t, str_t, int_t, or a list type")]
-    InvalidListElement,
+    #[error(
+        "list elements cannot be {0}; lists allow rule_t, str_t, int_t, or list_t (max 2 levels deep)"
+    )]
+    InvalidListElement(Ty),
     #[error("empty list requires a type annotation")]
     EmptyContainerNeedsAnnotation,
     #[error("for-expression requires a list, got {0}")]
@@ -1531,7 +1650,7 @@ pub enum TypeErrorKind {
     GrammarConfigRequiresInherit,
     #[error("cannot infer type of this expression")]
     CannotInferType,
-    #[error("cannot bind a for-loop expansion to a variable: for-loops are expanded inline")]
+    #[error("{}", non_bindable_message(*.0))]
     NonBindableType(Ty),
     #[error("imported module has no member '{0}'")]
     ImportMemberNotFound(String),

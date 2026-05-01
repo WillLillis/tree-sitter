@@ -33,7 +33,8 @@ use tree_sitter_cli::{
     wasm,
 };
 use tree_sitter_config::Config;
-use tree_sitter_generate::OptLevel;
+#[cfg(feature = "nativedsl")]
+use tree_sitter_generate::{GenerateError, LoadGrammarError, OptLevel};
 use tree_sitter_highlight::Highlighter;
 use tree_sitter_loader::{self as loader, Bindings, TreeSitterJSON};
 use tree_sitter_tags::TagsContext;
@@ -966,10 +967,15 @@ impl Generate {
                 eprintln!("{}", serde_json::to_string_pretty(&err)?);
                 // Exit early to prevent errors from being printed a second time in the caller
                 std::process::exit(1);
-            } else {
-                // Removes extra context associated with the error
-                Err(anyhow!(err.to_string())).with_context(|| "Error when generating parser")?;
             }
+            #[cfg(feature = "nativedsl")]
+            if let GenerateError::LoadGrammarFile(LoadGrammarError::NativeDsl(_)) = err {
+                // Native DSL errors are rendered by themselves
+                return Err(err)?;
+            }
+
+            // Removes extra context associated with the error
+            Err(anyhow!(err.to_string())).context("Error when generating parser")?;
         }
         if self.build {
             warn!("--build is deprecated, use the `build` command");
@@ -2031,6 +2037,23 @@ fn main() {
         {
             return;
         }
+
+        // Pretty-render native DSL diagnostics
+        #[cfg(feature = "nativedsl")]
+        if let Some(e) = err
+            .chain()
+            .find_map(|c| match c.downcast_ref::<GenerateError>()? {
+                GenerateError::LoadGrammarFile(LoadGrammarError::NativeDsl(boxed)) => {
+                    Some(boxed.as_ref())
+                }
+                _ => None,
+            })
+        {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+
+        // Fallback for everything else
         if !err.to_string().is_empty() {
             error!("{err:?}");
         }

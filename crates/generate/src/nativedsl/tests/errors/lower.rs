@@ -38,6 +38,22 @@ error_tests! { Lower {
         rule program { "z" }"#,
         LowerErrorKind::ExpectedRuleName
     }
+    error_int_literal_too_large_positive {
+        r#"grammar { language: "test" }
+        rule program { prec(3000000000, "x") }"#,
+        LowerErrorKind::IntegerOverflow(3_000_000_000)
+    }
+    error_int_literal_too_large_negative {
+        r#"grammar { language: "test" }
+        rule program { prec(-3000000000, "x") }"#,
+        LowerErrorKind::IntegerOverflow(-3_000_000_000)
+    }
+    error_double_negation_of_i32_min_overflows {
+        r#"grammar { language: "test" }
+        let x: int_t = -2147483648
+        rule program { prec(-x, "y") }"#,
+        LowerErrorKind::IntegerOverflow(2_147_483_648)
+    }
 }}
 
 #[test]
