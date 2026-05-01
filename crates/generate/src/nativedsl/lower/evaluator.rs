@@ -45,10 +45,15 @@ macro_rules! scratch_scope {
 pub(super) struct Evaluator<'ast> {
     // Shared AST data (arena + pools), immutable during evaluation
     shared: &'ast SharedAst,
-    // All modules including root (root is last, at index root_global_id)
-    modules: &'ast [Module],
+    // Modules already loaded before this evaluation. The module being lowered
+    // ("root") is not in this slice; it lives in `root_ctx`. Its module id is
+    // `previous.len()` (== `root_id`).
+    previous: &'ast [Module],
+    root_ctx: &'ast ModuleContext,
+    root_id: usize,
     loaded: LoadedModules,
-    // Current execution state
+    // Current execution state. May equal `root_id` (current module's let
+    // bindings or rule body) or any index into `previous`.
     current_module: usize,
     let_values: FxHashMap<NodeId, ValueId>,
     call_stack: Vec<(&'ast str, Span, usize)>, // name, span, module index
@@ -67,13 +72,19 @@ pub(super) struct Evaluator<'ast> {
 }
 
 impl<'ast> Evaluator<'ast> {
-    pub(super) fn new(shared: &'ast SharedAst, modules: &'ast [Module]) -> Self {
-        let root = modules.len() - 1;
+    pub(super) fn new(
+        shared: &'ast SharedAst,
+        previous: &'ast [Module],
+        root_ctx: &'ast ModuleContext,
+    ) -> Self {
+        let root_id = previous.len();
         Self {
             shared,
-            modules,
+            previous,
+            root_ctx,
+            root_id,
             loaded: LoadedModules::default(),
-            current_module: root,
+            current_module: root_id,
             let_values: FxHashMap::default(),
             call_stack: Vec::new(),
             macro_args: Vec::new(),
@@ -99,7 +110,17 @@ impl<'ast> Evaluator<'ast> {
     }
 
     fn ctx(&self) -> &'ast ModuleContext {
-        &self.modules[self.current_module].ctx
+        self.module_ctx(self.current_module)
+    }
+
+    /// `idx` is a global module id; `idx == self.root_id` is the in-progress
+    /// module (whose ctx isn't in `previous`).
+    fn module_ctx(&self, idx: usize) -> &'ast ModuleContext {
+        if idx == self.root_id {
+            self.root_ctx
+        } else {
+            self.previous[idx].ctx()
+        }
     }
 
     fn alloc_val(&mut self, val: Value) -> ValueId {
@@ -418,7 +439,9 @@ impl<'ast> Evaluator<'ast> {
         span: Span,
     ) -> LowerResult<ValueId> {
         use ConfigField as C;
-        let grammar = self.modules[mod_idx].lowered.as_ref().unwrap();
+        // grammar_config target is always an inherit'd module (typecheck-enforced),
+        // i.e. in `previous` with a lowered grammar set.
+        let grammar = self.previous[mod_idx].lowered().unwrap();
         match field {
             C::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
             C::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
@@ -691,9 +714,10 @@ impl<'ast> Evaluator<'ast> {
                     unreachable!() // guarded by typecheck
                 };
                 let table_id = idx as usize;
-                if let Some(var) = self.modules[table_id]
-                    .lowered
-                    .as_ref()
+                // base::name only resolves against an inherit'd module (typecheck-enforced),
+                // so the target is in `previous` with a lowered grammar.
+                if let Some(var) = self.previous[table_id]
+                    .lowered()
                     .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
                 {
                     let rid = self.import_rule(&var.rule);
@@ -933,7 +957,7 @@ impl<'ast> Evaluator<'ast> {
                 .call_stack
                 .iter()
                 .map(|(name, span, mod_idx)| {
-                    let ctx = &self.modules[*mod_idx].ctx;
+                    let ctx = self.module_ctx(*mod_idx);
                     let offset = span.start as usize;
                     let bytes = &ctx.source.as_bytes()[..offset];
                     let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
@@ -961,7 +985,7 @@ impl<'ast> Evaluator<'ast> {
     ) -> LowerResult<ValueId> {
         let config = self.shared.pools.get_macro(macro_id);
         let macro_name = match module {
-            Some(id) => self.modules[id].ctx.text(config.name),
+            Some(id) => self.module_ctx(id).text(config.name),
             None => self.ctx().text(config.name),
         };
         // Args evaluate in the caller's macro context, not the callee's, so
@@ -1004,7 +1028,7 @@ impl<'ast> Evaluator<'ast> {
 
     /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> LowerResult<()> {
-        let ctx = &self.modules[self.current_module].ctx;
+        let ctx = self.ctx();
         let n = ctx.root_items.len();
         for i in 0..n {
             let item_id = ctx.root_items[i];
