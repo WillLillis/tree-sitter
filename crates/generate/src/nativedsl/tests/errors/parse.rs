@@ -23,19 +23,19 @@ error_tests! { Parse {
     }
     error_spread_t_not_allowed {
         r#"grammar { language: "test" } let x: spread_t = "y" rule program { "x" }"#,
-        ParseErrorKind::InternalTypeNotAllowed(Ty::Spread)
+        ParseErrorKind::UnknownType("spread_t".into())
     }
     error_list_of_module_rejected {
         r#"grammar { language: "test" } let x: list_t<module_t> = [] rule program { "x" }"#,
-        ParseErrorKind::ListInnerType(Ty::AnyModule)
+        ParseErrorKind::ListInnerType(Ty::ANY_MODULE)
     }
     error_obj_of_module_rejected {
         r#"grammar { language: "test" } let x: obj_t<module_t> = { a: 1 } rule program { "x" }"#,
-        ParseErrorKind::ObjectInnerType(Ty::AnyModule)
+        ParseErrorKind::ObjectInnerType(Ty::ANY_MODULE)
     }
     error_list_triple_nesting_rejected {
         r#"grammar { language: "test" } let x: list_t<list_t<list_t<rule_t>>> = [] rule program { "x" }"#,
-        ParseErrorKind::ListInnerType(Ty::ListListRule)
+        ParseErrorKind::ListInnerType(Ty::LIST_LIST_RULE)
     }
     error_missing_return_type {
         r#"grammar { language: "test" } macro f(x: rule_t) = x rule program { "x" }"#,

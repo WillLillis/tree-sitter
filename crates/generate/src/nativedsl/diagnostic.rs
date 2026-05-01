@@ -1,12 +1,84 @@
 //! Diagnostic rendering for DSL errors.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use anstyle::{AnsiColor, Style};
+use anstyle::{AnsiColor, Color, Style};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::nativedsl::Note;
+
 use super::{Diagnostic, DslError, NoteMessage, ast::Span, lower::LowerErrorKind};
+
+struct Paint<T>(Style, T);
+
+impl<T: std::fmt::Display> std::fmt::Display for Paint<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if color_enabled() {
+            write!(f, "{}{}{:#}", self.0, self.1, self.0)
+        } else {
+            self.1.fmt(f)
+        }
+    }
+}
+
+fn color_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    // Per https://no-color.org: any non-empty value of NO_COLOR disables color.
+    *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
+}
+
+const PIPE: Paint<&str> = Paint(CYAN_STYLE, "|");
+const ARROW: Paint<&str> = Paint(CYAN_STYLE, "-->");
+const ELLIP: Paint<&str> = Paint(CYAN_STYLE, "...");
+const EQUALS: Paint<&str> = Paint(CYAN_STYLE, "=");
+const ERROR: Paint<&str> = Paint(RED_STYLE, "error");
+const NOTE: Paint<&str> = Paint(CYAN_STYLE, "note");
+
+const RED_STYLE: Style = Style::new()
+    .fg_color(Some(Color::Ansi(AnsiColor::Red)))
+    .bold();
+const CYAN_STYLE: Style = Style::new()
+    .fg_color(Some(Color::Ansi(AnsiColor::Cyan)))
+    .bold();
+
+struct SnippetMarker {
+    style: Style,
+    glyph: char,
+}
+
+const ERROR_MARKER: SnippetMarker = SnippetMarker {
+    style: RED_STYLE,
+    glyph: '^',
+};
+const NOTE_MARKER: SnippetMarker = SnippetMarker {
+    style: CYAN_STYLE,
+    glyph: '-',
+};
+
+/// A located region of source text.
+#[derive(Clone, Copy)]
+struct Source<'a> {
+    span: Span,
+    text: &'a str,
+    path: &'a Path,
+}
+
+#[derive(Clone, Copy)]
+enum SnippetKind {
+    Error,
+    Note(NoteMessage),
+}
+
+impl SnippetKind {
+    const fn marker(self) -> SnippetMarker {
+        match self {
+            Self::Error => ERROR_MARKER,
+            Self::Note(_) => NOTE_MARKER,
+        }
+    }
+}
 
 /// A [`DslError`] bundled with source text and file path for diagnostic rendering.
 #[derive(Debug, Error, Serialize)]
@@ -20,7 +92,7 @@ pub struct NativeDslError {
 
 impl std::fmt::Display for NativeDslError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let DslError::Module(_) = &self.error {
+        if matches!(self.error, DslError::Module(_)) {
             // Walk the Module chain to find the leaf error and collect
             // intermediate ModuleErrors for the reference note chain.
             let mut modules = Vec::new();
@@ -34,25 +106,32 @@ impl std::fmt::Display for NativeDslError {
             // Render the leaf error with the innermost module's source context
             render_error(f, current, &innermost.source_text, &innermost.path)?;
 
-            // Render "referenced from" notes from innermost to outermost
-            for i in (0..modules.len()).rev() {
-                let (parent_src, parent_path): (&str, &Path) = if i > 0 {
-                    (&modules[i - 1].source_text, &modules[i - 1].path)
-                } else {
-                    (&self.src, &self.path)
-                };
+            // Each module is referenced *from* its parent's source: modules[0]
+            // from the root, modules[i] from modules[i-1]. Pair each module
+            // with its parent's (text, path) and render innermost-out.
+            let parents: Vec<(&str, &Path)> =
+                std::iter::once((self.src.as_str(), self.path.as_path()))
+                    .chain(
+                        modules[..modules.len() - 1]
+                            .iter()
+                            .map(|m| (m.source_text.as_str(), m.path.as_path())),
+                    )
+                    .collect();
+
+            for (m, (text, path)) in modules.iter().zip(parents).rev() {
                 writeln!(f)?;
-                let label = format!("note: {}", NoteMessage::ReferencedFromHere);
                 render_snippet(
                     f,
-                    modules[i].reference_span,
-                    parent_src,
-                    parent_path,
-                    NOTE_STYLE,
+                    Source {
+                        span: m.reference_span,
+                        text,
+                        path,
+                    },
+                    SnippetKind::Note(NoteMessage::ReferencedFromHere),
                     false,
-                    Some(&label),
                 )?;
             }
+
             return Ok(());
         }
 
@@ -63,11 +142,12 @@ impl std::fmt::Display for NativeDslError {
 fn render_error(
     f: &mut std::fmt::Formatter<'_>,
     error: &DslError,
-    src: &str,
+    text: &str,
     path: &Path,
 ) -> std::fmt::Result {
+    writeln!(f, "{ERROR}: {error}")?;
+
     let Some(span) = error.span() else {
-        writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
         // Render per-entry spans for errors that carry their own locations
         if let DslError::Lower(Diagnostic {
             kind: LowerErrorKind::OverrideRuleNotFound(entries),
@@ -75,27 +155,33 @@ fn render_error(
         }) = error
         {
             for (_, entry_span) in entries {
-                render_snippet(f, *entry_span, src, path, ERROR_STYLE, false, None)?;
+                let span = *entry_span;
+                render_snippet(f, Source { span, text, path }, SnippetKind::Error, false)?;
                 writeln!(f)?;
             }
         }
         return Ok(());
     };
 
-    writeln!(f, "{}: {}", paint(AnsiColor::Red, "error"), error)?;
-    render_snippet(f, span, src, path, ERROR_STYLE, true, None)?;
+    render_snippet(f, Source { span, text, path }, SnippetKind::Error, true)?;
 
-    if let Some(note) = error.note() {
+    if let Some(Note {
+        message,
+        span,
+        path,
+        source,
+    }) = error.note()
+    {
         writeln!(f)?;
-        let label = format!("note: {}", note.message);
         render_snippet(
             f,
-            note.span,
-            &note.source,
-            &note.path,
-            NOTE_STYLE,
+            Source {
+                span: *span,
+                text: source,
+                path,
+            },
+            SnippetKind::Note(*message),
             false,
-            Some(&label),
         )?;
     }
 
@@ -103,24 +189,15 @@ fn render_error(
         let show = 3;
         let elided = trace.len().saturating_sub(show * 2);
         writeln!(f)?;
-        writeln!(f, " {} call trace:", paint(AnsiColor::Cyan, "="))?;
+        writeln!(f, " {EQUALS} call trace:")?;
         for (i, (name, path, line, col)) in trace.iter().enumerate() {
             if elided > 0 && i == show {
-                writeln!(
-                    f,
-                    "   {} ... {elided} more frames ...",
-                    paint(AnsiColor::Cyan, "...")
-                )?;
+                writeln!(f, "   {ELLIP} ... {elided} more frames ...")?;
             }
             if i >= show && i < trace.len().saturating_sub(show) {
                 continue;
             }
-            writeln!(
-                f,
-                "   {} {}:{line}:{col} in {name}()",
-                paint(AnsiColor::Cyan, "-->"),
-                path.display(),
-            )?;
+            writeln!(f, "   {ARROW} {}:{line}:{col} in {name}()", path.display())?;
         }
     }
 
@@ -130,57 +207,50 @@ fn render_error(
 /// Render a source snippet with a location header, source line, and underline.
 fn render_snippet(
     f: &mut std::fmt::Formatter<'_>,
-    span: Span,
-    src: &str,
-    path: &Path,
-    style: (AnsiColor, char),
+    src: Source<'_>,
+    kind: SnippetKind,
     show_prev_line: bool,
-    label: Option<&str>,
 ) -> std::fmt::Result {
-    let ctx = SpanContext::new(span, src);
-    let gutter_width = digit_count(ctx.line_num);
-    let pipe = paint(AnsiColor::Cyan, "|");
-    let underline = paint(style.0, &style.1.to_string().repeat(ctx.underline_len));
+    let marker = kind.marker();
+    let ctx = SpanContext::new(src.span, src.text);
+    let underline = Paint(
+        marker.style,
+        marker.glyph.to_string().repeat(ctx.underline_len),
+    );
+    let gutter = ctx.gutter_width;
 
     writeln!(
         f,
-        " {} {}:{}:{}",
-        paint(AnsiColor::Cyan, "-->"),
-        path.display(),
+        " {ARROW} {}:{}:{}",
+        src.path.display(),
         ctx.line_num,
-        ctx.col,
+        ctx.col
     )?;
-    writeln!(f, " {:>gutter_width$} {pipe}", "")?;
+    writeln!(f, " {:>gutter$} {PIPE}", "")?;
     if show_prev_line && let Some(prev_text) = ctx.prev_line_text {
         writeln!(
             f,
-            " {} {pipe} {prev_text}",
-            paint(AnsiColor::Cyan, &ctx.prev_line_num.to_string()),
+            " {} {PIPE} {prev_text}",
+            Paint(CYAN_STYLE, ctx.prev_line_num)
         )?;
     }
     writeln!(
         f,
-        " {} {pipe} {}",
-        paint(AnsiColor::Cyan, &ctx.line_num.to_string()),
+        " {} {PIPE} {}",
+        Paint(CYAN_STYLE, ctx.line_num),
         ctx.line_text,
     )?;
-    match label {
-        Some(label) => write!(
-            f,
-            " {:>gutter_width$} {pipe} {:>width$}{underline} {}",
-            "",
-            "",
-            paint(style.0, label),
-            width = ctx.span_start_in_line,
-        ),
-        None => write!(
-            f,
-            " {:>gutter_width$} {pipe} {:>width$}{underline}",
-            "",
-            "",
-            width = ctx.span_start_in_line,
-        ),
+    write!(
+        f,
+        " {pad:>gutter$} {PIPE} {pad:>width$}{underline}",
+        pad = "",
+        width = ctx.span_start_in_line
+    )?;
+    if let SnippetKind::Note(msg) = kind {
+        write!(f, " {NOTE}: {}", Paint(marker.style, msg))?;
     }
+
+    Ok(())
 }
 
 struct SpanContext<'a> {
@@ -191,6 +261,7 @@ struct SpanContext<'a> {
     prev_line_num: usize,
     span_start_in_line: usize,
     underline_len: usize,
+    gutter_width: usize,
 }
 
 impl SpanContext<'_> {
@@ -226,18 +297,11 @@ impl SpanContext<'_> {
             prev_line_num: line_num.saturating_sub(1),
             span_start_in_line,
             underline_len,
+            gutter_width: digit_count(line_num),
         }
     }
 }
 
-const ERROR_STYLE: (AnsiColor, char) = (AnsiColor::Red, '^');
-const NOTE_STYLE: (AnsiColor, char) = (AnsiColor::Cyan, '-');
-
 fn digit_count(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)
-}
-
-fn paint(color: AnsiColor, text: &str) -> String {
-    let style = Style::new().fg_color(Some(color.into())).bold();
-    format!("{style}{text}{style:#}")
 }
