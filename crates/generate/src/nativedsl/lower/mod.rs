@@ -46,18 +46,26 @@ struct EvalResult {
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
-pub fn lower_with_base(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<InputGrammar> {
-    let root_ctx = &modules.last().unwrap().ctx;
-    let base_grammar = root_ctx
+/// `previous` are the modules already loaded; `current` is the root module
+/// being lowered (not yet pushed into `previous`).
+pub fn lower_with_base(
+    shared: &SharedAst,
+    previous: &[super::Module],
+    current: &super::ModuleContext,
+) -> LowerResult<InputGrammar> {
+    let base_grammar = current
         .inherit_module(&shared.arena)
-        .and_then(|(idx, _)| modules[idx as usize].lowered.as_ref());
-    let result = evaluate(shared, modules)?;
+        .and_then(|(idx, _)| previous[idx as usize].lowered());
+    let result = evaluate(shared, previous, current)?;
     build_grammar(result, base_grammar)
 }
 
-fn evaluate(shared: &SharedAst, modules: &[super::Module]) -> LowerResult<EvalResult> {
-    let mut eval = Evaluator::new(shared, modules);
-    let ctx = &modules.last().unwrap().ctx;
+fn evaluate(
+    shared: &SharedAst,
+    previous: &[super::Module],
+    ctx: &super::ModuleContext,
+) -> LowerResult<EvalResult> {
+    let mut eval = Evaluator::new(shared, previous, ctx);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ctx.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
