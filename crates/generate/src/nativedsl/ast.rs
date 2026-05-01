@@ -11,7 +11,6 @@ use super::typecheck::Ty;
 pub struct NodeId(NonZeroU32);
 
 impl NodeId {
-    /// The first valid `NodeId` (index 1, after the sentinel).
     pub const FIRST: Self = Self(NonZeroU32::new(1).unwrap());
 
     #[must_use]
@@ -29,7 +28,6 @@ impl NodeId {
         Self(NonZeroU32::new(index as u32).unwrap())
     }
 
-    /// Return the next `NodeId` (index + 1).
     #[must_use]
     pub const fn next(self) -> Self {
         // SAFETY: self.0 >= 1 and < u32::MAX (arena is bounded well below that),
@@ -98,7 +96,6 @@ impl NodeArena {
         self.nodes.len() == 1
     }
 
-    /// Iterate all valid [`NodeId`]s.
     pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         (1..self.nodes.len()).map(|i| {
             // SAFETY: i starts at 1, always non-zero.
@@ -106,7 +103,6 @@ impl NodeArena {
         })
     }
 
-    /// Iterate all `(NodeId, &Node)` pairs.
     pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
         self.node_ids().map(|id| (id, &self.nodes[id.index()]))
     }
@@ -212,9 +208,9 @@ impl Span {
     }
 
     /// Strip the first and last byte (e.g. surrounding quotes).
-    /// Assumes the span covers at least 2 bytes.
     #[must_use]
     pub const fn strip_quotes(self) -> Self {
+        debug_assert!(self.end >= self.start + 2);
         Self {
             start: self.start + 1,
             end: self.end - 1,
@@ -229,7 +225,6 @@ impl Span {
         }
     }
 
-    /// Resolve to a `&str` slice.
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
         // SAFETY: span boundaries are at ASCII byte positions. The
@@ -349,6 +344,26 @@ impl AstPools {
     }
 }
 
+#[derive(Clone)]
+pub struct MacroConfig {
+    pub name: Span,
+    pub params: Vec<Param>,
+    pub return_ty: Ty,
+    pub body: NodeId,
+}
+
+#[derive(Copy, Clone)]
+pub struct Param {
+    pub name: Span,
+    pub ty: Ty,
+}
+
+#[derive(Clone)]
+pub struct ForConfig {
+    pub bindings: Vec<(Span, Ty)>,
+    pub iterable: NodeId,
+}
+
 /// Per-module data produced by the parser.
 ///
 /// Each loaded module (root, inherited, imported) has its own `ModuleContext`
@@ -362,13 +377,30 @@ pub struct ModuleContext {
     /// The `inherit()` `ModuleRef` node, if this module has one.
     /// Set by the parser when it encounters `inherit(...)`.
     pub inherit_ref: Option<NodeId>,
+    /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
+    /// collected by the parser so the loader can iterate without scanning the arena.
+    pub module_refs: Vec<NodeId>,
 }
 
 impl ModuleContext {
-    /// Resolve a span to the source text it covers.
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         span.resolve(&self.source)
+    }
+
+    /// The resolved inherited-module index and its `inherit(...)` call span,
+    /// once the loader has populated it. `None` for non-inheriting modules
+    /// or before child loading completes.
+    #[must_use]
+    pub fn inherit_module(&self, arena: &NodeArena) -> Option<(u8, Span)> {
+        let id = self.inherit_ref?;
+        let &Node::ModuleRef {
+            module: Some(idx), ..
+        } = arena.get(id)
+        else {
+            return None;
+        };
+        Some((idx, arena.span(id)))
     }
 }
 
@@ -408,7 +440,7 @@ pub enum Node {
     RawStringLit {
         hash_count: u8,
     },
-    IntLit(i32),
+    IntLit(i64),
     Ident(IdentKind),
     FieldAccess {
         obj: NodeId,
@@ -540,37 +572,17 @@ pub struct GrammarConfig {
 impl GrammarConfig {
     /// Iterate all node-valued config fields with their kind (excludes `language`).
     pub fn node_fields(&self) -> impl Iterator<Item = (ConfigField, NodeId)> + '_ {
-        use ConfigField as F;
+        use ConfigField as C;
         #[rustfmt::skip]
         let fields = [
-            (F::Inherits, self.inherits),       (F::Extras, self.extras),
-            (F::Externals, self.externals),      (F::Inline, self.inline),
-            (F::Supertypes, self.supertypes),    (F::Word, self.word),
-            (F::Conflicts, self.conflicts),      (F::Precedences, self.precedences),
-            (F::Reserved, self.reserved),
+            (C::Inherits, self.inherits),     (C::Extras, self.extras),
+            (C::Externals, self.externals),   (C::Inline, self.inline),
+            (C::Supertypes, self.supertypes), (C::Word, self.word),
+            (C::Conflicts, self.conflicts),   (C::Precedences, self.precedences),
+            (C::Reserved, self.reserved),
         ];
         fields
             .into_iter()
             .filter_map(|(f, opt)| opt.map(|id| (f, id)))
     }
-}
-
-#[derive(Clone)]
-pub struct MacroConfig {
-    pub name: Span,
-    pub params: Vec<Param>,
-    pub return_ty: Ty,
-    pub body: NodeId,
-}
-
-#[derive(Clone)]
-pub struct Param {
-    pub name: Span,
-    pub ty: Ty,
-}
-
-#[derive(Clone)]
-pub struct ForConfig {
-    pub bindings: Vec<(Span, Ty)>,
-    pub iterable: NodeId,
 }

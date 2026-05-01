@@ -70,6 +70,10 @@ rule_tests! {
         r#"grammar { language: "test" } rule program { prec_dynamic(4, "x") }"#,
         Rule::prec_dynamic(4, Rule::String("x".into()))
     }
+    prec_dynamic_negative {
+        r#"grammar { language: "test" } rule program { prec_dynamic(-1, "x") }"#,
+        Rule::prec_dynamic(-1, Rule::String("x".into()))
+    }
     prec_with_string_name {
         r#"grammar { language: "test" } rule program { prec_left("assign", "x") }"#,
         Rule::prec_left(Precedence::Name("assign".into()), Rule::String("x".into()))

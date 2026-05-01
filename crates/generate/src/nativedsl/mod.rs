@@ -18,7 +18,7 @@ pub use diagnostic::NativeDslError;
 pub use lexer::LexErrorKind;
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult};
 pub use parser::ParseErrorKind;
-pub use typecheck::{InnerTy, Ty, TypeErrorKind};
+pub use typecheck::{DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeErrorKind};
 
 pub type LexError = Diagnostic<LexErrorKind>;
 pub type ParseError = Diagnostic<ParseErrorKind>;
@@ -32,7 +32,7 @@ use thiserror::Error;
 
 use crate::grammars::InputGrammar;
 
-use ast::{ModuleContext, Node, NodeId, SharedAst, Span};
+use ast::{ModuleContext, Node, SharedAst, Span};
 use typecheck::TypeEnv;
 
 fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
@@ -52,14 +52,15 @@ fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
 ///
 /// # Errors
 ///
-/// Returns [`DslError`] if any pipeline stage fails.
-///
-/// # Panics
-///
-/// Panics if `grammar_path` cannot be canonicalized.
+/// Returns [`DslError`] if any pipeline stage fails, or if `grammar_path`
+/// cannot be canonicalized.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
-    let canonical = dunce::canonicalize(grammar_path)
-        .expect("grammar path should be canonicalizable (file was already read)");
+    let canonical = dunce::canonicalize(grammar_path).map_err(|e| {
+        LowerError::without_span(LowerErrorKind::ModuleResolveFailed {
+            path: grammar_path.to_path_buf(),
+            error: e.to_string(),
+        })
+    })?;
     let cap = input.len() / 30;
     let mut shared = SharedAst::new(cap);
     let mut modules: Vec<Module> = Vec::new();
@@ -87,7 +88,7 @@ pub enum ModuleKind {
     Helper,
 }
 
-/// Loads a tsg module, imported either via `import` or `inherit`
+/// Loads a tsg module, imported either via `import` or `inherit`.
 ///
 /// # Errors
 ///
@@ -112,11 +113,7 @@ pub fn load_module<'m>(
     let module_dir = path.parent().unwrap();
 
     let tokens = lexer::Lexer::new(source).tokenize()?;
-    // Record node range for this module so load_import_children only scans
-    // nodes belonging to this module (not parent or child modules).
-    let node_start = shared.arena.len() + 1;
     let ctx = parser::Parser::new(&tokens, source.to_string(), path, shared).parse()?;
-    let node_end = shared.arena.len();
 
     match kind {
         ModuleKind::Grammar => validate_grammar(shared, &ctx)?,
@@ -151,32 +148,13 @@ pub fn load_module<'m>(
         );
     }
 
-    load_import_children(
-        shared,
-        &ctx,
-        module_dir,
-        ancestor_paths,
-        modules,
-        env,
-        node_start..=node_end,
-    )?;
+    load_import_children(shared, &ctx, module_dir, ancestor_paths, modules, env)?;
 
     // Resolve identifiers + typecheck. Child modules already populated env
     // during their own load_module calls.
-    let base = ctx.inherit_ref.and_then(|id| {
-        if let Node::ModuleRef {
-            module: Some(child_id),
-            ..
-        } = shared.arena.get(id)
-        {
-            Some((
-                modules[*child_id as usize].lowered.as_ref()?,
-                shared.arena.span(id),
-            ))
-        } else {
-            None
-        }
-    });
+    let base = ctx
+        .inherit_module(&shared.arena)
+        .and_then(|(idx, span)| Some((modules[idx as usize].lowered.as_ref()?, span)));
     typecheck::resolve_and_check(shared, &ctx, env, modules, base, path)?;
 
     let global_id = u8::try_from(modules.len())
@@ -296,8 +274,8 @@ pub struct Module {
     pub lowered: Option<InputGrammar>,
 }
 
-/// Scan AST for unresolved module refs, load files, and set indices.
-/// Deduplicates: same file imported multiple times is loaded once.
+/// Resolve unresolved `ModuleRef` nodes (those still `module: None`),
+/// loading each child file. Deduplicates by canonical path.
 fn load_import_children(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
@@ -305,31 +283,25 @@ fn load_import_children(
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
     env: &mut TypeEnv,
-    node_range: std::ops::RangeInclusive<usize>,
 ) -> Result<(), DslError> {
     // Dedup cache: canonical path -> module index. Typically 0-3 entries,
     // so linear search beats hashing.
     let mut loaded: Vec<(PathBuf, u8)> = Vec::new();
 
-    // Only scan nodes belonging to this module (not parent or child modules).
-    let mut node_id = NodeId::from_index(*node_range.start());
-    let end = *node_range.end();
-    while node_id.index() <= end {
-        let (path_span, is_import, kind) = if let Node::ModuleRef {
+    for &node_id in &ctx.module_refs {
+        let Node::ModuleRef {
             import: is_import,
-            path,
+            path: path_span,
             module: None,
         } = *shared.arena.get(node_id)
-        {
-            let kind = if is_import {
-                ModuleKind::Helper
-            } else {
-                ModuleKind::Grammar
-            };
-            (path, is_import, kind)
-        } else {
-            node_id = node_id.next();
+        else {
+            // Already resolved (e.g. the inherit ref handled by the caller).
             continue;
+        };
+        let kind = if is_import {
+            ModuleKind::Helper
+        } else {
+            ModuleKind::Grammar
         };
 
         let path_str = ctx.text(path_span);
@@ -359,8 +331,6 @@ fn load_import_children(
                 module: Some(gid),
             },
         );
-
-        node_id = node_id.next();
     }
 
     Ok(())
@@ -470,7 +440,7 @@ pub struct Note {
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,

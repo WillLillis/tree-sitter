@@ -12,7 +12,7 @@ use super::{
         ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
-    typecheck::Ty,
+    typecheck::{DataTy, Ty},
 };
 
 const MAX_PARSE_DEPTH: u16 = 256;
@@ -56,6 +56,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 grammar_config: None,
                 root_items: Vec::new(),
                 inherit_ref: None,
+                module_refs: Vec::new(),
             },
             scratch: Vec::new(),
             locals: Vec::new(),
@@ -91,7 +92,6 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.tokens[self.pos].kind == kind
     }
 
-    /// Check whether the next non-comment token after the current one is `kind`.
     fn next_is(&self, kind: TokenKind) -> bool {
         if self.at_eof() {
             return false;
@@ -107,7 +107,6 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     }
 
     /// Advance past the current token, skipping any comments.
-    /// Safe without bounds check: the token stream always ends with `Eof`.
     fn advance_pos(&mut self) {
         self.pos += 1;
         while self.tokens[self.pos].kind == TokenKind::Comment {
@@ -385,10 +384,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
         if let Some(id_span) = self.eat(TokenKind::Ident) {
             return match self.ctx.text(id_span) {
-                "rule_t" => Ok((Ty::Rule, id_span)),
-                "str_t" => Ok((Ty::Str, id_span)),
-                "int_t" => Ok((Ty::Int, id_span)),
-                "module_t" => Ok((Ty::AnyModule, id_span)),
+                "rule_t" => Ok((Ty::RULE, id_span)),
+                "str_t" => Ok((Ty::STR, id_span)),
+                "int_t" => Ok((Ty::INT, id_span)),
+                "module_t" => Ok((Ty::ANY_MODULE, id_span)),
                 "list_t" => {
                     self.expect(TokenKind::Lt)?;
                     let (inner_ty, inner_span) = self.parse_type()?;
@@ -401,16 +400,20 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 "obj_t" => {
                     self.expect(TokenKind::Lt)?;
                     let (inner_ty, inner_span) = self.parse_type()?;
-                    let ty = InnerTy::try_from(inner_ty).map(Ty::Object).map_err(|()| {
-                        ParseError::new(ParseErrorKind::ObjectInnerType(inner_ty), inner_span)
-                    });
+                    let inner = match inner_ty {
+                        Ty::Data(d) => InnerTy::try_from(d).map_err(|()| {
+                            ParseError::new(ParseErrorKind::ObjectInnerType(inner_ty), inner_span)
+                        })?,
+                        _ => {
+                            return Err(ParseError::new(
+                                ParseErrorKind::ObjectInnerType(inner_ty),
+                                inner_span,
+                            ));
+                        }
+                    };
                     let gt = self.expect(TokenKind::Gt)?;
-                    Ok((ty?, id_span.merge(gt)))
+                    Ok((Ty::Data(DataTy::Object(inner)), id_span.merge(gt)))
                 }
-                "spread_t" => Err(ParseError::new(
-                    ParseErrorKind::InternalTypeNotAllowed(Ty::Spread),
-                    id_span,
-                )),
                 _ => Err(ParseError::new(
                     ParseErrorKind::UnknownType(self.ctx.text(id_span).to_string()),
                     id_span,
@@ -514,7 +517,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             }
             TokenKind::IntLit(n) => {
                 self.advance_pos();
-                Ok(self.shared.arena.push(Node::IntLit(n), start))
+                Ok(self.shared.arena.push(Node::IntLit(i64::from(n)), start))
             }
             TokenKind::RawStringLit { hash_count } => {
                 self.advance_pos();
@@ -709,6 +712,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             },
             start.merge(end),
         );
+        self.ctx.module_refs.push(id);
         if !is_import {
             if let Some(first) = self.ctx.inherit_ref {
                 return Err(ParseError::with_note(
@@ -972,8 +976,6 @@ pub enum ParseErrorKind {
     ExpectedItem,
     #[error("unknown type '{0}'")]
     UnknownType(String),
-    #[error("{0} is an internal type and cannot be used as a type annotation")]
-    InternalTypeNotAllowed(Ty),
     #[error("{0} cannot be stored inside a list")]
     ListInnerType(Ty),
     #[error("{0} cannot be stored inside an object")]
