@@ -762,15 +762,16 @@ fn resolve_qualified_member(
     member_name: &str,
     member_span: Span,
 ) -> Result<(), TypeError> {
-    for &item_id in &target.ctx.root_items {
+    let target_ctx = target.ctx();
+    for &item_id in &target_ctx.root_items {
         match arena.get(item_id) {
-            Node::Let { name, .. } if target.ctx.text(*name) == member_name => {
+            Node::Let { name, .. } if target_ctx.text(*name) == member_name => {
                 arena.set(node_id, Node::Ident(IdentKind::Var(item_id)));
                 return Ok(());
             }
             Node::Macro(macro_id) => {
                 let config = pools.get_macro(*macro_id);
-                if target.ctx.text(config.name) == member_name {
+                if target_ctx.text(config.name) == member_name {
                     return Err(TypeError::new(
                         TypeErrorKind::MacroUsedAsValue(member_name.to_string()),
                         member_span,
@@ -782,8 +783,7 @@ fn resolve_qualified_member(
     }
     // Check inherited grammar rules (only for inherit modules with a lowered grammar)
     if target
-        .lowered
-        .as_ref()
+        .lowered()
         .is_some_and(|g| g.variables.iter().any(|v| v.name == member_name))
     {
         // Leave as QualifiedAccess - the lowerer handles inherited rule
@@ -804,10 +804,11 @@ fn resolve_qualified_call_name(
     name_id: NodeId,
     macro_name: &str,
 ) {
-    for &item_id in &target.ctx.root_items {
+    let target_ctx = target.ctx();
+    for &item_id in &target_ctx.root_items {
         if let Node::Macro(macro_id) = arena.get(item_id) {
             let config = pools.get_macro(*macro_id);
-            if target.ctx.text(config.name) == macro_name {
+            if target_ctx.text(config.name) == macro_name {
                 arena.set(name_id, Node::Ident(IdentKind::Macro(*macro_id)));
                 return;
             }
