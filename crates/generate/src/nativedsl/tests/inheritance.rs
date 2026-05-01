@@ -311,6 +311,179 @@ fn inherit_from_grammar_that_imports() {
 }
 
 #[test]
+fn override_rule_can_access_base_let() {
+    // override rule body referencing a let defined in the inherited grammar.
+    // This exercises eager evaluation of the base's let bindings before any
+    // override rule body that references them.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(
+        &base,
+        r#"
+        let GREETING: str_t = "hello"
+        grammar { language: "base" }
+        rule program { GREETING }
+        "#,
+    )
+    .unwrap();
+
+    let parent = dir.path().join("parent.tsg");
+    let src = format!(
+        r#"
+        let base = inherit("{}")
+        grammar {{ language: "derived", inherits: base }}
+        override rule program {{ seq(base::GREETING, "!") }}
+        "#,
+        dsl_path(&base)
+    );
+    std::fs::write(&parent, &src).unwrap();
+    let g = parse_native_dsl(&src, &parent).unwrap();
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
+    );
+}
+
+#[test]
+fn nested_inheritance_merges_all_rules() {
+    // child inherits parent inherits grandparent. All three levels' rules
+    // should appear in the child's grammar.
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+        rule child_only { "child" }
+    "#);
+    assert_eq!(g.name, "child");
+    let names = rule_names(&g);
+    // Grandparent's rules
+    assert!(names.contains(&"program"));
+    assert!(names.contains(&"identifier"));
+    assert!(names.contains(&"_gp_inline"));
+    // Parent's added rules
+    assert!(names.contains(&"parent_only"));
+    assert!(names.contains(&"_parent_inline"));
+    // Parent's override of statement should be present (not grandparent's)
+    let statement = find_rule(&g, "statement");
+    assert_eq!(
+        *statement,
+        Rule::choice(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::String("!".into())
+        ])
+    );
+    // Child's own rule
+    assert!(names.contains(&"child_only"));
+}
+
+#[test]
+fn nested_inheritance_qualified_access_to_grandparent_via_parent() {
+    // child references parent::identifier where identifier is defined in
+    // grandparent. The merge in parent's lowering puts identifier into
+    // parent.lowered.variables, so resolution succeeds without traversing.
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+        rule wrapper { parent::identifier }
+    "#);
+    let wrapper = find_rule(&g, "wrapper");
+    assert!(matches!(wrapper, Rule::Pattern(p, _) if p == "[a-z]+"));
+}
+
+#[test]
+fn nested_inheritance_explicit_chain_access() {
+    // child reaches grandparent via parent::gp::identifier, traversing
+    // parent's own inherit binding (`gp`).
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+        rule wrapper { parent::gp::identifier }
+    "#);
+    let wrapper = find_rule(&g, "wrapper");
+    assert!(matches!(wrapper, Rule::Pattern(p, _) if p == "[a-z]+"));
+}
+
+#[test]
+fn nested_inheritance_child_override_of_grandparent_rule() {
+    // child overrides identifier (defined in grandparent, untouched by parent).
+    // The override should win.
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+        override rule identifier { regexp("[A-Z]+") }
+    "#);
+    let identifier = find_rule(&g, "identifier");
+    assert!(matches!(identifier, Rule::Pattern(p, _) if p == "[A-Z]+"));
+}
+
+#[test]
+fn nested_inheritance_child_override_of_parent_override() {
+    // parent overrides statement (originally from grandparent).
+    // child overrides statement again. Child's version wins.
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+        override rule statement { "child_statement" }
+    "#);
+    let statement = find_rule(&g, "statement");
+    assert_eq!(*statement, Rule::String("child_statement".into()));
+}
+
+#[test]
+fn nested_inheritance_grammar_config_transitive() {
+    // parent appended _parent_inline to gp's inline. child reads
+    // grammar_config(parent, inline) which should return [_gp_inline, _parent_inline].
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar {
+            language: "child",
+            inherits: parent,
+            inline: append(grammar_config(parent, inline), [_child_inline]),
+        }
+        rule _child_inline { "c" }
+    "#);
+    assert_eq!(
+        g.variables_to_inline,
+        vec!["_gp_inline", "_parent_inline", "_child_inline"]
+    );
+}
+
+#[test]
+fn nested_inheritance_chain_accesses_pre_override_rule() {
+    // parent overrides `statement`; grandparent's original is `identifier`.
+    // From the child, `parent::statement` should yield parent's override,
+    // while `parent::gp::statement` should yield grandparent's original.
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+        rule via_parent { parent::statement }
+        rule via_chain { parent::gp::statement }
+    "#);
+    let via_parent = find_rule(&g, "via_parent");
+    let via_chain = find_rule(&g, "via_chain");
+    // parent::statement -> parent's override: choice(identifier, "!")
+    assert_eq!(
+        *via_parent,
+        Rule::choice(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::String("!".into())
+        ])
+    );
+    // parent::gp::statement -> grandparent's original: identifier
+    assert_eq!(*via_chain, Rule::NamedSymbol("identifier".into()));
+}
+
+#[test]
+fn nested_inheritance_word_token_propagates() {
+    // grandparent set word: identifier. parent didn't override. child should
+    // see the inherited word_token.
+    let g = dsl(r#"
+        let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent }
+    "#);
+    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+}
+
+#[test]
 fn import_before_inherit_in_source_order() {
     // Import before inherit in source order. Tests that eval order doesn't
     // corrupt the module values table.
