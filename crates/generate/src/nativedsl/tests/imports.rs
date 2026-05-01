@@ -292,7 +292,9 @@ fn error_qualified_call_on_non_module() {
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
-        TypeErrorKind::QualifiedCallOnNonModule(Ty::Object(InnerTy::Int))
+        TypeErrorKind::QualifiedCallOnNonModule(Ty::Data(DataTy::Object(InnerTy::Scalar(
+            ScalarTy::Int
+        ))))
     );
 }
 
@@ -606,6 +608,17 @@ fn import_keyword_as_rule_name() {
         rule import { "import_stmt" }
     "#);
     assert_eq!(g.variables[1].name, "import");
+}
+
+#[test]
+fn chained_let_alias_to_import_module() {
+    let g = dsl(r#"
+        let h = import("import_helpers/helpers.tsg")
+        let h2 = h
+        grammar { language: "test" }
+        rule program { h2::GREETING }
+    "#);
+    assert_eq!(*find_rule(&g, "program"), Rule::String("hello".into()));
 }
 
 #[test]

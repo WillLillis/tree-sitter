@@ -5,7 +5,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         macro needs_int(x: int_t) rule_t { prec(x, "a") }
         rule program { needs_int("not_an_int") }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Str }
+        TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
     error_for_binding_count_mismatch {
         r#"grammar { language: "test" }
@@ -16,7 +16,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let c = append("x", ["y"])
         rule program { "x" }"#,
-        TypeErrorKind::AppendRequiresList(Ty::Str)
+        TypeErrorKind::AppendRequiresList(Ty::STR)
     }
     error_append_non_list {
         r#"grammar { language: "test" }
@@ -24,19 +24,19 @@ error_tests! { Type {
         let b: list_t<str_t> = ["y"]
         let c = append(a, b)
         rule program { "x" }"#,
-        TypeErrorKind::AppendRequiresList(Ty::Str)
+        TypeErrorKind::AppendRequiresList(Ty::STR)
     }
     error_let_type_annotation_mismatch {
         r#"grammar { language: "test" }
         let X: int_t = "not_an_int"
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Str }
+        TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
     error_module_t_annotation_mismatch {
         r#"grammar { language: "test" }
         let X: module_t = "not_a_module"
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::AnyModule, got: Ty::Str }
+        TypeErrorKind::TypeMismatch { expected: Ty::ANY_MODULE, got: Ty::STR }
     }
     error_rule_called_as_function {
         r#"grammar { language: "test", word: ident }
@@ -60,25 +60,25 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let obj = { x: 1 }
         rule program { obj::x }"#,
-        TypeErrorKind::QualifiedAccessOnInvalidType(Ty::Object(InnerTy::Int))
+        TypeErrorKind::QualifiedAccessOnInvalidType(Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))))
     }
     error_field_access_on_non_object {
         r#"grammar { language: "test" }
         let x: int_t = 5
         rule program { prec(x.foo, "a") }"#,
-        TypeErrorKind::FieldAccessOnNonObject(Ty::Int)
+        TypeErrorKind::FieldAccessOnNonObject(Ty::INT)
     }
     error_field_not_found {
         r#"grammar { language: "test" }
         let x = { a: 1 }
         rule program { prec(x.b, "a") }"#,
-        TypeErrorKind::FieldNotFound { field: "b".into(), on_type: Ty::Object(InnerTy::Int) }
+        TypeErrorKind::FieldNotFound { field: "b".into(), on_type: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))) }
     }
     error_word_non_rule_var {
         r#"let my_word = 42
         grammar { language: "test", word: my_word }
         rule program { "y" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Rule, got: Ty::Int }
+        TypeErrorKind::TypeMismatch { expected: Ty::RULE, got: Ty::INT }
     }
     error_config_access_unknown_field {
         r#"let base = inherit("inherit_base/grammar.tsg")
@@ -90,30 +90,30 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let x: int_t = 5
         rule program { choice(for (v: int_t) in x { prec(v, "a") }) }"#,
-        TypeErrorKind::ForRequiresList(Ty::Int)
+        TypeErrorKind::ForRequiresList(Ty::INT)
     }
     error_rule_body_not_rule_typed {
         r#"grammar { language: "test" }
         rule program { 42 }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Rule, got: Ty::Int }
+        TypeErrorKind::TypeMismatch { expected: Ty::RULE, got: Ty::INT }
     }
     error_fn_return_type_mismatch {
         r#"grammar { language: "test" }
         macro bad(x: rule_t) int_t { x }
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Rule }
+        TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::RULE }
     }
     error_prec_value_not_int_or_str {
         r#"grammar { language: "test" }
         rule program { prec(identifier, "x") }
         rule identifier { "id" }"#,
-        TypeErrorKind::PrecValueTypeMismatch(Ty::Rule)
+        TypeErrorKind::PrecValueTypeMismatch(Ty::RULE)
     }
     error_list_inconsistent_types {
         r#"grammar { language: "test" }
         let x = ["a", 1]
         rule program { "x" }"#,
-        TypeErrorKind::ListElementTypeMismatch { first: Ty::Str, got: Ty::Int }
+        TypeErrorKind::ListElementTypeMismatch { first: Ty::STR, got: Ty::INT }
     }
     error_expected_rule_name_in_word {
         r#"grammar { language: "test", word: "not_a_name" }
@@ -125,6 +125,18 @@ error_tests! { Type {
         let foo = for (k: str_t) in ["a", "b"] { k }
         rule program { seq(foo) }"#,
         TypeErrorKind::NonBindableType(Ty::Spread)
+    }
+    error_let_rhs_tuple_rejected {
+        r#"grammar { language: "test" }
+        let pair = ("a", 1)
+        rule program { "x" }"#,
+        TypeErrorKind::NonBindableType(Ty::Tuple)
+    }
+    error_list_of_tuples_rejected {
+        r#"grammar { language: "test" }
+        let xs = [("a", 1), ("b", 2)]
+        rule program { "x" }"#,
+        TypeErrorKind::InvalidListElement(Ty::Tuple)
     }
     error_conflicts_rejects_non_name {
         r#"grammar {
@@ -143,7 +155,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let x: list_t<rule_t> = [1, 2]
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::ListRule, got: Ty::ListInt }
+        TypeErrorKind::TypeMismatch { expected: Ty::LIST_RULE, got: Ty::LIST_INT }
     }
     error_flat_list_assigned_to_list_list_rule {
         r#"grammar { language: "test" }
@@ -151,7 +163,7 @@ error_tests! { Type {
         rule program { "x" }
         rule a { "a" }
         rule b { "b" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::ListListRule, got: Ty::ListRule }
+        TypeErrorKind::TypeMismatch { expected: Ty::LIST_LIST_RULE, got: Ty::LIST_RULE }
     }
     error_for_bindings_not_tuple {
         r#"grammar { language: "test" }
@@ -165,7 +177,7 @@ error_tests! { Type {
         let inner = { a: 1 }
         let x = { nested: inner }
         rule program { "x" }"#,
-        TypeErrorKind::InvalidObjectValue(Ty::Object(InnerTy::Int))
+        TypeErrorKind::InvalidObjectValue(Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))))
     }
     error_invalid_list_element {
         r#"grammar { language: "test" }
@@ -173,7 +185,7 @@ error_tests! { Type {
         let x = [inner]
         rule program { "x" }
         rule a { "a" }"#,
-        TypeErrorKind::InvalidListElement
+        TypeErrorKind::InvalidListElement(Ty::LIST_LIST_RULE)
     }
     error_empty_list_needs_annotation {
         r#"grammar { language: "test" }
@@ -190,7 +202,7 @@ error_tests! { Type {
     error_invalid_alias_target {
         r#"grammar { language: "test" }
         rule program { alias("x", 42) }"#,
-        TypeErrorKind::InvalidAliasTarget(Ty::Int)
+        TypeErrorKind::InvalidAliasTarget(Ty::INT)
     }
     error_expected_reserved_config {
         r#"grammar { language: "test", reserved: "not_an_object" }
@@ -212,31 +224,31 @@ error_tests! { Type {
     error_concat_with_non_string_arg {
         r#"grammar { language: "test" }
         rule program { regexp(concat("a", 1)) }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Str, got: Ty::Int }
+        TypeErrorKind::TypeMismatch { expected: Ty::STR, got: Ty::INT }
     }
     error_regexp_with_non_string_pattern {
         r#"grammar { language: "test" }
         let x: int_t = 1
         rule program { regexp(x) }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Str, got: Ty::Int }
+        TypeErrorKind::TypeMismatch { expected: Ty::STR, got: Ty::INT }
     }
     error_regexp_with_non_string_flags {
         r#"grammar { language: "test" }
         let f: int_t = 1
         rule program { regexp("[a-z]+", f) }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Str, got: Ty::Int }
+        TypeErrorKind::TypeMismatch { expected: Ty::STR, got: Ty::INT }
     }
     error_prec_dynamic_with_string_value {
         r#"grammar { language: "test" }
         rule program { prec_dynamic("high", "x") }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::Int, got: Ty::Str }
+        TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
 }}
 
 inherit_error_tests! { Type {
     error_inherited_type_error {
         "grammar { language: \"base\" }\nrule program { 42 }\n",
-        TypeErrorKind::TypeMismatch { expected: Ty::Rule, got: Ty::Int }
+        TypeErrorKind::TypeMismatch { expected: Ty::RULE, got: Ty::INT }
     }
 }}
 

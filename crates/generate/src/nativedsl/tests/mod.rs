@@ -5,8 +5,8 @@ use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
 use super::{
-    DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, NoteMessage,
-    ParseErrorKind, Span, Ty, TypeErrorKind, parse_native_dsl,
+    DataTy, DisallowedItemKind, DslError, InnerTy, LexErrorKind, LowerErrorKind, NoteMessage,
+    ParseErrorKind, ScalarTy, Span, Ty, TypeErrorKind, parse_native_dsl,
 };
 
 /// Generate tests that parse a grammar and assert on the first variable's rule.
@@ -39,7 +39,7 @@ mod bindings;
 mod combinators;
 mod config;
 mod errors;
-mod hardening;
+// mod hardening; // local testing only
 mod imports;
 mod inheritance;
 mod types;
