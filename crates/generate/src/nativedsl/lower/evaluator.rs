@@ -1,6 +1,6 @@
-//! The lowering evaluator: walks the typed AST and produces the intermediate
-//! IR (values + `ARule` trees) that [`super`] then materializes into a final
-//! [`crate::grammars::InputGrammar`].
+//!  Walks the typed AST into intermediate IR; [`super`] materializes it into
+//!  [`crate::grammars::InputGrammar`].
+
 
 use std::borrow::Cow;
 
@@ -19,9 +19,7 @@ use crate::grammars::{PrecedenceEntry, ReservedWordContext};
 use crate::rules::{Associativity, Precedence, Rule};
 
 /// Save the length of one or more scratch buffers, run a body, then truncate
-/// each back. The body is wrapped in a closure so `?` inside short-circuits
-/// the closure rather than the outer function, letting the truncates always
-/// run. The multi-buffer form folds in any "push N, pop N" stack-frame
+/// each back. The multi-buffer form folds in any "push N, pop N" stack-frame
 /// cleanup that pairs with the scratch save.
 macro_rules! scratch_scope {
     ($buf:expr, |$base:ident| $body:expr) => {{
@@ -44,9 +42,7 @@ macro_rules! scratch_scope {
     }};
 }
 
-/// Per-grammar evaluation wrapper. Holds a borrow of the long-lived
-/// [`LoweringState`] plus per-call references to `SharedAst`, the module
-/// slice, and the in-progress module's context.
+/// Per-grammar evaluation wrapper around long-lived [`LoweringState`].
 pub(super) struct Evaluator<'a, 'ast> {
     pub(super) state: &'a mut LoweringState,
     pub(super) shared: &'ast SharedAst,
@@ -56,8 +52,7 @@ pub(super) struct Evaluator<'a, 'ast> {
     previous: &'a [Module],
     root_ctx: &'a ModuleContext,
     root_id: ModuleId,
-    /// May equal `root_id` (current module's let bindings or rule body) or any
-    /// index into `previous`.
+    /// May equal `root_id` (current module) or index into `previous`.
     current_module: ModuleId,
 }
 
@@ -83,7 +78,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    /// Evaluate a top-level `let` binding's value and store it under `let_id`.
     pub(super) fn eval_let(&mut self, let_id: NodeId, value: NodeId) -> LowerResult<()> {
         let val = self.eval_expr(value)?;
         self.state.let_values.insert(let_id, val);
@@ -187,7 +181,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         id
     }
 
-    /// Get a rule by arena ID. All `RuleId`s are produced by `alloc_rule`.
     fn get_rule(&self, id: RuleId) -> &ARule {
         // Safety: id was produced by alloc_rule which returns sequential indices.
         unsafe { self.state.rules.get_unchecked(id.0 as usize) }
@@ -427,7 +420,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             .collect()
     }
 
-    /// Evaluate a `grammar_config(module, field)` expression.
     fn eval_grammar_config(
         &mut self,
         mod_idx: ModuleId,
@@ -498,6 +490,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn import_rules_as_list(&mut self, rules_data: &[Rule], span: Span) -> LowerResult<ValueId> {
         let start = self.state.value_children.len() as u32;
+        self.state.value_children.reserve(rules_data.len());
         for r in rules_data {
             let rid = self.import_rule(r, span)?;
             let vid = self.alloc_val(Value::Rule(rid));
@@ -510,6 +503,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn import_names_as_list(&mut self, names: &[String], span: Span) -> LowerResult<ValueId> {
         let start = self.state.value_children.len() as u32;
+        self.state.value_children.reserve(names.len());
         for name in names {
             let vid = self.owned_symbol_val(Cow::Borrowed(name));
             self.state.value_children.push(vid);
@@ -538,6 +532,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             Rule::Choice(members) | Rule::Seq(members) => {
                 let is_seq = matches!(rule, Rule::Seq(_));
+                self.state.rule_scratch.reserve(members.len());
+                self.state.rule_children.reserve(members.len());
                 let (start, count) = scratch_scope!(self.state.rule_scratch, |base| {
                     for m in members {
                         let rid = self.import_rule(m, ref_span)?;
@@ -1035,7 +1031,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         result
     }
 
-    /// Evaluate top-level let bindings in the current module context.
     fn eval_let_bindings(&mut self) -> LowerResult<()> {
         let ctx = self.ctx();
         let n = ctx.root_items.len();

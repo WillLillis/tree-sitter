@@ -30,25 +30,21 @@ use repr::{ARule, LoadedModules, RuleId, StringPool, Value, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
 
-/// One stack frame for the macro-call trace, kept owned (no `&str`) so the
-/// state can persist across grammar lowerings without lifetime ties.
+/// One stack frame for the macro-call trace.
 #[derive(Clone, Copy)]
 pub(super) struct CallFrame {
-    /// Span of the macro's *name* in its defining module.
+    /// Span of the macro's name in its defining module.
     pub(super) name_span: Span,
-    /// Module that defined the macro (where `name_span` resolves).
     pub(super) name_mod: ModuleId,
     /// Span of the call site in the caller's module.
     pub(super) call_span: Span,
-    /// Module that issued the call (where `call_span` resolves).
     pub(super) caller_mod: ModuleId,
 }
 
-/// Long-lived lowering state that persists across all grammar lowerings in a
-/// single `parse_native_dsl` call. Pools, the let-value cache, and the
-/// `loaded` bitset all live here so that imported/inherited modules' let
-/// bindings evaluate exactly once. Scratch buffers also live here so their
-/// allocated capacity carries between calls.
+/// Long-lived state shared across grammar lowerings in one
+/// `parse_native_dsl` call. Pools and caches make imported/inherited let
+/// bindings evaluate exactly once; scratch buffers persist to reuse
+/// allocated capacity.
 #[derive(Default)]
 pub(super) struct LoweringState {
     // Persistent pools and caches:
@@ -60,8 +56,7 @@ pub(super) struct LoweringState {
     value_children: Vec<ValueId>,
     object_pool: Vec<FxHashMap<String, ValueId>>,
     strings: StringPool,
-
-    // Scratch (cleared per grammar; capacity retained):
+    // Scratch (cleared per grammar):
     call_stack: Vec<CallFrame>,
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
@@ -72,7 +67,6 @@ pub(super) struct LoweringState {
 }
 
 impl LoweringState {
-    /// Clear scratch buffers between grammar lowerings (capacity retained).
     fn reset_per_grammar(&mut self) {
         self.call_stack.clear();
         self.macro_args.clear();
@@ -84,8 +78,6 @@ impl LoweringState {
     }
 }
 
-/// Intermediate results from the evaluation phase, ready to be assembled
-/// into an `InputGrammar` once the base grammar can be moved out.
 struct EvalResult {
     language: String,
     rules: Vec<(String, Rule)>,
@@ -103,8 +95,7 @@ struct EvalResult {
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 /// `previous` are the modules already loaded; `current` is the root module
 /// being lowered (not yet pushed into `previous`). `state` persists across
-/// the whole `parse_native_dsl` pipeline so that imported/inherited modules'
-/// let bindings evaluate exactly once.
+/// the whole `parse_native_dsl` pipeline.
 pub(super) fn lower_with_base(
     state: &mut LoweringState,
     shared: &SharedAst,
@@ -199,13 +190,10 @@ fn evaluate(
     })
 }
 
-/// Assemble evaluated results into an `InputGrammar`, optionally merging
-/// with an inherited base grammar.
 fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult<InputGrammar> {
-    // Start with inherited rules (cloned), apply overrides, then append new rules.
+    // Start with inherited rules, apply overrides, then append new rules.
     let mut variables = if let Some(base) = base {
-        // Build override map so we can apply them in a single pass over the
-        // base variables, avoiding a full clone of every rule tree.
+        // Build override map so we can apply them in a single pass over the base variables
         let mut overrides: FxHashMap<String, (Rule, Span)> = FxHashMap::default();
         for (name, rule, span) in result.overrides {
             overrides.insert(name, (rule, span));
@@ -250,7 +238,6 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
         });
     }
 
-    // Derived values override base; only clone base fields that aren't overridden.
     fn inherit<T: Clone>(
         overridden: Option<Vec<T>>,
         base: Option<&InputGrammar>,

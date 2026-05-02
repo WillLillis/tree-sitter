@@ -1,9 +1,4 @@
 //! Intermediate representation used during lowering.
-//!
-//! All types here are pure data: pools, IDs, and an interned-string store.
-//! The algorithm that fills these pools lives in [`super::evaluator`]; the
-//! final translation to [`crate::rules::Rule`] / [`crate::grammars::InputGrammar`]
-//! lives in [`super`] (mod.rs).
 
 use std::borrow::Cow;
 use std::num::NonZeroU32;
@@ -77,8 +72,8 @@ pub(super) enum APrec {
     Name(Str),
 }
 
-/// Intermediate rule shape. Built up during evaluation, materialized into
-/// [`crate::rules::Rule`] at the end via `Evaluator::build_rule`.
+/// Intermediate rule shape. Materialized into [`crate::rules::Rule`]
+/// at the end via `Evaluator::build_rule`.
 pub(super) enum ARule {
     Blank,
     String(Str),
@@ -100,8 +95,6 @@ pub(super) enum ARule {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct ValueId(pub(super) u32);
 
-/// Compact value representation. Compound data (List/Tuple/Object) stores
-/// indices into external pools on the Evaluator rather than inline heap data.
 #[derive(Clone, Copy)]
 pub(super) enum Value {
     Int(i32),
@@ -118,8 +111,7 @@ pub(super) enum Value {
 
 const LOADED_MODULES_WORDS: usize = (u8::MAX as usize + 1) / u64::BITS as usize;
 
-/// Tracks which modules have had their let bindings evaluated. Sized to
-/// the `u8` module-id ceiling: 256 bits = 4 × u64.
+/// Tracks which modules have had their let bindings evaluated.
 #[derive(Default)]
 pub(super) struct LoadedModules([u64; LOADED_MODULES_WORDS]);
 
