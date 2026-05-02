@@ -54,6 +54,15 @@ fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
     })
 }
 
+/// Mutable pipeline state passed through the load/lower recursion. Bundled
+/// to keep `load_module` / `load_child_module` argument lists tractable.
+struct Loader<'a> {
+    shared: &'a mut SharedAst,
+    modules: &'a mut Vec<Module>,
+    env: &'a mut TypeEnv,
+    state: &'a mut LoweringState,
+}
+
 /// Parse a native DSL source file into an [`InputGrammar`].
 ///
 /// # Errors
@@ -72,16 +81,13 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
-    load_module(
-        &mut shared,
-        &mut modules,
-        &mut env,
-        &mut state,
-        input,
-        grammar_path,
-        ModuleKind::Grammar,
-        &[canonical],
-    )?;
+    let mut loader = Loader {
+        shared: &mut shared,
+        modules: &mut modules,
+        env: &mut env,
+        state: &mut state,
+    };
+    loader.load_module(input, grammar_path, ModuleKind::Grammar, &[canonical])?;
     // Root is the last-pushed module by construction.
     let Module::Grammar { lowered, .. } = modules.pop().unwrap() else {
         unreachable!("root module is always loaded as Grammar");
@@ -97,89 +103,85 @@ pub enum ModuleKind {
     Helper,
 }
 
-/// Loads a tsg module, imported either via `import` or `inherit`.
-///
-/// # Errors
-///
-/// Returns `Err` if the imported module isn't valid tsg source.
-///
-/// # Panics
-///
-/// Panics if `path` has no parent directory.
-fn load_module<'m>(
-    shared: &'m mut SharedAst,
-    modules: &'m mut Vec<Module>,
-    env: &mut TypeEnv,
-    state: &mut LoweringState,
-    source: &str,
-    path: &Path,
-    kind: ModuleKind,
-    ancestor_paths: &[PathBuf],
-) -> DslResult<u8> {
-    if source.len() >= u32::MAX as usize {
-        Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
-    }
+impl Loader<'_> {
+    /// Load a tsg module, imported either via `import` or `inherit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the imported module isn't valid tsg source.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` has no parent directory.
+    fn load_module(
+        &mut self,
+        source: &str,
+        path: &Path,
+        kind: ModuleKind,
+        ancestor_paths: &[PathBuf],
+    ) -> DslResult<ModuleId> {
+        if source.len() >= u32::MAX as usize {
+            Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
+        }
 
-    let module_dir = path.parent().unwrap();
+        let module_dir = path.parent().unwrap();
 
-    let tokens = lexer::Lexer::new(source).tokenize()?;
-    let ctx = parser::Parser::new(&tokens, source.to_string(), path, shared).parse()?;
+        let tokens = lexer::Lexer::new(source).tokenize()?;
+        let ctx = parser::Parser::new(&tokens, source.to_string(), path, self.shared).parse()?;
 
-    match kind {
-        ModuleKind::Grammar => validate_grammar(shared, &ctx)?,
-        ModuleKind::Helper => validate_import_items(shared, &ctx)?,
-    }
+        match kind {
+            ModuleKind::Grammar => validate_grammar(self.shared, &ctx)?,
+            ModuleKind::Helper => validate_import_items(self.shared, &ctx)?,
+        }
 
-    // Load inherited grammar (Grammar kind only, must happen before typecheck).
-    if let Some(inherit_id) = ctx.inherit_ref
-        && let Node::ModuleRef {
-            import: false,
-            path: ref_path,
-            ..
-        } = *shared.arena.get(inherit_id)
-    {
-        let child_path = resolve_path(&module_dir.join(ctx.text(ref_path)), ref_path)?;
-        let child_id = load_child_module(
-            shared,
-            modules,
-            env,
-            state,
-            &child_path,
-            ref_path,
-            ancestor_paths,
-            ModuleKind::Grammar,
-        )?;
-        shared.arena.set(
-            inherit_id,
-            Node::ModuleRef {
+        // Load inherited grammar (Grammar kind only, must happen before typecheck).
+        if let Some(inherit_id) = ctx.inherit_ref
+            && let Node::ModuleRef {
                 import: false,
                 path: ref_path,
-                module: Some(child_id),
-            },
-        );
-    }
-
-    load_import_children(shared, &ctx, module_dir, ancestor_paths, modules, env, state)?;
-
-    // Resolve identifiers + typecheck. Child modules already populated env
-    // during their own load_module calls.
-    let base = ctx
-        .inherit_module(&shared.arena)
-        .and_then(|(idx, span)| Some((modules[idx as usize].lowered()?, span)));
-    typecheck::resolve_and_check(shared, &ctx, env, modules, base, path)?;
-
-    let global_id = u8::try_from(modules.len())
-        .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
-    let module = match kind {
-        ModuleKind::Grammar => {
-            let lowered = Box::new(lower::lower_with_base(state, shared, modules, &ctx)?);
-            Module::Grammar { ctx, lowered }
+                ..
+            } = *self.shared.arena.get(inherit_id)
+        {
+            let child_path = resolve_path(&module_dir.join(ctx.text(ref_path)), ref_path)?;
+            let child_id =
+                self.load_child_module(&child_path, ref_path, ancestor_paths, ModuleKind::Grammar)?;
+            self.shared.arena.set(
+                inherit_id,
+                Node::ModuleRef {
+                    import: false,
+                    path: ref_path,
+                    module: Some(child_id),
+                },
+            );
         }
-        ModuleKind::Helper => Module::Helper { ctx },
-    };
-    modules.push(module);
 
-    Ok(global_id)
+        self.load_import_children(&ctx, module_dir, ancestor_paths)?;
+
+        // Resolve identifiers + typecheck. Child modules already populated env
+        // during their own load_module calls.
+        let base = ctx
+            .inherit_module(&self.shared.arena)
+            .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
+        typecheck::resolve_and_check(self.shared, &ctx, self.env, self.modules, base, path)?;
+
+        let global_id = u8::try_from(self.modules.len())
+            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+        let module = match kind {
+            ModuleKind::Grammar => {
+                let lowered = Box::new(lower::lower_with_base(
+                    self.state,
+                    self.shared,
+                    self.modules,
+                    &ctx,
+                )?);
+                Module::Grammar { ctx, lowered }
+            }
+            ModuleKind::Helper => Module::Helper { ctx },
+        };
+        self.modules.push(module);
+
+        Ok(global_id)
+    }
 }
 
 /// Validate: grammar block exists, inherits field consistency.
@@ -215,69 +217,59 @@ fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()> {
 
 const MAX_MODULE_DEPTH: usize = 256;
 
-fn load_child_module(
-    shared: &mut SharedAst,
-    modules: &mut Vec<Module>,
-    env: &mut TypeEnv,
-    state: &mut LoweringState,
-    module_path: &Path,
-    span: Span,
-    ancestor_paths: &[PathBuf],
-    kind: ModuleKind,
-) -> DslResult<u8> {
-    if ancestor_paths.len() >= MAX_MODULE_DEPTH {
-        return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
-    }
+impl Loader<'_> {
+    fn load_child_module(
+        &mut self,
+        module_path: &Path,
+        span: Span,
+        ancestor_paths: &[PathBuf],
+        kind: ModuleKind,
+    ) -> DslResult<ModuleId> {
+        if ancestor_paths.len() >= MAX_MODULE_DEPTH {
+            return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
+        }
 
-    let content = std::fs::read_to_string(module_path).map_err(|e| {
-        DslError::from(ModuleError {
-            inner: Box::new(
-                LowerError::new(
-                    LowerErrorKind::ModuleReadFailed {
-                        path: module_path.to_path_buf(),
-                        error: e.to_string(),
-                    },
-                    span,
-                )
-                .into(),
-            ),
-            source_text: String::new(),
-            path: module_path.to_path_buf(),
-            reference_span: span,
-        })
-    })?;
-
-    if ancestor_paths.iter().any(|p| p == module_path) {
-        #[expect(clippy::needless_return_with_question_mark)]
-        return Err(ModuleError {
-            inner: Box::new(LowerError::without_span(LowerErrorKind::ModuleCycle).into()),
-            source_text: content,
-            path: module_path.to_path_buf(),
-            reference_span: span,
+        let content = std::fs::read_to_string(module_path).map_err(|e| {
+            DslError::from(ModuleError {
+                inner: Box::new(
+                    LowerError::new(
+                        LowerErrorKind::ModuleReadFailed {
+                            path: module_path.to_path_buf(),
+                            error: e.to_string(),
+                        },
+                        span,
+                    )
+                    .into(),
+                ),
+                source_text: String::new(),
+                path: module_path.to_path_buf(),
+                reference_span: span,
+            })
         })?;
+
+        if ancestor_paths.iter().any(|p| p == module_path) {
+            return Err(ModuleError {
+                inner: Box::new(LowerError::without_span(LowerErrorKind::ModuleCycle).into()),
+                source_text: content,
+                path: module_path.to_path_buf(),
+                reference_span: span,
+            })?;
+        }
+
+        let mut child_ancestors = ancestor_paths.to_vec();
+        child_ancestors.push(module_path.to_path_buf());
+
+        let module_id = self
+            .load_module(&content, module_path, kind, &child_ancestors)
+            .map_err(|inner| ModuleError {
+                inner: Box::new(inner),
+                source_text: content,
+                path: module_path.to_path_buf(),
+                reference_span: span,
+            })?;
+
+        Ok(module_id)
     }
-
-    let mut child_ancestors = ancestor_paths.to_vec();
-    child_ancestors.push(module_path.to_path_buf());
-
-    let module_id = load_module(
-        shared,
-        modules,
-        env,
-        state,
-        &content,
-        module_path,
-        kind,
-        &child_ancestors,
-    )
-    .map_err(|inner| ModuleError {
-        inner: Box::new(inner),
-        source_text: content,
-        path: module_path.to_path_buf(),
-        reference_span: span,
-    })?;
-
-    Ok(module_id)
 }
 
 /// A loaded and resolved module.
@@ -314,68 +306,58 @@ impl Module {
     }
 }
 
-/// Resolve unresolved `ModuleRef` nodes (those still `module: None`),
-/// loading each child file. Deduplicates by canonical path.
-fn load_import_children(
-    shared: &mut SharedAst,
-    ctx: &ModuleContext,
-    module_dir: &Path,
-    ancestor_paths: &[PathBuf],
-    modules: &mut Vec<Module>,
-    env: &mut TypeEnv,
-    state: &mut LoweringState,
-) -> Result<(), DslError> {
-    // Dedup cache: canonical path -> module index. Typically 0-3 entries,
-    // so linear search beats hashing.
-    let mut loaded: Vec<(PathBuf, u8)> = Vec::new();
+impl Loader<'_> {
+    /// Resolve unresolved `ModuleRef` nodes (those still `module: None`),
+    /// loading each child file. Deduplicates by canonical path.
+    fn load_import_children(
+        &mut self,
+        ctx: &ModuleContext,
+        module_dir: &Path,
+        ancestor_paths: &[PathBuf],
+    ) -> Result<(), DslError> {
+        // Dedup cache: canonical path -> module index. Typically 0-3 entries,
+        // so linear search beats hashing.
+        let mut loaded: Vec<(PathBuf, ModuleId)> = Vec::new();
 
-    for &node_id in &ctx.module_refs {
-        let Node::ModuleRef {
-            import: is_import,
-            path: path_span,
-            module: None,
-        } = *shared.arena.get(node_id)
-        else {
-            // Already resolved (e.g. the inherit ref handled by the caller).
-            continue;
-        };
-        let kind = if is_import {
-            ModuleKind::Helper
-        } else {
-            ModuleKind::Grammar
-        };
-
-        let path_str = ctx.text(path_span);
-        let canonical = resolve_path(&module_dir.join(path_str), path_span)?;
-
-        let gid = if let Some(&(_, gid)) = loaded.iter().find(|(p, _)| p == &canonical) {
-            gid
-        } else {
-            let gid = load_child_module(
-                shared,
-                modules,
-                env,
-                state,
-                &canonical,
-                path_span,
-                ancestor_paths,
-                kind,
-            )?;
-            loaded.push((canonical, gid));
-            gid
-        };
-
-        shared.arena.set(
-            node_id,
-            Node::ModuleRef {
+        for &node_id in &ctx.module_refs {
+            let Node::ModuleRef {
                 import: is_import,
                 path: path_span,
-                module: Some(gid),
-            },
-        );
-    }
+                module: None,
+            } = *self.shared.arena.get(node_id)
+            else {
+                // Already resolved (e.g. the inherit ref handled by the caller).
+                continue;
+            };
+            let kind = if is_import {
+                ModuleKind::Helper
+            } else {
+                ModuleKind::Grammar
+            };
 
-    Ok(())
+            let path_str = ctx.text(path_span);
+            let canonical = resolve_path(&module_dir.join(path_str), path_span)?;
+
+            let gid = if let Some(&(_, gid)) = loaded.iter().find(|(p, _)| p == &canonical) {
+                gid
+            } else {
+                let gid = self.load_child_module(&canonical, path_span, ancestor_paths, kind)?;
+                loaded.push((canonical, gid));
+                gid
+            };
+
+            self.shared.arena.set(
+                node_id,
+                Node::ModuleRef {
+                    import: is_import,
+                    path: path_span,
+                    module: Some(gid),
+                },
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Validate that an imported file only contains allowed items.
