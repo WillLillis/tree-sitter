@@ -7,33 +7,37 @@
 
 use std::num::NonZeroU32;
 
+use super::super::ModuleId;
 use super::super::ast::{ChildRange, Span};
 
 /// Interned string id. Indexes into [`StringPool::entries`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Str(pub(super) NonZeroU32);
 
-pub(super) enum StrEntry<'src> {
+pub(super) enum StrEntry {
     Unreachable,
-    Source(Span, &'src str),
+    Source(Span, ModuleId),
     Owned(String),
 }
 
-pub(super) struct StringPool<'src> {
-    pub(super) entries: Vec<StrEntry<'src>>,
+pub(super) struct StringPool {
+    pub(super) entries: Vec<StrEntry>,
 }
 
-impl<'src> StringPool<'src> {
-    pub(super) fn new() -> Self {
+impl Default for StringPool {
+    fn default() -> Self {
         Self {
             entries: vec![StrEntry::Unreachable],
         }
     }
+}
 
-    pub(super) fn intern_span(&mut self, span: Span, source: &'src str) -> Str {
+impl StringPool {
+
+    pub(super) fn intern_span(&mut self, span: Span, mod_id: ModuleId) -> Str {
         // Safety: entries always starts with one sentinel, so len() >= 1.
         let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
-        self.entries.push(StrEntry::Source(span, source));
+        self.entries.push(StrEntry::Source(span, mod_id));
         id
     }
 
@@ -44,18 +48,13 @@ impl<'src> StringPool<'src> {
         id
     }
 
-    pub(super) fn resolve(&self, id: Str) -> &str {
+    /// Get the raw entry. Resolution to `&str` lives on the Evaluator since
+    /// `Source` entries may reference the in-progress module whose source
+    /// isn't in the `previous` slice.
+    pub(super) fn entry(&self, id: Str) -> &StrEntry {
         // Safety: id was produced by intern_span/intern_owned which return
         // sequential indices into self.entries.
-        match unsafe { self.entries.get_unchecked(id.0.get() as usize) } {
-            StrEntry::Source(span, source) => span.resolve(source),
-            StrEntry::Owned(s) => s,
-            StrEntry::Unreachable => unreachable!(),
-        }
-    }
-
-    pub(super) fn to_string(&self, id: Str) -> String {
-        self.resolve(id).to_string()
+        unsafe { self.entries.get_unchecked(id.0.get() as usize) }
     }
 }
 
@@ -105,7 +104,7 @@ pub(super) enum Value {
     List(ChildRange),
     /// Range into `Evaluator::value_children`.
     Tuple(ChildRange),
-    Module(u8),
+    Module(ModuleId),
 }
 
 const LOADED_MODULES_WORDS: usize = (u8::MAX as usize + 1) / u64::BITS as usize;
