@@ -61,6 +61,7 @@ struct Loader<'a> {
     modules: &'a mut Vec<Module>,
     env: &'a mut TypeEnv,
     state: &'a mut LoweringState,
+    ancestor_paths: Vec<PathBuf>,
 }
 
 /// Parse a native DSL source file into an [`InputGrammar`].
@@ -86,8 +87,9 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
         modules: &mut modules,
         env: &mut env,
         state: &mut state,
+        ancestor_paths: vec![canonical.clone()],
     };
-    loader.load_module(input, grammar_path, ModuleKind::Grammar, &[canonical])?;
+    loader.load_module(input, &canonical, ModuleKind::Grammar)?;
     // Root is the last-pushed module by construction.
     let Module::Grammar { lowered, .. } = modules.pop().unwrap() else {
         unreachable!("root module is always loaded as Grammar");
@@ -113,13 +115,7 @@ impl Loader<'_> {
     /// # Panics
     ///
     /// Panics if `path` has no parent directory.
-    fn load_module(
-        &mut self,
-        source: &str,
-        path: &Path,
-        kind: ModuleKind,
-        ancestor_paths: &[PathBuf],
-    ) -> DslResult<ModuleId> {
+    fn load_module(&mut self, source: &str, path: &Path, kind: ModuleKind) -> DslResult<ModuleId> {
         if source.len() >= u32::MAX as usize {
             Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
         }
@@ -143,8 +139,7 @@ impl Loader<'_> {
             } = *self.shared.arena.get(inherit_id)
         {
             let child_path = resolve_path(&module_dir.join(ctx.text(ref_path)), ref_path)?;
-            let child_id =
-                self.load_child_module(&child_path, ref_path, ancestor_paths, ModuleKind::Grammar)?;
+            let child_id = self.load_child_module(&child_path, ref_path, ModuleKind::Grammar)?;
             self.shared.arena.set(
                 inherit_id,
                 Node::ModuleRef {
@@ -155,7 +150,7 @@ impl Loader<'_> {
             );
         }
 
-        self.load_import_children(&ctx, module_dir, ancestor_paths)?;
+        self.load_import_children(&ctx, module_dir)?;
 
         // Resolve identifiers + typecheck. Child modules already populated env
         // during their own load_module calls.
@@ -222,10 +217,9 @@ impl Loader<'_> {
         &mut self,
         module_path: &Path,
         span: Span,
-        ancestor_paths: &[PathBuf],
         kind: ModuleKind,
     ) -> DslResult<ModuleId> {
-        if ancestor_paths.len() >= MAX_MODULE_DEPTH {
+        if self.ancestor_paths.len() >= MAX_MODULE_DEPTH {
             return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
         }
 
@@ -247,7 +241,7 @@ impl Loader<'_> {
             })
         })?;
 
-        if ancestor_paths.iter().any(|p| p == module_path) {
+        if self.ancestor_paths.iter().any(|p| p == module_path) {
             return Err(ModuleError {
                 inner: Box::new(LowerError::without_span(LowerErrorKind::ModuleCycle).into()),
                 source_text: content,
@@ -256,19 +250,17 @@ impl Loader<'_> {
             })?;
         }
 
-        let mut child_ancestors = ancestor_paths.to_vec();
-        child_ancestors.push(module_path.to_path_buf());
-
-        let module_id = self
-            .load_module(&content, module_path, kind, &child_ancestors)
+        self.ancestor_paths.push(module_path.to_path_buf());
+        let result = self
+            .load_module(&content, module_path, kind)
             .map_err(|inner| ModuleError {
                 inner: Box::new(inner),
                 source_text: content,
                 path: module_path.to_path_buf(),
                 reference_span: span,
-            })?;
-
-        Ok(module_id)
+            });
+        self.ancestor_paths.pop();
+        Ok(result?)
     }
 }
 
@@ -313,7 +305,6 @@ impl Loader<'_> {
         &mut self,
         ctx: &ModuleContext,
         module_dir: &Path,
-        ancestor_paths: &[PathBuf],
     ) -> Result<(), DslError> {
         // Dedup cache: canonical path -> module index. Typically 0-3 entries,
         // so linear search beats hashing.
@@ -341,7 +332,7 @@ impl Loader<'_> {
             let gid = if let Some(&(_, gid)) = loaded.iter().find(|(p, _)| p == &canonical) {
                 gid
             } else {
-                let gid = self.load_child_module(&canonical, path_span, ancestor_paths, kind)?;
+                let gid = self.load_child_module(&canonical, path_span, kind)?;
                 loaded.push((canonical, gid));
                 gid
             };
