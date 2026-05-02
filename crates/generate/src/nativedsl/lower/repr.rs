@@ -5,7 +5,10 @@
 //! final translation to [`crate::rules::Rule`] / [`crate::grammars::InputGrammar`]
 //! lives in [`super`] (mod.rs).
 
+use std::borrow::Cow;
 use std::num::NonZeroU32;
+
+use rustc_hash::FxHashMap;
 
 use super::super::ModuleId;
 use super::super::ast::{ChildRange, Span};
@@ -22,12 +25,14 @@ pub(super) enum StrEntry {
 
 pub(super) struct StringPool {
     pub(super) entries: Vec<StrEntry>,
+    owned_lookup: FxHashMap<String, Str>,
 }
 
 impl Default for StringPool {
     fn default() -> Self {
         Self {
             entries: vec![StrEntry::Unreachable],
+            owned_lookup: FxHashMap::default(),
         }
     }
 }
@@ -40,10 +45,15 @@ impl StringPool {
         id
     }
 
-    pub(super) fn intern_owned(&mut self, s: String) -> Str {
+    pub(super) fn intern_owned(&mut self, s: Cow<'_, str>) -> Str {
+        if let Some(&id) = self.owned_lookup.get(s.as_ref()) {
+            return id;
+        }
+        let owned = s.into_owned();
         // Safety: entries always starts with one sentinel, so len() >= 1.
         let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
-        self.entries.push(StrEntry::Owned(s));
+        self.entries.push(StrEntry::Owned(owned.clone()));
+        self.owned_lookup.insert(owned, id);
         id
     }
 
@@ -114,10 +124,12 @@ const LOADED_MODULES_WORDS: usize = (u8::MAX as usize + 1) / u64::BITS as usize;
 pub(super) struct LoadedModules([u64; LOADED_MODULES_WORDS]);
 
 impl LoadedModules {
-    pub(super) const fn is_loaded(&self, idx: usize) -> bool {
-        self.0[idx / 64] & (1 << (idx % 64)) != 0
+    pub(super) const fn is_loaded(&self, idx: ModuleId) -> bool {
+        let i = idx as usize;
+        self.0[i / 64] & (1 << (i % 64)) != 0
     }
-    pub(super) const fn set_loaded(&mut self, idx: usize) {
-        self.0[idx / 64] |= 1 << (idx % 64);
+    pub(super) const fn set_loaded(&mut self, idx: ModuleId) {
+        let i = idx as usize;
+        self.0[i / 64] |= 1 << (i % 64);
     }
 }
