@@ -24,6 +24,7 @@ use crate::{
 use super::LowerError;
 use super::ast::{Node, SharedAst, Span};
 
+pub use evaluator::LoweringState;
 use evaluator::Evaluator;
 use repr::RuleId;
 
@@ -47,8 +48,11 @@ struct EvalResult {
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
 /// `previous` are the modules already loaded; `current` is the root module
-/// being lowered (not yet pushed into `previous`).
+/// being lowered (not yet pushed into `previous`). `state` persists across
+/// the whole `parse_native_dsl` pipeline so that imported/inherited modules'
+/// let bindings evaluate exactly once.
 pub fn lower_with_base(
+    state: &mut LoweringState,
     shared: &SharedAst,
     previous: &[super::Module],
     current: &super::ModuleContext,
@@ -56,16 +60,17 @@ pub fn lower_with_base(
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[idx as usize].lowered());
-    let result = evaluate(shared, previous, current)?;
+    let result = evaluate(state, shared, previous, current)?;
     build_grammar(result, base_grammar)
 }
 
 fn evaluate(
+    state: &mut LoweringState,
     shared: &SharedAst,
     previous: &[super::Module],
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
-    let mut eval = Evaluator::new(shared, previous, ctx);
+    let mut eval = Evaluator::new(state, shared, previous, ctx);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ctx.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
