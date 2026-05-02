@@ -25,6 +25,11 @@ pub type ParseError = Diagnostic<ParseErrorKind>;
 pub type TypeError = Diagnostic<TypeErrorKind>;
 pub type LowerError = Diagnostic<LowerErrorKind>;
 
+/// Global module index. Every loaded module (root, inherited, imported)
+/// gets a unique `ModuleId`. The cap is `u8::MAX`; exceeding it raises
+/// `LowerErrorKind::ModuleTooMany`.
+pub type ModuleId = u8;
+
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -33,6 +38,7 @@ use thiserror::Error;
 use crate::grammars::InputGrammar;
 
 use ast::{ModuleContext, Node, SharedAst, Span};
+use lower::LoweringState;
 use typecheck::TypeEnv;
 
 fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
@@ -65,10 +71,12 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut shared = SharedAst::new(cap);
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
+    let mut state = LoweringState::default();
     load_module(
         &mut shared,
         &mut modules,
         &mut env,
+        &mut state,
         input,
         grammar_path,
         ModuleKind::Grammar,
@@ -102,6 +110,7 @@ pub fn load_module<'m>(
     shared: &'m mut SharedAst,
     modules: &'m mut Vec<Module>,
     env: &mut TypeEnv,
+    state: &mut LoweringState,
     source: &str,
     path: &Path,
     kind: ModuleKind,
@@ -134,6 +143,7 @@ pub fn load_module<'m>(
             shared,
             modules,
             env,
+            state,
             &child_path,
             ref_path,
             ancestor_paths,
@@ -149,7 +159,7 @@ pub fn load_module<'m>(
         );
     }
 
-    load_import_children(shared, &ctx, module_dir, ancestor_paths, modules, env)?;
+    load_import_children(shared, &ctx, module_dir, ancestor_paths, modules, env, state)?;
 
     // Resolve identifiers + typecheck. Child modules already populated env
     // during their own load_module calls.
@@ -162,7 +172,7 @@ pub fn load_module<'m>(
         .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
     let module = match kind {
         ModuleKind::Grammar => {
-            let lowered = Box::new(lower::lower_with_base(shared, modules, &ctx)?);
+            let lowered = Box::new(lower::lower_with_base(state, shared, modules, &ctx)?);
             Module::Grammar { ctx, lowered }
         }
         ModuleKind::Helper => Module::Helper { ctx },
@@ -209,6 +219,7 @@ fn load_child_module(
     shared: &mut SharedAst,
     modules: &mut Vec<Module>,
     env: &mut TypeEnv,
+    state: &mut LoweringState,
     module_path: &Path,
     span: Span,
     ancestor_paths: &[PathBuf],
@@ -253,6 +264,7 @@ fn load_child_module(
         shared,
         modules,
         env,
+        state,
         &content,
         module_path,
         kind,
@@ -311,6 +323,7 @@ fn load_import_children(
     ancestor_paths: &[PathBuf],
     modules: &mut Vec<Module>,
     env: &mut TypeEnv,
+    state: &mut LoweringState,
 ) -> Result<(), DslError> {
     // Dedup cache: canonical path -> module index. Typically 0-3 entries,
     // so linear search beats hashing.
@@ -342,6 +355,7 @@ fn load_import_children(
                 shared,
                 modules,
                 env,
+                state,
                 &canonical,
                 path_span,
                 ancestor_paths,
