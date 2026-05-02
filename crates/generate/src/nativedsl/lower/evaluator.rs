@@ -5,13 +5,13 @@
 use rustc_hash::FxHashMap;
 
 use super::super::LowerError;
-use super::super::{Module, ModuleId};
 use super::super::ast::{
     ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind,
     RepeatKind, SharedAst, Span,
 };
+use super::super::{Module, ModuleId};
 use super::repr::{APrec, ARule, RuleId, Str, StrEntry, Value, ValueId};
-use super::{CallFrame, LoweringState, LowerErrorKind, LowerResult, MAX_CALL_DEPTH};
+use super::{CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH};
 
 use crate::grammars::{PrecedenceEntry, ReservedWordContext};
 use crate::rules::{Associativity, Precedence, Rule};
@@ -206,7 +206,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Intern a span using the current module's source text.
     fn intern_span(&mut self, span: Span) -> Str {
-        self.state.strings.intern_span(span, self.current_module as ModuleId)
+        self.state
+            .strings
+            .intern_span(span, self.current_module as ModuleId)
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
@@ -539,7 +541,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         self.state.rule_scratch.push(rid);
                     }
                     let start = self.children_start();
-                    self.state.rule_children
+                    self.state
+                        .rule_children
                         .extend_from_slice(&self.state.rule_scratch[base..]);
                     (start, self.state.rule_children.len() as u32 - start)
                 });
@@ -694,9 +697,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = self.ctx().text(field);
                 match *self.get_val(obj_val) {
-                    Value::Object(idx) => {
-                        Ok(*self.state.object_pool[idx as usize].get(field_name).unwrap())
-                    }
+                    Value::Object(idx) => Ok(*self.state.object_pool[idx as usize]
+                        .get(field_name)
+                        .unwrap()),
                     _ => unreachable!(), // guarded by typecheck
                 }
             }
@@ -728,7 +731,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let mut map =
                     FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
                 for &(key_span, value_id) in fields {
-                    map.insert(self.ctx().text(key_span).to_string(), self.eval_expr(value_id)?);
+                    map.insert(
+                        self.ctx().text(key_span).to_string(),
+                        self.eval_expr(value_id)?,
+                    );
                 }
                 Ok(self.alloc_object(map))
             }
@@ -743,7 +749,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let start = self.state.value_children.len() as u32;
                     let len = u16::try_from(self.state.val_scratch.len() - base)
                         .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-                    self.state.value_children
+                    self.state
+                        .value_children
                         .extend_from_slice(&self.state.val_scratch[base..]);
                     Ok(ChildRange::new(start, len))
                 })?;
@@ -852,7 +859,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         }
                     }
                     let start = self.children_start();
-                    self.state.rule_children
+                    self.state
+                        .rule_children
                         .extend_from_slice(&self.state.rule_scratch[base..]);
                     self.children_range(start, span)
                 })?;
