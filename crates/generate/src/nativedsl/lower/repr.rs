@@ -33,7 +33,6 @@ impl Default for StringPool {
 }
 
 impl StringPool {
-
     pub(super) fn intern_span(&mut self, span: Span, mod_id: ModuleId) -> Str {
         // Safety: entries always starts with one sentinel, so len() >= 1.
         let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
