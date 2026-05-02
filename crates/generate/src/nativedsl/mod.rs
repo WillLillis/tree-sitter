@@ -106,7 +106,7 @@ pub enum ModuleKind {
 /// # Panics
 ///
 /// Panics if `path` has no parent directory.
-pub fn load_module<'m>(
+fn load_module<'m>(
     shared: &'m mut SharedAst,
     modules: &'m mut Vec<Module>,
     env: &mut TypeEnv,
@@ -184,7 +184,7 @@ pub fn load_module<'m>(
 
 /// Validate: grammar block exists, inherits field consistency.
 /// Multiple `inherit()` calls are caught by the parser.
-pub fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()> {
+fn validate_grammar(shared: &SharedAst, ctx: &ModuleContext) -> DslResult<()> {
     if ctx.grammar_config.is_none() {
         return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
     }
