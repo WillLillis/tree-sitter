@@ -22,13 +22,67 @@ use crate::{
 };
 
 use super::LowerError;
-use super::ast::{Node, SharedAst, Span};
+use super::ModuleId;
+use super::ast::{ForId, Node, NodeId, SharedAst, Span};
 
-pub use evaluator::LoweringState;
 use evaluator::Evaluator;
-use repr::RuleId;
+use repr::{ARule, LoadedModules, RuleId, StringPool, Value, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
+
+/// One stack frame for the macro-call trace, kept owned (no `&str`) so the
+/// state can persist across grammar lowerings without lifetime ties.
+#[derive(Clone, Copy)]
+pub(super) struct CallFrame {
+    /// Span of the macro's *name* in its defining module.
+    pub(super) name_span: Span,
+    /// Module that defined the macro (where `name_span` resolves).
+    pub(super) name_mod: ModuleId,
+    /// Span of the call site in the caller's module.
+    pub(super) call_span: Span,
+    /// Module that issued the call (where `call_span` resolves).
+    pub(super) caller_mod: ModuleId,
+}
+
+/// Long-lived lowering state that persists across all grammar lowerings in a
+/// single `parse_native_dsl` call. Pools, the let-value cache, and the
+/// `loaded` bitset all live here so that imported/inherited modules' let
+/// bindings evaluate exactly once. Scratch buffers also live here so their
+/// allocated capacity carries between calls.
+#[derive(Default)]
+pub(super) struct LoweringState {
+    // Persistent pools and caches:
+    loaded: LoadedModules,
+    let_values: FxHashMap<NodeId, ValueId>,
+    values: Vec<Value>,
+    rules: Vec<ARule>,
+    rule_children: Vec<RuleId>,
+    value_children: Vec<ValueId>,
+    object_pool: Vec<FxHashMap<String, ValueId>>,
+    strings: StringPool,
+
+    // Scratch (cleared per grammar; capacity retained):
+    call_stack: Vec<CallFrame>,
+    macro_args: Vec<ValueId>,
+    macro_arg_bases: Vec<usize>,
+    for_binding_values: Vec<ValueId>,
+    for_binding_frames: Vec<(ForId, usize)>,
+    val_scratch: Vec<ValueId>,
+    rule_scratch: Vec<RuleId>,
+}
+
+impl LoweringState {
+    /// Clear scratch buffers between grammar lowerings (capacity retained).
+    fn reset_per_grammar(&mut self) {
+        self.call_stack.clear();
+        self.macro_args.clear();
+        self.macro_arg_bases.clear();
+        self.for_binding_values.clear();
+        self.for_binding_frames.clear();
+        self.val_scratch.clear();
+        self.rule_scratch.clear();
+    }
+}
 
 /// Intermediate results from the evaluation phase, ready to be assembled
 /// into an `InputGrammar` once the base grammar can be moved out.
@@ -51,7 +105,7 @@ struct EvalResult {
 /// being lowered (not yet pushed into `previous`). `state` persists across
 /// the whole `parse_native_dsl` pipeline so that imported/inherited modules'
 /// let bindings evaluate exactly once.
-pub fn lower_with_base(
+pub(super) fn lower_with_base(
     state: &mut LoweringState,
     shared: &SharedAst,
     previous: &[super::Module],

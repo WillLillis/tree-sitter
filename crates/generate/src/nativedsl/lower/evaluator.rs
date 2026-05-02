@@ -10,8 +10,8 @@ use super::super::ast::{
     ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind,
     RepeatKind, SharedAst, Span,
 };
-use super::repr::{APrec, ARule, LoadedModules, RuleId, Str, StrEntry, StringPool, Value, ValueId};
-use super::{LowerErrorKind, LowerResult, MAX_CALL_DEPTH};
+use super::repr::{APrec, ARule, RuleId, Str, StrEntry, Value, ValueId};
+use super::{CallFrame, LoweringState, LowerErrorKind, LowerResult, MAX_CALL_DEPTH};
 
 use crate::grammars::{PrecedenceEntry, ReservedWordContext};
 use crate::rules::{Associativity, Precedence, Rule};
@@ -40,63 +40,6 @@ macro_rules! scratch_scope {
         $($buf.truncate($base);)+
         result
     }};
-}
-
-/// One stack frame for the macro-call trace, kept owned (no `&str`) so the
-/// state can persist across grammar lowerings without lifetime ties.
-#[derive(Clone, Copy)]
-pub(super) struct CallFrame {
-    /// Span of the macro's *name* in its defining module.
-    name_span: Span,
-    /// Module that defined the macro (where `name_span` resolves).
-    name_mod: ModuleId,
-    /// Span of the call site in the caller's module.
-    call_span: Span,
-    /// Module that issued the call (where `call_span` resolves).
-    caller_mod: ModuleId,
-}
-
-/// Long-lived lowering state that persists across all grammar lowerings in a
-/// single `parse_native_dsl` call. Pools, the let-value cache, and the
-/// `loaded` bitset all live here so that imported/inherited modules' let
-/// bindings evaluate exactly once. Scratch buffers also live here so their
-/// allocated capacity carries between calls.
-///
-/// Owns no borrows; constructed once with `Default` capacities and threaded
-/// as `&mut` through the load/lower pipeline.
-#[derive(Default)]
-pub struct LoweringState {
-    // Persistent pools and caches:
-    pub(super) loaded: LoadedModules,
-    pub(super) let_values: FxHashMap<NodeId, ValueId>,
-    pub(super) values: Vec<Value>,
-    pub(super) rules: Vec<ARule>,
-    pub(super) rule_children: Vec<RuleId>,
-    pub(super) value_children: Vec<ValueId>,
-    pub(super) object_pool: Vec<FxHashMap<String, ValueId>>,
-    pub(super) strings: StringPool,
-
-    // Scratch (cleared per grammar; capacity retained):
-    pub(super) call_stack: Vec<CallFrame>,
-    pub(super) macro_args: Vec<ValueId>,
-    pub(super) macro_arg_bases: Vec<usize>,
-    pub(super) for_binding_values: Vec<ValueId>,
-    pub(super) for_binding_frames: Vec<(ForId, usize)>,
-    pub(super) val_scratch: Vec<ValueId>,
-    pub(super) rule_scratch: Vec<RuleId>,
-}
-
-impl LoweringState {
-    /// Clear scratch buffers between grammar lowerings (capacity retained).
-    pub(super) fn reset_per_grammar(&mut self) {
-        self.call_stack.clear();
-        self.macro_args.clear();
-        self.macro_arg_bases.clear();
-        self.for_binding_values.clear();
-        self.for_binding_frames.clear();
-        self.val_scratch.clear();
-        self.rule_scratch.clear();
-    }
 }
 
 /// Per-grammar evaluation wrapper. Holds a borrow of the long-lived
