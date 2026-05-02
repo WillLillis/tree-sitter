@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use super::ModuleId;
 use super::typecheck::Ty;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -392,7 +393,7 @@ impl ModuleContext {
     /// once the loader has populated it. `None` for non-inheriting modules
     /// or before child loading completes.
     #[must_use]
-    pub fn inherit_module(&self, arena: &NodeArena) -> Option<(u8, Span)> {
+    pub fn inherit_module(&self, arena: &NodeArena) -> Option<(ModuleId, Span)> {
         let id = self.inherit_ref?;
         let &Node::ModuleRef {
             module: Some(idx), ..
@@ -492,7 +493,7 @@ pub enum Node {
     ModuleRef {
         import: bool,
         path: Span,
-        module: Option<u8>,
+        module: Option<ModuleId>,
     },
     /// `grammar_config(module, field)` - access a specific config field from
     /// an inherited grammar module.
