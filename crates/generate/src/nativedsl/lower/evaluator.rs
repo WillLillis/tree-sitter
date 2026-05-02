@@ -2,6 +2,8 @@
 //! IR (values + `ARule` trees) that [`super`] then materializes into a final
 //! [`crate::grammars::InputGrammar`].
 
+use std::borrow::Cow;
+
 use rustc_hash::FxHashMap;
 
 use super::super::LowerError;
@@ -53,10 +55,10 @@ pub(super) struct Evaluator<'a, 'ast> {
     /// `previous.len()` (== `root_id`).
     previous: &'a [Module],
     root_ctx: &'a ModuleContext,
-    root_id: usize,
+    root_id: ModuleId,
     /// May equal `root_id` (current module's let bindings or rule body) or any
     /// index into `previous`.
-    current_module: usize,
+    current_module: ModuleId,
 }
 
 impl<'a, 'ast> Evaluator<'a, 'ast> {
@@ -66,7 +68,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         previous: &'a [Module],
         root_ctx: &'a ModuleContext,
     ) -> Self {
-        let root_id = previous.len();
+        let root_id = previous.len() as ModuleId;
         state.reset_per_grammar();
         // Mark the in-progress grammar as "loaded" so that subsequent imports
         // of it from other grammars short-circuit in `eval_import_module`.
@@ -94,19 +96,17 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// `idx` is a global module id; `idx == self.root_id` is the in-progress
     /// module (whose ctx isn't in `previous`).
-    fn module_ctx(&self, idx: usize) -> &'a ModuleContext {
+    fn module_ctx(&self, idx: ModuleId) -> &'a ModuleContext {
         if idx == self.root_id {
             self.root_ctx
         } else {
-            self.previous[idx].ctx()
+            self.previous[usize::from(idx)].ctx()
         }
     }
 
     fn resolve_str(&self, id: Str) -> &str {
         match self.state.strings.entry(id) {
-            &StrEntry::Source(span, mod_id) => {
-                span.resolve(&self.module_ctx(mod_id as usize).source)
-            }
+            &StrEntry::Source(span, mod_id) => span.resolve(&self.module_ctx(mod_id).source),
             StrEntry::Owned(s) => s,
             StrEntry::Unreachable => unreachable!(),
         }
@@ -206,15 +206,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Intern a span using the current module's source text.
     fn intern_span(&mut self, span: Span) -> Str {
-        self.state
-            .strings
-            .intern_span(span, self.current_module as ModuleId)
+        self.state.strings.intern_span(span, self.current_module)
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
         let raw = self.ctx().text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-            self.state.strings.intern_owned(unescape_string(raw))
+            self.state
+                .strings
+                .intern_owned(Cow::Owned(unescape_string(raw)))
         } else {
             self.intern_span(span)
         }
@@ -227,7 +227,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Intern a string, create a `NamedSymbol` rule, and wrap as a `Value::Rule`.
-    fn owned_symbol_val(&mut self, name: String) -> ValueId {
+    fn owned_symbol_val(&mut self, name: Cow<'_, str>) -> ValueId {
         let sid = self.state.strings.intern_owned(name);
         let rid = self.alloc_rule(ARule::NamedSymbol(sid));
         self.alloc_val(Value::Rule(rid))
@@ -430,14 +430,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// Evaluate a `grammar_config(module, field)` expression.
     fn eval_grammar_config(
         &mut self,
-        mod_idx: usize,
+        mod_idx: ModuleId,
         field: ConfigField,
         span: Span,
     ) -> LowerResult<ValueId> {
         use ConfigField as C;
         // grammar_config target is always an inherit'd module (typecheck-enforced),
         // i.e. in `previous` with a lowered grammar set.
-        let grammar = self.previous[mod_idx].lowered().unwrap();
+        let grammar = self.previous[usize::from(mod_idx)].lowered().unwrap();
         match field {
             C::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
             C::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
@@ -460,10 +460,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         for entry in group {
                             let vid = match entry {
                                 PrecedenceEntry::Name(s) => {
-                                    let sid = self.state.strings.intern_owned(s.clone());
+                                    let sid = self.state.strings.intern_owned(Cow::Borrowed(s));
                                     self.alloc_val(Value::Str(sid))
                                 }
-                                PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s.clone()),
+                                PrecedenceEntry::Symbol(s) => {
+                                    self.owned_symbol_val(Cow::Borrowed(s))
+                                }
                             };
                             self.state.value_children.push(vid);
                         }
@@ -476,7 +478,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             C::Word => {
                 if let Some(name) = &grammar.word_token {
-                    Ok(self.owned_symbol_val(name.clone()))
+                    Ok(self.owned_symbol_val(Cow::Borrowed(name)))
                 } else {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
@@ -497,7 +499,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn import_rules_as_list(&mut self, rules_data: &[Rule], span: Span) -> LowerResult<ValueId> {
         let start = self.state.value_children.len() as u32;
         for r in rules_data {
-            let rid = self.import_rule(r);
+            let rid = self.import_rule(r, span)?;
             let vid = self.alloc_val(Value::Rule(rid));
             self.state.value_children.push(vid);
         }
@@ -509,7 +511,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn import_names_as_list(&mut self, names: &[String], span: Span) -> LowerResult<ValueId> {
         let start = self.state.value_children.len() as u32;
         for name in names {
-            let vid = self.owned_symbol_val(name.clone());
+            let vid = self.owned_symbol_val(Cow::Borrowed(name));
             self.state.value_children.push(vid);
         }
         let len = u16::try_from(names.len())
@@ -517,50 +519,50 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
-    fn import_rule(&mut self, rule: &Rule) -> RuleId {
-        match rule {
+    fn import_rule(&mut self, rule: &Rule, ref_span: Span) -> LowerResult<RuleId> {
+        Ok(match rule {
             Rule::Blank => self.alloc_rule(ARule::Blank),
             Rule::String(s) => {
-                let sid = self.state.strings.intern_owned(s.clone());
+                let sid = self.state.strings.intern_owned(Cow::Borrowed(s));
                 self.alloc_rule(ARule::String(sid))
             }
             Rule::Pattern(p, f) => {
-                let pid = self.state.strings.intern_owned(p.clone());
-                let fid = (!f.is_empty()).then(|| self.state.strings.intern_owned(f.clone()));
+                let pid = self.state.strings.intern_owned(Cow::Borrowed(p));
+                let fid =
+                    (!f.is_empty()).then(|| self.state.strings.intern_owned(Cow::Borrowed(f)));
                 self.alloc_rule(ARule::Pattern(pid, fid))
             }
             Rule::NamedSymbol(name) => {
-                let sid = self.state.strings.intern_owned(name.clone());
+                let sid = self.state.strings.intern_owned(Cow::Borrowed(name));
                 self.alloc_rule(ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) | Rule::Seq(members) => {
                 let is_seq = matches!(rule, Rule::Seq(_));
                 let (start, count) = scratch_scope!(self.state.rule_scratch, |base| {
                     for m in members {
-                        let rid = self.import_rule(m);
+                        let rid = self.import_rule(m, ref_span)?;
                         self.state.rule_scratch.push(rid);
                     }
                     let start = self.children_start();
                     self.state
                         .rule_children
                         .extend_from_slice(&self.state.rule_scratch[base..]);
-                    (start, self.state.rule_children.len() as u32 - start)
-                });
-                debug_assert!(
-                    u16::try_from(count).is_ok(),
-                    "inherited rule has too many children"
-                );
-                self.alloc_rule(ARule::SeqOrChoice(is_seq, start, count as u16))
+                    LowerResult::Ok((start, self.state.rule_children.len() as u32 - start))
+                })?;
+                let len = u16::try_from(count).map_err(|_| {
+                    LowerError::new(LowerErrorKind::InheritedRuleTooLarge, ref_span)
+                })?;
+                self.alloc_rule(ARule::SeqOrChoice(is_seq, start, len))
             }
             Rule::Repeat(inner) => {
-                let inner = self.import_rule(inner);
+                let inner = self.import_rule(inner, ref_span)?;
                 self.alloc_rule(ARule::Repeat(inner))
             }
             Rule::Metadata {
                 params,
                 rule: inner,
             } => {
-                let mut rid = self.import_rule(inner);
+                let mut rid = self.import_rule(inner, ref_span)?;
                 if params.dynamic_precedence != 0 {
                     rid = self.alloc_rule(ARule::PrecDynamic(params.dynamic_precedence, rid));
                 }
@@ -568,15 +570,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let aprec = APrec::Integer(*n);
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 } else if let Precedence::Name(s) = &params.precedence {
-                    let aprec = APrec::Name(self.state.strings.intern_owned(s.clone()));
+                    let aprec = APrec::Name(self.state.strings.intern_owned(Cow::Borrowed(s)));
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 }
                 if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
-                    let sid = self.state.strings.intern_owned(value.clone());
+                    let sid = self.state.strings.intern_owned(Cow::Borrowed(value));
                     rid = self.alloc_rule(ARule::Alias(sid, *is_named, rid));
                 }
                 if let Some(field_name) = &params.field_name {
-                    let sid = self.state.strings.intern_owned(field_name.clone());
+                    let sid = self.state.strings.intern_owned(Cow::Borrowed(field_name));
                     rid = self.alloc_rule(ARule::Field(sid, rid));
                 }
                 if params.is_token {
@@ -588,12 +590,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 rule: inner,
                 context_name,
             } => {
-                let inner = self.import_rule(inner);
-                let sid = self.state.strings.intern_owned(context_name.clone());
+                let inner = self.import_rule(inner, ref_span)?;
+                let sid = self.state.strings.intern_owned(Cow::Borrowed(context_name));
                 self.alloc_rule(ARule::Reserved(sid, inner))
             }
             Rule::Symbol(_) => unreachable!(),
-        }
+        })
     }
 
     fn import_prec_rule(
@@ -672,11 +674,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let Value::Module(idx) = *self.get_val(mod_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                self.eval_grammar_config(idx as usize, field, span)
+                self.eval_grammar_config(idx, field, span)
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
-                self.eval_import_module(usize::from(global_id))?;
+                self.eval_import_module(global_id)?;
                 Ok(self.alloc_val(Value::Module(global_id)))
             }
             &Node::Append { left, right } => {
@@ -711,14 +713,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let Value::Module(idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                let table_id = idx as usize;
                 // base::name only resolves against an inherit'd module (typecheck-enforced),
                 // so the target is in `previous` with a lowered grammar.
-                if let Some(var) = self.previous[table_id]
+                if let Some(var) = self.previous[usize::from(idx)]
                     .lowered()
                     .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
                 {
-                    let rid = self.import_rule(&var.rule);
+                    let rid = self.import_rule(&var.rule, member)?;
                     return Ok(self.alloc_val(Value::Rule(rid)));
                 }
                 Err(LowerError::new(
@@ -766,7 +767,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let vid = self.eval_expr(part_id)?;
                     result.push_str(self.resolve_str(self.str_id(vid)));
                 }
-                let sid = self.state.strings.intern_owned(result);
+                let sid = self.state.strings.intern_owned(Cow::Owned(result));
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             Node::DynRegex(range) => {
@@ -784,22 +785,21 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
                     unreachable!() // guarded by resolver
                 };
-                self.invoke_macro(*macro_id, args, span, None)
+                self.invoke_macro(*macro_id, args, span, self.current_module)
             }
             &Node::QualifiedCall(range) => {
                 let children = self.shared.pools.child_slice(range);
                 let (obj, name) = (children[0], children[1]);
                 let obj_val = self.eval_expr(obj)?;
-                let Value::Module(idx) = *self.get_val(obj_val) else {
+                let Value::Module(mod_idx) = *self.get_val(obj_val) else {
                     unreachable!() // guarded by typecheck
                 };
-                let table_id = idx as usize;
-                self.eval_import_module(table_id)?;
+                self.eval_import_module(mod_idx)?;
                 let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
                     unreachable!() // guarded by resolver
                 };
                 let args = ChildRange::new(range.start + 2, range.len - 2);
-                self.invoke_macro(*macro_id, args, span, Some(table_id))
+                self.invoke_macro(*macro_id, args, span, mod_idx)
             }
             _ => {
                 let rid = self.eval_combinator(id)?;
@@ -963,7 +963,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             name_span,
             name_mod,
             call_span,
-            caller_mod: self.current_module as ModuleId,
+            caller_mod: self.current_module,
         });
         if self.state.call_stack.len() > MAX_CALL_DEPTH as usize {
             let trace = self
@@ -971,9 +971,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 .call_stack
                 .iter()
                 .map(|frame| {
-                    let name_ctx = self.module_ctx(frame.name_mod as usize);
+                    let name_ctx = self.module_ctx(frame.name_mod);
                     let name = name_ctx.text(frame.name_span).to_string();
-                    let call_ctx = self.module_ctx(frame.caller_mod as usize);
+                    let call_ctx = self.module_ctx(frame.caller_mod);
                     let offset = frame.call_span.start as usize;
                     let bytes = &call_ctx.source.as_bytes()[..offset];
                     let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
@@ -990,17 +990,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(())
     }
 
-    /// Evaluate a macro call. If `module` is `Some`, switches to that module
-    /// for the body evaluation (cross-module call).
+    /// Evaluate a call to a macro defined in `def_module`.
     fn invoke_macro(
         &mut self,
         macro_id: MacroId,
         args: ChildRange,
         span: Span,
-        module: Option<usize>,
+        def_module: ModuleId,
     ) -> LowerResult<ValueId> {
         let config = self.shared.pools.get_macro(macro_id);
-        let name_mod = module.unwrap_or(self.current_module) as ModuleId;
         // Args evaluate in the caller's macro context, not the callee's, so
         // arg eval happens before macro_arg_bases is pushed.
         scratch_scope!(
@@ -1008,16 +1006,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             self.state.call_stack => _call_base,
             self.state.macro_arg_bases => _bases_base;
             {
-                self.push_call(config.name, name_mod, span)?;
+                self.push_call(config.name, def_module, span)?;
                 for &arg_id in self.shared.pools.child_slice(args) {
                     let v = self.eval_expr(arg_id)?;
                     self.state.macro_args.push(v);
                 }
                 self.state.macro_arg_bases.push(args_base);
                 let saved = self.current_module;
-                if let Some(id) = module {
-                    self.current_module = id;
-                }
+                self.current_module = def_module;
                 let result = self.eval_expr(config.body);
                 self.current_module = saved;
                 result
@@ -1026,7 +1022,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Lazily evaluate an imported module's top-level let bindings.
-    fn eval_import_module(&mut self, table_id: usize) -> LowerResult<()> {
+    fn eval_import_module(&mut self, table_id: ModuleId) -> LowerResult<()> {
         if self.state.loaded.is_loaded(table_id) {
             return Ok(());
         }
