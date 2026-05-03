@@ -94,6 +94,20 @@ error_tests! { Parse {
         },
         ParseErrorKind::TooManyChildren
     }
+    error_too_many_macro_params {
+        &{
+            let params = (0..256).map(|i| format!("p{i}: rule_t")).collect::<Vec<_>>().join(",");
+            format!("grammar {{ language: \"test\" }} macro f({params}) rule_t {{ \"x\" }} rule program {{ \"y\" }}")
+        },
+        ParseErrorKind::TooManyBindings
+    }
+    error_too_many_for_bindings {
+        &{
+            let bs = (0..256).map(|i| format!("b{i}: rule_t")).collect::<Vec<_>>().join(",");
+            format!("grammar {{ language: \"test\" }} rule program {{ for ({bs}) in [program] {{ \"x\" }} }}")
+        },
+        ParseErrorKind::TooManyBindings
+    }
     error_grammar_config_unknown_field {
         r#"let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, extras: grammar_config(base, bogus) }"#,

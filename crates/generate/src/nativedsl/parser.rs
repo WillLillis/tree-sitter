@@ -357,7 +357,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.expect(TokenKind::RParen)?;
         self.check_duplicate_names(&params, |p| p.name)?;
         if params.len() > u8::MAX as usize {
-            return Err(self.error(ParseErrorKind::TooManyChildren));
+            return Err(self.error(ParseErrorKind::TooManyBindings));
         }
         let return_ty = self.parse_type()?.0;
         self.expect(TokenKind::LBrace)?;
@@ -748,7 +748,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             return Err(self.error(ParseErrorKind::EmptyForBindings));
         }
         if bindings.len() > u8::MAX as usize {
-            return Err(self.error(ParseErrorKind::TooManyChildren));
+            return Err(self.error(ParseErrorKind::TooManyBindings));
         }
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
@@ -1000,6 +1000,8 @@ pub enum ParseErrorKind {
     NestingTooDeep,
     #[error("too many elements (maximum 65535)")]
     TooManyChildren,
+    #[error("too many bindings (maximum 255)")]
+    TooManyBindings,
     #[error("for-loop requires at least one binding")]
     EmptyForBindings,
     #[error("{}", format_arg_count(*.expected, .name, *.got))]

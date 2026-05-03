@@ -1,7 +1,6 @@
 //!  Walks the typed AST into intermediate IR; [`super`] materializes it into
 //!  [`crate::grammars::InputGrammar`].
 
-
 use std::borrow::Cow;
 
 use rustc_hash::FxHashMap;
@@ -492,7 +491,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let start = self.state.value_children.len() as u32;
         self.state.value_children.reserve(rules_data.len());
         for r in rules_data {
-            let rid = self.import_rule(r, span)?;
+            let rid = self.import_rule(r);
             let vid = self.alloc_val(Value::Rule(rid));
             self.state.value_children.push(vid);
         }
@@ -513,8 +512,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
-    fn import_rule(&mut self, rule: &Rule, ref_span: Span) -> LowerResult<RuleId> {
-        Ok(match rule {
+    fn import_rule(&mut self, rule: &Rule) -> RuleId {
+        match rule {
             Rule::Blank => self.alloc_rule(ARule::Blank),
             Rule::String(s) => {
                 let sid = self.state.strings.intern_owned(Cow::Borrowed(s));
@@ -536,29 +535,27 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.state.rule_children.reserve(members.len());
                 let (start, count) = scratch_scope!(self.state.rule_scratch, |base| {
                     for m in members {
-                        let rid = self.import_rule(m, ref_span)?;
+                        let rid = self.import_rule(m);
                         self.state.rule_scratch.push(rid);
                     }
                     let start = self.children_start();
                     self.state
                         .rule_children
                         .extend_from_slice(&self.state.rule_scratch[base..]);
-                    LowerResult::Ok((start, self.state.rule_children.len() as u32 - start))
-                })?;
-                let len = u16::try_from(count).map_err(|_| {
-                    LowerError::new(LowerErrorKind::InheritedRuleTooLarge, ref_span)
-                })?;
-                self.alloc_rule(ARule::SeqOrChoice(is_seq, start, len))
+                    (start, self.state.rule_children.len() as u32 - start)
+                });
+                debug_assert!(u16::try_from(count).is_ok());
+                self.alloc_rule(ARule::SeqOrChoice(is_seq, start, count as u16))
             }
             Rule::Repeat(inner) => {
-                let inner = self.import_rule(inner, ref_span)?;
+                let inner = self.import_rule(inner);
                 self.alloc_rule(ARule::Repeat(inner))
             }
             Rule::Metadata {
                 params,
                 rule: inner,
             } => {
-                let mut rid = self.import_rule(inner, ref_span)?;
+                let mut rid = self.import_rule(inner);
                 if params.dynamic_precedence != 0 {
                     rid = self.alloc_rule(ARule::PrecDynamic(params.dynamic_precedence, rid));
                 }
@@ -586,12 +583,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 rule: inner,
                 context_name,
             } => {
-                let inner = self.import_rule(inner, ref_span)?;
+                let inner = self.import_rule(inner);
                 let sid = self.state.strings.intern_owned(Cow::Borrowed(context_name));
                 self.alloc_rule(ARule::Reserved(sid, inner))
             }
             Rule::Symbol(_) => unreachable!(),
-        })
+        }
     }
 
     fn import_prec_rule(
@@ -715,7 +712,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .lowered()
                     .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
                 {
-                    let rid = self.import_rule(&var.rule, member)?;
+                    let rid = self.import_rule(&var.rule);
                     return Ok(self.alloc_val(Value::Rule(rid)));
                 }
                 Err(LowerError::new(
