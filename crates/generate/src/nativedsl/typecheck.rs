@@ -495,7 +495,7 @@ fn collect_decls<'a>(
             root_items,
             grammar_path,
             source,
-            visited: FxHashSet::default(),
+            expanding_lets: FxHashSet::default(),
         };
         collect_external_names(shared, ctx, ext_id, &mut ec)?;
     }
@@ -509,7 +509,8 @@ struct ExternalNameCtx<'src, 'a, 'b> {
     root_items: &'b [NodeId],
     grammar_path: &'b Path,
     source: &'src str,
-    visited: FxHashSet<NodeId>,
+    /// `let` names currently being expanded; reentry indicates a cycle.
+    expanding_lets: FxHashSet<&'src str>,
 }
 
 /// Recursively collect external token names from an expression.
@@ -520,19 +521,19 @@ fn collect_external_names<'src>(
     ec: &mut ExternalNameCtx<'src, '_, '_>,
 ) -> Result<(), TypeError> {
     let arena = &shared.arena;
-    if !ec.visited.insert(id) {
-        return Err(TypeError::new(
-            TypeErrorKind::InvalidExternalsExpression,
-            arena.span(id),
-        ));
-    }
     match arena.get(id) {
         // Bare identifier: either a let binding (follow it) or an external token name.
         Node::Ident(IdentKind::Unresolved) => {
             let name = ctx.text(arena.span(id));
             if let Some(value_id) = find_let_value(arena, ctx, ec.root_items, name) {
-                // It's a let binding - recurse into its value.
+                if !ec.expanding_lets.insert(name) {
+                    return Err(TypeError::new(
+                        TypeErrorKind::InvalidExternalsExpression,
+                        arena.span(id),
+                    ));
+                }
                 collect_external_names(shared, ctx, value_id, ec)?;
+                ec.expanding_lets.remove(name);
             } else if !ec.decls.contains_key(name) {
                 // Unknown bare identifier - register as external token.
                 insert_decl(

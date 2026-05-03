@@ -228,8 +228,7 @@ impl Span {
 
     #[must_use]
     pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
-        // SAFETY: span boundaries are at ASCII byte positions. The
-        // input length is checked against u32::MAX before lexing.
+        // SAFETY: lexer emits spans at UTF-8 char boundaries within `source`.
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
     }
 }
