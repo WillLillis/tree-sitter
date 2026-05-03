@@ -17,30 +17,6 @@ use super::{CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPT
 use crate::grammars::{PrecedenceEntry, ReservedWordContext};
 use crate::rules::{Associativity, Precedence, Rule};
 
-/// Save the length of one or more scratch buffers, run a body, then truncate
-/// each back. The multi-buffer form folds in any "push N, pop N" stack-frame
-/// cleanup that pairs with the scratch save.
-macro_rules! scratch_scope {
-    ($buf:expr, |$base:ident| $body:expr) => {{
-        let $base = $buf.len();
-        let result = {
-            #[allow(clippy::redundant_closure_call, reason = "IIFE scopes `?` to the closure so truncate runs")]
-            (|| $body)()
-        };
-        $buf.truncate($base);
-        result
-    }};
-    ($($buf:expr => $base:ident),+; $body:expr) => {{
-        $(let $base = $buf.len();)+
-        let result = {
-            #[allow(clippy::redundant_closure_call, reason = "IIFE scopes `?` to the closure so truncates run")]
-            (|| $body)()
-        };
-        $($buf.truncate($base);)+
-        result
-    }};
-}
-
 /// Per-grammar evaluation wrapper around long-lived [`LoweringState`].
 pub(super) struct Evaluator<'a, 'ast> {
     pub(super) state: &'a mut LoweringState,
@@ -533,7 +509,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let is_seq = matches!(rule, Rule::Seq(_));
                 self.state.rule_scratch.reserve(members.len());
                 self.state.rule_children.reserve(members.len());
-                let (start, count) = scratch_scope!(self.state.rule_scratch, |base| {
+                let (start, count) = stack_scope!(self.state.rule_scratch, |base| {
                     for m in members {
                         let rid = self.import_rule(m);
                         self.state.rule_scratch.push(rid);
@@ -735,7 +711,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             node @ (&Node::List(range) | &Node::Tuple(range)) => {
                 let is_list = matches!(node, Node::List(_));
                 let items = self.shared.pools.child_slice(range);
-                let range = scratch_scope!(self.state.val_scratch, |base| {
+                let range = stack_scope!(self.state.val_scratch, |base| {
                     for &item_id in items {
                         let v = self.eval_expr(item_id)?;
                         self.state.val_scratch.push(v);
@@ -842,7 +818,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match self.shared.arena.get(id) {
             &Node::SeqOrChoice { seq, range } => {
                 let children = self.shared.pools.child_slice(range);
-                let (offset, len) = scratch_scope!(self.state.rule_scratch, |base| {
+                let (offset, len) = stack_scope!(self.state.rule_scratch, |base| {
                     for &member in children {
                         if let Node::For { for_id, body } = *self.shared.arena.get(member) {
                             self.eval_for_to_rules(for_id, body)?;
@@ -994,7 +970,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let config = self.shared.pools.get_macro(macro_id);
         // Args evaluate in the caller's macro context, not the callee's, so
         // arg eval happens before macro_arg_bases is pushed.
-        scratch_scope!(
+        stack_scope!(
             self.state.macro_args => args_base,
             self.state.call_stack => _call_base,
             self.state.macro_arg_bases => _bases_base;
@@ -1049,7 +1025,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let iter_vid = self.eval_expr(iterable)?;
         let iter_range = self.list_range(iter_vid);
         let n_items = iter_range.len as usize;
-        scratch_scope!(
+        stack_scope!(
             self.state.for_binding_values => base,
             self.state.for_binding_frames => _frames_base;
             {
