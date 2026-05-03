@@ -302,8 +302,6 @@ pub enum LowerErrorKind {
     InheritsWithoutInherit,
     #[error("too many elements (maximum 65535)")]
     TooManyChildren,
-    #[error("inherited rule has too many children (maximum 65535)")]
-    InheritedRuleTooLarge,
     #[error("maximum macro call depth ({MAX_CALL_DEPTH}) exceeded")]
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]

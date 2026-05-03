@@ -341,6 +341,24 @@ fn externals_via_let_with_append() {
 }
 
 #[test]
+fn externals_dag_let_referenced_twice_via_append() {
+    // Same `let` value reached through both arms of `append` should not
+    // be mistaken for a cycle.
+    let g = dsl(r#"
+        let ext: list_t<rule_t> = [heredoc]
+        grammar { language: "test", externals: append(ext, ext) }
+        rule program { "x" }
+    "#);
+    assert_eq!(
+        g.external_tokens,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("heredoc".into()),
+        ]
+    );
+}
+
+#[test]
 fn externals_via_let_mixed_declared_and_undeclared() {
     let g = dsl(r#"
         let ext: list_t<rule_t> = [heredoc, comment]

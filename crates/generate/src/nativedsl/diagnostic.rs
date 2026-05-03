@@ -283,8 +283,8 @@ impl SpanContext<'_> {
         let span_start_in_line = col.saturating_sub(1);
         let span_len = (span.end - span.start) as usize;
         let underline_len = span_len
-            .max(1)
-            .min(line_text.len().saturating_sub(span_start_in_line));
+            .min(line_text.len().saturating_sub(span_start_in_line))
+            .max(1);
 
         let prev_line_text =
             prev_line_start.map(|ps| &source_text[ps..line_start.saturating_sub(1)]);
