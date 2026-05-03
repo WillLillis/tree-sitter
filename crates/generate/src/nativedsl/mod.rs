@@ -3,6 +3,31 @@
 //! Pipeline: lex -> parse -> resolve+typecheck -> lower, producing an
 //! [`InputGrammar`] equivalent to what `grammar.json` parsing produces.
 
+/// Save the length of one or more `Vec`s used as stacks, run a body, then
+/// truncate each back. The body is wrapped in a closure so `?` inside
+/// short-circuits the closure rather than the outer function, letting the
+/// truncates always run.
+macro_rules! stack_scope {
+    ($buf:expr, |$base:ident| $body:expr) => {{
+        let $base = $buf.len();
+        let result = {
+            #[allow(clippy::redundant_closure_call, reason = "IIFE scopes `?` to the closure so truncate runs")]
+            (|| $body)()
+        };
+        $buf.truncate($base);
+        result
+    }};
+    ($($buf:expr => $base:ident),+; $body:expr) => {{
+        $(let $base = $buf.len();)+
+        let result = {
+            #[allow(clippy::redundant_closure_call, reason = "IIFE scopes `?` to the closure so truncates run")]
+            (|| $body)()
+        };
+        $($buf.truncate($base);)+
+        result
+    }};
+}
+
 pub mod ast;
 pub mod diagnostic;
 pub mod lexer;
