@@ -361,13 +361,13 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         }
         let return_ty = self.parse_type()?.0;
         self.expect(TokenKind::LBrace)?;
-        let saved = self.locals.len();
-        for (i, p) in params.iter().enumerate() {
-            self.locals
-                .push((p.name, LocalBinding::MacroParam(i as u8)));
-        }
-        let body = self.parse_expr()?;
-        self.locals.truncate(saved);
+        let body = stack_scope!(self.locals, |_saved| {
+            for (i, p) in params.iter().enumerate() {
+                self.locals
+                    .push((p.name, LocalBinding::MacroParam(i as u8)));
+            }
+            self.parse_expr()
+        })?;
         self.expect(TokenKind::RBrace)?;
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
@@ -753,16 +753,17 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
         let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
-        let saved = self.locals.len();
-        let config = self.shared.pools.get_for(for_id);
-        for (i, &(name_span, _)) in config.bindings.iter().enumerate() {
-            self.locals
-                .push((name_span, LocalBinding::ForBinding(for_id, i as u8)));
-        }
         self.expect(TokenKind::LBrace)?;
-        let body = self.parse_expr()?;
-        let end = self.expect(TokenKind::RBrace)?;
-        self.locals.truncate(saved);
+        let (body, end) = stack_scope!(self.locals, |_saved| {
+            let config = self.shared.pools.get_for(for_id);
+            for (i, &(name_span, _)) in config.bindings.iter().enumerate() {
+                self.locals
+                    .push((name_span, LocalBinding::ForBinding(for_id, i as u8)));
+            }
+            let body = self.parse_expr()?;
+            let end = self.expect(TokenKind::RBrace)?;
+            ParseResult::Ok((body, end))
+        })?;
         Ok(self
             .shared
             .arena
