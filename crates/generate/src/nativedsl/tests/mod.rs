@@ -46,7 +46,7 @@ mod types;
 
 /// Directory containing DSL-specific helper fixtures (inherit bases, import helpers).
 pub(super) fn test_fixtures_dir() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nativedsl/test_fixtures")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nativedsl/tests/fixtures")
 }
 
 /// Convert a path to a forward-slash string for embedding in DSL source.
