@@ -28,12 +28,26 @@ macro_rules! stack_scope {
     }};
 }
 
+/// Extract a node matching the given pattern from the expression
+///
+/// # Panics
+///
+/// Panics if the expression does not match the given pattern.
+macro_rules! expect_pat {
+    ($pat:pat, $expr:expr $(,)?) => {
+        let $pat = $expr else {
+            panic!("Expected {}, got {:?}", stringify!($pat), $expr);
+        };
+    };
+}
+
 pub mod ast;
 pub mod diagnostic;
 pub mod lexer;
 pub mod loader;
 pub mod lower;
 pub mod parser;
+pub mod resolve;
 pub mod serialize;
 #[cfg(test)]
 mod tests;
@@ -43,6 +57,7 @@ pub use diagnostic::NativeDslError;
 pub use lexer::LexErrorKind;
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult};
 pub use parser::ParseErrorKind;
+pub use resolve::ResolveErrorKind;
 pub use typecheck::{DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeErrorKind};
 
 use std::path::{Path, PathBuf};
@@ -67,6 +82,7 @@ pub type ModuleId = u8;
 /// a fully lowered grammar for rule merging and `grammar_config` access. The
 /// `lowered` field is boxed because `InputGrammar` is far larger than
 /// `ModuleContext`, and most modules are `Helper`s.
+#[derive(Debug)]
 pub enum Module {
     Helper {
         ctx: ModuleContext,
@@ -121,9 +137,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     };
     dsl_loader.load_module(input, &canonical, loader::ModuleKind::Grammar)?;
     // Root is the last-pushed module by construction.
-    let Module::Grammar { lowered, .. } = modules.pop().unwrap() else {
-        unreachable!();
-    };
+    expect_pat!(Some(Module::Grammar { lowered, .. }), modules.pop());
     Ok(*lowered)
 }
 
@@ -131,6 +145,7 @@ pub type DslResult<T> = Result<T, DslError>;
 
 pub type LexError = Diagnostic<LexErrorKind>;
 pub type ParseError = Diagnostic<ParseErrorKind>;
+pub type ResolveError = Diagnostic<ResolveErrorKind>;
 pub type TypeError = Diagnostic<TypeErrorKind>;
 pub type LowerError = Diagnostic<LowerErrorKind>;
 
@@ -180,6 +195,7 @@ impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
 pub enum DslError {
     Lex(#[from] LexError),
     Parse(#[from] ParseError),
+    Resolve(#[from] ResolveError),
     Type(#[from] TypeError),
     Lower(#[from] LowerError),
     Module(#[from] ModuleError),
@@ -231,6 +247,7 @@ impl DslError {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
+            Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
             Self::Module(e) => Some(e.reference_span),
@@ -253,6 +270,7 @@ impl DslError {
         match self {
             Self::Lex(e) => e.note.as_deref(),
             Self::Parse(e) => e.note.as_deref(),
+            Self::Resolve(e) => e.note.as_deref(),
             Self::Type(e) => e.note.as_deref(),
             Self::Lower(e) => e.note.as_deref(),
             Self::Module(e) => e.inner.note(),
