@@ -234,9 +234,9 @@ fn error_macro_param_shadows_let() {
             rule program { wrap(identifier) }
             rule identifier { regexp("[a-z]+") }"#
         ),
-        Type
+        Resolve
     );
-    assert_eq!(e.kind, TypeErrorKind::ShadowedBinding("X".into()));
+    assert_eq!(e.kind, ResolveErrorKind::ShadowedBinding("X".into()));
 }
 
 #[test]
