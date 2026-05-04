@@ -45,6 +45,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         grammar_path: &'path Path,
         shared: &'shared mut SharedAst,
     ) -> Self {
+        let root_cap = tokens.len() / 30;
         Self {
             tokens,
             pos: 0,
@@ -54,11 +55,11 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 source,
                 path: grammar_path.to_path_buf(),
                 grammar_config: None,
-                root_items: Vec::new(),
+                root_items: Vec::with_capacity(root_cap),
                 inherit_ref: None,
                 module_refs: Vec::new(),
             },
-            scratch: Vec::new(),
+            scratch: Vec::with_capacity(32),
             locals: Vec::new(),
             depth: 0,
         }
@@ -74,22 +75,30 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         Ok(self.ctx)
     }
 
+    /// Current token. Eof terminates the stream and the parser never
+    /// advances past it, so `pos` is always in bounds.
+    #[inline]
+    fn current(&self) -> &Token {
+        debug_assert!(self.pos < self.tokens.len());
+        unsafe { self.tokens.get_unchecked(self.pos) }
+    }
+
     fn skip_comments(&mut self) {
-        while self.tokens[self.pos].kind == TokenKind::Comment {
+        while self.current().kind == TokenKind::Comment {
             self.pos += 1;
         }
     }
 
     fn span(&self) -> Span {
-        self.tokens[self.pos].span
+        self.current().span
     }
 
     fn at_eof(&self) -> bool {
-        self.tokens[self.pos].kind == TokenKind::Eof
+        self.current().kind == TokenKind::Eof
     }
 
     fn at(&self, kind: TokenKind) -> bool {
-        self.tokens[self.pos].kind == kind
+        self.current().kind == kind
     }
 
     fn next_is(&self, kind: TokenKind) -> bool {
@@ -109,7 +118,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     /// Advance past the current token, skipping any comments.
     fn advance_pos(&mut self) {
         self.pos += 1;
-        while self.tokens[self.pos].kind == TokenKind::Comment {
+        while self.current().kind == TokenKind::Comment {
             self.pos += 1;
         }
     }
@@ -128,7 +137,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.eat(kind).ok_or_else(|| {
             self.error(ParseErrorKind::ExpectedToken {
                 expected: kind,
-                got: self.tokens[self.pos].kind,
+                got: self.current().kind,
             })
         })
     }
@@ -151,7 +160,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     }
 
     fn expect_ident_or_kw(&mut self, err: ParseErrorKind) -> ParseResult<Span> {
-        let kind = self.tokens[self.pos].kind;
+        let kind = self.current().kind;
         if kind == TokenKind::Ident || kind.is_keyword() {
             let span = self.span();
             self.advance_pos();
@@ -227,7 +236,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     }
 
     fn parse_item(&mut self) -> ParseResult<NodeId> {
-        match &self.tokens[self.pos].kind {
+        match &self.current().kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
             TokenKind::KwRule => self.parse_rule_def(false),
             TokenKind::KwOverride => self.parse_rule_def(true),
@@ -450,7 +459,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         // followed by `(`. Otherwise they are identifiers so grammars can
         // use names like `import`, `field`, `for`, etc. as rules.
         let next_lparen = self.next_is(TokenKind::LParen);
-        let kw = self.tokens[self.pos].kind;
+        let kw = self.current().kind;
         match kw {
             TokenKind::KwSeq | TokenKind::KwChoice if next_lparen => {
                 let seq = kw == TokenKind::KwSeq;
@@ -908,16 +917,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     ) -> ParseResult<ChildRange> {
         let saved = self.scratch.len();
         self.scratch.extend_from_slice(prefix);
-        loop {
-            if self.at(close) {
-                break;
-            }
+        while !self.at(close) {
             let id = parse_item(self)?;
             self.scratch.push(id);
             if self.eat(TokenKind::Comma).is_none() {
-                break;
-            }
-            if self.at(close) {
                 break;
             }
         }
@@ -936,15 +939,9 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         mut parse_item: impl FnMut(&mut Self) -> ParseResult<T>,
     ) -> ParseResult<Vec<T>> {
         let mut items = Vec::new();
-        loop {
-            if self.at(close) {
-                break;
-            }
+        while !self.at(close) {
             items.push(parse_item(self)?);
             if self.eat(TokenKind::Comma).is_none() {
-                break;
-            }
-            if self.at(close) {
                 break;
             }
         }
