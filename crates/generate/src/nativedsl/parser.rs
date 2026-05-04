@@ -679,15 +679,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         };
         self.expect_close_args(TokenKind::KwRegexp, 1 + u8::from(flags.is_some()), start)?;
         let end = self.expect(TokenKind::RParen)?;
-        let range = if let Some(f) = flags {
-            self.shared.pools.push_children(&[pattern, f]).unwrap()
-        } else {
-            self.shared.pools.push_children(&[pattern]).unwrap()
-        };
         Ok(self
             .shared
             .arena
-            .push(Node::DynRegex(range), start.merge(end)))
+            .push(Node::DynRegex { pattern, flags }, start.merge(end)))
     }
 
     fn parse_module_path(
