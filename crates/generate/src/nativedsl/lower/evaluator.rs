@@ -725,8 +725,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let sid = self.state.strings.intern_owned(Cow::Owned(result));
                 Ok(self.alloc_val(Value::Str(sid)))
             }
-            Node::DynRegex(range) => {
-                let (pattern, flags) = self.shared.pools.get_regex(*range);
+            &Node::DynRegex { pattern, flags } => {
                 let pv = self.eval_expr(pattern)?;
                 let ps = self.str_id(pv);
                 let fs = flags

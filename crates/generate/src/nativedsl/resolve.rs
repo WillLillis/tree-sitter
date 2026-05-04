@@ -348,8 +348,7 @@ fn resolve_children(
             resolve_expr(arena, pools, ctx, decls, modules, a)?;
             resolve_expr(arena, pools, ctx, decls, modules, b)
         }
-        Node::DynRegex(range) => {
-            let (pattern, flags) = pools.get_regex(*range);
+        &Node::DynRegex { pattern, flags } => {
             resolve_expr(arena, pools, ctx, decls, modules, pattern)?;
             if let Some(flags) = flags {
                 resolve_expr(arena, pools, ctx, decls, modules, flags)?;

@@ -311,8 +311,7 @@ fn type_of(
             }
             Ok(Ty::STR)
         }
-        Node::DynRegex(range) => {
-            let (pattern, flags) = shared.pools.get_regex(*range);
+        &Node::DynRegex { pattern, flags } => {
             let pt = type_of(shared, ctx, pattern, env)?;
             if pt != Ty::STR {
                 return Err(mismatch(Ty::STR, pt, shared.arena.span(pattern)));
