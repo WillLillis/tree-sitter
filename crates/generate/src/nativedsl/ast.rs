@@ -107,6 +107,17 @@ impl NodeArena {
     pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
         self.node_ids().map(|id| (id, &self.nodes[id.index()]))
     }
+
+    /// Iterate a half-open `[start, end)` slice of NodeIds and their nodes.
+    /// Caller must ensure both bounds are valid arena indices.
+    pub(super) fn iter_range(&self, range: std::ops::Range<u32>) -> impl Iterator<Item = (NodeId, &Node)> {
+        range.map(|i| {
+            // SAFETY: i in [start, end), both produced by ModuleContext after
+            // a successful Parser::parse, so within self.nodes bounds.
+            let id = NodeId(unsafe { NonZeroU32::new_unchecked(i) });
+            (id, unsafe { self.nodes.get_unchecked(i as usize) })
+        })
+    }
 }
 
 macro_rules! id_type {
@@ -375,6 +386,11 @@ pub struct ModuleContext {
     /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
     /// collected by the parser so the loader can iterate without scanning the arena.
     pub module_refs: Vec<NodeId>,
+    /// Half-open `[start, end)` range of NodeIds this module owns in the
+    /// shared arena. The parser pushes all of a module's nodes contiguously
+    /// before any child loads, so this slice is well-defined and stable.
+    /// Populated by `Parser::parse`; default `0..0` means "uninitialized".
+    pub(super) node_range: std::ops::Range<u32>,
 }
 
 impl ModuleContext {
@@ -396,6 +412,21 @@ impl ModuleContext {
             return None;
         };
         Some((idx, arena.span(id)))
+    }
+
+    /// Iterate just this module's own nodes, paired with their NodeIds.
+    /// Avoids scanning unrelated modules' entries in the shared arena.
+    pub fn iter_own_nodes<'a>(
+        &self,
+        arena: &'a NodeArena,
+    ) -> impl Iterator<Item = (NodeId, &'a Node)> {
+        arena.iter_range(self.node_range.clone())
+    }
+
+    /// `true` if `id` was produced while parsing this module.
+    #[must_use]
+    pub fn owns_node(&self, id: NodeId) -> bool {
+        self.node_range.contains(&(id.index() as u32))
     }
 }
 
