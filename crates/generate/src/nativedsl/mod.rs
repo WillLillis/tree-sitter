@@ -55,7 +55,7 @@ pub mod typecheck;
 
 pub use diagnostic::NativeDslError;
 pub use lexer::LexErrorKind;
-pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult};
+pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
 pub use parser::ParseErrorKind;
 pub use resolve::ResolveErrorKind;
 pub use typecheck::{DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeErrorKind};
@@ -69,7 +69,6 @@ use crate::grammars::InputGrammar;
 
 use ast::{ModuleContext, SharedAst, Span};
 use loader::Loader;
-use lower::LoweringState;
 use typecheck::TypeEnv;
 
 /// Global module index. Every loaded module gets a unique `ModuleId`.

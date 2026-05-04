@@ -19,8 +19,8 @@ const MAX_PARSE_DEPTH: u16 = 256;
 
 #[derive(Clone, Copy)]
 enum LocalBinding {
-    MacroParam(u8),
-    ForBinding(ForId, u8),
+    MacroParam(Ty, u8),
+    ForBinding(ForId, Ty, u8),
 }
 
 pub struct Parser<'tok, 'path, 'shared> {
@@ -364,7 +364,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         let body = stack_scope!(self.locals, |_saved| {
             for (i, p) in params.iter().enumerate() {
                 self.locals
-                    .push((p.name, LocalBinding::MacroParam(i as u8)));
+                    .push((p.name, LocalBinding::MacroParam(p.ty, i as u8)));
             }
             self.parse_expr()
         })?;
@@ -548,7 +548,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
-        let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
+        let range = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.shared.arena.push(make(range), start.merge(end)))
     }
@@ -756,9 +756,9 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
             let config = self.shared.pools.get_for(for_id);
-            for (i, &(name_span, _)) in config.bindings.iter().enumerate() {
+            for (i, &(name_span, ty)) in config.bindings.iter().enumerate() {
                 self.locals
-                    .push((name_span, LocalBinding::ForBinding(for_id, i as u8)));
+                    .push((name_span, LocalBinding::ForBinding(for_id, ty, i as u8)));
             }
             let body = self.parse_expr()?;
             let end = self.expect(TokenKind::RBrace)?;
@@ -780,8 +780,8 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             .find(|(s, _)| self.ctx.text(*s) == name)
         {
             let node = match binding {
-                LocalBinding::MacroParam(i) => Node::MacroParam(i),
-                LocalBinding::ForBinding(for_id, i) => Node::ForBinding { for_id, index: i },
+                LocalBinding::MacroParam(ty, index) => Node::MacroParam { ty, index },
+                LocalBinding::ForBinding(for_id, ty, index) => Node::ForBinding { for_id, ty, index },
             };
             self.shared.arena.push(node, span)
         } else {
@@ -802,22 +802,18 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 self.advance_pos();
                 let member_span = self.expect_ident()?;
                 if self.at(TokenKind::LParen) {
-                    // h::macro_name(args) - qualified call needs member as NodeId in ChildRange
+                    // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
                     let member_id = self
                         .shared
                         .arena
                         .push(Node::Ident(IdentKind::Unresolved), member_span);
                     self.advance_pos();
-                    let args = self.comma_sep(TokenKind::RParen, Self::parse_expr)?;
+                    let range = self.comma_sep_children(
+                        &[id, member_id],
+                        TokenKind::RParen,
+                        Self::parse_expr,
+                    )?;
                     let end = self.expect(TokenKind::RParen)?;
-                    let mut children = Vec::with_capacity(2 + args.len());
-                    children.extend_from_slice(&[id, member_id]);
-                    children.extend(args);
-                    let range = self
-                        .shared
-                        .pools
-                        .push_children(&children)
-                        .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
                     id = self
                         .shared
                         .arena
@@ -839,7 +835,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                     return Err(self.error(ParseErrorKind::ExpectedMacroName));
                 }
                 self.advance_pos();
-                let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
+                let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
                 let end = self.expect(TokenKind::RParen)?;
                 id = self.shared.arena.push(
                     Node::Call {
@@ -863,7 +859,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         make: fn(ChildRange) -> Node,
     ) -> ParseResult<NodeId> {
         self.advance_pos();
-        let range = self.comma_sep_children(close, Self::parse_expr)?;
+        let range = self.comma_sep_children(&[], close, Self::parse_expr)?;
         let end = self.expect(close)?;
         Ok(self.shared.arena.push(make(range), start.merge(end)))
     }
@@ -903,16 +899,20 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     }
 
     /// Parse comma-separated children directly into a [`ChildRange`].
+    /// `prefix` is prepended to the resulting range (e.g. `[obj, name]`
+    /// for a qualified call).
     ///
     /// Uses a scratch buffer as a stack to avoid per-call heap allocation.
     /// Nested calls push above the parent's items and truncate back, so
     /// interleaving is impossible.
     fn comma_sep_children(
         &mut self,
+        prefix: &[NodeId],
         close: TokenKind,
         mut parse_item: impl FnMut(&mut Self) -> ParseResult<NodeId>,
     ) -> ParseResult<ChildRange> {
         let saved = self.scratch.len();
+        self.scratch.extend_from_slice(prefix);
         loop {
             if self.at(close) {
                 break;
