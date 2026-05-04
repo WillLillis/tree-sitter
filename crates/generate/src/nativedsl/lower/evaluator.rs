@@ -116,37 +116,27 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn list_range(&self, v: ValueId) -> ChildRange {
-        let Value::List(range) = *self.get_val(v) else {
-            unreachable!()
-        };
+        expect_pat!(Value::List(range), *self.get_val(v));
         range
     }
 
     fn rule_id(&self, v: ValueId) -> RuleId {
-        let Value::Rule(rid) = *self.get_val(v) else {
-            unreachable!()
-        };
+        expect_pat!(Value::Rule(rid), *self.get_val(v));
         rid
     }
 
     fn str_id(&self, v: ValueId) -> Str {
-        let Value::Str(s) = *self.get_val(v) else {
-            unreachable!()
-        };
+        expect_pat!(Value::Str(s), *self.get_val(v));
         s
     }
 
     fn int_val(&self, v: ValueId) -> i32 {
-        let Value::Int(n) = *self.get_val(v) else {
-            unreachable!()
-        };
+        expect_pat!(Value::Int(n), *self.get_val(v));
         n
     }
 
     fn object_fields(&self, v: ValueId) -> &FxHashMap<String, ValueId> {
-        let Value::Object(idx) = *self.get_val(v) else {
-            unreachable!()
-        };
+        expect_pat!(Value::Object(idx), *self.get_val(v));
         &self.state.object_pool[idx as usize]
     }
 
@@ -640,10 +630,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             Node::Ident(IdentKind::Var(let_id)) => Ok(*self.state.let_values.get(let_id).unwrap()),
             &Node::GrammarConfig { module, field } => {
                 let mod_val = self.eval_expr(module)?;
-                let Value::Module(idx) = *self.get_val(mod_val) else {
-                    unreachable!() // guarded by typecheck
-                };
-                self.eval_grammar_config(idx, field, span)
+                expect_pat!(Value::Module(mod_idx), *self.get_val(mod_val));
+                self.eval_grammar_config(mod_idx, field, span)
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
@@ -679,12 +667,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::QualifiedAccess { obj, member } => {
                 let obj_val = self.eval_expr(obj)?;
                 let member_name = self.ctx().text(member);
-                let Value::Module(idx) = *self.get_val(obj_val) else {
-                    unreachable!() // guarded by typecheck
-                };
+                expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
                 // base::name only resolves against an inherit'd module (typecheck-enforced),
                 // so the target is in `previous` with a lowered grammar.
-                if let Some(var) = self.previous[usize::from(idx)]
+                if let Some(var) = self.previous[usize::from(mod_idx)]
                     .lowered()
                     .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
                 {
@@ -751,22 +737,23 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             &Node::Call { name, args } => {
-                let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
-                    unreachable!() // guarded by resolver
-                };
+                expect_pat!(
+                    Node::Ident(IdentKind::Macro(macro_id)),
+                    self.shared.arena.get(name)
+                );
                 self.invoke_macro(*macro_id, args, span, self.current_module)
             }
             &Node::QualifiedCall(range) => {
                 let children = self.shared.pools.child_slice(range);
                 let (obj, name) = (children[0], children[1]);
                 let obj_val = self.eval_expr(obj)?;
-                let Value::Module(mod_idx) = *self.get_val(obj_val) else {
-                    unreachable!() // guarded by typecheck
-                };
+                expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val)); // guarded by typecheck
                 self.eval_import_module(mod_idx)?;
-                let Node::Ident(IdentKind::Macro(macro_id)) = self.shared.arena.get(name) else {
-                    unreachable!() // guarded by resolver
-                };
+                // guarded by resolver
+                expect_pat!(
+                    Node::Ident(IdentKind::Macro(macro_id)),
+                    self.shared.arena.get(name)
+                );
                 let args = ChildRange::new(range.start + 2, range.len - 2);
                 self.invoke_macro(*macro_id, args, span, mod_idx)
             }

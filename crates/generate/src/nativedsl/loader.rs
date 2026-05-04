@@ -8,7 +8,7 @@ use crate::nativedsl::{
     DisallowedItemKind, DslError, DslResult, LexError, LexErrorKind, LowerError, LowerErrorKind,
     LoweringState, Module, ModuleError, ModuleId,
     ast::{ModuleContext, Node, SharedAst, Span},
-    lexer, lower, parser,
+    lexer, lower, parser, resolve,
     typecheck::{self, TypeEnv},
 };
 
@@ -88,7 +88,9 @@ impl Loader<'_> {
         let base = ctx
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
-        typecheck::resolve_and_check(self.shared, &ctx, self.env, self.modules, base, path)?;
+        resolve::resolve(self.shared, &ctx, self.modules, base, path)?;
+
+        typecheck::check(self.shared, &ctx, self.env)?;
 
         let global_id = u8::try_from(self.modules.len())
             .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
