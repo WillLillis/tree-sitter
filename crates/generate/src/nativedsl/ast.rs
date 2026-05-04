@@ -525,13 +525,18 @@ pub enum Node {
     /// `{ key0: val0, key1: val1, ... }`. Fields stored in `SharedAst::object_fields`.
     Object(ChildRange),
     Neg(NodeId),
-    /// Parameter hole in a macro body. Emitted by the parser when an identifier
-    /// in a macro body matches a parameter name. The `u8` is the parameter index.
-    MacroParam(u8),
-    /// Binding reference in a for-loop body. Emitted by the parser when an
-    /// identifier in a for-loop body matches a binding name.
+    /// Parameter reference in a macro body. `index` is the position into the
+    /// call's arg list; `ty` lets the typechecker avoid a macro-context lookup.
+    MacroParam {
+        ty: Ty,
+        index: u8,
+    },
+    /// Binding reference in a for-loop body. `for_id` disambiguates the
+    /// enclosing frame (for-loops nest); `index` selects within it; `ty`
+    /// lets the typechecker avoid a pool lookup.
     ForBinding {
         for_id: ForId,
+        ty: Ty,
         index: u8,
     },
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
