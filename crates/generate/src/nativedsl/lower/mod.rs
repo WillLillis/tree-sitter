@@ -46,7 +46,7 @@ pub(super) struct CallFrame {
 /// bindings evaluate exactly once; scratch buffers persist to reuse
 /// allocated capacity.
 #[derive(Default)]
-pub(super) struct LoweringState {
+pub struct LoweringState {
     // Persistent pools and caches:
     loaded: LoadedModules,
     let_values: FxHashMap<NodeId, ValueId>,
@@ -96,7 +96,7 @@ struct EvalResult {
 /// `previous` are the modules already loaded; `current` is the root module
 /// being lowered (not yet pushed into `previous`). `state` persists across
 /// the whole `parse_native_dsl` pipeline.
-pub(super) fn lower_with_base(
+pub fn lower_with_base(
     state: &mut LoweringState,
     shared: &SharedAst,
     previous: &[super::Module],
@@ -212,10 +212,11 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
         }
         // Any remaining overrides reference rules that don't exist in the base.
         if !overrides.is_empty() {
-            let entries = overrides
+            let mut entries: Vec<(String, Span)> = overrides
                 .into_iter()
                 .map(|(name, (_, span))| (name, span))
                 .collect();
+            entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             return Err(LowerError::without_span(
                 LowerErrorKind::OverrideRuleNotFound(entries),
             ));

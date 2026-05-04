@@ -394,6 +394,44 @@ fn error_import_cycle() {
 }
 
 #[test]
+fn error_import_cycle_three_levels() {
+    let dir = tempfile::tempdir().unwrap();
+    let a_path = dir.path().join("a.tsg");
+    let b_path = dir.path().join("b.tsg");
+    let c_path = dir.path().join("c.tsg");
+    std::fs::write(
+        &a_path,
+        format!("let b = import(\"{}\")", dsl_path(&b_path)),
+    )
+    .unwrap();
+    std::fs::write(
+        &b_path,
+        format!("let c = import(\"{}\")", dsl_path(&c_path)),
+    )
+    .unwrap();
+    std::fs::write(
+        &c_path,
+        format!("let a = import(\"{}\")", dsl_path(&a_path)),
+    )
+    .unwrap();
+    let input = format!(
+        r#"let h = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ "x" }}"#,
+        dsl_path(&a_path)
+    );
+    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    fn has_cycle(e: &DslError) -> bool {
+        match e {
+            DslError::Lower(l) => matches!(l.kind, LowerErrorKind::ModuleCycle),
+            DslError::Module(m) => has_cycle(&m.inner),
+            _ => false,
+        }
+    }
+    assert!(has_cycle(&err), "expected cycle error, got {err:?}");
+}
+
+#[test]
 fn error_import_bad_path() {
     let err = dsl_err(
         r#"

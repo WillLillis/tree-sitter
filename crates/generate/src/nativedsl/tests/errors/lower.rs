@@ -57,6 +57,27 @@ error_tests! { Lower {
 }}
 
 #[test]
+fn error_multiple_override_rules_not_found() {
+    // Multiple unmatched overrides should produce a list in deterministic
+    // (sorted) order so users see a stable error and tests don't flake.
+    let e = assert_err!(
+        dsl_err(
+            r#"let base = inherit("inherit_base/grammar.tsg")
+            grammar { language: "derived", inherits: base }
+            override rule zzz { "z" }
+            override rule aaa { "a" }
+            override rule mmm { "m" }"#
+        ),
+        Lower
+    );
+    let LowerErrorKind::OverrideRuleNotFound(entries) = e.kind else {
+        panic!("expected OverrideRuleNotFound, got {:?}", e.kind);
+    };
+    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["aaa", "mmm", "zzz"]);
+}
+
+#[test]
 fn error_inherit_bad_path() {
     let e = assert_err!(
         dsl_err(

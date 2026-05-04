@@ -15,7 +15,7 @@ use crate::nativedsl::{
 const MAX_MODULE_DEPTH: usize = 256;
 
 /// Mutable pipeline state passed through the load/lower recursion.
-pub(super) struct Loader<'a> {
+pub struct Loader<'a> {
     pub shared: &'a mut SharedAst,
     pub modules: &'a mut Vec<Module>,
     pub env: &'a mut TypeEnv,
