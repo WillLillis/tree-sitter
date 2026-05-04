@@ -8,7 +8,7 @@ use serde::Serialize;
 use super::ModuleId;
 use super::typecheck::Ty;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(NonZeroU32);
 
 impl NodeId {
@@ -111,7 +111,7 @@ impl NodeArena {
 
 macro_rules! id_type {
     ($name:ident) => {
-        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
         pub struct $name(u32);
         impl $name {
             #[must_use]
@@ -125,7 +125,7 @@ macro_rules! id_type {
 id_type!(MacroId);
 id_type!(ForId);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrecKind {
     Default,
     Left,
@@ -135,7 +135,7 @@ pub enum PrecKind {
 
 /// All grammar config fields. Used for parsing the grammar block, `grammar_config()`
 /// access (Language/Inherits excluded by the parser), and iterating config node fields.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ConfigField {
     Language,
     Inherits,
@@ -172,14 +172,14 @@ impl TryFrom<&str> for ConfigField {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RepeatKind {
     ZeroOrMore,
     OneOrMore,
     Optional,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IdentKind {
     Unresolved,
     Rule,
@@ -369,6 +369,7 @@ pub struct ForConfig {
 /// Each loaded module (root, inherited, imported) has its own `ModuleContext`
 /// containing source text and module-specific configuration, while sharing a
 /// single [`SharedAst`] for all node data.
+#[derive(Debug)]
 pub struct ModuleContext {
     pub source: String,
     pub path: PathBuf,
@@ -404,7 +405,7 @@ impl ModuleContext {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ChildRange {
     pub start: u32,
     pub len: u16,
@@ -422,7 +423,7 @@ impl ChildRange {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Node {
     Grammar,
     Rule {
@@ -555,7 +556,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct GrammarConfig {
     pub language: Option<String>,
     pub inherits: Option<NodeId>,
