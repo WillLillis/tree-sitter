@@ -611,11 +611,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
-            Node::MacroParam(i) => {
+            Node::MacroParam { index, .. } => {
                 let base = *self.state.macro_arg_bases.last().unwrap();
-                Ok(self.state.macro_args[base + *i as usize])
+                Ok(self.state.macro_args[base + *index as usize])
             }
-            Node::ForBinding { for_id, index } => {
+            Node::ForBinding { for_id, index, .. } => {
                 let base = self
                     .state
                     .for_binding_frames
@@ -1040,23 +1040,24 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 }
 
 fn unescape_string(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('"') => result.push('"'),
-                Some('\\') => result.push('\\'),
-                Some('n') => result.push('\n'),
-                Some('t') => result.push('\t'),
-                Some('r') => result.push('\r'),
-                Some('0') => result.push('\0'),
-                // Guarded by lexer escape validation
-                _ => unreachable!(),
-            }
-        } else {
-            result.push(c);
-        }
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while let Some(off) = memchr::memchr(b'\\', &bytes[i..]) {
+        out.extend_from_slice(&bytes[i..i + off]);
+        // Guarded by lexer escape validation
+        out.push(match bytes[i + off + 1] {
+            b'"' => b'"',
+            b'\\' => b'\\',
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'0' => 0,
+            _ => unreachable!(),
+        });
+        i += off + 2;
     }
-    result
+    out.extend_from_slice(&bytes[i..]);
+    // SAFETY: input was UTF-8 and every escape resolves to an ASCII byte.
+    unsafe { String::from_utf8_unchecked(out) }
 }

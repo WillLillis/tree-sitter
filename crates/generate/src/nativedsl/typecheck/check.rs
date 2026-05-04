@@ -95,19 +95,17 @@ pub(super) fn check_item(
         }
         Node::Macro(macro_id) => {
             let config = shared.pools.get_macro(*macro_id);
-            let return_ty = config.return_ty;
-            let prev = env.current_macro.replace(*macro_id);
             let body_ty = type_of(shared, ctx, config.body, env)?;
-            env.current_macro = prev;
-            if !body_ty.is_compatible(return_ty) {
-                return Err(mismatch(return_ty, body_ty, shared.arena.span(config.body)));
+            if !body_ty.is_compatible(config.return_ty) {
+                return Err(mismatch(
+                    config.return_ty,
+                    body_ty,
+                    shared.arena.span(config.body),
+                ));
             }
             Ok(())
         }
-        Node::Rule { body, .. } => {
-            env.vars.insert(id, Ty::RULE);
-            expect_rule(shared, ctx, *body, env)
-        }
+        Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
         _ => unreachable!(),
     }
 }
@@ -155,7 +153,7 @@ fn expect_name_ref(
         Node::Ident(IdentKind::Var(_))
         | Node::FieldAccess { .. }
         | Node::GrammarConfig { .. }
-        | Node::MacroParam(_)
+        | Node::MacroParam { .. }
         | Node::ForBinding { .. } => {
             let ty = type_of(shared, ctx, id, env)?;
             if ty != Ty::RULE {
@@ -261,13 +259,7 @@ fn type_of(
             })
         }
         Node::Ident(IdentKind::Unresolved) => unreachable!(),
-        Node::MacroParam(i) => {
-            let macro_id = env.current_macro.unwrap();
-            Ok(shared.pools.get_macro(macro_id).params[*i as usize].ty)
-        }
-        Node::ForBinding { for_id, index } => {
-            Ok(shared.pools.get_for(*for_id).bindings[*index as usize].1)
-        }
+        &Node::MacroParam { ty, .. } | &Node::ForBinding { ty, .. } => Ok(ty),
         Node::Ident(IdentKind::Macro(_)) => Err(TypeError::new(
             TypeErrorKind::MacroUsedAsValue(ctx.text(span).to_string()),
             span,
@@ -355,7 +347,7 @@ fn type_of(
             let is_valid = matches!(
                 shared.arena.get(*target),
                 Node::Ident(IdentKind::Rule | IdentKind::Var(_))
-                    | Node::MacroParam(_)
+                    | Node::MacroParam { .. }
                     | Node::ForBinding { .. }
                     | Node::QualifiedAccess { .. }
                     | Node::FieldAccess { .. }

@@ -1,7 +1,5 @@
-//! Name resolution and type checking for the native grammar DSL.
-//!
-//! Entry point is [`resolve_and_check`]: collects declarations, resolves
-//! identifiers, then type-checks the resolved AST.
+//! Type checking for the native grammar DSL. Entry point is [`check`],
+//! invoked after [`super::resolve`] has resolved identifiers.
 
 mod check;
 pub mod types;
@@ -14,14 +12,14 @@ use thiserror::Error;
 
 use check::check_item;
 
-use super::ast::{MacroId, ModuleContext, NodeId, SharedAst};
+use super::TypeError;
+use super::ast::{ModuleContext, NodeId, SharedAst};
 
 #[derive(Clone, Default)]
 pub struct TypeEnv {
     pub vars: FxHashMap<NodeId, Ty>,
     /// Field names for Object variables, keyed by the Let node's `NodeId`.
     pub object_fields: FxHashMap<NodeId, Vec<String>>,
-    current_macro: Option<MacroId>,
 }
 
 /// Walks root items and type-checks the now-resolved AST.
@@ -29,9 +27,9 @@ pub struct TypeEnv {
 /// # Errors
 ///
 /// Returns [`TypeError`] on typecheck failure.
-pub fn check<'ast>(
-    shared: &'ast mut SharedAst,
-    ctx: &'ast ModuleContext,
+pub fn check(
+    shared: &mut SharedAst,
+    ctx: &ModuleContext,
     env: &mut TypeEnv,
 ) -> Result<(), TypeError> {
     for &item_id in &ctx.root_items {
@@ -39,8 +37,6 @@ pub fn check<'ast>(
     }
     Ok(())
 }
-
-use super::TypeError;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
 pub enum TypeErrorKind {

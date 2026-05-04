@@ -52,11 +52,11 @@ struct ExternalNameCtx<'src, 'a, 'b> {
 /// # Errors
 ///
 /// Returns `ResolveError` if name resolution fails.
-pub fn resolve<'ast>(
-    shared: &'ast mut SharedAst,
-    ctx: &'ast ModuleContext,
-    modules: &'ast [Module],
-    base: Option<(&'ast InputGrammar, Span)>,
+pub fn resolve(
+    shared: &mut SharedAst,
+    ctx: &ModuleContext,
+    modules: &[Module],
+    base: Option<(&InputGrammar, Span)>,
     grammar_path: &Path,
 ) -> Result<(), ResolveError> {
     let mut decls = collect_decls(shared, ctx, &ctx.root_items, grammar_path, base)?;
@@ -158,8 +158,9 @@ pub fn collect_decls<'a>(
                 )?;
             }
             Node::Let { name, value, .. } => {
-                // Self-referential let (e.g. `let C = C`). This must be caught before
-                // the call below to `collect_external_names` to avoid an infinite loop
+                // Catch `let X = X` here so externals referencing X surface
+                // UnknownIdentifier rather than the less-useful
+                // InvalidExternalsExpression from collect_external_names below.
                 let lhs = ctx.text(*name);
                 if matches!(shared.arena.get(*value), Node::Ident(IdentKind::Unresolved))
                     && ctx.text(shared.arena.span(*value)) == lhs
@@ -260,12 +261,11 @@ pub fn resolve_expr(
     modules: &[Module],
     id: NodeId,
 ) -> Result<(), ResolveError> {
-    // Handle Ident mutation first
+    // Local bindings are emitted as MacroParam/ForBinding by the parser,
+    // so any remaining Ident(Unresolved) is a top-level reference.
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = ctx.text(span);
-        // locals check removed: parser emits MacroParam/ForBinding directly,
-        // so no Ident(Unresolved) can be a local binding at this point.
         if let Some(&(decl, _)) = decls.get(name) {
             match decl {
                 Decl::Var(let_id) => arena.resolve_as(id, IdentKind::Var(let_id)),
@@ -278,11 +278,8 @@ pub fn resolve_expr(
         return Ok(());
     }
 
-    // Alias target: bare identifiers resolve as Rule (named alias).
-    // Targets don't require the name to be declared - they're just node names,
-    // same as grammar.js `alias($.x, $.undeclared_name)`.
-    // Parser already emits MacroParam/ForBinding for local bindings,
-    // so any remaining Ident(Unresolved) target is a rule name.
+    // Alias target: a bare identifier becomes a named-alias rule reference,
+    // even if undeclared (mirrors grammar.js `alias($.x, $.undeclared)`).
     if let &Node::Alias { content, target } = arena.get(id) {
         resolve_expr(arena, pools, ctx, decls, modules, content)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
