@@ -416,7 +416,7 @@ fn error_externals_via_function_call() {
             rule program { "x" }
         "#
         ),
-        Type
+        Resolve
     );
-    assert_eq!(e.kind, TypeErrorKind::InvalidExternalsExpression);
+    assert_eq!(e.kind, ResolveErrorKind::InvalidExternalsExpression);
 }

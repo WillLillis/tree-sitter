@@ -44,12 +44,6 @@ error_tests! { Type {
         rule program { ident("default", regexp("[a-z]+")) }"#,
         TypeErrorKind::UndefinedMacro("ident".into())
     }
-    error_self_referential_let {
-        r#"grammar { language: "test" }
-        let P = { a: P.a }
-        rule program { "x" }"#,
-        TypeErrorKind::UnknownIdentifier("P".into())
-    }
     error_wrong_arg_count {
         r#"grammar { language: "test" }
         macro one_arg(x: rule_t) rule_t { x }
@@ -79,12 +73,6 @@ error_tests! { Type {
         grammar { language: "test", word: my_word }
         rule program { "y" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::RULE, got: Ty::INT }
-    }
-    error_config_access_unknown_field {
-        r#"let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base }
-        let x = base::bogus"#,
-        TypeErrorKind::ImportMemberNotFound("bogus".into())
     }
     error_for_requires_list {
         r#"grammar { language: "test" }

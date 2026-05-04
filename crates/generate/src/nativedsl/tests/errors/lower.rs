@@ -68,10 +68,10 @@ fn error_inherit_bad_path() {
     assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
 }
 
-inherit_error_tests! { Type {
+inherit_error_tests! { Resolve {
     error_inherit_child_error {
         "grammar { language: \"base\" }\nrule program { bogus_ref }\n",
-        TypeErrorKind::UnknownIdentifier("bogus_ref".into())
+        ResolveErrorKind::UnknownIdentifier("bogus_ref".into())
     }
 }}
 
@@ -149,11 +149,11 @@ fn error_inherit_rule_not_found() {
         grammar { language: "derived", inherits: base }
         rule extra { base::nonexistent_rule }"#
         ),
-        Type
+        Resolve
     );
     assert_eq!(
         e.kind,
-        TypeErrorKind::ImportMemberNotFound("nonexistent_rule".into())
+        ResolveErrorKind::ImportMemberNotFound("nonexistent_rule".into())
     );
 }
 

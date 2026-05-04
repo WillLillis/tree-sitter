@@ -244,10 +244,10 @@ fn error_import_member_not_found() {
         rule program { h::nonexistent }
     "#,
     );
-    let e = assert_err!(err, Type);
+    let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
-        TypeErrorKind::ImportMemberNotFound("nonexistent".into())
+        ResolveErrorKind::ImportMemberNotFound("nonexistent".into())
     );
 }
 
@@ -261,7 +261,10 @@ fn error_import_macro_used_as_value() {
     "#,
     );
     let e = assert_err!(err, Type);
-    assert_eq!(e.kind, TypeErrorKind::MacroUsedAsValue("comma_sep1".into()));
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::MacroUsedAsValue("h::comma_sep1".into())
+    );
 }
 
 #[test]
