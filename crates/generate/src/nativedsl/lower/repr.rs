@@ -9,7 +9,7 @@ use super::super::ModuleId;
 use super::super::ast::{ChildRange, Span};
 
 /// Interned string id. Indexes into [`StringPool::entries`].
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Str(pub(super) NonZeroU32);
 
 pub(super) enum StrEntry {
@@ -63,7 +63,7 @@ impl StringPool {
 }
 
 /// Index into the lowering rule pool.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct RuleId(pub(super) u32);
 
 #[derive(Clone, Copy)]
@@ -95,7 +95,7 @@ pub(super) enum ARule {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct ValueId(pub(super) u32);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum Value {
     Int(i32),
     Str(Str),
