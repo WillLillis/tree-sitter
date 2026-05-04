@@ -58,6 +58,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 root_items: Vec::with_capacity(root_cap),
                 inherit_ref: None,
                 module_refs: Vec::new(),
+                node_range: 0..0,
             },
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
@@ -66,12 +67,18 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     }
 
     pub fn parse(mut self) -> ParseResult<ModuleContext> {
+        // Capture this module's NodeId range so consumers (e.g. LSP) can
+        // attribute nodes back to the right ModuleContext / source text.
+        let start = self.shared.arena.len() as u32 + 1;
         self.skip_comments();
         while !self.at_eof() {
             let id = self.parse_item()?;
             self.ctx.root_items.push(id);
             self.skip_comments();
         }
+        let end = self.shared.arena.len() as u32 + 1;
+        debug_assert!(start <= end);
+        self.ctx.node_range = start..end;
         Ok(self.ctx)
     }
 
