@@ -336,12 +336,6 @@ impl AstPools {
         }
     }
 
-    /// Unpack a `DynRegex(range)` into `(pattern, Option<flags>)`.
-    #[must_use]
-    pub fn get_regex(&self, range: ChildRange) -> (NodeId, Option<NodeId>) {
-        let c = self.child_slice(range);
-        (c[0], c.get(1).copied())
-    }
 }
 
 #[derive(Clone)]
@@ -485,9 +479,11 @@ pub enum Node {
     },
     /// `concat(a, b, ...)`. Children: `[part0, part1, ...]` - each must be `str_t`.
     Concat(ChildRange),
-    /// `regexp(pattern)` or `regexp(pattern, flags)`. Children layout:
-    /// `[pattern]` or `[pattern, flags]` in the children vec.
-    DynRegex(ChildRange),
+    /// `regexp(pattern)` or `regexp(pattern, flags)`.
+    DynRegex {
+        pattern: NodeId,
+        flags: Option<NodeId>,
+    },
     /// `inherit("path.tsg")` or `import("path.tsg")`. `module` is `None`
     /// after parsing, set to a global module index by the loading pre-pass.
     ModuleRef {
