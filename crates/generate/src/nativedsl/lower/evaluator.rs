@@ -663,24 +663,21 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 }
             }
             // Only unresolved QualifiedAccess reaches here: inherited grammar
-            // rules looked up by name in base_grammar.variables.
+            // rules looked up by name in base_grammar.variables. Resolver
+            // already verified the rule exists, so the find always succeeds.
             &Node::QualifiedAccess { obj, member } => {
                 let obj_val = self.eval_expr(obj)?;
                 let member_name = self.ctx().text(member);
                 expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
-                // base::name only resolves against an inherit'd module (typecheck-enforced),
-                // so the target is in `previous` with a lowered grammar.
-                if let Some(var) = self.previous[usize::from(mod_idx)]
+                let var = self.previous[usize::from(mod_idx)]
                     .lowered()
-                    .and_then(|g| g.variables.iter().find(|v| v.name == member_name))
-                {
-                    let rid = self.import_rule(&var.rule);
-                    return Ok(self.alloc_val(Value::Rule(rid)));
-                }
-                Err(LowerError::new(
-                    LowerErrorKind::ModuleMemberNotFound(member_name.to_string()),
-                    member,
-                ))
+                    .unwrap()
+                    .variables
+                    .iter()
+                    .find(|v| v.name == member_name)
+                    .unwrap();
+                let rid = self.import_rule(&var.rule);
+                Ok(self.alloc_val(Value::Rule(rid)))
             }
             &Node::Object(range) => {
                 let fields = self.shared.pools.get_object(range);
@@ -977,17 +974,17 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Lazily evaluate an imported module's top-level let bindings.
-    fn eval_import_module(&mut self, table_id: ModuleId) -> LowerResult<()> {
-        if self.state.loaded.is_loaded(table_id) {
+    fn eval_import_module(&mut self, mod_idx: ModuleId) -> LowerResult<()> {
+        if self.state.loaded.is_loaded(mod_idx) {
             return Ok(());
         }
-        self.state.loaded.set_loaded(table_id);
-
         let saved_module = self.current_module;
-        self.current_module = table_id;
+        self.current_module = mod_idx;
         let result = self.eval_let_bindings();
         self.current_module = saved_module;
-        result
+        result?;
+        self.state.loaded.set_loaded(mod_idx);
+        Ok(())
     }
 
     fn eval_let_bindings(&mut self) -> LowerResult<()> {

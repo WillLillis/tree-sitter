@@ -54,11 +54,13 @@ mod tests;
 pub mod typecheck;
 
 pub use diagnostic::NativeDslError;
-pub use lexer::LexErrorKind;
+pub use lexer::{LexErrorKind, LexResult};
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
-pub use parser::ParseErrorKind;
-pub use resolve::ResolveErrorKind;
-pub use typecheck::{DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeErrorKind};
+pub use parser::{ParseErrorKind, ParseResult};
+pub use resolve::{ResolveErrorKind, ResolveResult};
+pub use typecheck::{
+    ContainerKind, DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeErrorKind, TypeResult,
+};
 
 use std::path::{Path, PathBuf};
 

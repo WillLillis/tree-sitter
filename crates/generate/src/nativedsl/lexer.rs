@@ -220,6 +220,7 @@ impl<'src> Lexer<'src> {
                 });
                 break;
             }
+            // SAFETY: the `pos + 1 < len` guard makes both indexes in-bounds.
             if self.pos + 1 < len
                 && unsafe { *source.get_unchecked(self.pos) == b'/' }
                 && unsafe { *source.get_unchecked(self.pos + 1) == b'/' }
