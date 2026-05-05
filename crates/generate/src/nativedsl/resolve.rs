@@ -27,10 +27,10 @@ use crate::{
 /// Intermediate resolve environment used during phase 1. Maps declaration
 /// names to their kind (for Ident resolution) and span
 /// (for duplicate checking / "first defined here" notes).
-pub type Decls<'src> = FxHashMap<&'src str, (Decl, Span)>;
+type Decls<'src> = FxHashMap<&'src str, (Decl, Span)>;
 
 #[derive(Clone, Copy)]
-pub enum Decl {
+enum Decl {
     Rule,
     Var(NodeId),
     Macro(MacroId),
@@ -58,7 +58,7 @@ pub fn resolve(
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
     grammar_path: &Path,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     let mut decls = collect_decls(shared, ctx, &ctx.root_items, grammar_path, base)?;
 
     for &item_id in &ctx.root_items {
@@ -88,14 +88,14 @@ pub fn resolve(
     Ok(())
 }
 
-pub fn insert_decl<'src>(
+fn insert_decl<'src>(
     decls: &mut Decls<'src>,
     name: &'src str,
     kind: Decl,
     span: Span,
     grammar_path: &Path,
     source: &str,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     if let Some(&(_, first_span)) = decls.get(name) {
         return Err(ResolveError::with_note(
             ResolveErrorKind::DuplicateDeclaration(name.to_string()),
@@ -121,13 +121,13 @@ pub fn insert_decl<'src>(
 /// before the externals walk so that an `externals` field referencing an
 /// inherited rule is correctly identified as a known name rather than being
 /// re-registered as a fresh external token.
-pub fn collect_decls<'a>(
+fn collect_decls<'a>(
     shared: &SharedAst,
     ctx: &'a ModuleContext,
     root_items: &[NodeId],
     grammar_path: &Path,
     base: Option<(&'a InputGrammar, Span)>,
-) -> Result<Decls<'a>, ResolveError> {
+) -> ResolveResult<Decls<'a>> {
     let mut decls = Decls::default();
     let source = &ctx.source;
 
@@ -214,7 +214,7 @@ fn resolve_item(
     decls: &Decls,
     modules: &[Module],
     item_id: NodeId,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     match arena.get(item_id) {
         Node::Grammar => {
             // INVARIANT: set during grammar block parsing, always present here
@@ -253,14 +253,14 @@ fn resolve_item(
 }
 
 /// Resolve identifiers within a single expression.
-pub fn resolve_expr(
+fn resolve_expr(
     arena: &mut NodeArena,
     pools: &AstPools,
     ctx: &ModuleContext,
     decls: &Decls,
     modules: &[Module],
     id: NodeId,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     // Local bindings are emitted as MacroParam/ForBinding by the parser,
     // so any remaining Ident(Unresolved) is a top-level reference.
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
@@ -310,7 +310,7 @@ fn resolve_children(
     decls: &Decls,
     modules: &[Module],
     id: NodeId,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
         for child in pools.child_slice(range) {
@@ -416,7 +416,7 @@ fn resolve_qualified_member(
     node_id: NodeId,
     member_name: &str,
     member_span: Span,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     let target_ctx = target.ctx();
     for &item_id in &target_ctx.root_items {
         match arena.get(item_id) {
@@ -475,7 +475,7 @@ fn collect_external_names<'src>(
     ctx: &'src ModuleContext,
     id: NodeId,
     ec: &mut ExternalNameCtx<'src, '_, '_>,
-) -> Result<(), ResolveError> {
+) -> ResolveResult<()> {
     let arena = &shared.arena;
     match arena.get(id) {
         // Bare identifier: either a let binding (follow it) or an external token name.
@@ -552,6 +552,7 @@ fn find_let_value(
     })
 }
 
+
 pub type ResolveResult<T> = Result<T, ResolveError>;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
@@ -577,10 +578,12 @@ fn unknown_ident_error(
     span: Span,
 ) -> ResolveError {
     let forward_span = ctx.root_items.iter().find_map(|&rid| {
+        let let_span = arena.span(rid);
         if let Node::Let { name: let_name, .. } = arena.get(rid)
+            && let_span.start > span.start
             && ctx.text(*let_name) == name
         {
-            return Some(arena.span(rid));
+            return Some(let_span);
         }
         None
     });

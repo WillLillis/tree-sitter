@@ -113,6 +113,11 @@ error_tests! { Parse {
         grammar { language: "derived", inherits: base, extras: grammar_config(base, bogus) }"#,
         ParseErrorKind::UnknownGrammarField("bogus".into())
     }
+    error_empty_for_bindings {
+        r#"grammar { language: "test" }
+        rule program { choice(for () in [program] { "x" }) }"#,
+        ParseErrorKind::EmptyForBindings
+    }
 }}
 
 #[test]
@@ -183,6 +188,8 @@ fn error_builtin_arg_count_messages() {
         (g!(r#"reserved("ctx", "a", "b")"#), TokenKind::KwReserved, 2, 3),
         (g!("regexp()"), TokenKind::KwRegexp, 1, 0),
         (g!(r#"regexp("a", "b", "c")"#), TokenKind::KwRegexp, 2, 3),
+        (g!("grammar_config()"), TokenKind::KwGrammarConfig, 2, 0),
+        (g!("grammar_config(base)"), TokenKind::KwGrammarConfig, 2, 1),
     ];
     for &(src, name, expected, got) in cases {
         let e = assert_err!(dsl_err(src), Parse);

@@ -432,6 +432,27 @@ fn error_import_cycle_three_levels() {
 }
 
 #[test]
+fn error_too_many_modules() {
+    // Loading 256 helpers + 1 root tips the loader's module-id counter past
+    // u8::MAX, which should surface as `ModuleTooMany`.
+    let dir = tempfile::tempdir().unwrap();
+    let mut imports = String::new();
+    for i in 0..256 {
+        let path = dir.path().join(format!("h{i}.tsg"));
+        std::fs::write(&path, format!("let v{i}: str_t = \"x\"")).unwrap();
+        imports.push_str(&format!("let h{i} = import(\"{}\")\n", dsl_path(&path)));
+    }
+    let root = format!(
+        "{imports}grammar {{ language: \"test\" }}\nrule program {{ \"x\" }}\n"
+    );
+    let root_path = dir.path().join("root.tsg");
+    std::fs::write(&root_path, &root).unwrap();
+    let err = parse_native_dsl(&root, &root_path).unwrap_err();
+    let e = assert_err!(err, Lower);
+    assert!(matches!(e.kind, LowerErrorKind::ModuleTooMany));
+}
+
+#[test]
 fn error_import_bad_path() {
     let err = dsl_err(
         r#"
