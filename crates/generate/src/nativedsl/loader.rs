@@ -36,7 +36,7 @@ impl Loader<'_> {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the imported module isn't valid tsg source.
+    /// Returns `Err` if the module isn't valid tsg source.
     ///
     /// # Panics
     ///
