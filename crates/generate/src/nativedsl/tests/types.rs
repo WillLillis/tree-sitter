@@ -50,6 +50,16 @@ compile_tests! {
         let o: obj_t<rule_t> = { a: "x", b: "y" }
         rule program { o.a }"#
     }
+    empty_object_in_macro_arg_uses_param_type {
+        r#"grammar { language: "test" }
+        macro f(o: obj_t<rule_t>) rule_t { "x" }
+        rule program { f({}) }"#
+    }
+    empty_list_in_macro_arg_uses_param_type {
+        r#"grammar { language: "test" }
+        macro f(xs: list_t<rule_t>) rule_t { "x" }
+        rule program { f([]) }"#
+    }
     list_int_literal_infers_list_int {
         r#"grammar { language: "test" }
         let nums: list_t<int_t> = [1, 2, 3]

@@ -181,6 +181,18 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::EmptyContainerNeedsAnnotation
     }
+    error_empty_list_with_non_list_annotation {
+        r#"grammar { language: "test" }
+        let x: int_t = []
+        rule program { "x" }"#,
+        TypeErrorKind::EmptyContainerAnnotationMismatch { declared: Ty::INT, kind: ContainerKind::List }
+    }
+    error_empty_object_with_non_object_annotation {
+        r#"grammar { language: "test" }
+        let x: str_t = {}
+        rule program { "x" }"#,
+        TypeErrorKind::EmptyContainerAnnotationMismatch { declared: Ty::STR, kind: ContainerKind::Object }
+    }
     error_for_requires_tuples {
         r#"grammar { language: "test" }
         let items: list_t<str_t> = ["a", "b"]

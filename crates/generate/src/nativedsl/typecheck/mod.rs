@@ -31,11 +31,28 @@ pub fn check(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     for &item_id in &ctx.root_items {
         check_item(shared, ctx, item_id, env)?;
     }
     Ok(())
+}
+
+pub type TypeResult<T> = Result<T, TypeError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ContainerKind {
+    List,
+    Object,
+}
+
+impl std::fmt::Display for ContainerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::List => "list",
+            Self::Object => "object",
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
@@ -64,6 +81,8 @@ pub enum TypeErrorKind {
     InvalidListElement(Ty),
     #[error("empty list requires a type annotation")]
     EmptyContainerNeedsAnnotation,
+    #[error("annotation {declared} is not a {kind} type, but value is an empty {kind} literal")]
+    EmptyContainerAnnotationMismatch { declared: Ty, kind: ContainerKind },
     #[error("for-expression requires a list, got {0}")]
     ForRequiresList(Ty),
     #[error("for with multiple bindings requires a list of tuples")]
@@ -73,8 +92,6 @@ pub enum TypeErrorKind {
         bindings: usize,
         tuple_elements: usize,
     },
-    #[error("unresolved variable '{0}'")]
-    UnresolvedVariable(String),
     #[error("append requires list arguments, got {0}")]
     AppendRequiresList(Ty),
     #[error("'::' requires module_t, got {0}")]

@@ -27,8 +27,8 @@ pub struct Parser<'tok, 'path, 'shared> {
     tokens: &'tok [Token],
     pos: usize,
     grammar_path: &'path Path,
-    pub shared: &'shared mut SharedAst,
-    pub ctx: ModuleContext,
+    shared: &'shared mut SharedAst,
+    ctx: ModuleContext,
     scratch: Vec<NodeId>,
     /// Stack of local bindings (macro params and for-loop bindings).
     /// Innermost scope is at the end. Pushed before parsing a body,
@@ -38,6 +38,11 @@ pub struct Parser<'tok, 'path, 'shared> {
 }
 
 impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
+    /// SAFETY:
+    ///
+    /// Caller must pass a token stream produced by
+    /// [`super::lexer::Lexer::tokenize`] (in particular, terminated by
+    /// `TokenKind::Eof`).
     #[must_use]
     pub fn new(
         tokens: &'tok [Token],
@@ -384,17 +389,17 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             }
             self.parse_expr()
         })?;
-        self.expect(TokenKind::RBrace)?;
+        let end = self.expect(TokenKind::RBrace)?;
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,
             return_ty,
             body,
         });
-        Ok(self.shared.arena.push(
-            Node::Macro(macro_idx),
-            start.merge(self.shared.arena.span(body)),
-        ))
+        Ok(self
+            .shared
+            .arena
+            .push(Node::Macro(macro_idx), start.merge(end)))
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -590,7 +595,13 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     fn parse_grammar_config(&mut self, start: Span) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count(TokenKind::KwGrammarConfig, 2, 0, start));
+        }
         let module = self.parse_expr()?;
+        if self.at(TokenKind::RParen) {
+            return Err(self.err_arg_count(TokenKind::KwGrammarConfig, 2, 1, start));
+        }
         self.expect(TokenKind::Comma)?;
         let field_span = self.expect_name()?;
         let field_name = self.ctx.text(field_span);
@@ -922,22 +933,20 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         close: TokenKind,
         mut parse_item: impl FnMut(&mut Self) -> ParseResult<NodeId>,
     ) -> ParseResult<ChildRange> {
-        let saved = self.scratch.len();
-        self.scratch.extend_from_slice(prefix);
-        while !self.at(close) {
-            let id = parse_item(self)?;
-            self.scratch.push(id);
-            if self.eat(TokenKind::Comma).is_none() {
-                break;
+        stack_scope!(self.scratch, |saved| {
+            self.scratch.extend_from_slice(prefix);
+            while !self.at(close) {
+                let id = parse_item(self)?;
+                self.scratch.push(id);
+                if self.eat(TokenKind::Comma).is_none() {
+                    break;
+                }
             }
-        }
-        let range = self
-            .shared
-            .pools
-            .push_children(&self.scratch[saved..])
-            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
-        self.scratch.truncate(saved);
-        Ok(range)
+            self.shared
+                .pools
+                .push_children(&self.scratch[saved..])
+                .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))
+        })
     }
 
     fn comma_sep<T>(

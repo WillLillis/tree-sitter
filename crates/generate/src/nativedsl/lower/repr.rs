@@ -10,7 +10,7 @@ use super::super::ast::{ChildRange, Span};
 
 /// Interned string id. Indexes into [`StringPool::entries`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct Str(pub(super) NonZeroU32);
+pub(super) struct Str(pub NonZeroU32);
 
 pub(super) enum StrEntry {
     Unreachable,
@@ -19,7 +19,7 @@ pub(super) enum StrEntry {
 }
 
 pub(super) struct StringPool {
-    pub(super) entries: Vec<StrEntry>,
+    pub entries: Vec<StrEntry>,
     owned_lookup: FxHashMap<String, Str>,
 }
 
@@ -64,7 +64,7 @@ impl StringPool {
 
 /// Index into the lowering rule pool.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) struct RuleId(pub(super) u32);
+pub(super) struct RuleId(pub u32);
 
 #[derive(Clone, Copy)]
 pub(super) enum APrec {
@@ -93,7 +93,7 @@ pub(super) enum ARule {
 
 /// Index into the lowering value pool.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct ValueId(pub(super) u32);
+pub(super) struct ValueId(pub u32);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Value {

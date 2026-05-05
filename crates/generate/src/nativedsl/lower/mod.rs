@@ -34,11 +34,11 @@ const MAX_CALL_DEPTH: u16 = 128;
 #[derive(Clone, Copy)]
 pub(super) struct CallFrame {
     /// Span of the macro's name in its defining module.
-    pub(super) name_span: Span,
-    pub(super) name_mod: ModuleId,
+    pub name_span: Span,
+    pub name_mod: ModuleId,
     /// Span of the call site in the caller's module.
-    pub(super) call_span: Span,
-    pub(super) caller_mod: ModuleId,
+    pub call_span: Span,
+    pub caller_mod: ModuleId,
 }
 
 /// Long-lived state shared across grammar lowerings in one
@@ -291,8 +291,6 @@ pub enum LowerErrorKind {
     ModuleDisallowedItem(DisallowedItemKind),
     #[error("module cycle detected")]
     ModuleCycle,
-    #[error("member '{0}' not found in module")]
-    ModuleMemberNotFound(String),
     #[error("expected a rule name reference")]
     ExpectedRuleName,
     #[error("config field is not set in the base grammar")]
