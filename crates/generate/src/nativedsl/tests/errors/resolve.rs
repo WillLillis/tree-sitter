@@ -73,6 +73,27 @@ error_tests! { Resolve {
 }}
 
 #[test]
+fn error_self_ref_in_container_no_misleading_note() {
+    // `let X = [X]` (or any non-bare-Ident self-ref) should report an
+    // UnknownIdentifier without the misleading "defined later" note that
+    // would point back at the same let.
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            let X: list_t<rule_t> = [X]
+            rule program { "x" }"#
+        ),
+        Resolve
+    );
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("X".into()));
+    assert!(
+        e.note.is_none(),
+        "self-reference inside container should not attach DefinedLater note: {:?}",
+        e.note
+    );
+}
+
+#[test]
 fn error_mutual_let_ref_in_externals() {
     // Mutual let references should not cause infinite recursion in
     // collect_external_names.

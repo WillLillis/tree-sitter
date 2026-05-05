@@ -237,8 +237,9 @@ impl Span {
         }
     }
 
+    /// Caller must pair the span with the source it was lexed from.
     #[must_use]
-    pub fn resolve<'src>(&self, source: &'src str) -> &'src str {
+    pub(super) fn resolve<'src>(&self, source: &'src str) -> &'src str {
         // SAFETY: lexer emits spans at UTF-8 char boundaries within `source`.
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
     }
@@ -327,6 +328,10 @@ impl AstPools {
     }
 
     /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
+    ///
+    /// SAFETY:
+    ///
+    /// Caller must pass a range from an actual `Node::QualifiedCall` node.
     #[must_use]
     pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
         let children = self.child_slice(range);
@@ -574,8 +579,8 @@ pub enum Node {
 const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl Node {
-    /// Returns the child range for nodes that store plain `NodeId` children.
-    /// `Object` and `Call` use separate arenas and are not included.
+    /// Range of children for variadic nodes whose children are `NodeId`s
+    /// directly: SeqOrChoice`, `List`, `Tuple`, and `Concat`.
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {

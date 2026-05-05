@@ -1,24 +1,25 @@
 use crate::nativedsl::{
-    DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeError, TypeErrorKind,
+    ContainerKind, DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeError, TypeErrorKind,
     ast::{
         ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind, SharedAst,
         Span,
     },
-    typecheck::TypeEnv,
+    typecheck::{TypeEnv, TypeResult},
 };
 
 /// Function pointer type for element checkers passed to `expect_list`.
 type CheckFn<'ast> =
-    fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> Result<(), TypeError>;
+    fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
 
 pub(super) fn check_item(
     shared: &SharedAst,
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     match shared.arena.get(id) {
         Node::Grammar => {
+            // INVARIANT: validate_grammar enforces grammar_config.is_some()
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
                 expect_list(shared, ctx, id, env, expect_rule, Ty::LIST_RULE)?;
@@ -57,6 +58,24 @@ pub(super) fn check_item(
             let resolved_ty = match (is_empty_list, is_empty_obj, declared_ty) {
                 (true, _, Some(ty)) if ty.is_list() => ty,
                 (_, true, Some(ty)) if matches!(ty, Ty::Data(DataTy::Object(_))) => ty,
+                (true, _, Some(declared)) => {
+                    return Err(TypeError::new(
+                        TypeErrorKind::EmptyContainerAnnotationMismatch {
+                            declared,
+                            kind: ContainerKind::List,
+                        },
+                        shared.arena.span(*value),
+                    ));
+                }
+                (_, true, Some(declared)) => {
+                    return Err(TypeError::new(
+                        TypeErrorKind::EmptyContainerAnnotationMismatch {
+                            declared,
+                            kind: ContainerKind::Object,
+                        },
+                        shared.arena.span(*value),
+                    ));
+                }
                 (true, _, None) | (_, true, None) => {
                     return Err(TypeError::new(
                         TypeErrorKind::EmptyContainerNeedsAnnotation,
@@ -119,7 +138,7 @@ fn expect_list<'ast>(
     env: &mut TypeEnv,
     check_elem: CheckFn<'ast>,
     expected: Ty,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     if let Node::List(range) = shared.arena.get(id) {
         for &child in shared.pools.child_slice(*range) {
             check_elem(shared, ctx, child, env)?;
@@ -138,7 +157,7 @@ fn expect_name_list(
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     expect_list(shared, ctx, id, env, expect_name_ref, Ty::LIST_RULE)
 }
 
@@ -147,7 +166,7 @@ fn expect_name_ref(
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     match shared.arena.get(id) {
         Node::Ident(IdentKind::Rule) => Ok(()),
         Node::Ident(IdentKind::Var(_))
@@ -174,7 +193,7 @@ fn expect_name_or_str(
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     if matches!(
         shared.arena.get(id),
         Node::StringLit | Node::RawStringLit { .. }
@@ -184,13 +203,14 @@ fn expect_name_or_str(
     expect_name_ref(shared, ctx, id, env)
 }
 
-/// Check a `precedences` inner list: each element must be a name-ref or string literal.
+/// Check the `reserved` config field: an object literal `{name: [rules]}` or
+/// an inherited expression typing to `obj_t<list_t<rule_t>>`.
 fn expect_reserved(
     shared: &SharedAst,
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
         for &(_, val_id) in shared.pools.get_object(*range) {
@@ -214,7 +234,7 @@ fn expect_rule(
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     let ty = type_of(shared, ctx, id, env)?;
     if !ty.is_rule_like() {
         return Err(mismatch(Ty::RULE, ty, shared.arena.span(id)));
@@ -227,7 +247,7 @@ fn type_of(
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let span = shared.arena.span(id);
     match shared.arena.get(id) {
         Node::IntLit(_) => Ok(Ty::INT),
@@ -264,10 +284,9 @@ fn type_of(
             TypeErrorKind::MacroUsedAsValue(ctx.text(span).to_string()),
             span,
         )),
-        Node::Ident(IdentKind::Var(let_id)) => env.vars.get(let_id).copied().ok_or_else(|| {
-            let name = ctx.text(span);
-            TypeError::new(TypeErrorKind::UnresolvedVariable(name.to_string()), span)
-        }),
+        // Resolver guarantees Var(let_id) points at a Let typechecked earlier
+        // in source order (cross-module: helpers checked before parent).
+        Node::Ident(IdentKind::Var(let_id)) => Ok(*env.vars.get(let_id).unwrap()),
         Node::Neg(inner) => {
             let ty = type_of(shared, ctx, *inner, env)?;
             if ty != Ty::INT {
@@ -386,7 +405,9 @@ fn type_of(
         }
         Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env),
         Node::QualifiedCall(range) => type_of_qualified_call(shared, ctx, *range, span, env),
-        _ => Err(TypeError::new(TypeErrorKind::CannotInferType, span)),
+        // Top-level items (Grammar/Rule/Let/Macro) and Unreachable never
+        // appear in expression position - parser dispatch keeps them apart.
+        _ => unreachable!(),
     }
 }
 
@@ -397,7 +418,7 @@ fn type_of_append(
     right: NodeId,
     span: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let is_empty = |id| matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty());
     let lt = (!is_empty(left))
         .then(|| type_of(shared, ctx, left, env))
@@ -438,7 +459,7 @@ fn type_of_field_access(
     obj: NodeId,
     field: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let obj_ty = type_of(shared, ctx, obj, env)?;
     let field_name = ctx.text(field);
     match obj_ty {
@@ -482,7 +503,7 @@ fn type_of_qualified_call(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let (obj, name, args) = shared.pools.get_qualified_call(range);
     let obj_ty = type_of(shared, ctx, obj, env)?;
     if !matches!(
@@ -513,7 +534,7 @@ fn check_macro_args(
     args: &[NodeId],
     span: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let config = shared.pools.get_macro(macro_id);
     if args.len() != config.params.len() {
         return Err(TypeError::new(
@@ -526,13 +547,13 @@ fn check_macro_args(
         ));
     }
     for (i, &arg_id) in args.iter().enumerate() {
-        let arg_ty = type_of(shared, ctx, arg_id, env)?;
-        if !arg_ty.is_compatible(config.params[i].ty) {
-            return Err(mismatch(
-                config.params[i].ty,
-                arg_ty,
-                shared.arena.span(arg_id),
-            ));
+        let expected = config.params[i].ty;
+        let arg_ty = match empty_container_with_expected(shared, arg_id, expected) {
+            Some(result) => result?,
+            None => type_of(shared, ctx, arg_id, env)?,
+        };
+        if !arg_ty.is_compatible(expected) {
+            return Err(mismatch(expected, arg_ty, shared.arena.span(arg_id)));
         }
     }
     Ok(config.return_ty)
@@ -544,7 +565,7 @@ fn type_of_object(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let fields = shared.pools.get_object(range);
     if fields.is_empty() {
         return Err(TypeError::new(TypeErrorKind::CannotInferType, span));
@@ -575,7 +596,7 @@ fn type_of_list(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let items = shared.pools.child_slice(range);
     if items.is_empty() {
         return Err(TypeError::new(
@@ -608,7 +629,7 @@ fn type_of_call(
     args: ChildRange,
     span: Span,
     env: &mut TypeEnv,
-) -> Result<Ty, TypeError> {
+) -> TypeResult<Ty> {
     let macro_name = ctx.text(shared.arena.span(name));
     let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
         return Err(TypeError::new(
@@ -626,7 +647,7 @@ fn check_for_expr(
     for_idx: ForId,
     body: NodeId,
     env: &mut TypeEnv,
-) -> Result<(), TypeError> {
+) -> TypeResult<()> {
     let config = shared.pools.get_for(for_idx);
 
     // Check if iterable is a literal list of tuples (for destructuring)
@@ -689,4 +710,30 @@ fn check_for_expr(
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
+}
+
+/// If `arg_id` is an empty list/object literal, resolve it against `expected`
+/// (analogous to `let x: T = []`). `None` for non-empty / non-container args -
+/// caller falls back to plain `type_of`.
+fn empty_container_with_expected(
+    shared: &SharedAst,
+    arg_id: NodeId,
+    expected: Ty,
+) -> Option<TypeResult<Ty>> {
+    let node = shared.arena.get(arg_id);
+    let is_empty_list =
+        matches!(node, Node::List(r) if shared.pools.child_slice(*r).is_empty());
+    let is_empty_obj =
+        matches!(node, Node::Object(r) if shared.pools.get_object(*r).is_empty());
+    let kind = match (is_empty_list, is_empty_obj) {
+        (true, _) if expected.is_list() => return Some(Ok(expected)),
+        (_, true) if matches!(expected, Ty::Data(DataTy::Object(_))) => return Some(Ok(expected)),
+        (true, _) => ContainerKind::List,
+        (_, true) => ContainerKind::Object,
+        _ => return None,
+    };
+    Some(Err(TypeError::new(
+        TypeErrorKind::EmptyContainerAnnotationMismatch { declared: expected, kind },
+        shared.arena.span(arg_id),
+    )))
 }
