@@ -1,5 +1,6 @@
 use super::*;
 use crate::rules::{Precedence, Rule};
+use std::fmt::Write as _;
 use std::path::Path;
 
 #[test]
@@ -440,11 +441,9 @@ fn error_too_many_modules() {
     for i in 0..256 {
         let path = dir.path().join(format!("h{i}.tsg"));
         std::fs::write(&path, format!("let v{i}: str_t = \"x\"")).unwrap();
-        imports.push_str(&format!("let h{i} = import(\"{}\")\n", dsl_path(&path)));
+        let _ = writeln!(imports, "let h{i} = import(\"{}\")", dsl_path(&path));
     }
-    let root = format!(
-        "{imports}grammar {{ language: \"test\" }}\nrule program {{ \"x\" }}\n"
-    );
+    let root = format!("{imports}grammar {{ language: \"test\" }}\nrule program {{ \"x\" }}\n");
     let root_path = dir.path().join("root.tsg");
     std::fs::write(&root_path, &root).unwrap();
     let err = parse_native_dsl(&root, &root_path).unwrap_err();

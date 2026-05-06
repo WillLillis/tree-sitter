@@ -41,10 +41,11 @@ pub(super) struct CallFrame {
     pub caller_mod: ModuleId,
 }
 
-/// Long-lived state shared across grammar lowerings in one
-/// `parse_native_dsl` call. Pools and caches make imported/inherited let
-/// bindings evaluate exactly once; scratch buffers persist to reuse
-/// allocated capacity.
+/// Long-lived state shared across grammar lowerings in one `parse_native_dsl`
+/// call.
+///
+/// Pools and caches make imported/inherited let bindings evaluate exactly once,
+/// scratch buffers persist to reuse allocated capacity.
 #[derive(Default)]
 pub struct LoweringState {
     // Persistent pools and caches:
@@ -93,9 +94,9 @@ struct EvalResult {
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
-/// `previous` are the modules already loaded; `current` is the root module
-/// being lowered (not yet pushed into `previous`). `state` persists across
-/// the whole `parse_native_dsl` pipeline.
+/// - `previous` contains the modules already loaded
+/// - `current` is the root module being lowered (not yet pushed into `previous`)
+/// - `state` persists across the whole `parse_native_dsl` pipeline.
 pub fn lower_with_base(
     state: &mut LoweringState,
     shared: &SharedAst,
@@ -242,9 +243,9 @@ fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult
     fn inherit<T: Clone>(
         overridden: Option<Vec<T>>,
         base: Option<&InputGrammar>,
-        field: fn(&InputGrammar) -> &Vec<T>,
+        field: fn(&InputGrammar) -> &[T],
     ) -> Vec<T> {
-        overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).clone()))
+        overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).to_vec()))
     }
     Ok(InputGrammar {
         name: result.language,
