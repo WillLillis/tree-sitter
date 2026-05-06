@@ -27,11 +27,7 @@ pub struct TypeEnv {
 /// # Errors
 ///
 /// Returns [`TypeError`] on typecheck failure.
-pub fn check(
-    shared: &mut SharedAst,
-    ctx: &ModuleContext,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
+pub fn check(shared: &mut SharedAst, ctx: &ModuleContext, env: &mut TypeEnv) -> TypeResult<()> {
     for &item_id in &ctx.root_items {
         check_item(shared, ctx, item_id, env)?;
     }
