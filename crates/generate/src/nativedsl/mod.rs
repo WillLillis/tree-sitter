@@ -214,6 +214,18 @@ pub struct ModuleError {
     pub reference_span: Span,
 }
 
+impl ModuleError {
+    #[must_use]
+    pub fn new(inner: DslError, source_text: String, path: &Path, reference_span: Span) -> Self {
+        Self {
+            inner: Box::new(inner),
+            source_text,
+            path: path.to_path_buf(),
+            reference_span,
+        }
+    }
+}
+
 /// Secondary annotation on an error, pointing to a related source location.
 #[derive(Clone, Debug, Serialize)]
 pub struct Note {

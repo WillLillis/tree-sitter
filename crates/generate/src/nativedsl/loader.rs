@@ -54,7 +54,8 @@ impl Loader<'_> {
         let module_dir = path.parent().unwrap();
 
         let tokens = lexer::Lexer::new(source).tokenize()?;
-        let ctx = parser::Parser::new(&tokens, source.to_string(), path, self.shared).parse()?;
+        let ctx = parser::Parser::new(&tokens, source.to_string(), path.to_path_buf(), self.shared)
+            .parse()?;
 
         match kind {
             ModuleKind::Grammar => self.validate_grammar(&ctx)?,
@@ -88,7 +89,7 @@ impl Loader<'_> {
         let base = ctx
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
-        resolve::resolve(self.shared, &ctx, self.modules, base, path)?;
+        resolve::resolve(self.shared, &ctx, self.modules, base)?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
 
@@ -121,40 +122,32 @@ impl Loader<'_> {
             return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
         }
 
-        let content = std::fs::read_to_string(module_path).map_err(|e| ModuleError {
-            inner: Box::new(
-                LowerError::new(
-                    LowerErrorKind::ModuleReadFailed {
-                        path: module_path.to_path_buf(),
-                        error: e.to_string(),
-                    },
-                    span,
-                )
-                .into(),
-            ),
-            source_text: String::new(),
-            path: module_path.to_path_buf(),
-            reference_span: span,
+        let content = std::fs::read_to_string(module_path).map_err(|e| {
+            let kind = LowerErrorKind::ModuleReadFailed {
+                path: module_path.to_path_buf(),
+                error: e.to_string(),
+            };
+            ModuleError::new(
+                LowerError::new(kind, span).into(),
+                String::new(),
+                module_path,
+                span,
+            )
         })?;
 
         if self.ancestor_paths.iter().any(|p| p == module_path) {
-            return Err(ModuleError {
-                inner: Box::new(LowerError::without_span(LowerErrorKind::ModuleCycle).into()),
-                source_text: content,
-                path: module_path.to_path_buf(),
-                reference_span: span,
-            })?;
+            return Err(ModuleError::new(
+                LowerError::without_span(LowerErrorKind::ModuleCycle).into(),
+                content,
+                module_path,
+                span,
+            ))?;
         }
 
         self.ancestor_paths.push(module_path.to_path_buf());
         let result = self
             .load_module(&content, module_path, kind)
-            .map_err(|inner| ModuleError {
-                inner: Box::new(inner),
-                source_text: content,
-                path: module_path.to_path_buf(),
-                reference_span: span,
-            });
+            .map_err(|inner| ModuleError::new(inner, content, module_path, span));
         self.ancestor_paths.pop();
         Ok(result?)
     }

@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use super::ModuleId;
 use super::typecheck::Ty;
+use super::{ModuleId, Note, NoteMessage};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(NonZeroU32);
@@ -108,9 +108,12 @@ impl NodeArena {
         self.node_ids().map(|id| (id, &self.nodes[id.index()]))
     }
 
-    /// Iterate a half-open `[start, end)` slice of NodeIds and their nodes.
+    /// Iterate a half-open `[start, end)` slice of `NodeId`s and their nodes.
     /// Caller must ensure both bounds are valid arena indices.
-    pub(super) fn iter_range(&self, range: std::ops::Range<u32>) -> impl Iterator<Item = (NodeId, &Node)> {
+    pub(super) fn iter_range(
+        &self,
+        range: std::ops::Range<u32>,
+    ) -> impl Iterator<Item = (NodeId, &Node)> {
         range.map(|i| {
             // SAFETY: i in [start, end), both produced by ModuleContext after
             // a successful Parser::parse, so within self.nodes bounds.
@@ -239,7 +242,7 @@ impl Span {
 
     /// Caller must pair the span with the source it was lexed from.
     #[must_use]
-    pub(super) fn resolve<'src>(&self, source: &'src str) -> &'src str {
+    pub(super) fn resolve(self, source: &str) -> &str {
         // SAFETY: lexer emits spans at UTF-8 char boundaries within `source`.
         unsafe { source.get_unchecked(self.start as usize..self.end as usize) }
     }
@@ -351,7 +354,6 @@ impl AstPools {
             )
         }
     }
-
 }
 
 #[derive(Clone)]
@@ -391,7 +393,7 @@ pub struct ModuleContext {
     /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
     /// collected by the parser so the loader can iterate without scanning the arena.
     pub module_refs: Vec<NodeId>,
-    /// Half-open `[start, end)` range of NodeIds this module owns in the
+    /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously
     /// before any child loads, so this slice is well-defined and stable.
     /// Populated by `Parser::parse`; default `0..0` means "uninitialized".
@@ -419,7 +421,7 @@ impl ModuleContext {
         Some((idx, arena.span(id)))
     }
 
-    /// Iterate just this module's own nodes, paired with their NodeIds.
+    /// Iterate just this module's own nodes, paired with their `NodeId`s.
     /// Avoids scanning unrelated modules' entries in the shared arena.
     pub fn iter_own_nodes<'a>(
         &self,
@@ -432,6 +434,17 @@ impl ModuleContext {
     #[must_use]
     pub fn owns_node(&self, id: NodeId) -> bool {
         self.node_range.contains(&(id.index() as u32))
+    }
+
+    /// Build a [`Note`] anchored to this module's source.
+    #[must_use]
+    pub fn note(&self, message: NoteMessage, span: Span) -> Note {
+        Note {
+            message,
+            span,
+            path: self.path.clone(),
+            source: self.source.clone(),
+        }
     }
 }
 
@@ -580,7 +593,7 @@ const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl Node {
     /// Range of children for variadic nodes whose children are `NodeId`s
-    /// directly: SeqOrChoice`, `List`, `Tuple`, and `Concat`.
+    /// directly: `SeqOrChoice`, `List`, `Tuple`, and `Concat`.
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {

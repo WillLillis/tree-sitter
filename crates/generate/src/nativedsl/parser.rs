@@ -1,12 +1,12 @@
 //! Recursive descent parser for the native grammar DSL.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Serialize;
 use thiserror::Error;
 
 use super::{
-    InnerTy, Note, NoteMessage, ParseError,
+    InnerTy, NoteMessage, ParseError,
     ast::{
         ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
         ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
@@ -23,10 +23,9 @@ enum LocalBinding {
     ForBinding(ForId, Ty, u8),
 }
 
-pub struct Parser<'tok, 'path, 'shared> {
+pub struct Parser<'tok, 'shared> {
     tokens: &'tok [Token],
     pos: usize,
-    grammar_path: &'path Path,
     shared: &'shared mut SharedAst,
     ctx: ModuleContext,
     scratch: Vec<NodeId>,
@@ -37,7 +36,7 @@ pub struct Parser<'tok, 'path, 'shared> {
     depth: u16,
 }
 
-impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
+impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// SAFETY:
     ///
     /// Caller must pass a token stream produced by
@@ -47,18 +46,17 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     pub fn new(
         tokens: &'tok [Token],
         source: String,
-        grammar_path: &'path Path,
+        grammar_path: PathBuf,
         shared: &'shared mut SharedAst,
     ) -> Self {
         let root_cap = tokens.len() / 30;
         Self {
             tokens,
             pos: 0,
-            grammar_path,
             shared,
             ctx: ModuleContext {
                 source,
-                path: grammar_path.to_path_buf(),
+                path: grammar_path,
                 grammar_config: None,
                 root_items: Vec::with_capacity(root_cap),
                 inherit_ref: None,
@@ -188,13 +186,12 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
     }
 
     #[cold]
-    fn first_defined_note(&self, span: Span) -> Note {
-        Note {
-            message: NoteMessage::FirstDefinedHere,
+    fn dup_err(&self, kind: ParseErrorKind, span: Span, first_span: Span) -> ParseError {
+        ParseError::with_note(
+            kind,
             span,
-            path: self.grammar_path.to_path_buf(),
-            source: self.ctx.source.clone(),
-        }
+            self.ctx.note(NoteMessage::FirstDefinedHere, first_span),
+        )
     }
 
     fn check_duplicate_names<T>(&self, items: &[T], name_of: fn(&T) -> Span) -> ParseResult<()> {
@@ -203,10 +200,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
             let name = self.ctx.text(span);
             for item in items.iter().take(i) {
                 if self.ctx.text(name_of(item)) == name {
-                    return Err(ParseError::with_note(
+                    return Err(self.dup_err(
                         ParseErrorKind::DuplicateParameter(name.to_string()),
                         span,
-                        self.first_defined_note(name_of(item)),
+                        name_of(item),
                     ));
                 }
             }
@@ -268,11 +265,7 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 .find(|&&id| matches!(self.shared.arena.get(id), Node::Grammar))
                 .map(|&id| self.shared.arena.span(id))
                 .unwrap();
-            Err(ParseError::with_note(
-                ParseErrorKind::DuplicateGrammarBlock,
-                start,
-                self.first_defined_note(first_span),
-            ))?;
+            Err(self.dup_err(ParseErrorKind::DuplicateGrammarBlock, start, first_span))?;
         }
         self.expect(TokenKind::LBrace)?;
         let mut config = GrammarConfig::default();
@@ -298,10 +291,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
                 )
             })?;
             if let Some(first_span) = seen[field as usize].replace(key_span) {
-                Err(ParseError::with_note(
+                Err(self.dup_err(
                     ParseErrorKind::DuplicateGrammarField(key.to_string()),
                     key_span,
-                    self.first_defined_note(first_span),
+                    first_span,
                 ))?;
             }
             match field {
@@ -737,10 +730,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         self.ctx.module_refs.push(id);
         if !is_import {
             if let Some(first) = self.ctx.inherit_ref {
-                return Err(ParseError::with_note(
+                return Err(self.dup_err(
                     ParseErrorKind::MultipleInherits,
                     start.merge(end),
-                    self.first_defined_note(self.shared.arena.span(first)),
+                    self.shared.arena.span(first),
                 ));
             }
             self.ctx.inherit_ref = Some(id);
@@ -803,7 +796,9 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         {
             let node = match binding {
                 LocalBinding::MacroParam(ty, index) => Node::MacroParam { ty, index },
-                LocalBinding::ForBinding(for_id, ty, index) => Node::ForBinding { for_id, ty, index },
+                LocalBinding::ForBinding(for_id, ty, index) => {
+                    Node::ForBinding { for_id, ty, index }
+                }
             };
             self.shared.arena.push(node, span)
         } else {
@@ -901,10 +896,10 @@ impl<'tok, 'path, 'shared> Parser<'tok, 'path, 'shared> {
         for &(span, _) in &fields {
             let key = self.ctx.text(span);
             if let Some(first_span) = seen.insert(key, span) {
-                return Err(ParseError::with_note(
+                return Err(self.dup_err(
                     ParseErrorKind::DuplicateObjectKey(key.to_string()),
                     span,
-                    self.first_defined_note(first_span),
+                    first_span,
                 ));
             }
         }
