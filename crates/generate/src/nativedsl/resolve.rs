@@ -8,8 +8,6 @@
 //!
 //! Let bindings register into the decl table after their RHS is resolved.
 
-use std::path::Path;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use thiserror::Error;
@@ -17,7 +15,7 @@ use thiserror::Error;
 use crate::{
     grammars::InputGrammar,
     nativedsl::{
-        Module, Note, NoteMessage, ResolveError,
+        Module, NoteMessage, ResolveError,
         ast::{
             AstPools, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
         },
@@ -40,8 +38,6 @@ enum Decl {
 struct ExternalNameCtx<'src, 'a, 'b> {
     decls: &'a mut Decls<'src>,
     root_items: &'b [NodeId],
-    grammar_path: &'b Path,
-    source: &'src str,
     /// `let` names currently being expanded; reentry indicates a cycle.
     expanding_lets: FxHashSet<&'src str>,
 }
@@ -57,9 +53,8 @@ pub fn resolve(
     ctx: &ModuleContext,
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
-    grammar_path: &Path,
 ) -> ResolveResult<()> {
-    let mut decls = collect_decls(shared, ctx, &ctx.root_items, grammar_path, base)?;
+    let mut decls = collect_decls(shared, ctx, &ctx.root_items, base)?;
 
     for &item_id in &ctx.root_items {
         resolve_item(
@@ -74,14 +69,7 @@ pub fn resolve(
         if let Node::Let { name, .. } = shared.arena.get(item_id) {
             let name_text = ctx.text(*name);
             let span = shared.arena.span(item_id);
-            insert_decl(
-                &mut decls,
-                name_text,
-                Decl::Var(item_id),
-                span,
-                grammar_path,
-                &ctx.source,
-            )?;
+            insert_decl(&mut decls, name_text, Decl::Var(item_id), span, ctx)?;
         }
     }
 
@@ -93,19 +81,13 @@ fn insert_decl<'src>(
     name: &'src str,
     kind: Decl,
     span: Span,
-    grammar_path: &Path,
-    source: &str,
+    ctx: &ModuleContext,
 ) -> ResolveResult<()> {
     if let Some(&(_, first_span)) = decls.get(name) {
         return Err(ResolveError::with_note(
             ResolveErrorKind::DuplicateDeclaration(name.to_string()),
             span,
-            Note {
-                message: NoteMessage::FirstDefinedHere,
-                span: first_span,
-                path: grammar_path.to_path_buf(),
-                source: source.to_string(),
-            },
+            ctx.note(NoteMessage::FirstDefinedHere, first_span),
         ));
     }
     decls.insert(name, (kind, span));
@@ -125,11 +107,9 @@ fn collect_decls<'a>(
     shared: &SharedAst,
     ctx: &'a ModuleContext,
     root_items: &[NodeId],
-    grammar_path: &Path,
     base: Option<(&'a InputGrammar, Span)>,
 ) -> ResolveResult<Decls<'a>> {
     let mut decls = Decls::default();
-    let source = &ctx.source;
 
     // Register rules and macros upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
@@ -137,14 +117,7 @@ fn collect_decls<'a>(
         let span = shared.arena.span(item_id);
         match shared.arena.get(item_id) {
             Node::Rule { name, .. } => {
-                insert_decl(
-                    &mut decls,
-                    ctx.text(*name),
-                    Decl::Rule,
-                    span,
-                    grammar_path,
-                    source,
-                )?;
+                insert_decl(&mut decls, ctx.text(*name), Decl::Rule, span, ctx)?;
             }
             Node::Macro(macro_id) => {
                 let config = shared.pools.get_macro(*macro_id);
@@ -153,8 +126,7 @@ fn collect_decls<'a>(
                     ctx.text(config.name),
                     Decl::Macro(*macro_id),
                     span,
-                    grammar_path,
-                    source,
+                    ctx,
                 )?;
             }
             Node::Let { name, value, .. } => {
@@ -196,8 +168,6 @@ fn collect_decls<'a>(
         let mut ec = ExternalNameCtx {
             decls: &mut decls,
             root_items,
-            grammar_path,
-            source,
             expanding_lets: FxHashSet::default(),
         };
         collect_external_names(shared, ctx, ext_id, &mut ec)?;
@@ -236,12 +206,7 @@ fn resolve_item(
                     return Err(ResolveError::with_note(
                         ResolveErrorKind::ShadowedBinding(name.to_string()),
                         param.name,
-                        Note {
-                            message: NoteMessage::FirstDefinedHere,
-                            span: first_span,
-                            path: ctx.path.clone(),
-                            source: ctx.source.clone(),
-                        },
+                        ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
                 }
             }
@@ -492,14 +457,7 @@ fn collect_external_names<'src>(
                 ec.expanding_lets.remove(name);
             } else if !ec.decls.contains_key(name) {
                 // Unknown bare identifier - register as external token.
-                insert_decl(
-                    ec.decls,
-                    name,
-                    Decl::Rule,
-                    arena.span(id),
-                    ec.grammar_path,
-                    ec.source,
-                )?;
+                insert_decl(ec.decls, name, Decl::Rule, arena.span(id), ctx)?;
             }
         }
         // List: scan children for identifiers.
@@ -552,7 +510,6 @@ fn find_let_value(
     })
 }
 
-
 pub type ResolveResult<T> = Result<T, ResolveError>;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
@@ -589,16 +546,7 @@ fn unknown_ident_error(
     });
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
     if let Some(let_span) = forward_span {
-        ResolveError::with_note(
-            kind,
-            span,
-            Note {
-                message: NoteMessage::DefinedLater,
-                span: let_span,
-                path: ctx.path.clone(),
-                source: ctx.source.clone(),
-            },
-        )
+        ResolveError::with_note(kind, span, ctx.note(NoteMessage::DefinedLater, let_span))
     } else {
         ResolveError::new(kind, span)
     }
