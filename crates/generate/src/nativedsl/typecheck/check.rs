@@ -8,8 +8,7 @@ use crate::nativedsl::{
 };
 
 /// Function pointer type for element checkers passed to `expect_list`.
-type CheckFn<'ast> =
-    fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
+type CheckFn<'ast> = fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
 
 pub(super) fn check_item(
     shared: &SharedAst,
@@ -278,7 +277,6 @@ fn type_of(
                 C::Language | C::Inherits => unreachable!(),
             })
         }
-        Node::Ident(IdentKind::Unresolved) => unreachable!(),
         &Node::MacroParam { ty, .. } | &Node::ForBinding { ty, .. } => Ok(ty),
         Node::Ident(IdentKind::Macro(_)) => Err(TypeError::new(
             TypeErrorKind::MacroUsedAsValue(ctx.text(span).to_string()),
@@ -721,10 +719,8 @@ fn empty_container_with_expected(
     expected: Ty,
 ) -> Option<TypeResult<Ty>> {
     let node = shared.arena.get(arg_id);
-    let is_empty_list =
-        matches!(node, Node::List(r) if shared.pools.child_slice(*r).is_empty());
-    let is_empty_obj =
-        matches!(node, Node::Object(r) if shared.pools.get_object(*r).is_empty());
+    let is_empty_list = matches!(node, Node::List(r) if shared.pools.child_slice(*r).is_empty());
+    let is_empty_obj = matches!(node, Node::Object(r) if shared.pools.get_object(*r).is_empty());
     let kind = match (is_empty_list, is_empty_obj) {
         (true, _) if expected.is_list() => return Some(Ok(expected)),
         (_, true) if matches!(expected, Ty::Data(DataTy::Object(_))) => return Some(Ok(expected)),
@@ -733,7 +729,10 @@ fn empty_container_with_expected(
         _ => return None,
     };
     Some(Err(TypeError::new(
-        TypeErrorKind::EmptyContainerAnnotationMismatch { declared: expected, kind },
+        TypeErrorKind::EmptyContainerAnnotationMismatch {
+            declared: expected,
+            kind,
+        },
         shared.arena.span(arg_id),
     )))
 }
