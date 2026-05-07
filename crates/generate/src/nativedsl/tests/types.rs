@@ -118,4 +118,19 @@ compile_tests! {
         let aliases: obj_t<str_t> = { open: "<", close: ">" }
         rule program { seq(aliases.open, aliases.close) }"#
     }
+    nested_empty_list_infers_from_outer_annotation {
+        r#"grammar { language: "test" }
+        let pairs: list_t<list_t<rule_t>> = [[]]
+        rule program { "x" }"#
+    }
+    empty_list_in_obj_value_infers_from_obj_annotation {
+        r#"grammar { language: "test" }
+        let o: obj_t<list_t<rule_t>> = { a: [] }
+        rule program { "x" }"#
+    }
+    empty_append_arms_infer_from_let_annotation {
+        r#"grammar { language: "test" }
+        let xs: list_t<rule_t> = append([], [])
+        rule program { "x" }"#
+    }
 }
