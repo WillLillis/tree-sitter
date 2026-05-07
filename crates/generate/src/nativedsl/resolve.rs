@@ -17,22 +17,17 @@ use crate::{
     nativedsl::{
         Module, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
+            AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
         },
     },
 };
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
-/// names to their kind (for Ident resolution) and span
-/// (for duplicate checking / "first defined here" notes).
-type Decls<'src> = FxHashMap<&'src str, (Decl, Span)>;
-
-#[derive(Clone, Copy)]
-enum Decl {
-    Rule,
-    Var(NodeId),
-    Macro(MacroId),
-}
+/// names to their resolved kind (for Ident rewriting) and span
+/// (for duplicate checking / "first defined here" notes). The kind never
+/// stores [`IdentKind::Unresolved`] - by the time a name reaches the table
+/// we know what it resolves to.
+type Decls<'src> = FxHashMap<&'src str, (IdentKind, Span)>;
 
 /// Context for [`collect_external_names`].
 struct ExternalNameCtx<'src, 'a, 'b> {
@@ -69,7 +64,7 @@ pub fn resolve(
         if let Node::Let { name, .. } = shared.arena.get(item_id) {
             let name_text = ctx.text(*name);
             let span = shared.arena.span(item_id);
-            insert_decl(&mut decls, name_text, Decl::Var(item_id), span, ctx)?;
+            insert_decl(&mut decls, name_text, IdentKind::Var(item_id), span, ctx)?;
         }
     }
 
@@ -79,7 +74,7 @@ pub fn resolve(
 fn insert_decl<'src>(
     decls: &mut Decls<'src>,
     name: &'src str,
-    kind: Decl,
+    kind: IdentKind,
     span: Span,
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
@@ -117,14 +112,14 @@ fn collect_decls<'a>(
         let span = shared.arena.span(item_id);
         match shared.arena.get(item_id) {
             Node::Rule { name, .. } => {
-                insert_decl(&mut decls, ctx.text(*name), Decl::Rule, span, ctx)?;
+                insert_decl(&mut decls, ctx.text(*name), IdentKind::Rule, span, ctx)?;
             }
             Node::Macro(macro_id) => {
                 let config = shared.pools.get_macro(*macro_id);
                 insert_decl(
                     &mut decls,
                     ctx.text(config.name),
-                    Decl::Macro(*macro_id),
+                    IdentKind::Macro(*macro_id),
                     span,
                     ctx,
                 )?;
@@ -155,7 +150,7 @@ fn collect_decls<'a>(
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
             if !decls.contains_key(var.name.as_str()) {
-                decls.insert(&var.name, (Decl::Rule, inherit_span));
+                decls.insert(&var.name, (IdentKind::Rule, inherit_span));
             }
         }
     }
@@ -231,12 +226,8 @@ fn resolve_expr(
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = ctx.text(span);
-        if let Some(&(decl, _)) = decls.get(name) {
-            match decl {
-                Decl::Var(let_id) => arena.resolve_as(id, IdentKind::Var(let_id)),
-                Decl::Rule => arena.resolve_as(id, IdentKind::Rule),
-                Decl::Macro(macro_id) => arena.resolve_as(id, IdentKind::Macro(macro_id)),
-            }
+        if let Some(&(kind, _)) = decls.get(name) {
+            arena.resolve_as(id, kind);
         } else {
             return Err(unknown_ident_error(arena, ctx, name, span));
         }
@@ -457,7 +448,7 @@ fn collect_external_names<'src>(
                 ec.expanding_lets.remove(name);
             } else if !ec.decls.contains_key(name) {
                 // Unknown bare identifier - register as external token.
-                insert_decl(ec.decls, name, Decl::Rule, arena.span(id), ctx)?;
+                insert_decl(ec.decls, name, IdentKind::Rule, arena.span(id), ctx)?;
             }
         }
         // List: scan children for identifiers.
