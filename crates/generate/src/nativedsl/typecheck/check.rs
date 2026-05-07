@@ -340,6 +340,10 @@ fn type_of(
         // appear in expression position - parser dispatch keeps them apart.
         _ => unreachable!(),
     }?;
+    // Short-circuit the most common no-op case before the satisfies dispatch.
+    if matches!(expected, Constraint::None) {
+        return Ok(ty);
+    }
     if !expected.satisfies(ty) {
         let kind = match expected {
             Constraint::Exact(t) | Constraint::Strict(t) => TypeErrorKind::TypeMismatch {
