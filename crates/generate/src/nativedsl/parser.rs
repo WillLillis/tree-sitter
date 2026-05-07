@@ -755,10 +755,13 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
             let name = this.expect_ident()?;
             this.expect(TokenKind::Colon)?;
-            Ok((name, this.parse_type()?.0))
+            Ok(Param {
+                name,
+                ty: this.parse_type()?.0,
+            })
         })?;
         self.expect(TokenKind::RParen)?;
-        self.check_duplicate_names(&bindings, |&(s, _)| s)?;
+        self.check_duplicate_names(&bindings, |p| p.name)?;
         if bindings.is_empty() {
             return Err(self.error(ParseErrorKind::EmptyForBindings));
         }
@@ -771,9 +774,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
             let config = self.shared.pools.get_for(for_id);
-            for (i, &(name_span, ty)) in config.bindings.iter().enumerate() {
+            for (i, &Param { name, ty }) in config.bindings.iter().enumerate() {
                 self.locals
-                    .push((name_span, LocalBinding::ForBinding(for_id, ty, i as u8)));
+                    .push((name, LocalBinding::ForBinding(for_id, ty, i as u8)));
             }
             let body = self.parse_expr()?;
             let end = self.expect(TokenKind::RBrace)?;

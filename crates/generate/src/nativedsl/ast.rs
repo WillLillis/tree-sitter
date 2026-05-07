@@ -372,7 +372,7 @@ pub struct Param {
 
 #[derive(Clone)]
 pub struct ForConfig {
-    pub bindings: Vec<(Span, Ty)>,
+    pub bindings: Vec<Param>,
     pub iterable: NodeId,
 }
 
