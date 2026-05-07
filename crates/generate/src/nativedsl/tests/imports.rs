@@ -296,9 +296,10 @@ fn error_qualified_call_on_non_module() {
     let e = assert_err!(err, Type);
     assert_eq!(
         e.kind,
-        TypeErrorKind::QualifiedCallOnNonModule(Ty::Data(DataTy::Object(InnerTy::Scalar(
-            ScalarTy::Int
-        ))))
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))),
+        }
     );
 }
 

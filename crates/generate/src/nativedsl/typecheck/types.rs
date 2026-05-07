@@ -110,6 +110,21 @@ impl Ty {
         matches!(self, Self::Data(d) if d.is_list())
     }
 
+    /// True if this is any object type.
+    #[must_use]
+    pub const fn is_object(self) -> bool {
+        matches!(self, Self::Data(DataTy::Object(_)))
+    }
+
+    /// Unwrap an object type to its inner. Returns `None` for non-object types.
+    #[must_use]
+    pub const fn object_inner(self) -> Option<InnerTy> {
+        match self {
+            Self::Data(DataTy::Object(i)) => Some(i),
+            _ => None,
+        }
+    }
+
     /// Widen two types, delegating to [`DataTy::widen`] for data pairs.
     /// Equal non-data types widen to themselves; otherwise `None`.
     #[must_use]
@@ -281,12 +296,14 @@ impl std::fmt::Display for InnerTy {
 /// Used by `type_of` to give nested empty containers (`[]`, `{}`) enough
 /// context to infer their type, and to surface more accurate errors when
 /// a value is used in a position with a known shape constraint.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Constraint {
     /// No constraint; the typed value can be anything bindable.
     None,
     /// Must equal (or widen to) this exact type.
     Exact(Ty),
+    /// Must equal this type by strict equality (no widening).
+    Strict(Ty),
     /// Must be `Object<?>` for any inner; specific inner is unknown.
     AnyObject,
     /// Must satisfy at least one of these types.
@@ -297,13 +314,15 @@ impl Constraint {
     pub const RULE_LIKE: Self = Self::OneOf(&[Ty::STR, Ty::RULE]);
     pub const INT_OR_STR: Self = Self::OneOf(&[Ty::INT, Ty::STR]);
 
-    /// True if `ty` satisfies this constraint via [`Ty::is_compatible`].
+    /// True if `ty` satisfies this constraint via [`Ty::is_compatible`]
+    /// (or strict equality, for [`Self::Strict`]).
     #[must_use]
     pub fn satisfies(self, ty: Ty) -> bool {
         match self {
             Self::None => true,
             Self::Exact(t) => ty.is_compatible(t),
-            Self::AnyObject => matches!(ty, Ty::Data(DataTy::Object(_))),
+            Self::Strict(t) => ty == t,
+            Self::AnyObject => ty.is_object(),
             Self::OneOf(ts) => ts.iter().any(|&t| ty.is_compatible(t)),
         }
     }
@@ -323,8 +342,30 @@ impl Constraint {
     #[must_use]
     pub fn object_value(self) -> Self {
         match self {
-            Self::Exact(Ty::Data(DataTy::Object(inner))) => Self::Exact(Ty::Data(inner.into())),
+            Self::Exact(ty) => ty
+                .object_inner()
+                .map_or(Self::None, |i| Self::Exact(Ty::from(i))),
             _ => Self::None,
+        }
+    }
+}
+
+impl std::fmt::Display for Constraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("any value"),
+            Self::Exact(ty) | Self::Strict(ty) => ty.fmt(f),
+            Self::AnyObject => f.write_str("an object"),
+            Self::OneOf(tys) => {
+                let last = tys.len().saturating_sub(1);
+                for (i, ty) in tys.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(if i == last { " or " } else { ", " })?;
+                    }
+                    ty.fmt(f)?;
+                }
+                Ok(())
+            }
         }
     }
 }
