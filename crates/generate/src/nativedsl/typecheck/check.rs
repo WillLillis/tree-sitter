@@ -1,10 +1,10 @@
 use crate::nativedsl::{
-    ContainerKind, DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeError, TypeErrorKind,
+    ContainerKind, DataTy, InnerTy, ModuleTy, Ty, TypeError, TypeErrorKind,
     ast::{
         ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind, SharedAst,
         Span,
     },
-    typecheck::{TypeEnv, TypeResult},
+    typecheck::{Constraint, TypeEnv, TypeResult},
 };
 
 /// Function pointer type for element checkers passed to `expect_list`.
@@ -51,19 +51,16 @@ pub(super) fn check_item(
         }
         Node::Let { ty, value, .. } => {
             let declared_ty = *ty;
-            let inferred = type_of(shared, ctx, *value, env, declared_ty)?;
-            let resolved_ty = match declared_ty {
-                Some(declared) => {
-                    if !inferred.is_compatible(declared) {
-                        return Err(mismatch(declared, inferred, shared.arena.span(*value)));
-                    }
-                    inferred
-                }
-                None => inferred,
-            };
-            if !resolved_ty.is_bindable() {
+            let constraint = declared_ty.map_or(Constraint::None, Constraint::Exact);
+            let inferred = type_of(shared, ctx, *value, env, constraint)?;
+            if let Some(declared) = declared_ty
+                && !inferred.is_compatible(declared)
+            {
+                return Err(mismatch(declared, inferred, shared.arena.span(*value)));
+            }
+            if !inferred.is_bindable() {
                 return Err(TypeError::new(
-                    TypeErrorKind::NonBindableType(resolved_ty),
+                    TypeErrorKind::NonBindableType(inferred),
                     shared.arena.span(*value),
                 ));
             }
@@ -75,16 +72,22 @@ pub(super) fn check_item(
                     .iter()
                     .map(|(span, _)| ctx.text(*span).to_string())
                     .collect();
-                env.vars.insert(id, resolved_ty);
+                env.vars.insert(id, inferred);
                 env.object_fields.insert(id, fields);
             } else {
-                env.vars.insert(id, resolved_ty);
+                env.vars.insert(id, inferred);
             }
             Ok(())
         }
         Node::Macro(macro_id) => {
             let config = shared.pools.get_macro(*macro_id);
-            let body_ty = type_of(shared, ctx, config.body, env, Some(config.return_ty))?;
+            let body_ty = type_of(
+                shared,
+                ctx,
+                config.body,
+                env,
+                Constraint::Exact(config.return_ty),
+            )?;
             if !body_ty.is_compatible(config.return_ty) {
                 return Err(mismatch(
                     config.return_ty,
@@ -115,7 +118,7 @@ fn expect_list<'ast>(
         }
         return Ok(());
     }
-    let ty = type_of(shared, ctx, id, env, Some(expected))?;
+    let ty = type_of(shared, ctx, id, env, Constraint::Exact(expected))?;
     if ty.is_compatible(expected) {
         return Ok(());
     }
@@ -144,7 +147,7 @@ fn expect_name_ref(
         | Node::GrammarConfig { .. }
         | Node::MacroParam { .. }
         | Node::ForBinding { .. } => {
-            let ty = type_of(shared, ctx, id, env, Some(Ty::RULE))?;
+            let ty = type_of(shared, ctx, id, env, Constraint::Exact(Ty::RULE))?;
             if ty != Ty::RULE {
                 return Err(mismatch(Ty::RULE, ty, shared.arena.span(id)));
             }
@@ -188,10 +191,10 @@ fn expect_reserved(
         }
         return Ok(());
     }
-    // Non-literal: must be inherited (base.reserved -> Object(ListRule))
-    let reserved_ty = Ty::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule)));
-    let ty = type_of(shared, ctx, id, env, Some(reserved_ty))?;
-    if ty.is_compatible(reserved_ty) {
+    // Non-literal: must type to obj_t<list_t<rule_t>>. Common case is
+    // inherited but any expression of that type works.
+    let ty = type_of(shared, ctx, id, env, Constraint::Exact(Ty::OBJ_LIST_RULE))?;
+    if ty.is_compatible(Ty::OBJ_LIST_RULE) {
         return Ok(());
     }
     Err(TypeError::new(
@@ -206,7 +209,7 @@ fn expect_rule(
     id: NodeId,
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
-    let ty = type_of(shared, ctx, id, env, Some(Ty::RULE))?;
+    let ty = type_of(shared, ctx, id, env, Constraint::Exact(Ty::RULE))?;
     if !ty.is_rule_like() {
         return Err(mismatch(Ty::RULE, ty, shared.arena.span(id)));
     }
@@ -221,7 +224,7 @@ fn type_of(
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-    expected: Option<Ty>,
+    expected: Constraint,
 ) -> TypeResult<Ty> {
     let span = shared.arena.span(id);
     match shared.arena.get(id) {
@@ -237,7 +240,7 @@ fn type_of(
             }))
         }
         Node::GrammarConfig { module, field } => {
-            let module_ty = type_of(shared, ctx, *module, env, Some(Ty::ANY_MODULE))?;
+            let module_ty = type_of(shared, ctx, *module, env, Constraint::Exact(Ty::ANY_MODULE))?;
             if !matches!(module_ty, Ty::Module(ModuleTy::Grammar(_))) {
                 return Err(TypeError::new(
                     TypeErrorKind::GrammarConfigRequiresInherit,
@@ -249,7 +252,7 @@ fn type_of(
                 C::Extras | C::Externals | C::Inline | C::Supertypes => Ty::LIST_RULE,
                 C::Conflicts | C::Precedences => Ty::LIST_LIST_RULE,
                 C::Word => Ty::RULE,
-                C::Reserved => Ty::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule))),
+                C::Reserved => Ty::OBJ_LIST_RULE,
                 C::Language | C::Inherits => unreachable!(),
             })
         }
@@ -262,7 +265,7 @@ fn type_of(
         // in source order (cross-module: helpers checked before parent).
         Node::Ident(IdentKind::Var(let_id)) => Ok(*env.vars.get(let_id).unwrap()),
         Node::Neg(inner) => {
-            let ty = type_of(shared, ctx, *inner, env, Some(Ty::INT))?;
+            let ty = type_of(shared, ctx, *inner, env, Constraint::Exact(Ty::INT))?;
             if ty != Ty::INT {
                 return Err(mismatch(Ty::INT, ty, span));
             }
@@ -276,7 +279,7 @@ fn type_of(
         // rules that exist in base_grammar.variables but not in root_items.
         // The resolver already resolved lets and caught macro-as-value errors.
         Node::QualifiedAccess { obj, .. } => {
-            let obj_ty = type_of(shared, ctx, *obj, env, Some(Ty::ANY_MODULE))?;
+            let obj_ty = type_of(shared, ctx, *obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
             if !matches!(
                 obj_ty,
                 Ty::Module(ModuleTy::Import(_) | ModuleTy::Grammar(_))
@@ -299,7 +302,7 @@ fn type_of(
         Node::Tuple(_) => Ok(Ty::Tuple),
         Node::Concat(range) => {
             for &part in shared.pools.child_slice(*range) {
-                let ty = type_of(shared, ctx, part, env, Some(Ty::STR))?;
+                let ty = type_of(shared, ctx, part, env, Constraint::Exact(Ty::STR))?;
                 if ty != Ty::STR {
                     return Err(mismatch(Ty::STR, ty, shared.arena.span(part)));
                 }
@@ -307,12 +310,12 @@ fn type_of(
             Ok(Ty::STR)
         }
         &Node::DynRegex { pattern, flags } => {
-            let pt = type_of(shared, ctx, pattern, env, Some(Ty::STR))?;
+            let pt = type_of(shared, ctx, pattern, env, Constraint::Exact(Ty::STR))?;
             if pt != Ty::STR {
                 return Err(mismatch(Ty::STR, pt, shared.arena.span(pattern)));
             }
             if let Some(fid) = flags {
-                let ft = type_of(shared, ctx, fid, env, Some(Ty::STR))?;
+                let ft = type_of(shared, ctx, fid, env, Constraint::Exact(Ty::STR))?;
                 if ft != Ty::STR {
                     return Err(mismatch(Ty::STR, ft, shared.arena.span(fid)));
                 }
@@ -321,8 +324,8 @@ fn type_of(
         }
         Node::SeqOrChoice { range, .. } => {
             for &member in shared.pools.child_slice(*range) {
-                // Members can be rule-like (RULE/STR widens) or Spread; pass Some(RULE).
-                let ty = type_of(shared, ctx, member, env, Some(Ty::RULE))?;
+                // Spread is also valid here, validated below.
+                let ty = type_of(shared, ctx, member, env, Constraint::RULE_LIKE)?;
                 if ty != Ty::Spread && !ty.is_rule_like() {
                     return Err(mismatch(Ty::RULE, ty, shared.arena.span(member)));
                 }
@@ -338,8 +341,7 @@ fn type_of(
         }
         Node::Alias { content, target } => {
             expect_rule(shared, ctx, *content, env)?;
-            // Target is RULE-or-STR; Some(RULE) accepts STR via widening.
-            let target_ty = type_of(shared, ctx, *target, env, Some(Ty::RULE))?;
+            let target_ty = type_of(shared, ctx, *target, env, Constraint::RULE_LIKE)?;
             let is_valid = matches!(
                 shared.arena.get(*target),
                 Node::Ident(IdentKind::Rule | IdentKind::Var(_))
@@ -363,8 +365,11 @@ fn type_of(
             value,
             content,
         } => {
-            // Dynamic prec wants INT; others accept INT-or-STR (union, can't express).
-            let value_expected = (*kind == PrecKind::Dynamic).then_some(Ty::INT);
+            let value_expected = if *kind == PrecKind::Dynamic {
+                Constraint::Exact(Ty::INT)
+            } else {
+                Constraint::INT_OR_STR
+            };
             let vt = type_of(shared, ctx, *value, env, value_expected)?;
             if *kind == PrecKind::Dynamic {
                 if vt != Ty::INT {
@@ -398,17 +403,16 @@ fn type_of_append(
     right: NodeId,
     span: Span,
     env: &mut TypeEnv,
-    expected: Option<Ty>,
+    expected: Constraint,
 ) -> TypeResult<Ty> {
-    // Both arms must be the same list type; expected propagates unchanged.
-    // If expected isn't a list, drop it - children would error misleadingly.
-    let arm_expected = expected.filter(|t| t.is_list());
     let is_empty = |id| matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty());
-    let l_ty = (!is_empty(left) || arm_expected.is_some())
-        .then(|| type_of(shared, ctx, left, env, arm_expected))
+    let is_list = |constr| matches!(constr, Constraint::Exact(t) if t.is_list());
+    // Don't typecheck empty list arguments unless we have an explicit annotation
+    let l_ty = (!is_empty(left) || is_list(expected))
+        .then(|| type_of(shared, ctx, left, env, expected))
         .transpose()?;
-    let r_ty = (!is_empty(right) || arm_expected.is_some())
-        .then(|| type_of(shared, ctx, right, env, arm_expected))
+    let r_ty = (!is_empty(right) || is_list(expected))
+        .then(|| type_of(shared, ctx, right, env, expected))
         .transpose()?;
     match (l_ty, r_ty) {
         (Some(l), Some(r)) => {
@@ -446,42 +450,39 @@ fn type_of_field_access(
     field: Span,
     env: &mut TypeEnv,
 ) -> TypeResult<Ty> {
-    // obj must be Object<?>; specific inner is unknown - pass None.
-    let obj_ty = type_of(shared, ctx, obj, env, None)?;
+    let obj_ty = type_of(shared, ctx, obj, env, Constraint::AnyObject)?;
     let field_name = ctx.text(field);
-    match obj_ty {
-        Ty::Data(DataTy::Object(inner)) => {
-            let field_known = match shared.arena.get(obj) {
-                Node::Ident(IdentKind::Var(let_id)) => {
-                    // None = not an object literal, can't validate field names
-                    env.object_fields
-                        .get(let_id)
-                        .is_none_or(|fields| fields.iter().any(|f| f == field_name))
-                }
-                Node::Object(range) => {
-                    let fields = shared.pools.get_object(*range);
-                    fields
-                        .iter()
-                        .any(|(key_span, _)| ctx.text(*key_span) == field_name)
-                }
-                _ => true, // can't validate dynamically-produced objects
-            };
-            if !field_known {
-                return Err(TypeError::new(
-                    TypeErrorKind::FieldNotFound {
-                        field: field_name.to_string(),
-                        on_type: obj_ty,
-                    },
-                    field,
-                ));
-            }
-            Ok(Ty::from(inner))
-        }
-        _ => Err(TypeError::new(
+    let Ty::Data(DataTy::Object(inner)) = obj_ty else {
+        return Err(TypeError::new(
             TypeErrorKind::FieldAccessOnNonObject(obj_ty),
             shared.arena.span(obj),
-        )),
+        ));
+    };
+    let field_known = match shared.arena.get(obj) {
+        Node::Ident(IdentKind::Var(let_id)) => {
+            // None = not an object literal, can't validate field names
+            env.object_fields
+                .get(let_id)
+                .is_none_or(|fields| fields.iter().any(|f| f == field_name))
+        }
+        Node::Object(range) => {
+            let fields = shared.pools.get_object(*range);
+            fields
+                .iter()
+                .any(|(key_span, _)| ctx.text(*key_span) == field_name)
+        }
+        _ => true, // can't validate dynamically-produced objects
+    };
+    if !field_known {
+        return Err(TypeError::new(
+            TypeErrorKind::FieldNotFound {
+                field: field_name.to_string(),
+                on_type: obj_ty,
+            },
+            field,
+        ));
     }
+    Ok(Ty::from(inner))
 }
 
 fn type_of_qualified_call(
@@ -492,7 +493,7 @@ fn type_of_qualified_call(
     env: &mut TypeEnv,
 ) -> TypeResult<Ty> {
     let (obj, name, args) = shared.pools.get_qualified_call(range);
-    let obj_ty = type_of(shared, ctx, obj, env, Some(Ty::ANY_MODULE))?;
+    let obj_ty = type_of(shared, ctx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
     if !matches!(
         obj_ty,
         Ty::Module(ModuleTy::Import(_) | ModuleTy::Grammar(_))
@@ -535,7 +536,7 @@ fn check_macro_args(
     }
     for (i, &arg_id) in args.iter().enumerate() {
         let expected = config.params[i].ty;
-        let arg_ty = type_of(shared, ctx, arg_id, env, Some(expected))?;
+        let arg_ty = type_of(shared, ctx, arg_id, env, Constraint::Exact(expected))?;
         if !arg_ty.is_compatible(expected) {
             return Err(mismatch(expected, arg_ty, shared.arena.span(arg_id)));
         }
@@ -549,37 +550,30 @@ fn type_of_object(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
-    expected: Option<Ty>,
+    expected: Constraint,
 ) -> TypeResult<Ty> {
     let fields = shared.pools.get_object(range);
-    let expected_inner = match expected {
-        Some(Ty::Data(DataTy::Object(inner))) => Some(inner),
-        Some(_) if !fields.is_empty() => None,
-        Some(declared) => {
-            return Err(TypeError::new(
+    if fields.is_empty() {
+        return match expected {
+            Constraint::Exact(ty) if matches!(ty, Ty::Data(DataTy::Object(_))) => Ok(ty),
+            Constraint::Exact(declared) => Err(TypeError::new(
                 TypeErrorKind::EmptyContainerAnnotationMismatch {
                     declared,
                     kind: ContainerKind::Object,
                 },
                 span,
-            ));
-        }
-        None => None,
-    };
-    if fields.is_empty() {
-        // `expected_inner.is_some()` here means expected was Object - return it directly.
-        if let Some(inner) = expected_inner {
-            return Ok(Ty::Data(DataTy::Object(inner)));
-        }
-        return Err(TypeError::new(
-            TypeErrorKind::EmptyContainerNeedsAnnotation,
-            span,
-        ));
+            )),
+            _ => Err(TypeError::new(
+                TypeErrorKind::EmptyContainerNeedsAnnotation,
+                span,
+            )),
+        };
     }
-    let value_expected = expected_inner.map(|i| Ty::Data(i.into()));
-    let mut widest = type_of(shared, ctx, fields[0].1, env, value_expected)?;
+
+    let expected_inner = expected.object_value();
+    let mut widest = type_of(shared, ctx, fields[0].1, env, expected_inner)?;
     for &(_, val_id) in &fields[1..] {
-        let ty = type_of(shared, ctx, val_id, env, value_expected)?;
+        let ty = type_of(shared, ctx, val_id, env, expected_inner)?;
         widest = widest
             .widen(ty)
             .ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
@@ -603,33 +597,26 @@ fn type_of_list(
     range: ChildRange,
     span: Span,
     env: &mut TypeEnv,
-    expected: Option<Ty>,
+    expected: Constraint,
 ) -> TypeResult<Ty> {
     let items = shared.pools.child_slice(range);
-    let elem_expected = match expected {
-        Some(ty) if ty.is_list() => ty.elem_type(),
-        Some(_) if !items.is_empty() => None,
-        Some(declared) => {
-            return Err(TypeError::new(
+    if items.is_empty() {
+        return match expected {
+            Constraint::Exact(ty) if ty.is_list() => Ok(ty),
+            Constraint::Exact(declared) => Err(TypeError::new(
                 TypeErrorKind::EmptyContainerAnnotationMismatch {
                     declared,
                     kind: ContainerKind::List,
                 },
                 span,
-            ));
-        }
-        None => None,
-    };
-    if items.is_empty() {
-        if let Some(ty) = expected {
-            // expected validated as list type above
-            return Ok(ty);
-        }
-        return Err(TypeError::new(
-            TypeErrorKind::EmptyContainerNeedsAnnotation,
-            span,
-        ));
+            )),
+            _ => Err(TypeError::new(
+                TypeErrorKind::EmptyContainerNeedsAnnotation,
+                span,
+            )),
+        };
     }
+    let elem_expected = expected.elem();
     let mut widest = type_of(shared, ctx, items[0], env, elem_expected)?;
     for &item_id in &items[1..] {
         let ty = type_of(shared, ctx, item_id, env, elem_expected)?;
@@ -701,7 +688,8 @@ fn check_for_expr(
                     ));
                 }
                 for (i, &(name_span, declared_ty)) in config.bindings.iter().enumerate() {
-                    let actual = type_of(shared, ctx, elems[i], env, Some(declared_ty))?;
+                    let actual =
+                        type_of(shared, ctx, elems[i], env, Constraint::Exact(declared_ty))?;
                     if !actual.is_compatible(declared_ty) {
                         return Err(mismatch(declared_ty, actual, name_span));
                     }
@@ -718,18 +706,17 @@ fn check_for_expr(
             shared.arena.span(config.iterable),
         ));
     }
-    // Iterable's expected is "some list whose elements widen to declared_ty";
-    // can't express precisely without a constraint type, so pass None.
-    let iter_ty = type_of(shared, ctx, config.iterable, env, None)?;
-    if !iter_ty.is_list() {
+    let (name_span, declared_ty) = config.bindings[0];
+    let iter_constraint = declared_ty
+        .to_list()
+        .map_or(Constraint::None, Constraint::Exact);
+    let iter_ty = type_of(shared, ctx, config.iterable, env, iter_constraint)?;
+    let Some(elem_ty) = iter_ty.list_elem() else {
         return Err(TypeError::new(
             TypeErrorKind::ForRequiresList(iter_ty),
             shared.arena.span(config.iterable),
         ));
-    }
-    let (name_span, declared_ty) = config.bindings[0];
-    // is_list() check above guarantees elem_type() returns Some
-    let elem_ty = iter_ty.elem_type().unwrap();
+    };
     if !elem_ty.is_compatible(declared_ty) {
         return Err(mismatch(declared_ty, elem_ty, name_span));
     }

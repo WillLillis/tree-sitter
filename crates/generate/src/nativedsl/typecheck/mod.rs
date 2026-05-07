@@ -4,7 +4,7 @@
 mod check;
 pub mod types;
 
-pub use types::{DataTy, InnerTy, ModuleTy, ScalarTy, Ty};
+pub use types::{Constraint, DataTy, InnerTy, ModuleTy, ScalarTy, Ty};
 
 use rustc_hash::FxHashMap;
 use serde::Serialize;
