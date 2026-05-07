@@ -71,6 +71,7 @@ impl Ty {
     pub const LIST_LIST_RULE: Self = Self::Data(DataTy::ListList(ScalarTy::Rule));
     pub const LIST_LIST_STR: Self = Self::Data(DataTy::ListList(ScalarTy::Str));
     pub const LIST_LIST_INT: Self = Self::Data(DataTy::ListList(ScalarTy::Int));
+    pub const OBJ_LIST_RULE: Self = Self::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule)));
     pub const ANY_MODULE: Self = Self::Module(ModuleTy::Any);
 
     /// True for `rule_t` or `str_t` (str widens to rule).
@@ -131,9 +132,9 @@ impl Ty {
 
     /// Unwrap a list type to its element type. Returns `None` for non-data
     /// or non-list types.
-    pub fn elem_type(self) -> Option<Self> {
+    pub fn list_elem(self) -> Option<Self> {
         match self {
-            Self::Data(d) => d.elem_type().map(Self::Data),
+            Self::Data(d) => d.list_elem().map(Self::Data),
             _ => None,
         }
     }
@@ -194,7 +195,7 @@ impl DataTy {
     }
 
     /// Unwrap a list type to its element type. Returns `None` for non-list types.
-    const fn elem_type(self) -> Option<Self> {
+    const fn list_elem(self) -> Option<Self> {
         Some(match self {
             Self::List(s) => Self::Scalar(s),
             Self::ListList(s) => Self::List(s),
@@ -272,5 +273,58 @@ impl std::fmt::Display for ScalarTy {
 impl std::fmt::Display for InnerTy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         DataTy::from(*self).fmt(f)
+    }
+}
+
+/// Type expectation propagated to children during type checking.
+///
+/// Used by `type_of` to give nested empty containers (`[]`, `{}`) enough
+/// context to infer their type, and to surface more accurate errors when
+/// a value is used in a position with a known shape constraint.
+#[derive(Clone, Copy, Debug)]
+pub enum Constraint {
+    /// No constraint; the typed value can be anything bindable.
+    None,
+    /// Must equal (or widen to) this exact type.
+    Exact(Ty),
+    /// Must be `Object<?>` for any inner; specific inner is unknown.
+    AnyObject,
+    /// Must satisfy at least one of these types.
+    OneOf(&'static [Ty]),
+}
+
+impl Constraint {
+    pub const RULE_LIKE: Self = Self::OneOf(&[Ty::STR, Ty::RULE]);
+    pub const INT_OR_STR: Self = Self::OneOf(&[Ty::INT, Ty::STR]);
+
+    /// True if `ty` satisfies this constraint via [`Ty::is_compatible`].
+    #[must_use]
+    pub fn satisfies(self, ty: Ty) -> bool {
+        match self {
+            Self::None => true,
+            Self::Exact(t) => ty.is_compatible(t),
+            Self::AnyObject => matches!(ty, Ty::Data(DataTy::Object(_))),
+            Self::OneOf(ts) => ts.iter().any(|&t| ty.is_compatible(t)),
+        }
+    }
+
+    /// Constraint to propagate to a list element. Only `Exact(list_t)`
+    /// carries through; other variants degrade to `None`.
+    #[must_use]
+    pub fn elem(self) -> Self {
+        match self {
+            Self::Exact(ty) => ty.list_elem().map_or(Self::None, Self::Exact),
+            _ => Self::None,
+        }
+    }
+
+    /// Constraint to propagate to an object value. Only `Exact(obj_t<X>)`
+    /// carries through; other variants degrade to `None`.
+    #[must_use]
+    pub fn object_value(self) -> Self {
+        match self {
+            Self::Exact(Ty::Data(DataTy::Object(inner))) => Self::Exact(Ty::Data(inner.into())),
+            _ => Self::None,
+        }
     }
 }
