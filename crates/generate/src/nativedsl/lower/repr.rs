@@ -79,7 +79,7 @@ pub(super) enum ARule {
     String(Str),
     Pattern(Str, Option<Str>),
     NamedSymbol(Str),
-    SeqOrChoice(bool, u32, u16),
+    SeqOrChoice(bool, ChildRange),
     Repeat(RuleId),
     Prec(APrec, RuleId),
     PrecLeft(APrec, RuleId),

@@ -155,10 +155,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         self.state.rule_children.len() as u32
     }
 
-    fn children_range(&self, start: u32, span: Span) -> LowerResult<(u32, u16)> {
+    fn children_range(&self, start: u32, span: Span) -> LowerResult<ChildRange> {
         let count = self.state.rule_children.len() as u32 - start;
         u16::try_from(count)
-            .map(|len| (start, len))
+            .map(|len| ChildRange::new(start, len))
             .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
     }
 
@@ -200,14 +200,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 f.map_or_else(String::new, |f| self.str_to_string(f)),
             ),
             ARule::NamedSymbol(sid) => Rule::NamedSymbol(self.str_to_string(*sid)),
-            ARule::SeqOrChoice(is_seq, start, len) => {
-                let range = *start as usize..*start as usize + *len as usize;
-                // Safety: start and len are produced by children_start/children_range
-                // which track rule_children indices.
-                let children: Vec<Rule> = unsafe { self.state.rule_children.get_unchecked(range) }
-                    .iter()
-                    .map(|&id| self.build_rule(id))
-                    .collect();
+            ARule::SeqOrChoice(is_seq, range) => {
+                // Safety: range is produced by children_start/children_range which
+                // track rule_children indices.
+                let children: Vec<Rule> = unsafe {
+                    self.state.rule_children.get_unchecked(range.as_range())
+                }
+                .iter()
+                .map(|&id| self.build_rule(id))
+                .collect();
                 if *is_seq {
                     Rule::seq(children)
                 } else {
@@ -511,7 +512,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     (start, self.state.rule_children.len() as u32 - start)
                 });
                 debug_assert!(u16::try_from(count).is_ok());
-                self.alloc_rule(ARule::SeqOrChoice(is_seq, start, count as u16))
+                self.alloc_rule(ARule::SeqOrChoice(
+                    is_seq,
+                    ChildRange::new(start, count as u16),
+                ))
             }
             Rule::Repeat(inner) => {
                 let inner = self.import_rule(inner);
@@ -801,7 +805,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match self.shared.arena.get(id) {
             &Node::SeqOrChoice { seq, range } => {
                 let children = self.shared.pools.child_slice(range);
-                let (offset, len) = stack_scope!(self.state.rule_scratch, |base| {
+                let child_range = stack_scope!(self.state.rule_scratch, |base| {
                     for &member in children {
                         if let Node::For { for_id, body } = *self.shared.arena.get(member) {
                             self.eval_for_to_rules(for_id, body)?;
@@ -816,7 +820,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         .extend_from_slice(&self.state.rule_scratch[base..]);
                     self.children_range(start, span)
                 })?;
-                Ok(self.alloc_rule(ARule::SeqOrChoice(seq, offset, len)))
+                Ok(self.alloc_rule(ARule::SeqOrChoice(seq, child_range)))
             }
             &Node::Repeat { kind, inner } => {
                 let inner = self.lower_to_rule(inner)?;
@@ -831,8 +835,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
                 self.state.rule_children.extend_from_slice(&[first, blank]);
-                let (s, l) = self.children_range(start, span).unwrap();
-                Ok(self.alloc_rule(ARule::SeqOrChoice(false, s, l)))
+                let child_range = self.children_range(start, span).unwrap();
+                Ok(self.alloc_rule(ARule::SeqOrChoice(false, child_range)))
             }
             Node::Blank => Ok(self.alloc_rule(ARule::Blank)),
             &Node::Field { name, content } => {
