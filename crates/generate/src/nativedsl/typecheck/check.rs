@@ -1,8 +1,8 @@
 use crate::nativedsl::{
     ContainerKind, DataTy, InnerTy, ModuleTy, Ty, TypeError, TypeErrorKind,
     ast::{
-        ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind, SharedAst,
-        Span,
+        ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, Param, PrecKind,
+        SharedAst, Span,
     },
     typecheck::{Constraint, TypeEnv, TypeResult},
 };
@@ -610,8 +610,8 @@ fn check_for_expr(
                         shared.arena.span(item_id),
                     ));
                 }
-                for (i, &(_, declared_ty)) in config.bindings.iter().enumerate() {
-                    type_of(shared, ctx, elems[i], env, Constraint::Exact(declared_ty))?;
+                for (i, p) in config.bindings.iter().enumerate() {
+                    type_of(shared, ctx, elems[i], env, Constraint::Exact(p.ty))?;
                 }
             }
             return expect_rule(shared, ctx, body, env);
@@ -625,7 +625,7 @@ fn check_for_expr(
             shared.arena.span(config.iterable),
         ));
     }
-    let (name_span, declared_ty) = config.bindings[0];
+    let Param { name, ty: declared_ty } = config.bindings[0];
     // Bespoke checks below distinguish "not a list" (ForRequiresList) from
     // "wrong element type" (TypeMismatch); auto-enforcing a list constraint
     // here would conflate them.
@@ -637,7 +637,7 @@ fn check_for_expr(
         ));
     };
     if !elem_ty.is_compatible(declared_ty) {
-        return Err(mismatch(declared_ty, elem_ty, name_span));
+        return Err(mismatch(declared_ty, elem_ty, name));
     }
     expect_rule(shared, ctx, body, env)
 }
