@@ -209,7 +209,7 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::ExpectedReservedConfig
     }
-    error_cannot_infer_type {
+    error_empty_object_needs_annotation {
         r#"grammar { language: "test" }
         let x = {}
         rule program { "x" }"#,

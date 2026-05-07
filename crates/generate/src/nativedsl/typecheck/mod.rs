@@ -102,8 +102,6 @@ pub enum TypeErrorKind {
     ExpectedReservedConfig,
     #[error("grammar_config() requires an inherited grammar, not an imported module")]
     GrammarConfigRequiresInherit,
-    #[error("cannot infer type of this expression")]
-    CannotInferType,
     #[error("{}", non_bindable_message(*.0))]
     NonBindableType(Ty),
     #[error("imported module has no macro '{0}'")]
