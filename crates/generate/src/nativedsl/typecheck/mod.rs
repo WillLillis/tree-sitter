@@ -55,6 +55,8 @@ impl std::fmt::Display for ContainerKind {
 pub enum TypeErrorKind {
     #[error("expected {expected}, got {got}")]
     TypeMismatch { expected: Ty, got: Ty },
+    #[error("expected {expected}, got {got}")]
+    ConstraintMismatch { expected: Constraint, got: Ty },
     #[error("undefined macro '{0}'")]
     UndefinedMacro(String),
     #[error("macro '{macro_name}': expected {expected} arguments, got {got}")]
@@ -65,8 +67,6 @@ pub enum TypeErrorKind {
     },
     #[error("no field '{field}' on {on_type}")]
     FieldNotFound { field: String, on_type: Ty },
-    #[error("field access requires obj_t, got {0}")]
-    FieldAccessOnNonObject(Ty),
     #[error("list elements have inconsistent types: {first} vs {got}")]
     ListElementTypeMismatch { first: Ty, got: Ty },
     #[error("object values must be rule_t, str_t, or int_t, got {0}")]
@@ -90,24 +90,16 @@ pub enum TypeErrorKind {
     },
     #[error("append requires list arguments, got {0}")]
     AppendRequiresList(Ty),
-    #[error("'::' requires module_t, got {0}")]
-    QualifiedAccessOnInvalidType(Ty),
     #[error("alias target must be a name or string, got {0}")]
     InvalidAliasTarget(Ty),
-    #[error("prec value must be int_t or str_t, got {0}")]
-    PrecValueTypeMismatch(Ty),
     #[error("expected a rule name")]
     ExpectedRuleName,
-    #[error("reserved config must be an object literal or inherited")]
-    ExpectedReservedConfig,
     #[error("grammar_config() requires an inherited grammar, not an imported module")]
     GrammarConfigRequiresInherit,
     #[error("{}", non_bindable_message(*.0))]
     NonBindableType(Ty),
     #[error("imported module has no macro '{0}'")]
     ImportMacroNotFound(String),
-    #[error("'::' call requires module_t, got {0}")]
-    QualifiedCallOnNonModule(Ty),
     #[error("'{0}' is a macro, not a value; call it with {0}(...)")]
     MacroUsedAsValue(String),
 }

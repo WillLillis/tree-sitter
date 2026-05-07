@@ -54,13 +54,19 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let obj = { x: 1 }
         rule program { obj::x }"#,
-        TypeErrorKind::QualifiedAccessOnInvalidType(Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))))
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))),
+        }
     }
     error_field_access_on_non_object {
         r#"grammar { language: "test" }
         let x: int_t = 5
         rule program { prec(x.foo, "a") }"#,
-        TypeErrorKind::FieldAccessOnNonObject(Ty::INT)
+        TypeErrorKind::ConstraintMismatch {
+            expected: Constraint::AnyObject,
+            got: Ty::INT,
+        }
     }
     error_field_not_found {
         r#"grammar { language: "test" }
@@ -95,7 +101,10 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         rule program { prec(identifier, "x") }
         rule identifier { "id" }"#,
-        TypeErrorKind::PrecValueTypeMismatch(Ty::RULE)
+        TypeErrorKind::ConstraintMismatch {
+            expected: Constraint::INT_OR_STR,
+            got: Ty::RULE,
+        }
     }
     error_list_inconsistent_types {
         r#"grammar { language: "test" }
@@ -143,7 +152,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let x: list_t<rule_t> = [1, 2]
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::LIST_RULE, got: Ty::LIST_INT }
+        TypeErrorKind::TypeMismatch { expected: Ty::RULE, got: Ty::INT }
     }
     error_flat_list_assigned_to_list_list_rule {
         r#"grammar { language: "test" }
@@ -151,7 +160,7 @@ error_tests! { Type {
         rule program { "x" }
         rule a { "a" }
         rule b { "b" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::LIST_LIST_RULE, got: Ty::LIST_RULE }
+        TypeErrorKind::TypeMismatch { expected: Ty::LIST_RULE, got: Ty::RULE }
     }
     error_for_bindings_not_tuple {
         r#"grammar { language: "test" }
@@ -207,7 +216,7 @@ error_tests! { Type {
     error_expected_reserved_config {
         r#"grammar { language: "test", reserved: "not_an_object" }
         rule program { "x" }"#,
-        TypeErrorKind::ExpectedReservedConfig
+        TypeErrorKind::TypeMismatch { expected: Ty::OBJ_LIST_RULE, got: Ty::STR }
     }
     error_empty_object_needs_annotation {
         r#"grammar { language: "test" }
