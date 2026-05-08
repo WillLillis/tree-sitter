@@ -111,7 +111,11 @@ impl Loader<'_> {
                 )?);
                 Module::Grammar { ctx, lowered }
             }
-            ModuleKind::Helper => Module::Helper { ctx },
+            ModuleKind::Helper => {
+                let lowered_rules =
+                    lower::lower_helper(self.state, self.shared, self.modules, &ctx)?;
+                Module::Helper { ctx, lowered_rules }
+            }
         };
         self.modules.push(module);
 
