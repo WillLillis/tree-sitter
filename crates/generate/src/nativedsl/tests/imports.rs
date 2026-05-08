@@ -790,11 +790,9 @@ fn helper_rule_materialized_into_grammar() {
 
 #[test]
 fn helper_can_define_rules() {
-    // Helpers can host rule decls. The rules aren't materialized into the
-    // root grammar yet (that's a later commit), but the helper itself
-    // parses, resolves, and typechecks. Tests that resolve handles
-    // intra-helper references (`expression` -> `application` and
-    // `_paren_open`) correctly.
+    // Mutually-recursive helper rules with intra-helper references plus a
+    // reference to a helper-declared external. Rules materialize into the
+    // root grammar's variables.
     let dir = tempfile::tempdir().unwrap();
     let helper = dir.path().join("exp.tsg");
     std::fs::write(
@@ -812,11 +810,12 @@ fn helper_can_define_rules() {
         r#"
         let exp = import("{}")
         grammar {{ language: "test", externals: [exp::_paren_open, exp::_paren_close] }}
-        rule program {{ "x" }}
+        rule program {{ expression }}
     "#,
         dsl_path(&helper)
     );
-    parse_native_dsl(&input, Path::new(".")).unwrap();
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert_eq!(rule_names(&g), vec!["program", "expression", "application"]);
 }
 
 #[test]
