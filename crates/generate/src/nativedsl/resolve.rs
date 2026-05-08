@@ -16,9 +16,7 @@ use crate::{
     grammars::InputGrammar,
     nativedsl::{
         Module, NoteMessage, ResolveError,
-        ast::{
-            AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
-        },
+        ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span},
     },
 };
 
@@ -49,7 +47,7 @@ pub fn resolve(
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
 ) -> ResolveResult<()> {
-    let mut decls = collect_decls(shared, ctx, &ctx.root_items, base)?;
+    let mut decls = collect_decls(shared, ctx, &ctx.root_items, base, modules)?;
 
     for &item_id in &ctx.root_items {
         resolve_item(
@@ -103,16 +101,24 @@ fn collect_decls<'a>(
     ctx: &'a ModuleContext,
     root_items: &[NodeId],
     base: Option<(&'a InputGrammar, Span)>,
+    modules: &'a [Module],
 ) -> ResolveResult<Decls<'a>> {
     let mut decls = Decls::default();
+    let mut override_names: FxHashSet<&str> = FxHashSet::default();
 
     // Register rules and macros upfront (forward references allowed).
     // Let bindings are registered during pass 2 in item order (no forward references).
     for &item_id in root_items {
         let span = shared.arena.span(item_id);
         match shared.arena.get(item_id) {
-            Node::Rule { name, .. } => {
-                insert_decl(&mut decls, ctx.text(*name), IdentKind::Rule, span, ctx)?;
+            Node::Rule {
+                name, is_override, ..
+            } => {
+                let name_text = ctx.text(*name);
+                insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
+                if *is_override {
+                    override_names.insert(name_text);
+                }
             }
             Node::Macro(macro_id) => {
                 let config = shared.pools.get_macro(*macro_id);
@@ -148,17 +154,23 @@ fn collect_decls<'a>(
         }
     }
 
-    // Register inherited rule names before walking externals, so that an
-    // externals field referencing an inherited rule sees it as already declared
-    // rather than re-registering it as a fresh external token. The inherit
-    // statement's span gives "first defined here" notes a sensible target.
+    // Register inherited rule names. Strict: collisions with local rules
+    // error, except for names that have a corresponding `override rule`
+    // (which is the explicit way to redefine an inherited rule). The
+    // inherit statement's span gives "first defined here" notes a sensible
+    // target.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
-            if !decls.contains_key(var.name.as_str()) {
-                decls.insert(&var.name, (IdentKind::Rule, inherit_span));
+            if override_names.contains(var.name.as_str()) {
+                continue;
             }
+            insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
         }
     }
+
+    // Register helper rule names from imported helpers (transitively). Same
+    // strictness as inherited: collisions error unless overridden locally.
+    register_helper_rules(shared, ctx, modules, &mut decls, &override_names)?;
 
     // Pre-register external token names. Externals are the only config field
     // that introduces names not declared as rules in the grammar file.
@@ -174,6 +186,33 @@ fn collect_decls<'a>(
     }
 
     Ok(decls)
+}
+
+/// Register each transitively-reachable helper's rule names. Names already
+/// in `override_names` are skipped (the local override will replace them).
+fn register_helper_rules<'a>(
+    shared: &SharedAst,
+    ctx: &'a ModuleContext,
+    modules: &'a [Module],
+    decls: &mut Decls<'a>,
+    override_names: &FxHashSet<&str>,
+) -> ResolveResult<()> {
+    super::for_each_imported_helper(
+        &shared.arena,
+        &ctx.module_refs,
+        modules,
+        |_idx, module, ref_span| {
+            let Module::Helper { lowered_rules, .. } = module else {
+                unreachable!()
+            };
+            for (name, _) in lowered_rules {
+                if !override_names.contains(name.as_str()) {
+                    insert_decl(decls, name.as_str(), IdentKind::Rule, ref_span, ctx)?;
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
@@ -409,9 +448,16 @@ fn resolve_qualified_member(
     // Both leave the QualifiedAccess intact for the lowerer.
     if let Some(g) = target.lowered()
         && (g.variables.iter().any(|v| v.name == member_name)
-            || g.external_tokens.iter().any(|r| {
-                matches!(r, crate::rules::Rule::NamedSymbol(n) if n == member_name)
-            }))
+            || g.external_tokens
+                .iter()
+                .any(|r| matches!(r, crate::rules::Rule::NamedSymbol(n) if n == member_name)))
+    {
+        return Ok(());
+    }
+    // Helper rule lookup: helper modules carry their own lowered rules.
+    // Leave as QualifiedAccess; the lowerer inlines via `import_rule`.
+    if let Module::Helper { lowered_rules, .. } = target
+        && lowered_rules.iter().any(|(name, _)| name == member_name)
     {
         return Ok(());
     }

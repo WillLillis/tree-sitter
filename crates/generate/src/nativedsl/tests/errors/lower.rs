@@ -1,9 +1,9 @@
 use super::super::*;
 
 error_tests! { Lower {
-    error_override_without_inherit {
+    error_override_without_target {
         r#"grammar { language: "test" } override rule foo { "bar" }"#,
-        LowerErrorKind::OverrideWithoutInherit
+        LowerErrorKind::OverrideRuleNotFound(vec![("foo".into(), Span::new(43, 46))])
     }
     error_override_rule_not_found {
         r#"let base = inherit("inherit_base/grammar.tsg")
