@@ -326,7 +326,6 @@ fn error_import_wrong_arg_count() {
 #[test]
 fn error_import_disallowed_items() {
     for (content, expected) in [
-        ("rule foo { \"x\" }", DisallowedItemKind::Rule),
         (
             "override rule foo { \"x\" }",
             DisallowedItemKind::OverrideRule,
@@ -645,6 +644,37 @@ fn import_diamond_dedups_shared_leaf() {
         "{imports}grammar {{ language: \"test\" }}\nrule program {{ h0::f0(\"x\") }}\n"
     );
     parse_native_dsl(&root, Path::new(".")).unwrap();
+}
+
+#[test]
+fn helper_can_define_rules() {
+    // Helpers can host rule decls. The rules aren't materialized into the
+    // root grammar yet (that's a later commit), but the helper itself
+    // parses, resolves, and typechecks. Tests that resolve handles
+    // intra-helper references (`expression` -> `application` and
+    // `_paren_open`) correctly.
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("exp.tsg");
+    std::fs::write(
+        &helper,
+        r#"
+        external _paren_open
+        external _paren_close
+        rule expression { choice(application, seq(_paren_open, expression, _paren_close)) }
+        rule application { seq(expression, expression) }
+    "#,
+    )
+    .unwrap();
+
+    let input = format!(
+        r#"
+        let exp = import("{}")
+        grammar {{ language: "test", externals: [exp::_paren_open, exp::_paren_close] }}
+        rule program {{ "x" }}
+    "#,
+        dsl_path(&helper)
+    );
+    parse_native_dsl(&input, Path::new(".")).unwrap();
 }
 
 #[test]
