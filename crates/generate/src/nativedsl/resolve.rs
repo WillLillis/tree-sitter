@@ -139,6 +139,11 @@ fn collect_decls<'a>(
                     ));
                 }
             }
+            Node::External { name } => {
+                // External decls register the symbol name as a rule-shaped
+                // identifier so it can be referenced from rule bodies.
+                insert_decl(&mut decls, ctx.text(*name), IdentKind::Rule, span, ctx)?;
+            }
             _ => {}
         }
     }
