@@ -619,6 +619,35 @@ fn import_diamond() {
 }
 
 #[test]
+fn import_diamond_dedups_shared_leaf() {
+    // 128 helpers each importing the same leaf. Without loader-wide dedup,
+    // the leaf would be loaded once per helper (128 leaf instances + 128
+    // helpers + 1 root = 257, tripping the u8 module limit). With dedup,
+    // the leaf loads once total (128 + 1 + 1 = 130, well under 256).
+    let dir = tempfile::tempdir().unwrap();
+    let leaf = dir.path().join("leaf.tsg");
+    std::fs::write(&leaf, "let X: int_t = 10").unwrap();
+
+    let mut imports = String::new();
+    for i in 0..128 {
+        let h = dir.path().join(format!("h{i}.tsg"));
+        std::fs::write(
+            &h,
+            format!(
+                "let l = import(\"{}\")\nmacro f{i}(r: rule_t) rule_t {{ prec(l::X, r) }}",
+                dsl_path(&leaf)
+            ),
+        )
+        .unwrap();
+        let _ = writeln!(imports, "let h{i} = import(\"{}\")", dsl_path(&h));
+    }
+    let root = format!(
+        "{imports}grammar {{ language: \"test\" }}\nrule program {{ h0::f0(\"x\") }}\n"
+    );
+    parse_native_dsl(&root, Path::new(".")).unwrap();
+}
+
+#[test]
 fn import_empty_module() {
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.tsg");

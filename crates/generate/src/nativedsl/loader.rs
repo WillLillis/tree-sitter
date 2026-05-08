@@ -21,9 +21,15 @@ pub struct Loader<'a> {
     pub env: &'a mut TypeEnv,
     pub state: &'a mut LoweringState,
     pub ancestor_paths: Vec<PathBuf>,
+    /// Loader-wide dedup cache: each (canonical path, kind) loads at most once
+    /// across the whole import graph for a single `parse_native_dsl` call. Keyed
+    /// by kind so that the unusual case of the same file being both inherited
+    /// and imported still loads twice (once per kind), letting validation fail
+    /// the inappropriate one.
+    pub loaded: Vec<(PathBuf, ModuleKind, ModuleId)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ModuleKind {
     /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
@@ -118,6 +124,16 @@ impl Loader<'_> {
         span: Span,
         kind: ModuleKind,
     ) -> DslResult<ModuleId> {
+        // Loader-wide dedup: if (path, kind) has already been loaded in this
+        // parse, return its module id without re-doing the work.
+        if let Some(&(_, _, gid)) = self
+            .loaded
+            .iter()
+            .find(|(p, k, _)| *k == kind && p == module_path)
+        {
+            return Ok(gid);
+        }
+
         if self.ancestor_paths.len() >= MAX_MODULE_DEPTH {
             return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
         }
@@ -149,20 +165,18 @@ impl Loader<'_> {
             .load_module(&content, module_path, kind)
             .map_err(|inner| ModuleError::new(inner, content, module_path, span));
         self.ancestor_paths.pop();
-        Ok(result?)
+        let gid = result?;
+        self.loaded.push((module_path.to_path_buf(), kind, gid));
+        Ok(gid)
     }
 
     /// Resolve unresolved `ModuleRef` nodes (those still `module: None`),
-    /// loading each child file. Deduplicates by canonical path.
+    /// loading each child file.
     fn load_import_children(
         &mut self,
         ctx: &ModuleContext,
         module_dir: &Path,
     ) -> Result<(), DslError> {
-        // Dedup cache: canonical path -> module index. Typically 0-3 entries,
-        // so linear search beats hashing.
-        let mut loaded: Vec<(PathBuf, ModuleId)> = Vec::new();
-
         for &node_id in &ctx.module_refs {
             let &Node::ModuleRef {
                 import: is_import,
@@ -181,14 +195,7 @@ impl Loader<'_> {
 
             let path_str = ctx.text(path_span);
             let canonical = resolve_path(&module_dir.join(path_str), path_span)?;
-
-            let gid = if let Some(&(_, gid)) = loaded.iter().find(|(p, _)| p == &canonical) {
-                gid
-            } else {
-                let gid = self.load_child_module(&canonical, path_span, kind)?;
-                loaded.push((canonical, gid));
-                gid
-            };
+            let gid = self.load_child_module(&canonical, path_span, kind)?;
 
             self.shared.arena.set(
                 node_id,

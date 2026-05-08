@@ -135,6 +135,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
         env: &mut env,
         state: &mut state,
         ancestor_paths: vec![canonical.clone()],
+        loaded: Vec::new(),
     };
     dsl_loader.load_module(input, &canonical, loader::ModuleKind::Grammar)?;
     // Root is the last-pushed module by construction.
