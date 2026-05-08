@@ -96,6 +96,39 @@ rule_tests! {
             Rule::String("end".into()),
         ])
     }
+    raw_ident_as_rule_reference {
+        // r#let escapes the `let` keyword so it can name a rule.
+        r#"grammar { language: "test" }
+        rule program { r#let }
+        rule r#let { "in" }"#,
+        Rule::NamedSymbol("let".into())
+    }
+    raw_ident_keyword_collisions {
+        // Shadowing builtin combinator/keyword names: r#field, r#import, r#alias.
+        // Each is a normal rule whose grammar.json key is the bare keyword.
+        r#"grammar { language: "test" }
+        rule program { seq(r#field, r#import, r#alias) }
+        rule r#field { "f" }
+        rule r#import { "i" }
+        rule r#alias { "a" }"#,
+        Rule::seq(vec![
+            Rule::NamedSymbol("field".into()),
+            Rule::NamedSymbol("import".into()),
+            Rule::NamedSymbol("alias".into()),
+        ])
+    }
+}
+
+#[test]
+fn raw_ident_emits_bare_name_in_grammar_json() {
+    let g = dsl(
+        r#"grammar { language: "test" }
+        rule program { r#let }
+        rule r#let { "in" }"#,
+    );
+    // grammar.json rule names must match the bare identifier, not `r#let`.
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["program", "let"]);
 }
 
 #[test]
