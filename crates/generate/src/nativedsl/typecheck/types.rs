@@ -66,11 +66,7 @@ impl Ty {
     pub const STR: Self = Self::Data(DataTy::Scalar(ScalarTy::Str));
     pub const INT: Self = Self::Data(DataTy::Scalar(ScalarTy::Int));
     pub const LIST_RULE: Self = Self::Data(DataTy::List(ScalarTy::Rule));
-    pub const LIST_STR: Self = Self::Data(DataTy::List(ScalarTy::Str));
-    pub const LIST_INT: Self = Self::Data(DataTy::List(ScalarTy::Int));
     pub const LIST_LIST_RULE: Self = Self::Data(DataTy::ListList(ScalarTy::Rule));
-    pub const LIST_LIST_STR: Self = Self::Data(DataTy::ListList(ScalarTy::Str));
-    pub const LIST_LIST_INT: Self = Self::Data(DataTy::ListList(ScalarTy::Int));
     pub const OBJ_LIST_RULE: Self = Self::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule)));
     pub const ANY_MODULE: Self = Self::Module(ModuleTy::Any);
 

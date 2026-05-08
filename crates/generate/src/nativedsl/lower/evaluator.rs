@@ -105,6 +105,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
+    fn finish_list(&mut self, start: u32, len: usize, span: Span) -> LowerResult<ValueId> {
+        let len = u16::try_from(len)
+            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
+    }
+
     fn alloc_object(&mut self, map: FxHashMap<String, ValueId>) -> ValueId {
         let idx = self.state.object_pool.len() as u32;
         self.state.object_pool.push(map);
@@ -427,9 +433,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                             };
                             self.state.value_children.push(vid);
                         }
-                        let inner_len = u16::try_from(group.len())
-                            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-                        Ok(self.alloc_val(Value::List(ChildRange::new(inner_start, inner_len))))
+                        self.finish_list(inner_start, group.len(), span)
                     })
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
@@ -462,9 +466,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             let vid = self.alloc_val(Value::Rule(rid));
             self.state.value_children.push(vid);
         }
-        let len = u16::try_from(rules_data.len())
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
+        self.finish_list(start, rules_data.len(), span)
     }
 
     fn import_names_as_list(&mut self, names: &[String], span: Span) -> LowerResult<ValueId> {
@@ -474,9 +476,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             let vid = self.owned_symbol_val(Cow::Borrowed(name));
             self.state.value_children.push(vid);
         }
-        let len = u16::try_from(names.len())
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
+        self.finish_list(start, names.len(), span)
     }
 
     fn import_rule(&mut self, rule: &Rule) -> RuleId {
