@@ -209,12 +209,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             ARule::SeqOrChoice(is_seq, range) => {
                 // Safety: range is produced by children_start/children_range which
                 // track rule_children indices.
-                let children: Vec<Rule> = unsafe {
-                    self.state.rule_children.get_unchecked(range.as_range())
-                }
-                .iter()
-                .map(|&id| self.build_rule(id))
-                .collect();
+                let children: Vec<Rule> =
+                    unsafe { self.state.rule_children.get_unchecked(range.as_range()) }
+                        .iter()
+                        .map(|&id| self.build_rule(id))
+                        .collect();
                 if *is_seq {
                     Rule::seq(children)
                 } else {
