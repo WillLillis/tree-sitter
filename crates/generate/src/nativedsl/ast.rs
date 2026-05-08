@@ -395,7 +395,7 @@ pub struct ModuleContext {
     pub module_refs: Vec<NodeId>,
     /// Spans of all top-level `external <name>` decls' names, in source order.
     /// Populated by the parser. Used by resolve and lower to look up
-    /// `helper::external_name` references without scanning root_items.
+    /// `helper::external_name` references without scanning `root_items`.
     pub external_names: Vec<Span>,
     /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously

@@ -640,10 +640,152 @@ fn import_diamond_dedups_shared_leaf() {
         .unwrap();
         let _ = writeln!(imports, "let h{i} = import(\"{}\")", dsl_path(&h));
     }
-    let root = format!(
-        "{imports}grammar {{ language: \"test\" }}\nrule program {{ h0::f0(\"x\") }}\n"
-    );
+    let root =
+        format!("{imports}grammar {{ language: \"test\" }}\nrule program {{ h0::f0(\"x\") }}\n");
     parse_native_dsl(&root, Path::new(".")).unwrap();
+}
+
+#[test]
+fn helper_rule_collision_errors() {
+    // Two helpers each defining `expression` -> resolver collision error.
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.tsg");
+    let b = dir.path().join("b.tsg");
+    std::fs::write(&a, "rule expression { \"a\" }").unwrap();
+    std::fs::write(&b, "rule expression { \"b\" }").unwrap();
+
+    let input = format!(
+        r#"
+        let a = import("{}")
+        let b = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ expression }}
+    "#,
+        dsl_path(&a),
+        dsl_path(&b)
+    );
+    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    let outer = assert_err!(err, Resolve);
+    assert_eq!(
+        outer.kind,
+        ResolveErrorKind::DuplicateDeclaration("expression".into())
+    );
+}
+
+#[test]
+fn override_helper_rule() {
+    // Helper defines `digit`. Root overrides it. The override should appear
+    // in the final grammar; the original is accessible via h::digit (which
+    // inlines).
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("h.tsg");
+    std::fs::write(&helper, r#"rule digit { regexp(r"[0-9]") }"#).unwrap();
+
+    let input = format!(
+        r#"
+        let h = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ digit }}
+        override rule digit {{ choice(h::digit, "x") }}
+    "#,
+        dsl_path(&helper)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    // `digit` in final grammar = the override body, with h::digit inlined to
+    // the original pattern.
+    assert_eq!(
+        *find_rule(&g, "digit"),
+        Rule::choice(vec![
+            Rule::Pattern(r"[0-9]".into(), String::new()),
+            Rule::String("x".into()),
+        ])
+    );
+}
+
+#[test]
+fn helper_rule_transitive_promotion() {
+    // root -> A -> B. B has rule `inner`. Root references `inner` by bare
+    // name (no qualified access). Transitive promotion should make this
+    // work.
+    let dir = tempfile::tempdir().unwrap();
+    let b = dir.path().join("b.tsg");
+    let a = dir.path().join("a.tsg");
+    std::fs::write(&b, r#"rule inner { "leaf" }"#).unwrap();
+    std::fs::write(
+        &a,
+        format!(
+            "let b = import(\"{}\")\nrule middle {{ inner }}",
+            dsl_path(&b)
+        ),
+    )
+    .unwrap();
+
+    let input = format!(
+        r#"
+        let a = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ seq(middle, inner) }}
+    "#,
+        dsl_path(&a)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert!(rule_names(&g).contains(&"inner"));
+    assert!(rule_names(&g).contains(&"middle"));
+    assert_eq!(*find_rule(&g, "inner"), Rule::String("leaf".into()));
+}
+
+#[test]
+fn helper_rule_qualified_inlines() {
+    // `h::rule_name` inlines the rule body, mirroring `base::rule_name` for
+    // inherited grammars.
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("h.tsg");
+    std::fs::write(&helper, r#"rule greeting { "hello" }"#).unwrap();
+
+    let input = format!(
+        r#"
+        let h = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ seq(h::greeting, "!") }}
+    "#,
+        dsl_path(&helper)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    // h::greeting inlined - program body has the literal "hello", not a
+    // NamedSymbol reference.
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
+    );
+}
+
+#[test]
+fn helper_rule_materialized_into_grammar() {
+    // Helper defines `digit`. Root references it by bare name. The rule
+    // should materialize as a top-level Variable in the final grammar,
+    // accessible as a NamedSymbol.
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("h.tsg");
+    std::fs::write(&helper, r#"rule digit { regexp(r"[0-9]") }"#).unwrap();
+
+    let input = format!(
+        r#"
+        let h = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ repeat1(digit) }}
+    "#,
+        dsl_path(&helper)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert_eq!(rule_names(&g), vec!["program", "digit"]);
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::repeat(Rule::NamedSymbol("digit".into()))
+    );
+    assert_eq!(
+        *find_rule(&g, "digit"),
+        Rule::Pattern(r"[0-9]".into(), String::new())
+    );
 }
 
 #[test]
@@ -657,12 +799,12 @@ fn helper_can_define_rules() {
     let helper = dir.path().join("exp.tsg");
     std::fs::write(
         &helper,
-        r#"
+        r"
         external _paren_open
         external _paren_close
         rule expression { choice(application, seq(_paren_open, expression, _paren_close)) }
         rule application { seq(expression, expression) }
-    "#,
+    ",
     )
     .unwrap();
 

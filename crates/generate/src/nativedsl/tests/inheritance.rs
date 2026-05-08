@@ -525,10 +525,7 @@ fn inherited_external_qualified_access() {
     std::fs::write(&parent, &src).unwrap();
     let g = parse_native_dsl(&src, &parent).unwrap();
     assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(
-        g.external_tokens[0],
-        Rule::NamedSymbol("_token".into())
-    );
+    assert_eq!(g.external_tokens[0], Rule::NamedSymbol("_token".into()));
     assert_eq!(
         *find_rule(&g, "program"),
         Rule::seq(vec![
