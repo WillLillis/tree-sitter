@@ -627,7 +627,10 @@ fn check_for_expr(
             shared.arena.span(config.iterable),
         ));
     }
-    let Param { name, ty: declared_ty } = config.bindings[0];
+    let Param {
+        name,
+        ty: declared_ty,
+    } = config.bindings[0];
     // Bespoke checks below distinguish "not a list" (ForRequiresList) from
     // "wrong element type" (TypeMismatch); auto-enforcing a list constraint
     // here would conflate them.

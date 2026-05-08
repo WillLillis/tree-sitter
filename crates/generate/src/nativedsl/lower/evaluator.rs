@@ -667,7 +667,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             // QualifiedAccess targets that survive resolve are one of:
             //   - cached external decl (helper, or grammar with top-level externals)
-            //   - inherited grammar rule
+            //   - helper rule (inlined via import_rule)
+            //   - inherited grammar rule (via lowered.variables)
             //   - inherited grammar external (via lowered.external_tokens)
             // Resolver already verified the target exists.
             &Node::QualifiedAccess { obj, member } => {
@@ -688,22 +689,27 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     return Ok(self.alloc_val(Value::Rule(rid)));
                 }
 
-                // Inherited grammar rule or external_token. Both produce a Rule
-                // we copy via import_rule.
+                // Inline a rule from either a helper or an inherited grammar.
                 let target = &self.previous[usize::from(mod_idx)];
-                let lowered = target.lowered().unwrap();
-                let rule = lowered
-                    .variables
-                    .iter()
-                    .find(|v| v.name == member_name)
-                    .map(|v| &v.rule)
-                    .or_else(|| {
-                        lowered
-                            .external_tokens
-                            .iter()
-                            .find(|r| matches!(r, Rule::NamedSymbol(n) if n == member_name))
-                    })
-                    .unwrap();
+                let rule = match target {
+                    Module::Helper { lowered_rules, .. } => lowered_rules
+                        .iter()
+                        .find(|(name, _)| name == member_name)
+                        .map(|(_, r)| r)
+                        .unwrap(),
+                    Module::Grammar { lowered, .. } => lowered
+                        .variables
+                        .iter()
+                        .find(|v| v.name == member_name)
+                        .map(|v| &v.rule)
+                        .or_else(|| {
+                            lowered
+                                .external_tokens
+                                .iter()
+                                .find(|r| matches!(r, Rule::NamedSymbol(n) if n == member_name))
+                        })
+                        .unwrap(),
+                };
                 let rid = self.import_rule(rule);
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
