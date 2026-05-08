@@ -677,16 +677,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
 
                 // Cached external lookup: scan target's external_names cache.
-                // Span is Copy so the borrow ends before mutable self calls.
-                let ext_span = {
-                    let target_ctx = self.previous[usize::from(mod_idx)].ctx();
-                    target_ctx
-                        .external_names
-                        .iter()
-                        .copied()
-                        .find(|&s| target_ctx.text(s) == member_name)
-                };
-                if let Some(name_span) = ext_span {
+                let target_ctx = self.previous[usize::from(mod_idx)].ctx();
+                if let Some(name_span) = target_ctx
+                    .external_names
+                    .iter()
+                    .copied()
+                    .find(|&s| target_ctx.text(s) == member_name)
+                {
                     let sid = self.state.strings.intern_span(name_span, mod_idx);
                     let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                     return Ok(self.alloc_val(Value::Rule(rid)));
@@ -702,9 +699,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .find(|v| v.name == member_name)
                     .map(|v| &v.rule)
                     .or_else(|| {
-                        lowered.external_tokens.iter().find(|r| {
-                            matches!(r, Rule::NamedSymbol(n) if n == member_name)
-                        })
+                        lowered
+                            .external_tokens
+                            .iter()
+                            .find(|r| matches!(r, Rule::NamedSymbol(n) if n == member_name))
                     })
                     .unwrap();
                 let rid = self.import_rule(rule);
