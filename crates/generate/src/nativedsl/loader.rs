@@ -242,17 +242,16 @@ impl Loader<'_> {
     }
 
     /// Validate that an imported file only contains allowed items.
+    /// Helpers may host rules, lets, macros, externals, and imports - but
+    /// not a grammar block (that's a root concept) or `override rule`
+    /// (overrides are a root-grammar privilege).
     fn validate_import_items(&self, ctx: &ModuleContext) -> DslResult<()> {
         for &item_id in &ctx.root_items {
             let kind = match self.shared.arena.get(item_id) {
                 Node::Grammar => DisallowedItemKind::GrammarBlock,
-                Node::Rule { is_override, .. } => {
-                    if *is_override {
-                        DisallowedItemKind::OverrideRule
-                    } else {
-                        DisallowedItemKind::Rule
-                    }
-                }
+                Node::Rule {
+                    is_override: true, ..
+                } => DisallowedItemKind::OverrideRule,
                 _ => continue,
             };
             Err(LowerError::new(

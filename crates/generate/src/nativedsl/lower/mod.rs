@@ -268,7 +268,6 @@ pub type LowerResult<T> = Result<T, super::LowerError>;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub enum DisallowedItemKind {
-    Rule,
     OverrideRule,
     GrammarBlock,
 }
@@ -319,7 +318,6 @@ fn format_override_names(entries: &[(String, Span)]) -> String {
 
 const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {
     match kind {
-        DisallowedItemKind::Rule => "rule",
         DisallowedItemKind::OverrideRule => "override rule",
         DisallowedItemKind::GrammarBlock => "grammar block",
     }
