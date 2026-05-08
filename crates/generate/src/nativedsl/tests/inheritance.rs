@@ -496,3 +496,44 @@ fn import_before_inherit_in_source_order() {
     assert_eq!(g.name, "derived");
     assert_eq!(*find_rule(&g, "new_rule"), comma_sep1_rule("identifier"));
 }
+
+#[test]
+fn inherited_external_qualified_access() {
+    // Symmetric with helper externals: a child grammar can reference an
+    // inherited grammar's external token via `base::name`. Resolves through
+    // the inherited grammar's lowered external_tokens.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(
+        &base,
+        r#"
+        grammar { language: "base", externals: [_token] }
+        rule program { _token }
+    "#,
+    )
+    .unwrap();
+
+    let parent = dir.path().join("child.tsg");
+    let src = format!(
+        r#"
+        let base = inherit("{}")
+        grammar {{ language: "child", inherits: base, externals: [base::_token] }}
+        override rule program {{ seq(base::_token, "!") }}
+    "#,
+        dsl_path(&base)
+    );
+    std::fs::write(&parent, &src).unwrap();
+    let g = parse_native_dsl(&src, &parent).unwrap();
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(
+        g.external_tokens[0],
+        Rule::NamedSymbol("_token".into())
+    );
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            Rule::NamedSymbol("_token".into()),
+            Rule::String("!".into()),
+        ])
+    );
+}
