@@ -68,6 +68,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::grammars::InputGrammar;
+use crate::rules::Rule;
 
 use ast::{ModuleContext, SharedAst, Span};
 use loader::Loader;
@@ -78,7 +79,9 @@ pub type ModuleId = u8;
 
 /// A loaded and resolved module.
 ///
-/// `Helper` modules come from `import(...)` and expose only let/macro bindings.
+/// `Helper` modules come from `import(...)` and expose let/macro/rule/external
+/// bindings. Their rules are lowered eagerly into `lowered_rules` so importers
+/// can materialize them by bare name or inline via `helper::rule_name`.
 /// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
 /// a fully lowered grammar for rule merging and `grammar_config` access. The
 /// `lowered` field is boxed because `InputGrammar` is far larger than
@@ -87,6 +90,7 @@ pub type ModuleId = u8;
 pub enum Module {
     Helper {
         ctx: ModuleContext,
+        lowered_rules: Vec<(String, Rule)>,
     },
     Grammar {
         ctx: ModuleContext,
@@ -98,7 +102,7 @@ impl Module {
     #[must_use]
     pub const fn ctx(&self) -> &ModuleContext {
         match self {
-            Self::Helper { ctx } | Self::Grammar { ctx, .. } => ctx,
+            Self::Helper { ctx, .. } | Self::Grammar { ctx, .. } => ctx,
         }
     }
 
@@ -109,6 +113,47 @@ impl Module {
             Self::Helper { .. } => None,
         }
     }
+}
+
+/// Walk the import graph BFS from `initial_refs`, calling `f` for each
+/// transitively-reachable helper module exactly once. The `Span` argument
+/// is the span of the original import statement that brought the helper
+/// into scope (used for "first defined here" notes when registering
+/// helper rule names).
+pub(super) fn for_each_imported_helper<'a, E>(
+    arena: &ast::NodeArena,
+    initial_refs: &[ast::NodeId],
+    modules: &'a [Module],
+    mut f: impl FnMut(ModuleId, &'a Module, Span) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut visited: rustc_hash::FxHashSet<u8> = rustc_hash::FxHashSet::default();
+    let mut stack: Vec<(u8, Span)> = Vec::new();
+
+    let seed = |stack: &mut Vec<(u8, Span)>, refs: &[ast::NodeId]| {
+        for &mref_id in refs {
+            if let &ast::Node::ModuleRef {
+                import: true,
+                module: Some(idx),
+                ..
+            } = arena.get(mref_id)
+            {
+                stack.push((idx, arena.span(mref_id)));
+            }
+        }
+    };
+    seed(&mut stack, initial_refs);
+
+    while let Some((idx, ref_span)) = stack.pop() {
+        if !visited.insert(idx) {
+            continue;
+        }
+        let module = &modules[usize::from(idx)];
+        if matches!(module, Module::Helper { .. }) {
+            f(idx, module, ref_span)?;
+            seed(&mut stack, &module.ctx().module_refs);
+        }
+    }
+    Ok(())
 }
 
 /// Entry point. Parse a native DSL source file into an [`InputGrammar`].

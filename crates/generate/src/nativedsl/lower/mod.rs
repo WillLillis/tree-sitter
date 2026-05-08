@@ -106,8 +106,72 @@ pub fn lower_with_base(
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[idx as usize].lowered());
+    let helper_rules = collect_helper_rules(shared, current, previous);
     let result = evaluate(state, shared, previous, current)?;
-    build_grammar(result, base_grammar)
+    build_grammar(result, base_grammar, helper_rules)
+}
+
+/// Collect rules from all transitively-reachable imported helpers, in BFS
+/// order. Cloned because helpers may be referenced from multiple parents
+/// (diamond imports).
+fn collect_helper_rules(
+    shared: &SharedAst,
+    current: &super::ModuleContext,
+    previous: &[super::Module],
+) -> Vec<(String, Rule)> {
+    let mut collected = Vec::new();
+    super::for_each_imported_helper::<std::convert::Infallible>(
+        &shared.arena,
+        &current.module_refs,
+        previous,
+        |_idx, module, _ref_span| {
+            let super::Module::Helper { lowered_rules, .. } = module else {
+                unreachable!()
+            };
+            collected.extend(lowered_rules.iter().cloned());
+            Ok(())
+        },
+    )
+    .unwrap();
+    collected
+}
+
+/// Lower a helper module's rules into a name-keyed list.
+///   - Lets/macros are evaluated through the same Evaluator as grammar lowering;
+///   - `external` decls and macros register names but don't materialize. Helper
+///     validation rejects grammar blocks and override rules.
+pub fn lower_helper(
+    state: &mut LoweringState,
+    shared: &SharedAst,
+    previous: &[super::Module],
+    current: &super::ModuleContext,
+) -> LowerResult<Vec<(String, Rule)>> {
+    let mut eval = Evaluator::new(state, shared, previous, current);
+    let mut rule_entries: Vec<(&str, RuleId)> = Vec::new();
+
+    for &item_id in &current.root_items {
+        match shared.arena.get(item_id) {
+            Node::Macro(_) | Node::External { .. } => {}
+            Node::Let { value, .. } => {
+                eval.eval_let(item_id, *value)?;
+            }
+            &Node::Rule {
+                name,
+                body,
+                is_override: false,
+            } => {
+                let rule_id = eval.lower_to_rule(body)?;
+                rule_entries.push((current.text(name), rule_id));
+            }
+            // Validation rejects grammar blocks and override rules in helpers.
+            _ => unreachable!(),
+        }
+    }
+
+    Ok(rule_entries
+        .iter()
+        .map(|(name, rid)| (name.to_string(), eval.build_rule(*rid)))
+        .collect())
 }
 
 fn evaluate(
@@ -192,53 +256,64 @@ fn evaluate(
     })
 }
 
-fn build_grammar(result: EvalResult, base: Option<&InputGrammar>) -> LowerResult<InputGrammar> {
-    // Start with inherited rules, apply overrides, then append new rules.
-    let mut variables = if let Some(base) = base {
-        // Build override map so we can apply them in a single pass over the base variables
-        let mut overrides: FxHashMap<String, (Rule, Span)> = FxHashMap::default();
-        for (name, rule, span) in result.overrides {
-            overrides.insert(name, (rule, span));
-        }
-        let mut vars = Vec::with_capacity(base.variables.len());
+fn build_grammar(
+    result: EvalResult,
+    base: Option<&InputGrammar>,
+    helper_rules: Vec<(String, Rule)>,
+) -> LowerResult<InputGrammar> {
+    // Build override map; apply over base + helpers in one pass.
+    let mut overrides: FxHashMap<String, (Rule, Span)> = FxHashMap::default();
+    for (name, rule, span) in result.overrides {
+        overrides.insert(name, (rule, span));
+    }
+
+    let mut variables = Vec::new();
+
+    // Base rules first - preserves the inherited grammar's start rule.
+    if let Some(base) = base {
+        variables.reserve(base.variables.len());
         for v in &base.variables {
             if let Some((rule, _)) = overrides.remove(v.name.as_str()) {
-                vars.push(Variable {
+                variables.push(Variable {
                     name: v.name.clone(),
                     kind: v.kind,
                     rule,
                 });
             } else {
-                vars.push(v.clone());
+                variables.push(v.clone());
             }
         }
-        // Any remaining overrides reference rules that don't exist in the base.
-        if !overrides.is_empty() {
-            let mut entries: Vec<(String, Span)> = overrides
-                .into_iter()
-                .map(|(name, (_, span))| (name, span))
-                .collect();
-            entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            return Err(LowerError::without_span(
-                LowerErrorKind::OverrideRuleNotFound(entries),
-            ));
-        }
-        vars
-    } else if !result.overrides.is_empty() {
-        return Err(LowerError::new(
-            LowerErrorKind::OverrideWithoutInherit,
-            result.overrides[0].2,
-        ));
-    } else {
-        Vec::new()
-    };
+    }
 
+    // Local rules (root grammar's own rules - not override targets).
     for (name, rule) in result.rules {
         variables.push(Variable {
             name,
             kind: VariableType::Named,
             rule,
         });
+    }
+
+    // Helper rules (transitively gathered). Apply overrides here too.
+    for (name, rule) in helper_rules {
+        let final_rule = overrides.remove(&name).map_or(rule, |(r, _)| r);
+        variables.push(Variable {
+            name,
+            kind: VariableType::Named,
+            rule: final_rule,
+        });
+    }
+
+    // Any remaining overrides reference rules that don't exist anywhere.
+    if !overrides.is_empty() {
+        let mut entries: Vec<(String, Span)> = overrides
+            .into_iter()
+            .map(|(name, (_, span))| (name, span))
+            .collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        return Err(LowerError::without_span(
+            LowerErrorKind::OverrideRuleNotFound(entries),
+        ));
     }
 
     fn inherit<T: Clone>(
@@ -276,10 +351,8 @@ pub enum DisallowedItemKind {
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
-    #[error("override rule(s) not found in base grammar: {}", format_override_names(.0))]
+    #[error("override rule(s) not found in base grammar or imported helpers: {}", format_override_names(.0))]
     OverrideRuleNotFound(Vec<(String, Span)>),
-    #[error("'override rule' requires a grammar with 'inherits'")]
-    OverrideWithoutInherit,
     #[error("failed to resolve '{}': {error}", path.display())]
     ModuleResolveFailed { path: PathBuf, error: String },
     #[error("failed to read '{}': {error}", path.display())]
