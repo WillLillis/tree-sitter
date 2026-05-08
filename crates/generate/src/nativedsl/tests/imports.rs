@@ -648,6 +648,53 @@ fn import_diamond_dedups_shared_leaf() {
 }
 
 #[test]
+fn helper_external_qualified_in_rule_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("ext.tsg");
+    std::fs::write(&helper, "external _foo\nexternal _bar\n").unwrap();
+
+    let input = format!(
+        r#"
+        let e = import("{}")
+        grammar {{ language: "test", externals: [e::_foo, e::_bar] }}
+        rule program {{ seq(e::_foo, e::_bar) }}
+    "#,
+        dsl_path(&helper)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert_eq!(g.external_tokens.len(), 2);
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            Rule::NamedSymbol("_foo".into()),
+            Rule::NamedSymbol("_bar".into()),
+        ])
+    );
+}
+
+#[test]
+fn helper_external_member_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("ext.tsg");
+    std::fs::write(&helper, "external _foo\n").unwrap();
+
+    let input = format!(
+        r#"
+        let e = import("{}")
+        grammar {{ language: "test", externals: [e::_missing] }}
+        rule program {{ "x" }}
+    "#,
+        dsl_path(&helper)
+    );
+    let err = parse_native_dsl(&input, Path::new("."));
+    let e = assert_err!(err.unwrap_err(), Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::ImportMemberNotFound("_missing".into())
+    );
+}
+
+#[test]
 fn import_empty_module() {
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.tsg");
