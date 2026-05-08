@@ -122,7 +122,8 @@ fn evaluate(
 
     for &item_id in &ctx.root_items {
         match shared.arena.get(item_id) {
-            Node::Grammar | Node::Macro(_) => {}
+            // External decls register a symbol name; nothing to lower.
+            Node::Grammar | Node::Macro(_) | Node::External { .. } => {}
             Node::Let { value, .. } => {
                 eval.eval_let(item_id, *value)?;
             }
