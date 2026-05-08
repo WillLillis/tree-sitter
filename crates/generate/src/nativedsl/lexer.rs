@@ -89,6 +89,7 @@ pub enum TokenKind {
     KwOverride,
     KwAppend,
     KwGrammarConfig,
+    KwExternal,
     // Punctuation
     LBrace,
     RBrace,
@@ -147,6 +148,7 @@ keywords! {
     KwTokenImmediate => "token_immediate", KwConcat => "concat", KwRegexp => "regexp",
     KwInherit => "inherit", KwImport => "import", KwOverride => "override",
     KwAppend => "append", KwGrammarConfig => "grammar_config",
+    KwExternal => "external",
 }
 
 impl std::fmt::Display for TokenKind {

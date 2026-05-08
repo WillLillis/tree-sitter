@@ -251,8 +251,18 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwOverride => self.parse_rule_def(true),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
+            TokenKind::KwExternal => self.parse_external_decl(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
+    }
+
+    fn parse_external_decl(&mut self) -> ParseResult<NodeId> {
+        let start = self.expect(TokenKind::KwExternal)?;
+        let name = self.expect_ident()?;
+        Ok(self
+            .shared
+            .arena
+            .push(Node::External { name }, start.merge(name)))
     }
 
     fn parse_grammar_block(&mut self) -> ParseResult<NodeId> {

@@ -420,3 +420,49 @@ fn error_externals_via_function_call() {
     );
     assert_eq!(e.kind, ResolveErrorKind::InvalidExternalsExpression);
 }
+
+#[test]
+fn external_decl_in_grammar_file() {
+    // Top-level `external` decl forward-declares a name; the grammar block's
+    // externals list still does the actual registration. The name is usable
+    // in rule bodies via the resolver's decl table.
+    let g = dsl(r#"
+        external _foo
+        grammar { language: "test", externals: [_foo] }
+        rule program { _foo }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(*find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
+}
+
+#[test]
+fn external_decl_duplicate_errors() {
+    let e = assert_err!(
+        dsl_err(
+            r#"
+            external _foo
+            external _foo
+            grammar { language: "test", externals: [_foo] }
+            rule program { _foo }
+        "#
+        ),
+        Resolve
+    );
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::DuplicateDeclaration("_foo".into())
+    );
+}
+
+#[test]
+fn external_decl_redundant_with_grammar_block() {
+    // Both `external _foo` and `externals: [_foo]` declare the same name.
+    // The decl table sees `external` first; the grammar block's pre-registration
+    // skips already-declared names (collect_external_names checks contains_key).
+    let g = dsl(r#"
+        external _foo
+        grammar { language: "test", externals: [_foo, _bar] }
+        rule program { seq(_foo, _bar) }
+    "#);
+    assert_eq!(g.external_tokens.len(), 2);
+}

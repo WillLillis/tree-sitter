@@ -480,6 +480,13 @@ pub enum Node {
         value: NodeId,
     },
     Macro(MacroId),
+    /// `external <name>` top-level declaration. Forward-declares an
+    /// externally-provided symbol name. In a grammar file, redundant with
+    /// the grammar block's `externals: [...]` list. In a helper file, the
+    /// only way to expose a scanner symbol via qualified access.
+    External {
+        name: Span,
+    },
     StringLit,
     RawStringLit {
         hash_count: u8,

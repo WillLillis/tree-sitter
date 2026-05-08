@@ -85,6 +85,8 @@ pub(super) fn check_item(
             Ok(())
         }
         Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
+        // External decls have no body to typecheck.
+        Node::External { .. } => Ok(()),
         _ => unreachable!(),
     }
 }
