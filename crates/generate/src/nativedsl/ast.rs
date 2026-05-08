@@ -393,6 +393,10 @@ pub struct ModuleContext {
     /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
     /// collected by the parser so the loader can iterate without scanning the arena.
     pub module_refs: Vec<NodeId>,
+    /// Spans of all top-level `external <name>` decls' names, in source order.
+    /// Populated by the parser. Used by resolve and lower to look up
+    /// `helper::external_name` references without scanning root_items.
+    pub external_names: Vec<Span>,
     /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously
     /// before any child loads, so this slice is well-defined and stable.

@@ -395,13 +395,24 @@ fn resolve_qualified_member(
             _ => {}
         }
     }
-    // Check inherited grammar rules (only for inherit modules with a lowered grammar)
-    if target
-        .lowered()
-        .is_some_and(|g| g.variables.iter().any(|v| v.name == member_name))
+    // Cached external decls (helper or grammar with top-level `external`).
+    // Leave as QualifiedAccess - the lowerer interns the name from the
+    // target's source.
+    if target_ctx
+        .external_names
+        .iter()
+        .any(|&s| target_ctx.text(s) == member_name)
     {
-        // Leave as QualifiedAccess - the lowerer handles inherited rule
-        // lookups via base_grammar.variables (name-based).
+        return Ok(());
+    }
+    // Inherited grammar's lowered output: rules first, then external_tokens.
+    // Both leave the QualifiedAccess intact for the lowerer.
+    if let Some(g) = target.lowered()
+        && (g.variables.iter().any(|v| v.name == member_name)
+            || g.external_tokens.iter().any(|r| {
+                matches!(r, crate::rules::Rule::NamedSymbol(n) if n == member_name)
+            }))
+    {
         return Ok(());
     }
     Err(ResolveError::new(

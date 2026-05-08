@@ -666,21 +666,48 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     _ => unreachable!(), // guarded by typecheck
                 }
             }
-            // Only unresolved QualifiedAccess reaches here: inherited grammar
-            // rules looked up by name in base_grammar.variables. Resolver
-            // already verified the rule exists, so the find always succeeds.
+            // QualifiedAccess targets that survive resolve are one of:
+            //   - cached external decl (helper, or grammar with top-level externals)
+            //   - inherited grammar rule
+            //   - inherited grammar external (via lowered.external_tokens)
+            // Resolver already verified the target exists.
             &Node::QualifiedAccess { obj, member } => {
                 let obj_val = self.eval_expr(obj)?;
                 let member_name = self.ctx().text(member);
                 expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
-                let var = self.previous[usize::from(mod_idx)]
-                    .lowered()
-                    .unwrap()
+
+                // Cached external lookup: scan target's external_names cache.
+                // Span is Copy so the borrow ends before mutable self calls.
+                let ext_span = {
+                    let target_ctx = self.previous[usize::from(mod_idx)].ctx();
+                    target_ctx
+                        .external_names
+                        .iter()
+                        .copied()
+                        .find(|&s| target_ctx.text(s) == member_name)
+                };
+                if let Some(name_span) = ext_span {
+                    let sid = self.state.strings.intern_span(name_span, mod_idx);
+                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
+                    return Ok(self.alloc_val(Value::Rule(rid)));
+                }
+
+                // Inherited grammar rule or external_token. Both produce a Rule
+                // we copy via import_rule.
+                let target = &self.previous[usize::from(mod_idx)];
+                let lowered = target.lowered().unwrap();
+                let rule = lowered
                     .variables
                     .iter()
                     .find(|v| v.name == member_name)
+                    .map(|v| &v.rule)
+                    .or_else(|| {
+                        lowered.external_tokens.iter().find(|r| {
+                            matches!(r, Rule::NamedSymbol(n) if n == member_name)
+                        })
+                    })
                     .unwrap();
-                let rid = self.import_rule(&var.rule);
+                let rid = self.import_rule(rule);
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             &Node::Object(range) => {
