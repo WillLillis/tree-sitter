@@ -11,6 +11,7 @@ use super::ast::Span;
 /// Byte classification flags for the lexer's hot loops.
 const CLASS_WHITESPACE: u8 = 1;
 const CLASS_IDENT_CONTINUE: u8 = 2;
+const CLASS_IDENT_START: u8 = 4;
 
 /// Lookup table mapping byte value to classification flags.
 /// Replaces per-byte range checks with a single indexed load.
@@ -23,12 +24,12 @@ const BYTE_CLASS: [u8; 256] = {
     t[0x0c] = CLASS_WHITESPACE; // form feed
     let mut i = b'a';
     while i <= b'z' {
-        t[i as usize] |= CLASS_IDENT_CONTINUE;
+        t[i as usize] |= CLASS_IDENT_CONTINUE | CLASS_IDENT_START;
         i += 1;
     }
     i = b'A';
     while i <= b'Z' {
-        t[i as usize] |= CLASS_IDENT_CONTINUE;
+        t[i as usize] |= CLASS_IDENT_CONTINUE | CLASS_IDENT_START;
         i += 1;
     }
     i = b'0';
@@ -36,7 +37,7 @@ const BYTE_CLASS: [u8; 256] = {
         t[i as usize] |= CLASS_IDENT_CONTINUE;
         i += 1;
     }
-    t[b'_' as usize] |= CLASS_IDENT_CONTINUE;
+    t[b'_' as usize] |= CLASS_IDENT_CONTINUE | CLASS_IDENT_START;
     t
 };
 
@@ -264,7 +265,7 @@ impl<'src> Lexer<'src> {
     }
 
     fn next_token(&mut self) -> LexResult<Token> {
-        let start = self.pos;
+        let mut start = self.pos;
         let b = self.advance();
         let kind = match b {
             b'{' => TokenKind::LBrace,
@@ -289,7 +290,7 @@ impl<'src> Lexer<'src> {
             b'-' => TokenKind::Minus,
             b'"' => self.lex_string(start)?,
             b'0'..=b'9' => self.lex_int(start)?,
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(start)?,
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(&mut start)?,
             _ => {
                 // SAFETY: source originates from &str (Lexer::new takes &str).
                 let rest = unsafe { std::str::from_utf8_unchecked(&self.source[start..]) };
@@ -440,21 +441,37 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::IntLit(value))
     }
 
-    fn lex_ident(&mut self, start: usize) -> LexResult<TokenKind> {
-        let source = self.source;
-        let mut pos = self.pos;
-        while pos < source.len() // SAFETY: pos < source.len() checked by loop condition.
-            && byte_is(unsafe { *source.get_unchecked(pos) }, CLASS_IDENT_CONTINUE)
-        {
-            pos += 1;
-        }
-        self.pos = pos;
+    fn lex_ident(&mut self, start: &mut usize) -> LexResult<TokenKind> {
+        self.scan_ident_continue();
         // SAFETY: the slice contains only ASCII ident chars (a-z, A-Z, 0-9, _), which are valid UTF-8.
-        let text = unsafe { std::str::from_utf8_unchecked(&self.source[start..self.pos]) };
-        if text == "r" && matches!(self.peek(), Some(b'"' | b'#')) {
-            return self.lex_raw_string(start);
+        let text = unsafe { std::str::from_utf8_unchecked(&self.source[*start..self.pos]) };
+        if text == "r" {
+            match (self.peek(), self.source.get(self.pos + 1).copied()) {
+                // r#<ident> - raw identifier. Skip `r#` so the span and
+                // returned text cover just the bare name (e.g. `let`).
+                (Some(b'#'), Some(c)) if byte_is(c, CLASS_IDENT_START) => {
+                    self.pos += 1; // skip '#'
+                    *start = self.pos;
+                    self.pos += 1; // skip the ident-start char (already validated)
+                    self.scan_ident_continue();
+                    return Ok(TokenKind::Ident);
+                }
+                // r"..." or r#"..."# - raw string literal.
+                (Some(b'"' | b'#'), _) => return self.lex_raw_string(*start),
+                _ => {}
+            }
         }
         Ok(TokenKind::from_keyword(text))
+    }
+
+    fn scan_ident_continue(&mut self) {
+        let source = self.source;
+        while self.pos < source.len()
+            // SAFETY: pos < source.len() checked by loop condition.
+            && byte_is(unsafe { *source.get_unchecked(self.pos) }, CLASS_IDENT_CONTINUE)
+        {
+            self.pos += 1;
+        }
     }
 }
 
