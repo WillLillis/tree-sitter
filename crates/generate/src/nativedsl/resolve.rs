@@ -530,6 +530,7 @@ fn collect_external_names<'src>(
         | Node::RawStringLit { .. }
         | Node::IntLit(_)
         | Node::Blank
+        | Node::DynRegex { .. }
         | Node::GrammarConfig { .. }
         | Node::FieldAccess { .. }
         | Node::QualifiedAccess { .. } => {}
