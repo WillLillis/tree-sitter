@@ -61,6 +61,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 root_items: Vec::with_capacity(root_cap),
                 inherit_ref: None,
                 module_refs: Vec::new(),
+                external_names: Vec::new(),
                 node_range: 0..0,
             },
             scratch: Vec::with_capacity(32),
@@ -259,6 +260,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     fn parse_external_decl(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwExternal)?;
         let name = self.expect_ident()?;
+        self.ctx.external_names.push(name);
         Ok(self
             .shared
             .arena
