@@ -444,6 +444,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
             }
+            C::Start => {
+                // The start rule is always the first variable; this isn't
+                // ConfigFieldUnset because every grammar has one.
+                let name = &grammar.variables[0].name;
+                Ok(self.owned_symbol_val(Cow::Borrowed(name)))
+            }
             C::Reserved => {
                 let n = grammar.reserved_words.len();
                 let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
