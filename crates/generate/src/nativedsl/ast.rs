@@ -161,10 +161,11 @@ pub enum ConfigField {
     Conflicts,
     Precedences,
     Reserved,
+    Start,
 }
 
 impl ConfigField {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 11;
 }
 
 impl TryFrom<&str> for ConfigField {
@@ -181,6 +182,7 @@ impl TryFrom<&str> for ConfigField {
             "conflicts" => Self::Conflicts,
             "precedences" => Self::Precedences,
             "reserved" => Self::Reserved,
+            "start" => Self::Start,
             _ => return Err(()),
         })
     }
@@ -629,6 +631,7 @@ pub struct GrammarConfig {
     pub conflicts: Option<NodeId>,
     pub precedences: Option<NodeId>,
     pub reserved: Option<NodeId>,
+    pub start: Option<NodeId>,
 }
 
 impl GrammarConfig {
@@ -641,7 +644,7 @@ impl GrammarConfig {
             (C::Externals, self.externals),   (C::Inline, self.inline),
             (C::Supertypes, self.supertypes), (C::Word, self.word),
             (C::Conflicts, self.conflicts),   (C::Precedences, self.precedences),
-            (C::Reserved, self.reserved),
+            (C::Reserved, self.reserved),     (C::Start, self.start),
         ];
         fields
             .into_iter()
