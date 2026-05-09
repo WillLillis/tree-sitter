@@ -534,3 +534,20 @@ fn inherited_external_qualified_access() {
         ])
     );
 }
+
+#[test]
+fn start_rotates_inherited_rule_to_front() {
+    // Mirrors the ocaml_type case: the start rule lives mid-grammar in the
+    // base, and we want it as the start in the inheriting grammar without
+    // re-declaring every rule.
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, start: identifier }
+    "#);
+    let names = rule_names(&g);
+    assert_eq!(names[0], "identifier");
+    // All other base rules still present, just shifted.
+    assert!(names.contains(&"program"));
+    assert!(names.contains(&"statement"));
+    assert!(names.contains(&"expression"));
+}

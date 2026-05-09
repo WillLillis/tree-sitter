@@ -323,6 +323,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 ConfigField::Conflicts => config.conflicts = Some(self.parse_expr()?),
                 ConfigField::Precedences => config.precedences = Some(self.parse_expr()?),
                 ConfigField::Reserved => config.reserved = Some(self.parse_expr()?),
+                ConfigField::Start => config.start = Some(self.parse_expr()?),
             }
             if !self.at(TokenKind::RBrace) {
                 self.expect(TokenKind::Comma)?;
