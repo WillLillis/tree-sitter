@@ -88,6 +88,7 @@ struct EvalResult {
     inline: Option<Vec<String>>,
     supertypes: Option<Vec<String>>,
     word: Option<String>,
+    start: Option<String>,
     conflicts: Option<Vec<Vec<String>>>,
     precedences: Option<Vec<Vec<PrecedenceEntry>>>,
     reserved: Option<Vec<ReservedWordContext<Rule>>>,
@@ -241,6 +242,7 @@ fn evaluate(
             .map(|id| eval.eval_name_list(id))
             .transpose()?,
         word: config.word.map(|id| eval.eval_rule_name(id)).transpose()?,
+        start: config.start.map(|id| eval.eval_rule_name(id)).transpose()?,
         conflicts: config
             .conflicts
             .map(|id| eval.eval_conflicts(id))
@@ -314,6 +316,19 @@ fn build_grammar(
         return Err(LowerError::without_span(
             LowerErrorKind::OverrideRuleNotFound(entries),
         ));
+    }
+
+    // Honor `start: <rule>` by rotating the named rule to position 0. The
+    // first variable is tree-sitter's start symbol, so this lets a child
+    // grammar pick a non-default start without re-declaring every rule.
+    // The resolver + typecheck guarantee the name refers to a declared
+    // rule, so it must exist in `variables` (base, local, or helper).
+    if let Some(name) = result.start {
+        let pos = variables.iter().position(|v| v.name == name).unwrap();
+        if pos != 0 {
+            let v = variables.remove(pos);
+            variables.insert(0, v);
+        }
     }
 
     fn inherit<T: Clone>(
