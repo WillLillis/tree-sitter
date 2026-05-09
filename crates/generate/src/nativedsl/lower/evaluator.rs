@@ -730,8 +730,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let items = self.shared.pools.child_slice(range);
                 let range = stack_scope!(self.state.val_scratch, |base| {
                     for &item_id in items {
-                        let v = self.eval_expr(item_id)?;
-                        self.state.val_scratch.push(v);
+                        if let Node::For { for_id, body } = *self.shared.arena.get(item_id) {
+                            self.eval_for_to_values(for_id, body)?;
+                        } else {
+                            let val = self.eval_expr(item_id)?;
+                            self.state.val_scratch.push(val);
+                        }
                     }
                     let start = self.state.value_children.len() as u32;
                     let len = u16::try_from(self.state.val_scratch.len() - base)
@@ -1036,6 +1040,26 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Evaluate a for-loop, pushing each iteration's rule into `rule_scratch`.
     fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
+        self.eval_for_each(for_id, |evaluator| {
+            let rule_id = evaluator.lower_to_rule(body)?;
+            evaluator.state.rule_scratch.push(rule_id);
+            Ok(())
+        })
+    }
+
+    /// Evaluate a for-loop, pushing each iteration's value into `val_scratch`.
+    fn eval_for_to_values(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
+        self.eval_for_each(for_id, |evaluator| {
+            let value_id = evaluator.eval_expr(body)?;
+            evaluator.state.val_scratch.push(value_id);
+            Ok(())
+        })
+    }
+
+    fn eval_for_each<EachIter>(&mut self, for_id: ForId, mut each_iter: EachIter) -> LowerResult<()>
+    where
+        EachIter: FnMut(&mut Self) -> LowerResult<()>,
+    {
         let for_config = self.shared.pools.get_for(for_id);
         let iterable = for_config.iterable;
         let n_bindings = for_config.bindings.len();
@@ -1060,8 +1084,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                             self.state.for_binding_values[base + j] = val;
                         }
                     }
-                    let rid = self.lower_to_rule(body)?;
-                    self.state.rule_scratch.push(rid);
+                    each_iter(self)?;
                 }
                 Ok(())
             }

@@ -117,6 +117,101 @@ rule_tests! {
 }
 
 #[test]
+fn for_in_list_str_body_via_let() {
+    // For-loop spreads its body into a list literal under a let binding.
+    let g = dsl(r#"
+    let kws: list_t<str_t> = [for (kw: str_t) in ["if", "else", "while"] { kw }]
+    grammar {
+        language: "test",
+        reserved: { global: kws },
+    }
+    rule program { "x" }"#);
+    assert_eq!(g.reserved_words.len(), 1);
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![
+            Rule::String("if".into()),
+            Rule::String("else".into()),
+            Rule::String("while".into()),
+        ],
+    );
+}
+
+#[test]
+fn for_in_list_rule_body() {
+    // For-loop body builds rules (case-insensitive regexps), spread into the
+    // grammar's extras. Mirrors the PHP keywords.tsg pattern.
+    let g = dsl(r#"grammar {
+        language: "test",
+        extras: [for (kw: str_t) in ["if", "else"] { regexp(kw, "i") }],
+    }
+    rule program { "x" }"#);
+    assert_eq!(
+        g.extra_symbols,
+        vec![Rule::pattern("if", "i"), Rule::pattern("else", "i"),],
+    );
+}
+
+#[test]
+fn for_in_list_tuple_destructure() {
+    // Tuple destructuring inside a for-loop, spread into a list literal
+    // consumed by reserved_words.
+    let g = dsl(r#"grammar {
+        language: "test",
+        reserved: {
+            global: [
+                for (kw: str_t, _: int_t) in [("if", 1), ("else", 2)] { kw },
+            ],
+        },
+    }
+    rule program { "x" }"#);
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![Rule::String("if".into()), Rule::String("else".into())],
+    );
+}
+
+#[test]
+fn for_in_list_mixed_with_concrete_elements() {
+    // For-loop spread interleaved with concrete list elements; order is
+    // preserved.
+    let g = dsl(r#"grammar {
+        language: "test",
+        reserved: {
+            global: ["alpha", for (kw: str_t) in ["mid1", "mid2"] { kw }, "omega"],
+        },
+    }
+    rule program { "x" }"#);
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![
+            Rule::String("alpha".into()),
+            Rule::String("mid1".into()),
+            Rule::String("mid2".into()),
+            Rule::String("omega".into()),
+        ],
+    );
+}
+
+#[test]
+fn for_in_list_empty_iterable() {
+    // Spreading a for-loop over an empty literal contributes zero elements.
+    // The binding annotation makes the body type self-sufficient; no inference
+    // from the iterable is needed.
+    let g = dsl(r#"grammar {
+        language: "test",
+        reserved: {
+            global: ["only", for (kw: str_t) in [] { kw }],
+        },
+    }
+    rule program { "x" }"#);
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![Rule::String("only".into())],
+    );
+}
+
+#[test]
 fn object_with_list_rule_values() {
     let g = dsl(r#"grammar {
         language: "test",

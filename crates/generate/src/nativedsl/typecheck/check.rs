@@ -104,7 +104,15 @@ fn expect_list<'ast>(
 ) -> TypeResult<()> {
     if let Node::List(range) = shared.arena.get(id) {
         for &child in shared.pools.child_slice(*range) {
-            check_elem(shared, ctx, child, env)?;
+            // For-loops spread their body into the surrounding list. The body
+            // is checked by the same `check_elem` used for direct elements.
+            if let &Node::For { for_id, body } = shared.arena.get(child) {
+                check_for_expr(shared, ctx, for_id, body, env, |body, env| {
+                    check_elem(shared, ctx, body, env).map(|()| Ty::RULE)
+                })?;
+            } else {
+                check_elem(shared, ctx, child, env)?;
+            }
         }
         return Ok(());
     }
@@ -333,7 +341,9 @@ fn type_of(
             Ok(Ty::RULE)
         }
         Node::For { for_id, body } => {
-            check_for_expr(shared, ctx, *for_id, *body, env)?;
+            check_for_expr(shared, ctx, *for_id, *body, env, |body, env| {
+                expect_rule(shared, ctx, body, env).map(|()| Ty::RULE)
+            })?;
             Ok(Ty::Spread)
         }
         Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env),
@@ -542,9 +552,21 @@ fn type_of_list(
         return empty_container_result(expected, ContainerKind::List, span);
     }
     let elem_expected = expected.elem();
-    let mut widest = type_of(shared, ctx, items[0], env, elem_expected)?;
+    let item_ty = |item_id, env: &mut TypeEnv| {
+        // For-loops in list literals spread their body, so the element type
+        // we widen against is the body type checked under the list's element
+        // constraint - not Spread.
+        if let &Node::For { for_id, body } = shared.arena.get(item_id) {
+            check_for_expr(shared, ctx, for_id, body, env, |body, env| {
+                type_of(shared, ctx, body, env, elem_expected)
+            })
+        } else {
+            type_of(shared, ctx, item_id, env, elem_expected)
+        }
+    };
+    let mut widest = item_ty(items[0], env)?;
     for &item_id in &items[1..] {
-        let ty = type_of(shared, ctx, item_id, env, elem_expected)?;
+        let ty = item_ty(item_id, env)?;
         widest = widest.widen(ty).ok_or_else(|| {
             TypeError::new(
                 TypeErrorKind::ListElementTypeMismatch {
@@ -579,18 +601,29 @@ fn type_of_call(
     check_macro_args(shared, ctx, *macro_id, macro_name, args, span, env)
 }
 
-fn check_for_expr(
+fn check_for_expr<CheckBody>(
     shared: &SharedAst,
     ctx: &ModuleContext,
     for_idx: ForId,
     body: NodeId,
     env: &mut TypeEnv,
-) -> TypeResult<()> {
+    check_body: CheckBody,
+) -> TypeResult<Ty>
+where
+    CheckBody: FnOnce(NodeId, &mut TypeEnv) -> TypeResult<Ty>,
+{
     let config = shared.pools.get_for(for_idx);
 
     // Check if iterable is a literal list of tuples (for destructuring)
     if let Node::List(range) = shared.arena.get(config.iterable) {
         let items = shared.pools.child_slice(*range);
+        // Empty literal iterable: there's nothing to type against the bindings,
+        // and the surrounding list/seq/choice gets zero elements at lower
+        // time. The binding annotations make the element type explicit, so
+        // we don't need to infer anything from the iterable.
+        if items.is_empty() {
+            return check_body(body, env);
+        }
         let has_tuples = items
             .first()
             .is_some_and(|&id| matches!(shared.arena.get(id), Node::Tuple(_)));
@@ -612,11 +645,11 @@ fn check_for_expr(
                         shared.arena.span(item_id),
                     ));
                 }
-                for (i, p) in config.bindings.iter().enumerate() {
-                    type_of(shared, ctx, elems[i], env, Constraint::Exact(p.ty))?;
+                for (index, param) in config.bindings.iter().enumerate() {
+                    type_of(shared, ctx, elems[index], env, Constraint::Exact(param.ty))?;
                 }
             }
-            return expect_rule(shared, ctx, body, env);
+            return check_body(body, env);
         }
     }
 
@@ -644,7 +677,7 @@ fn check_for_expr(
     if !elem_ty.is_compatible(declared_ty) {
         return Err(mismatch(declared_ty, elem_ty, name));
     }
-    expect_rule(shared, ctx, body, env)
+    check_body(body, env)
 }
 
 /// Resolve an empty list/object literal against an outer constraint. Returns
