@@ -44,6 +44,9 @@ pub(super) fn check_item(
             if let Some(id) = config.word {
                 expect_name_ref(shared, ctx, id, env)?;
             }
+            if let Some(id) = config.start {
+                expect_name_ref(shared, ctx, id, env)?;
+            }
             if let Some(id) = config.reserved {
                 expect_reserved(shared, ctx, id, env)?;
             }
@@ -235,7 +238,7 @@ fn type_of(
             Ok(match field {
                 C::Extras | C::Externals | C::Inline | C::Supertypes => Ty::LIST_RULE,
                 C::Conflicts | C::Precedences => Ty::LIST_LIST_RULE,
-                C::Word => Ty::RULE,
+                C::Word | C::Start => Ty::RULE,
                 C::Reserved => Ty::OBJ_LIST_RULE,
                 C::Language | C::Inherits => unreachable!(),
             })

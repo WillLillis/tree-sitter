@@ -466,3 +466,46 @@ fn external_decl_redundant_with_grammar_block() {
     "#);
     assert_eq!(g.external_tokens.len(), 2);
 }
+
+#[test]
+fn start_picks_named_rule() {
+    // `start: third` rotates `third` to position 0, overriding the default
+    // "first declared rule is the start symbol" convention.
+    let g = dsl(r#"
+        grammar { language: "test", start: third }
+        rule first { "a" }
+        rule second { "b" }
+        rule third { "c" }
+    "#);
+    assert_eq!(rule_names(&g), vec!["third", "first", "second"]);
+}
+
+#[test]
+fn start_default_first_rule_when_unset() {
+    // Regression: omitting `start:` keeps the existing positional behavior.
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule alpha { "a" }
+        rule beta { "b" }
+    "#);
+    assert_eq!(rule_names(&g), vec!["alpha", "beta"]);
+}
+
+#[test]
+fn error_start_unknown_rule() {
+    // Resolver catches `start: <undeclared>` as UnknownIdentifier - no
+    // bespoke lower-time check needed.
+    let e = assert_err!(
+        dsl_err(
+            r#"
+            grammar { language: "test", start: nonexistent }
+            rule program { "x" }
+        "#
+        ),
+        Resolve
+    );
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::UnknownIdentifier("nonexistent".into())
+    );
+}
