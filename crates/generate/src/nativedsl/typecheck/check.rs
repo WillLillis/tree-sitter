@@ -106,9 +106,7 @@ fn expect_list(
     expected: Ty,
 ) -> TypeResult<()> {
     if let Node::List(range) = shared.arena.get(id) {
-        // Each element either dispatches to `check_elem` directly or, if it's
-        // a `Node::For`, recursively flatMaps; the leaf wraps `check_elem` to
-        // satisfy `check_spread_item`'s Ty-returning leaf signature.
+        // Wrap `check_elem` to fit `check_spread_item`'s Ty-returning leaf signature.
         let leaf = |shared: &SharedAst, ctx: &ModuleContext, id: NodeId, env: &mut TypeEnv| {
             check_elem(shared, ctx, id, env).map(|()| Ty::RULE)
         };
@@ -287,10 +285,6 @@ fn type_of(
             Ok(Ty::RULE)
         }
         Node::SeqOrChoice { range, .. } => {
-            // Each member must be rule-like (rule_t or str_t), or a for-loop
-            // spread whose deepest body is rule-like. `check_spread_item`
-            // recurses into nested for-loops and dispatches the leaf for
-            // non-For nodes.
             let leaf = |shared: &SharedAst,
                         ctx: &ModuleContext,
                         id: NodeId,
