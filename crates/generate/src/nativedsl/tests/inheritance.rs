@@ -551,3 +551,19 @@ fn start_rotates_inherited_rule_to_front() {
     assert!(names.contains(&"statement"));
     assert!(names.contains(&"expression"));
 }
+
+#[test]
+fn start_picks_derived_rule_under_inheritance() {
+    // `start:` can name a rule defined in the derived grammar (not the base).
+    // Build_grammar pushes base rules first, then locals, then helpers; the
+    // start rotation must find names in any of those buckets.
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, start: extra }
+        rule extra { "added" }
+    "#);
+    let names = rule_names(&g);
+    assert_eq!(names[0], "extra");
+    assert!(names.contains(&"program"));
+    assert!(names.contains(&"identifier"));
+}
