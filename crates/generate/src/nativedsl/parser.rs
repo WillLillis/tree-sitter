@@ -456,8 +456,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             return Err(self.error(ParseErrorKind::NestingTooDeep));
         }
         let mut result = self.parse_primary()?;
-        // Post-primary chaining: allow `.field` after any expression
-        // (e.g. `grammar_config(base).extras`).
+        // Post-primary `.field` chaining, e.g. `grammar_config(base).extras`.
         while self.at(TokenKind::Dot) {
             let start = self.shared.arena.span(result);
             self.advance_pos();
@@ -904,7 +903,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             this.expect(TokenKind::Colon)?;
             Ok((key, this.parse_expr()?))
         })?;
-        // Check for duplicate keys (O(n) via hash set).
         let mut seen = rustc_hash::FxHashMap::with_capacity_and_hasher(
             fields.len(),
             rustc_hash::FxBuildHasher,

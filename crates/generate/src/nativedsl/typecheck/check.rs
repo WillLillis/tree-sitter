@@ -61,7 +61,6 @@ pub(super) fn check_item(
                     shared.arena.span(*value),
                 ));
             }
-            // If the value is an object literal, register its field names
             if let Node::Object(range) = shared.arena.get(*value) {
                 let fields: Vec<String> = shared
                     .pools
@@ -175,15 +174,12 @@ fn expect_reserved(
     id: NodeId,
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
-    // Object literal: each field value must be a rule list
     if let Node::Object(range) = shared.arena.get(id) {
         for &(_, val_id) in shared.pools.get_object(*range) {
             expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
         }
         return Ok(());
     }
-    // Non-literal: must type to obj_t<list_t<rule_t>>. Common case is
-    // inherited but any expression of that type works.
     type_of(shared, ctx, id, env, Constraint::Exact(Ty::OBJ_LIST_RULE))?;
     Ok(())
 }
