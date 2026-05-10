@@ -74,7 +74,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn resolve_str(&self, id: Str) -> &str {
-        match self.state.strings.entry(id) {
+        match self.state.ir.strings.entry(id) {
             &StrEntry::Source(span, mod_id) => span.resolve(&self.module_ctx(mod_id).source),
             StrEntry::Owned(s) => s,
             StrEntry::Unreachable => unreachable!(),
@@ -86,22 +86,22 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn alloc_val(&mut self, val: Value) -> ValueId {
-        let id = ValueId(self.state.values.len() as u32);
-        self.state.values.push(val);
+        let id = ValueId(self.state.ir.values.len() as u32);
+        self.state.ir.values.push(val);
         id
     }
 
     fn get_val(&self, id: ValueId) -> &Value {
         // Safety: id was produced by alloc_val which returns sequential indices
-        // into self.state.values. No ValueId can outlive the Evaluator.
-        unsafe { self.state.values.get_unchecked(id.0 as usize) }
+        // into self.state.ir.values. No ValueId can outlive the Evaluator.
+        unsafe { self.state.ir.values.get_unchecked(id.0 as usize) }
     }
 
     fn alloc_list(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
-        let start = self.state.value_children.len() as u32;
+        let start = self.state.ir.value_children.len() as u32;
         let len = u16::try_from(items.len())
             .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-        self.state.value_children.extend_from_slice(items);
+        self.state.ir.value_children.extend_from_slice(items);
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
@@ -112,13 +112,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn alloc_object(&mut self, map: FxHashMap<String, ValueId>) -> ValueId {
-        let idx = self.state.object_pool.len() as u32;
-        self.state.object_pool.push(map);
+        let idx = self.state.ir.object_pool.len() as u32;
+        self.state.ir.object_pool.push(map);
         self.alloc_val(Value::Object(idx))
     }
 
     fn list_items(&self, v: ValueId) -> &[ValueId] {
-        &self.state.value_children[self.list_range(v).as_range()]
+        &self.state.ir.value_children[self.list_range(v).as_range()]
     }
 
     fn list_range(&self, v: ValueId) -> ChildRange {
@@ -143,26 +143,26 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn object_fields(&self, v: ValueId) -> &FxHashMap<String, ValueId> {
         expect_pat!(Value::Object(idx), *self.get_val(v));
-        &self.state.object_pool[idx as usize]
+        &self.state.ir.object_pool[idx as usize]
     }
 
     fn alloc_rule(&mut self, rule: ARule) -> RuleId {
-        let id = RuleId(self.state.rules.len() as u32);
-        self.state.rules.push(rule);
+        let id = RuleId(self.state.ir.rules.len() as u32);
+        self.state.ir.rules.push(rule);
         id
     }
 
     fn get_rule(&self, id: RuleId) -> &ARule {
         // Safety: id was produced by alloc_rule which returns sequential indices.
-        unsafe { self.state.rules.get_unchecked(id.0 as usize) }
+        unsafe { self.state.ir.rules.get_unchecked(id.0 as usize) }
     }
 
     const fn children_start(&self) -> u32 {
-        self.state.rule_children.len() as u32
+        self.state.ir.rule_children.len() as u32
     }
 
     fn children_range(&self, start: u32, span: Span) -> LowerResult<ChildRange> {
-        let count = self.state.rule_children.len() as u32 - start;
+        let count = self.state.ir.rule_children.len() as u32 - start;
         u16::try_from(count)
             .map(|len| ChildRange::new(start, len))
             .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
@@ -170,13 +170,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Intern a span using the current module's source text.
     fn intern_span(&mut self, span: Span) -> Str {
-        self.state.strings.intern_span(span, self.current_module)
+        self.state.ir.strings.intern_span(span, self.current_module)
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
         let raw = self.ctx().text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
             self.state
+                .ir
                 .strings
                 .intern_owned(Cow::Owned(unescape_string(raw)))
         } else {
@@ -192,7 +193,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Intern a string, create a `NamedSymbol` rule, and wrap as a `Value::Rule`.
     fn owned_symbol_val(&mut self, name: Cow<'_, str>) -> ValueId {
-        let sid = self.state.strings.intern_owned(name);
+        let sid = self.state.ir.strings.intern_owned(name);
         let rid = self.alloc_rule(ARule::NamedSymbol(sid));
         self.alloc_val(Value::Rule(rid))
     }
@@ -210,7 +211,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 // Safety: range is produced by children_start/children_range which
                 // track rule_children indices.
                 let children: Vec<Rule> =
-                    unsafe { self.state.rule_children.get_unchecked(range.as_range()) }
+                    unsafe { self.state.ir.rule_children.get_unchecked(range.as_range()) }
                         .iter()
                         .map(|&id| self.build_rule(id))
                         .collect();
@@ -417,18 +418,18 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .precedence_orderings
                     .iter()
                     .map(|group| {
-                        let inner_start = self.state.value_children.len() as u32;
+                        let inner_start = self.state.ir.value_children.len() as u32;
                         for entry in group {
                             let vid = match entry {
                                 PrecedenceEntry::Name(s) => {
-                                    let sid = self.state.strings.intern_owned(Cow::Borrowed(s));
+                                    let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(s));
                                     self.alloc_val(Value::Str(sid))
                                 }
                                 PrecedenceEntry::Symbol(s) => {
                                     self.owned_symbol_val(Cow::Borrowed(s))
                                 }
                             };
-                            self.state.value_children.push(vid);
+                            self.state.ir.value_children.push(vid);
                         }
                         self.finish_list(inner_start, group.len(), span)
                     })
@@ -462,22 +463,22 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn import_rules_as_list(&mut self, rules_data: &[Rule], span: Span) -> LowerResult<ValueId> {
-        let start = self.state.value_children.len() as u32;
-        self.state.value_children.reserve(rules_data.len());
+        let start = self.state.ir.value_children.len() as u32;
+        self.state.ir.value_children.reserve(rules_data.len());
         for r in rules_data {
             let rid = self.import_rule(r);
             let vid = self.alloc_val(Value::Rule(rid));
-            self.state.value_children.push(vid);
+            self.state.ir.value_children.push(vid);
         }
         self.finish_list(start, rules_data.len(), span)
     }
 
     fn import_names_as_list(&mut self, names: &[String], span: Span) -> LowerResult<ValueId> {
-        let start = self.state.value_children.len() as u32;
-        self.state.value_children.reserve(names.len());
+        let start = self.state.ir.value_children.len() as u32;
+        self.state.ir.value_children.reserve(names.len());
         for name in names {
             let vid = self.owned_symbol_val(Cow::Borrowed(name));
-            self.state.value_children.push(vid);
+            self.state.ir.value_children.push(vid);
         }
         self.finish_list(start, names.len(), span)
     }
@@ -486,23 +487,23 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match rule {
             Rule::Blank => self.alloc_rule(ARule::Blank),
             Rule::String(s) => {
-                let sid = self.state.strings.intern_owned(Cow::Borrowed(s));
+                let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(s));
                 self.alloc_rule(ARule::String(sid))
             }
             Rule::Pattern(p, f) => {
-                let pid = self.state.strings.intern_owned(Cow::Borrowed(p));
+                let pid = self.state.ir.strings.intern_owned(Cow::Borrowed(p));
                 let fid =
-                    (!f.is_empty()).then(|| self.state.strings.intern_owned(Cow::Borrowed(f)));
+                    (!f.is_empty()).then(|| self.state.ir.strings.intern_owned(Cow::Borrowed(f)));
                 self.alloc_rule(ARule::Pattern(pid, fid))
             }
             Rule::NamedSymbol(name) => {
-                let sid = self.state.strings.intern_owned(Cow::Borrowed(name));
+                let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(name));
                 self.alloc_rule(ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) | Rule::Seq(members) => {
                 let is_seq = matches!(rule, Rule::Seq(_));
                 self.state.rule_scratch.reserve(members.len());
-                self.state.rule_children.reserve(members.len());
+                self.state.ir.rule_children.reserve(members.len());
                 let (start, count) = stack_scope!(self.state.rule_scratch, |base| {
                     for m in members {
                         let rid = self.import_rule(m);
@@ -510,9 +511,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     }
                     let start = self.children_start();
                     self.state
+                        .ir
                         .rule_children
                         .extend_from_slice(&self.state.rule_scratch[base..]);
-                    (start, self.state.rule_children.len() as u32 - start)
+                    (start, self.state.ir.rule_children.len() as u32 - start)
                 });
                 debug_assert!(u16::try_from(count).is_ok());
                 self.alloc_rule(ARule::SeqOrChoice(
@@ -536,15 +538,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let aprec = APrec::Integer(*n);
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 } else if let Precedence::Name(s) = &params.precedence {
-                    let aprec = APrec::Name(self.state.strings.intern_owned(Cow::Borrowed(s)));
+                    let aprec = APrec::Name(self.state.ir.strings.intern_owned(Cow::Borrowed(s)));
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 }
                 if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
-                    let sid = self.state.strings.intern_owned(Cow::Borrowed(value));
+                    let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(value));
                     rid = self.alloc_rule(ARule::Alias(sid, *is_named, rid));
                 }
                 if let Some(field_name) = &params.field_name {
-                    let sid = self.state.strings.intern_owned(Cow::Borrowed(field_name));
+                    let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(field_name));
                     rid = self.alloc_rule(ARule::Field(sid, rid));
                 }
                 if params.is_token {
@@ -557,7 +559,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 context_name,
             } => {
                 let inner = self.import_rule(inner);
-                let sid = self.state.strings.intern_owned(Cow::Borrowed(context_name));
+                let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(context_name));
                 self.alloc_rule(ARule::Reserved(sid, inner))
             }
             Rule::Symbol(_) => unreachable!(),
@@ -651,19 +653,19 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 // Guarded by super::typecheck::type_of (Node::Append) - ensures both are lists
                 let lr = self.list_range(lv);
                 let rr = self.list_range(rv);
-                let start = self.state.value_children.len() as u32;
+                let start = self.state.ir.value_children.len() as u32;
                 let total = lr.len as usize + rr.len as usize;
                 let len = u16::try_from(total)
                     .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-                self.state.value_children.extend_from_within(lr.as_range());
-                self.state.value_children.extend_from_within(rr.as_range());
+                self.state.ir.value_children.extend_from_within(lr.as_range());
+                self.state.ir.value_children.extend_from_within(rr.as_range());
                 Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
             }
             &Node::FieldAccess { obj, field } => {
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = self.ctx().text(field);
                 match *self.get_val(obj_val) {
-                    Value::Object(idx) => Ok(*self.state.object_pool[idx as usize]
+                    Value::Object(idx) => Ok(*self.state.ir.object_pool[idx as usize]
                         .get(field_name)
                         .unwrap()),
                     _ => unreachable!(), // guarded by typecheck
@@ -687,7 +689,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .copied()
                     .find(|&s| target_ctx.text(s) == member_name)
                 {
-                    let sid = self.state.strings.intern_span(name_span, mod_idx);
+                    let sid = self.state.ir.strings.intern_span(name_span, mod_idx);
                     let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                     return Ok(self.alloc_val(Value::Rule(rid)));
                 }
@@ -739,10 +741,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                             self.state.val_scratch.push(val);
                         }
                     }
-                    let start = self.state.value_children.len() as u32;
+                    let start = self.state.ir.value_children.len() as u32;
                     let len = u16::try_from(self.state.val_scratch.len() - base)
                         .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
                     self.state
+                        .ir
                         .value_children
                         .extend_from_slice(&self.state.val_scratch[base..]);
                     Ok(ChildRange::new(start, len))
@@ -759,7 +762,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let vid = self.eval_expr(part_id)?;
                     result.push_str(self.resolve_str(self.str_id(vid)));
                 }
-                let sid = self.state.strings.intern_owned(Cow::Owned(result));
+                let sid = self.state.ir.strings.intern_owned(Cow::Owned(result));
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             &Node::DynRegex { pattern, flags } => {
@@ -852,6 +855,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     }
                     let start = self.children_start();
                     self.state
+                        .ir
                         .rule_children
                         .extend_from_slice(&self.state.rule_scratch[base..]);
                     self.children_range(start, span)
@@ -870,7 +874,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 };
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
-                self.state.rule_children.extend_from_slice(&[first, blank]);
+                self.state.ir.rule_children.extend_from_slice(&[first, blank]);
                 let child_range = self.children_range(start, span).unwrap();
                 Ok(self.alloc_rule(ARule::SeqOrChoice(false, child_range)))
             }
@@ -1092,10 +1096,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             {
                 self.state.for_binding_frames.push((for_id, base));
                 for i in 0..n_items {
-                    let item_id = self.state.value_children[iter_range.start as usize + i];
+                    let item_id = self.state.ir.value_children[iter_range.start as usize + i];
                     for j in 0..n_bindings {
                         let val = match *self.get_val(item_id) {
-                            Value::Tuple(range) => self.state.value_children[range.start as usize + j],
+                            Value::Tuple(range) => self.state.ir.value_children[range.start as usize + j],
                             _ => item_id,
                         };
                         if i == 0 {
