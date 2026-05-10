@@ -188,7 +188,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let x = []
         rule program { "x" }"#,
-        TypeErrorKind::EmptyContainerNeedsAnnotation
+        TypeErrorKind::EmptyContainerNeedsAnnotation(ContainerKind::List)
     }
     error_empty_list_with_non_list_annotation {
         r#"grammar { language: "test" }
@@ -222,7 +222,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let x = {}
         rule program { "x" }"#,
-        TypeErrorKind::EmptyContainerNeedsAnnotation
+        TypeErrorKind::EmptyContainerNeedsAnnotation(ContainerKind::Object)
     }
     error_bare_function_reference {
         r#"grammar { language: "test" }

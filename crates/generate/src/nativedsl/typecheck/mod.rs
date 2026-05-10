@@ -75,8 +75,8 @@ pub enum TypeErrorKind {
         "list elements cannot be {0}; lists allow rule_t, str_t, int_t, or list_t (max 2 levels deep)"
     )]
     InvalidListElement(Ty),
-    #[error("empty list requires a type annotation")]
-    EmptyContainerNeedsAnnotation,
+    #[error("empty {0} requires a type annotation")]
+    EmptyContainerNeedsAnnotation(ContainerKind),
     #[error("annotation {declared} is not a {kind} type, but value is an empty {kind} literal")]
     EmptyContainerAnnotationMismatch { declared: Ty, kind: ContainerKind },
     #[error("for-expression requires a list, got {0}")]

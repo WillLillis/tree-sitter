@@ -413,7 +413,7 @@ fn type_of_append(
             Ok(t)
         }
         (None, None) => Err(TypeError::new(
-            TypeErrorKind::EmptyContainerNeedsAnnotation,
+            TypeErrorKind::EmptyContainerNeedsAnnotation(ContainerKind::List),
             span,
         )),
     }
@@ -697,7 +697,7 @@ fn empty_container_result(expected: Constraint, kind: ContainerKind, span: Span)
             span,
         )),
         _ => Err(TypeError::new(
-            TypeErrorKind::EmptyContainerNeedsAnnotation,
+            TypeErrorKind::EmptyContainerNeedsAnnotation(kind),
             span,
         )),
     }
