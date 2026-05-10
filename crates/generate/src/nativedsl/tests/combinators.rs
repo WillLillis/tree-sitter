@@ -121,11 +121,9 @@ rule_tests! {
 
 #[test]
 fn raw_ident_emits_bare_name_in_grammar_json() {
-    let g = dsl(
-        r#"grammar { language: "test" }
+    let g = dsl(r#"grammar { language: "test" }
         rule program { r#let }
-        rule r#let { "in" }"#,
-    );
+        rule r#let { "in" }"#);
     // grammar.json rule names must match the bare identifier, not `r#let`.
     let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, vec!["program", "let"]);
