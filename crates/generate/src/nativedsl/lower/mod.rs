@@ -263,7 +263,6 @@ fn build_grammar(
     base: Option<&InputGrammar>,
     helper_rules: Vec<(String, Rule)>,
 ) -> LowerResult<InputGrammar> {
-    // Build override map; apply over base + helpers in one pass.
     let mut overrides: FxHashMap<String, (Rule, Span)> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
         overrides.insert(name, (rule, span));
@@ -287,7 +286,6 @@ fn build_grammar(
         }
     }
 
-    // Local rules (root grammar's own rules - not override targets).
     for (name, rule) in result.rules {
         variables.push(Variable {
             name,
@@ -296,7 +294,7 @@ fn build_grammar(
         });
     }
 
-    // Helper rules (transitively gathered). Apply overrides here too.
+    // Helper rules can also be override targets.
     for (name, rule) in helper_rules {
         let final_rule = overrides.remove(&name).map_or(rule, |(r, _)| r);
         variables.push(Variable {
@@ -306,7 +304,6 @@ fn build_grammar(
         });
     }
 
-    // Any remaining overrides reference rules that don't exist anywhere.
     if !overrides.is_empty() {
         let mut entries: Vec<(String, Span)> = overrides
             .into_iter()
@@ -318,11 +315,9 @@ fn build_grammar(
         ));
     }
 
-    // Honor `start: <rule>` by rotating the named rule to position 0. The
-    // first variable is tree-sitter's start symbol, so this lets a child
-    // grammar pick a non-default start without re-declaring every rule.
-    // The resolver + typecheck guarantee the name refers to a declared
-    // rule, so it must exist in `variables` (base, local, or helper).
+    // Tree-sitter's start symbol is `variables[0]`, so honor `start: <rule>`
+    // by rotating the named rule into position 0. The resolver + typecheck
+    // guarantee the name exists somewhere in `variables`.
     if let Some(name) = result.start {
         let pos = variables.iter().position(|v| v.name == name).unwrap();
         if pos != 0 {
