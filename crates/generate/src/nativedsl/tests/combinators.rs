@@ -130,6 +130,29 @@ fn raw_ident_emits_bare_name_in_grammar_json() {
 }
 
 #[test]
+fn raw_ident_as_let_binding_name() {
+    // `r#name` works in let-binding position when the bare name collides
+    // with a DSL keyword.
+    let g = dsl(r#"grammar { language: "test" }
+        let r#for: str_t = "x"
+        rule program { r#for }"#);
+    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+}
+
+#[test]
+fn raw_ident_as_object_key() {
+    // `r#name` works as an object literal key when the bare name collides
+    // with a DSL keyword.
+    let g = dsl(r#"grammar { language: "test" }
+        let cfg = { r#for: 1, r#in: 2 }
+        rule program { prec(cfg.r#for, "x") }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::prec(Precedence::Integer(1), Rule::String("x".into())),
+    );
+}
+
+#[test]
 fn regexp_combinator() {
     let g = dsl(r#"grammar { language: "test" } rule program { regexp("[a-z]+") }"#);
     assert_eq!(
