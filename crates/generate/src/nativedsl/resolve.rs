@@ -298,7 +298,6 @@ fn resolve_expr(
         return resolve_expr(arena, pools, ctx, decls, modules, body);
     }
 
-    // All remaining cases
     resolve_children(arena, pools, ctx, decls, modules, id)
 }
 
@@ -513,13 +512,11 @@ fn collect_external_names<'src>(
                 insert_decl(ec.decls, name, IdentKind::Rule, arena.span(id), ctx)?;
             }
         }
-        // List: scan children for identifiers.
         Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
             for &child in shared.pools.child_slice(*range) {
                 collect_external_names(shared, ctx, child, ec)?;
             }
         }
-        // Append: recurse into both arms.
         Node::Append { left, right } => {
             collect_external_names(shared, ctx, *left, ec)?;
             collect_external_names(shared, ctx, *right, ec)?;
