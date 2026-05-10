@@ -353,7 +353,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         id: NodeId,
     ) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
         let ctx = self.ctx();
-        // Object literal: each field is a named word set
         if let Node::Object(range) = self.shared.arena.get(id) {
             return self
                 .shared
@@ -369,7 +368,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 })
                 .collect();
         }
-        // Expression: evaluate to Object(ListRule), keyed by context name.
         // Sort by key for deterministic output (FxHashMap iteration is unordered).
         let vid = self.eval_expr(id)?;
         let fields = self.object_fields(vid);
@@ -682,7 +680,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let member_name = self.ctx().text(member);
                 expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
 
-                // Cached external lookup: scan target's external_names cache.
                 let target_ctx = self.previous[usize::from(mod_idx)].ctx();
                 if let Some(name_span) = target_ctx
                     .external_names
@@ -695,7 +692,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     return Ok(self.alloc_val(Value::Rule(rid)));
                 }
 
-                // Inline a rule from either a helper or an inherited grammar.
                 let target = &self.previous[usize::from(mod_idx)];
                 let rule = match target {
                     Module::Helper { lowered_rules, .. } => lowered_rules

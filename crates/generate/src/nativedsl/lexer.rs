@@ -323,7 +323,6 @@ impl<'src> Lexer<'src> {
                     ))?;
                 }
                 Some(offset) => {
-                    // Check for newline in the skipped region
                     if let Some(nl) = memchr(b'\n', &source[pos..pos + offset]) {
                         Err(LexError::new(
                             LexErrorKind::NewlineInString,
