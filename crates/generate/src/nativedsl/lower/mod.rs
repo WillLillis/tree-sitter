@@ -368,7 +368,7 @@ pub enum LowerErrorKind {
     ModuleDepthExceeded,
     #[error("imported files cannot contain a {}", format_disallowed(.0))]
     ModuleDisallowedItem(DisallowedItemKind),
-    #[error("module cycle detected")]
+    #[error("cycle while loading module")]
     ModuleCycle,
     #[error("expected a rule name reference")]
     ExpectedRuleName,
