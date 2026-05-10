@@ -8,7 +8,7 @@ use crate::nativedsl::{
 };
 
 /// Function pointer type for element checkers passed to `expect_list`.
-type CheckFn<'ast> = fn(&SharedAst, &'ast ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
+type CheckFn = fn(&SharedAst, &ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
 
 pub(super) fn check_item(
     shared: &SharedAst,
@@ -97,25 +97,23 @@ pub(super) fn check_item(
 /// Check a list config field. For literal lists, checks each element with
 /// `check_elem`. For non-literal expressions, defers to `type_of` with an
 /// `Exact(expected)` constraint.
-fn expect_list<'ast>(
+fn expect_list(
     shared: &SharedAst,
-    ctx: &'ast ModuleContext,
+    ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
-    check_elem: CheckFn<'ast>,
+    check_elem: CheckFn,
     expected: Ty,
 ) -> TypeResult<()> {
     if let Node::List(range) = shared.arena.get(id) {
+        // Each element either dispatches to `check_elem` directly or, if it's
+        // a `Node::For`, recursively flatMaps; the leaf wraps `check_elem` to
+        // satisfy `check_spread_item`'s Ty-returning leaf signature.
+        let leaf = |shared: &SharedAst, ctx: &ModuleContext, id: NodeId, env: &mut TypeEnv| {
+            check_elem(shared, ctx, id, env).map(|()| Ty::RULE)
+        };
         for &child in shared.pools.child_slice(*range) {
-            // For-loops spread their body into the surrounding list. The body
-            // is checked by the same `check_elem` used for direct elements.
-            if let &Node::For { for_id, body } = shared.arena.get(child) {
-                check_for_expr(shared, ctx, for_id, body, env, |body, env| {
-                    check_elem(shared, ctx, body, env).map(|()| Ty::RULE)
-                })?;
-            } else {
-                check_elem(shared, ctx, child, env)?;
-            }
+            check_spread_item(shared, ctx, child, env, leaf)?;
         }
         return Ok(());
     }
@@ -289,14 +287,18 @@ fn type_of(
             Ok(Ty::RULE)
         }
         Node::SeqOrChoice { range, .. } => {
+            // Each member must be rule-like (rule_t or str_t), or a for-loop
+            // spread whose deepest body is rule-like. `check_spread_item`
+            // recurses into nested for-loops and dispatches the leaf for
+            // non-For nodes.
+            let leaf = |shared: &SharedAst,
+                        ctx: &ModuleContext,
+                        id: NodeId,
+                        env: &mut TypeEnv| {
+                type_of(shared, ctx, id, env, Constraint::RULE_LIKE)
+            };
             for &member in shared.pools.child_slice(*range) {
-                // Spread (from for-loop expansion) is also valid here, but
-                // can't be expressed in user-facing constraint Display, so
-                // we type without enforcement and validate by hand.
-                let ty = type_of(shared, ctx, member, env, Constraint::None)?;
-                if ty != Ty::Spread && !ty.is_rule_like() {
-                    return Err(mismatch(Ty::RULE, ty, shared.arena.span(member)));
-                }
+                check_spread_item(shared, ctx, member, env, leaf)?;
             }
             Ok(Ty::RULE)
         }
@@ -555,21 +557,12 @@ fn type_of_list(
         return empty_container_result(expected, ContainerKind::List, span);
     }
     let elem_expected = expected.elem();
-    let item_ty = |item_id, env: &mut TypeEnv| {
-        // For-loops in list literals spread their body, so the element type
-        // we widen against is the body type checked under the list's element
-        // constraint - not Spread.
-        if let &Node::For { for_id, body } = shared.arena.get(item_id) {
-            check_for_expr(shared, ctx, for_id, body, env, |body, env| {
-                type_of(shared, ctx, body, env, elem_expected)
-            })
-        } else {
-            type_of(shared, ctx, item_id, env, elem_expected)
-        }
+    let leaf = |shared: &SharedAst, ctx: &ModuleContext, id: NodeId, env: &mut TypeEnv| {
+        type_of(shared, ctx, id, env, elem_expected)
     };
-    let mut widest = item_ty(items[0], env)?;
+    let mut widest = check_spread_item(shared, ctx, items[0], env, leaf)?;
     for &item_id in &items[1..] {
-        let ty = item_ty(item_id, env)?;
+        let ty = check_spread_item(shared, ctx, item_id, env, leaf)?;
         widest = widest.widen(ty).ok_or_else(|| {
             TypeError::new(
                 TypeErrorKind::ListElementTypeMismatch {
@@ -602,6 +595,32 @@ fn type_of_call(
     };
     let args = shared.pools.child_slice(args);
     check_macro_args(shared, ctx, *macro_id, macro_name, args, span, env)
+}
+
+/// Type-check an item in a spread-accepting position (list element, seq/choice
+/// member, etc). If the item is a `Node::For`, recursively flatMap into the
+/// surrounding sequence by re-applying `leaf` to the inner body. Otherwise
+/// dispatch to `leaf` directly.
+///
+/// Returns the type of the deepest non-For body so the caller can widen
+/// against sibling items.
+fn check_spread_item<Leaf>(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    item: NodeId,
+    env: &mut TypeEnv,
+    leaf: Leaf,
+) -> TypeResult<Ty>
+where
+    Leaf: Fn(&SharedAst, &ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<Ty> + Copy,
+{
+    if let &Node::For { for_id, body } = shared.arena.get(item) {
+        check_for_expr(shared, ctx, for_id, body, env, |body, env| {
+            check_spread_item(shared, ctx, body, env, leaf)
+        })
+    } else {
+        leaf(shared, ctx, item, env)
+    }
 }
 
 fn check_for_expr<CheckBody>(

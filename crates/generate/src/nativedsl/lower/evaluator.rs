@@ -1045,20 +1045,38 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Evaluate a for-loop, pushing each iteration's rule into `rule_scratch`.
+    /// If the body is itself a for-loop, recurses (flatMap semantics).
     fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
         self.eval_for_each(for_id, |evaluator| {
-            let rule_id = evaluator.lower_to_rule(body)?;
-            evaluator.state.rule_scratch.push(rule_id);
-            Ok(())
+            if let &Node::For {
+                for_id: inner,
+                body: inner_body,
+            } = evaluator.shared.arena.get(body)
+            {
+                evaluator.eval_for_to_rules(inner, inner_body)
+            } else {
+                let rule_id = evaluator.lower_to_rule(body)?;
+                evaluator.state.rule_scratch.push(rule_id);
+                Ok(())
+            }
         })
     }
 
     /// Evaluate a for-loop, pushing each iteration's value into `val_scratch`.
+    /// If the body is itself a for-loop, recurses (flatMap semantics).
     fn eval_for_to_values(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
         self.eval_for_each(for_id, |evaluator| {
-            let value_id = evaluator.eval_expr(body)?;
-            evaluator.state.val_scratch.push(value_id);
-            Ok(())
+            if let &Node::For {
+                for_id: inner,
+                body: inner_body,
+            } = evaluator.shared.arena.get(body)
+            {
+                evaluator.eval_for_to_values(inner, inner_body)
+            } else {
+                let value_id = evaluator.eval_expr(body)?;
+                evaluator.state.val_scratch.push(value_id);
+                Ok(())
+            }
         })
     }
 
