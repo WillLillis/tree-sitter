@@ -26,7 +26,7 @@ use super::ModuleId;
 use super::ast::{ForId, Node, NodeId, SharedAst, Span};
 
 use evaluator::Evaluator;
-use repr::{ARule, LoadedModules, RuleId, StringPool, Value, ValueId};
+use repr::{IrPools, LoadedModules, RuleId, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
 
@@ -44,19 +44,14 @@ pub(super) struct CallFrame {
 /// Long-lived state shared across grammar lowerings in one `parse_native_dsl`
 /// call.
 ///
-/// Pools and caches make imported/inherited let bindings evaluate exactly once,
-/// scratch buffers persist to reuse allocated capacity.
+/// `ir` and the caches make imported/inherited let bindings evaluate exactly
+/// once; scratch buffers persist to reuse allocated capacity.
 #[derive(Default)]
 pub struct LoweringState {
-    // Persistent pools and caches:
+    pub(super) ir: IrPools,
+    // Cross-grammar caches:
     loaded: LoadedModules,
     let_values: FxHashMap<NodeId, ValueId>,
-    values: Vec<Value>,
-    rules: Vec<ARule>,
-    rule_children: Vec<RuleId>,
-    value_children: Vec<ValueId>,
-    object_pool: Vec<FxHashMap<String, ValueId>>,
-    strings: StringPool,
     // Scratch (cleared per grammar):
     call_stack: Vec<CallFrame>,
     macro_args: Vec<ValueId>,
