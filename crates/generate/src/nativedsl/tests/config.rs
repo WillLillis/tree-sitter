@@ -271,6 +271,19 @@ fn externals_used_in_extras() {
 }
 
 #[test]
+fn externals_with_regexp_literal() {
+    let g = dsl(r#"
+        grammar { language: "test", externals: [regexp(r"\n")] }
+        rule program { "x" }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(
+        g.external_tokens[0],
+        Rule::Pattern(r"\n".into(), String::new())
+    );
+}
+
+#[test]
 fn externals_used_in_rule_body() {
     let g = dsl(r#"
         grammar { language: "test", externals: [heredoc] }

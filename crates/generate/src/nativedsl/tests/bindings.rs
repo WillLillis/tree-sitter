@@ -212,6 +212,61 @@ fn for_in_list_empty_iterable() {
 }
 
 #[test]
+fn for_in_list_nested() {
+    // A for-loop in spread position whose body contains another for-loop
+    // spread expands the cartesian product into the surrounding list.
+    let g = dsl(r#"
+        let prefixes: list_t<str_t> = ["a", "b"]
+        let suffixes: list_t<str_t> = ["1", "2", "3"]
+        grammar {
+            language: "test",
+            reserved: {
+                global: [for (p: str_t) in prefixes {
+                    for (s: str_t) in suffixes { concat(p, s) }
+                }],
+            },
+        }
+        rule program { "x" }
+    "#);
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![
+            Rule::String("a1".into()),
+            Rule::String("a2".into()),
+            Rule::String("a3".into()),
+            Rule::String("b1".into()),
+            Rule::String("b2".into()),
+            Rule::String("b3".into()),
+        ],
+    );
+}
+
+#[test]
+fn for_in_choice_nested() {
+    // Nested for-loop spread inside choice() (seq/choice path), confirming
+    // the same flatMap behavior as in list literals.
+    let g = dsl(r#"
+        let prefixes: list_t<str_t> = ["a", "b"]
+        let suffixes: list_t<str_t> = ["1", "2"]
+        grammar { language: "test" }
+        rule program {
+            choice(for (p: str_t) in prefixes {
+                for (s: str_t) in suffixes { concat(p, s) }
+            })
+        }
+    "#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::String("a1".into()),
+            Rule::String("a2".into()),
+            Rule::String("b1".into()),
+            Rule::String("b2".into()),
+        ]),
+    );
+}
+
+#[test]
 fn object_with_list_rule_values() {
     let g = dsl(r#"grammar {
         language: "test",
