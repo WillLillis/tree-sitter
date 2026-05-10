@@ -789,6 +789,33 @@ fn helper_rule_materialized_into_grammar() {
 }
 
 #[test]
+fn error_helper_rule_collides_with_root_rule() {
+    // Helper rules materialize bare-named into the root grammar. A name
+    // collision between a helper rule and a root rule is a duplicate
+    // declaration, not silent shadowing - tree-sitter's grammar JSON can't
+    // hold two variables with the same name.
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("h.tsg");
+    std::fs::write(&helper, r#"rule expression { "from_helper" }"#).unwrap();
+
+    let input = format!(
+        r#"
+        let h = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ expression }}
+        rule expression {{ "from_root" }}
+    "#,
+        dsl_path(&helper)
+    );
+    let err = parse_native_dsl(&input, Path::new("."));
+    let e = assert_err!(err.unwrap_err(), Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::DuplicateDeclaration("expression".into())
+    );
+}
+
+#[test]
 fn helper_can_define_rules() {
     // Mutually-recursive helper rules with intra-helper references plus a
     // reference to a helper-declared external. Rules materialize into the
