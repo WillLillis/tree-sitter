@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::num::NonZeroU32;
+use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
@@ -15,12 +16,15 @@ pub(super) struct Str(pub NonZeroU32);
 pub(super) enum StrEntry {
     Unreachable,
     Source(Span, ModuleId),
-    Owned(String),
+    Owned(Rc<str>),
 }
 
 pub(super) struct StringPool {
     pub entries: Vec<StrEntry>,
-    owned_lookup: FxHashMap<String, Str>,
+    /// Dedup table for `Owned` entries. The `Rc<str>` key shares its allocation
+    /// with the matching `StrEntry::Owned`, so each unique string only allocates
+    /// once.
+    owned_lookup: FxHashMap<Rc<str>, Str>,
 }
 
 impl Default for StringPool {
@@ -44,10 +48,10 @@ impl StringPool {
         if let Some(&id) = self.owned_lookup.get(s.as_ref()) {
             return id;
         }
-        let owned = s.into_owned();
+        let owned: Rc<str> = Rc::from(s.as_ref());
         // Safety: entries always starts with one sentinel, so len() >= 1.
         let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
-        self.entries.push(StrEntry::Owned(owned.clone()));
+        self.entries.push(StrEntry::Owned(Rc::clone(&owned)));
         self.owned_lookup.insert(owned, id);
         id
     }
