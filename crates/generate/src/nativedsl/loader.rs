@@ -128,8 +128,6 @@ impl Loader<'_> {
         span: Span,
         kind: ModuleKind,
     ) -> DslResult<ModuleId> {
-        // Loader-wide dedup: if (path, kind) has already been loaded in this
-        // parse, return its module id without re-doing the work.
         if let Some(&(_, _, gid)) = self
             .loaded
             .iter()
