@@ -1,26 +1,29 @@
 //!  Walks the typed AST into intermediate IR; [`super`] materializes it into
 //!  [`crate::grammars::InputGrammar`].
 
-use std::borrow::Cow;
-
 use rustc_hash::FxHashMap;
 
-use super::super::LowerError;
-use super::super::ast::{
-    ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, PrecKind,
-    RepeatKind, SharedAst, Span,
+use super::{
+    super::{
+        LowerError, Module, ModuleId,
+        ast::{
+            ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId,
+            PrecKind, RepeatKind, SharedAst, Span,
+        },
+    },
+    CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
+    repr::{APrec, ARule, RuleId, Str, StrEntry, Value, ValueId},
 };
-use super::super::{Module, ModuleId};
-use super::repr::{APrec, ARule, RuleId, Str, StrEntry, Value, ValueId};
-use super::{CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH};
 
-use crate::grammars::{PrecedenceEntry, ReservedWordContext};
-use crate::rules::{Associativity, Precedence, Rule};
+use crate::{
+    grammars::{PrecedenceEntry, ReservedWordContext},
+    rules::{Associativity, Precedence, Rule},
+};
 
 /// Per-grammar evaluation wrapper around long-lived [`LoweringState`].
 pub(super) struct Evaluator<'a, 'ast> {
-    pub(super) state: &'a mut LoweringState,
-    pub(super) shared: &'ast SharedAst,
+    pub state: &'a mut LoweringState,
+    pub shared: &'ast SharedAst,
     /// Modules already loaded before this evaluation. The module being lowered
     /// ("root") is not in this slice; it lives in `root_ctx`. Its module id is
     /// `previous.len()` (== `root_id`).
@@ -32,7 +35,7 @@ pub(super) struct Evaluator<'a, 'ast> {
 }
 
 impl<'a, 'ast> Evaluator<'a, 'ast> {
-    pub(super) fn new(
+    pub fn new(
         state: &'a mut LoweringState,
         shared: &'ast SharedAst,
         previous: &'a [Module],
@@ -53,7 +56,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    pub(super) fn eval_let(&mut self, let_id: NodeId, value: NodeId) -> LowerResult<()> {
+    pub fn eval_let(&mut self, let_id: NodeId, value: NodeId) -> LowerResult<()> {
         let val = self.eval_expr(value)?;
         self.state.let_values.insert(let_id, val);
         Ok(())
@@ -176,10 +179,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn intern_string_lit(&mut self, span: Span) -> Str {
         let raw = self.ctx().text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-            self.state
-                .ir
-                .strings
-                .intern_owned(Cow::Owned(unescape_string(raw)))
+            self.state.ir.strings.intern_owned(&unescape_string(raw))
         } else {
             self.intern_span(span)
         }
@@ -192,13 +192,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Intern a string, create a `NamedSymbol` rule, and wrap as a `Value::Rule`.
-    fn owned_symbol_val(&mut self, name: Cow<'_, str>) -> ValueId {
+    fn owned_symbol_val(&mut self, name: &str) -> ValueId {
         let sid = self.state.ir.strings.intern_owned(name);
         let rid = self.alloc_rule(ARule::NamedSymbol(sid));
         self.alloc_val(Value::Rule(rid))
     }
 
-    pub(super) fn build_rule(&self, id: RuleId) -> Rule {
+    pub fn build_rule(&self, id: RuleId) -> Rule {
         match self.get_rule(id) {
             ARule::Blank => Rule::Blank,
             ARule::String(sid) => Rule::String(self.str_to_string(*sid)),
@@ -261,7 +261,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    pub(super) fn eval_rule_list(&mut self, id: NodeId) -> LowerResult<Vec<Rule>> {
+    pub fn eval_rule_list(&mut self, id: NodeId) -> LowerResult<Vec<Rule>> {
         let vid = self.eval_expr(id)?;
         let items = self.list_items(vid);
         Ok(items.iter().map(|&v| self.value_to_owned_rule(v)).collect())
@@ -275,7 +275,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(self.str_to_string(*sid))
     }
 
-    pub(super) fn eval_name_list(&mut self, id: NodeId) -> LowerResult<Vec<String>> {
+    pub fn eval_name_list(&mut self, id: NodeId) -> LowerResult<Vec<String>> {
         let vid = self.eval_expr(id)?;
         let span = self.shared.arena.span(id);
         let items = self.list_items(vid);
@@ -287,7 +287,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Evaluate a `conflicts` expression into `Vec<Vec<String>>`. Each inner
     /// element must evaluate to a named rule reference.
-    pub(super) fn eval_conflicts(&mut self, id: NodeId) -> LowerResult<Vec<Vec<String>>> {
+    pub fn eval_conflicts(&mut self, id: NodeId) -> LowerResult<Vec<Vec<String>>> {
         let vid = self.eval_expr(id)?;
         let span = self.shared.arena.span(id);
         let outer = self.list_items(vid);
@@ -306,10 +306,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// Evaluate a `precedences` expression into `Vec<Vec<PrecedenceEntry>>`.
     /// Each inner element is either a string literal (`PrecedenceEntry::Name`)
     /// or a named rule reference (`PrecedenceEntry::Symbol`).
-    pub(super) fn eval_precedences(
-        &mut self,
-        id: NodeId,
-    ) -> LowerResult<Vec<Vec<PrecedenceEntry>>> {
+    pub fn eval_precedences(&mut self, id: NodeId) -> LowerResult<Vec<Vec<PrecedenceEntry>>> {
         let vid = self.eval_expr(id)?;
         let span = self.shared.arena.span(id);
         let outer = self.list_items(vid);
@@ -331,7 +328,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             .collect()
     }
 
-    pub(super) fn eval_rule_name(&mut self, id: NodeId) -> LowerResult<String> {
+    pub fn eval_rule_name(&mut self, id: NodeId) -> LowerResult<String> {
         let rid = self.lower_to_rule(id)?;
         match self.get_rule(rid) {
             ARule::NamedSymbol(sid) => Ok(self.str_to_string(*sid)),
@@ -349,10 +346,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// Evaluate the `reserved` config expression into `Vec<ReservedWordContext<Rule>>`.
     /// Accepts either an object literal `{ name: [words] }` or an expression
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
-    pub(super) fn eval_reserved(
-        &mut self,
-        id: NodeId,
-    ) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
+    pub fn eval_reserved(&mut self, id: NodeId) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
         let ctx = self.ctx();
         if let Node::Object(range) = self.shared.arena.get(id) {
             return self
@@ -422,12 +416,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         for entry in group {
                             let vid = match entry {
                                 PrecedenceEntry::Name(s) => {
-                                    let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(s));
+                                    let sid = self.state.ir.strings.intern_owned(s);
                                     self.alloc_val(Value::Str(sid))
                                 }
-                                PrecedenceEntry::Symbol(s) => {
-                                    self.owned_symbol_val(Cow::Borrowed(s))
-                                }
+                                PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s),
                             };
                             self.state.ir.value_children.push(vid);
                         }
@@ -438,7 +430,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             C::Word => {
                 if let Some(name) = &grammar.word_token {
-                    Ok(self.owned_symbol_val(Cow::Borrowed(name)))
+                    Ok(self.owned_symbol_val(name))
                 } else {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
@@ -447,7 +439,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 // The start rule is always the first variable; this isn't
                 // ConfigFieldUnset because every grammar has one.
                 let name = &grammar.variables[0].name;
-                Ok(self.owned_symbol_val(Cow::Borrowed(name)))
+                Ok(self.owned_symbol_val(name))
             }
             C::Reserved => {
                 let n = grammar.reserved_words.len();
@@ -477,7 +469,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let start = self.state.ir.value_children.len() as u32;
         self.state.ir.value_children.reserve(names.len());
         for name in names {
-            let vid = self.owned_symbol_val(Cow::Borrowed(name));
+            let vid = self.owned_symbol_val(name);
             self.state.ir.value_children.push(vid);
         }
         self.finish_list(start, names.len(), span)
@@ -487,17 +479,16 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match rule {
             Rule::Blank => self.alloc_rule(ARule::Blank),
             Rule::String(s) => {
-                let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(s));
+                let sid = self.state.ir.strings.intern_owned(s);
                 self.alloc_rule(ARule::String(sid))
             }
             Rule::Pattern(p, f) => {
-                let pid = self.state.ir.strings.intern_owned(Cow::Borrowed(p));
-                let fid =
-                    (!f.is_empty()).then(|| self.state.ir.strings.intern_owned(Cow::Borrowed(f)));
+                let pid = self.state.ir.strings.intern_owned(p);
+                let fid = (!f.is_empty()).then(|| self.state.ir.strings.intern_owned(f));
                 self.alloc_rule(ARule::Pattern(pid, fid))
             }
             Rule::NamedSymbol(name) => {
-                let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(name));
+                let sid = self.state.ir.strings.intern_owned(name);
                 self.alloc_rule(ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) | Rule::Seq(members) => {
@@ -538,15 +529,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let aprec = APrec::Integer(*n);
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 } else if let Precedence::Name(s) = &params.precedence {
-                    let aprec = APrec::Name(self.state.ir.strings.intern_owned(Cow::Borrowed(s)));
+                    let aprec = APrec::Name(self.state.ir.strings.intern_owned(s));
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 }
                 if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
-                    let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(value));
+                    let sid = self.state.ir.strings.intern_owned(value);
                     rid = self.alloc_rule(ARule::Alias(sid, *is_named, rid));
                 }
                 if let Some(field_name) = &params.field_name {
-                    let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(field_name));
+                    let sid = self.state.ir.strings.intern_owned(field_name);
                     rid = self.alloc_rule(ARule::Field(sid, rid));
                 }
                 if params.is_token {
@@ -559,7 +550,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 context_name,
             } => {
                 let inner = self.import_rule(inner);
-                let sid = self.state.ir.strings.intern_owned(Cow::Borrowed(context_name));
+                let sid = self.state.ir.strings.intern_owned(context_name);
                 self.alloc_rule(ARule::Reserved(sid, inner))
             }
             Rule::Symbol(_) => unreachable!(),
@@ -579,7 +570,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    pub(super) fn eval_expr(&mut self, id: NodeId) -> LowerResult<ValueId> {
+    pub fn eval_expr(&mut self, id: NodeId) -> LowerResult<ValueId> {
         let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
             Node::IntLit(n) => {
@@ -657,8 +648,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let total = lr.len as usize + rr.len as usize;
                 let len = u16::try_from(total)
                     .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
-                self.state.ir.value_children.extend_from_within(lr.as_range());
-                self.state.ir.value_children.extend_from_within(rr.as_range());
+                self.state
+                    .ir
+                    .value_children
+                    .extend_from_within(lr.as_range());
+                self.state
+                    .ir
+                    .value_children
+                    .extend_from_within(rr.as_range());
                 Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
             }
             &Node::FieldAccess { obj, field } => {
@@ -762,7 +759,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let vid = self.eval_expr(part_id)?;
                     result.push_str(self.resolve_str(self.str_id(vid)));
                 }
-                let sid = self.state.ir.strings.intern_owned(Cow::Owned(result));
+                let sid = self.state.ir.strings.intern_owned(&result);
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             &Node::DynRegex { pattern, flags } => {
@@ -803,7 +800,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    pub(super) fn lower_to_rule(&mut self, id: NodeId) -> LowerResult<RuleId> {
+    pub fn lower_to_rule(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
             Node::Ident(IdentKind::Rule) => {
@@ -819,10 +816,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 Ok(self.alloc_rule(ARule::String(sid)))
             }
             #[rustfmt::skip]
-            Node::SeqOrChoice { .. } | Node::Repeat { .. }
-            | Node::Blank | Node::Field { .. } | Node::Alias { .. }
-            | Node::Token { .. } | Node::Prec { .. }
-            | Node::Reserved { .. } => self.eval_combinator(id),
+            Node::SeqOrChoice { .. } | Node::Repeat { .. } | Node::Blank
+            | Node::Field { .. } | Node::Alias { .. } | Node::Token { .. }
+            | Node::Prec { .. } | Node::Reserved { .. } => self.eval_combinator(id),
             _ => {
                 let vid = self.eval_expr(id)?;
                 Ok(self.value_to_rule(vid))
@@ -874,7 +870,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 };
                 let blank = self.alloc_rule(ARule::Blank);
                 let start = self.children_start();
-                self.state.ir.rule_children.extend_from_slice(&[first, blank]);
+                self.state
+                    .ir
+                    .rule_children
+                    .extend_from_slice(&[first, blank]);
                 let child_range = self.children_range(start, span).unwrap();
                 Ok(self.alloc_rule(ARule::SeqOrChoice(false, child_range)))
             }

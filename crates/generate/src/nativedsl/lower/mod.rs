@@ -18,12 +18,14 @@ use thiserror::Error;
 
 use crate::{
     grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
+    nativedsl::{Module, ast::ModuleContext},
     rules::Rule,
 };
 
-use super::LowerError;
-use super::ModuleId;
-use super::ast::{ForId, Node, NodeId, SharedAst, Span};
+use super::{
+    LowerError, ModuleId,
+    ast::{ForId, Node, NodeId, SharedAst, Span},
+};
 
 use evaluator::Evaluator;
 use repr::{IrPools, LoadedModules, RuleId, ValueId};
@@ -53,6 +55,7 @@ pub struct LoweringState {
     loaded: LoadedModules,
     let_values: FxHashMap<NodeId, ValueId>,
     // Scratch (cleared per grammar):
+    // TODO: Organize into own struct
     call_stack: Vec<CallFrame>,
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
@@ -96,8 +99,8 @@ struct EvalResult {
 pub fn lower_with_base(
     state: &mut LoweringState,
     shared: &SharedAst,
-    previous: &[super::Module],
-    current: &super::ModuleContext,
+    previous: &[Module],
+    current: &ModuleContext,
 ) -> LowerResult<InputGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
@@ -112,8 +115,8 @@ pub fn lower_with_base(
 /// (diamond imports).
 fn collect_helper_rules(
     shared: &SharedAst,
-    current: &super::ModuleContext,
-    previous: &[super::Module],
+    current: &ModuleContext,
+    previous: &[Module],
 ) -> Vec<(String, Rule)> {
     let mut collected = Vec::new();
     super::for_each_imported_helper::<std::convert::Infallible>(
@@ -121,7 +124,7 @@ fn collect_helper_rules(
         &current.module_refs,
         previous,
         |_idx, module, _ref_span| {
-            let super::Module::Helper { lowered_rules, .. } = module else {
+            let Module::Helper { lowered_rules, .. } = module else {
                 unreachable!()
             };
             collected.extend(lowered_rules.iter().cloned());
@@ -202,8 +205,8 @@ fn evaluate(
             _ => unreachable!(),
         }
     }
-    // grammar_config is guaranteed present by validate_grammar in mod.rs,
-    // language is guaranteed present by the parser (MissingLanguageField error).
+    // grammar_config is guaranteed present by `validate_grammar`, language
+    // is guaranteed present by the parser (`MissingLanguageField` error).
     let config = ctx.grammar_config.as_ref().unwrap();
     let language = config.language.as_ref().unwrap();
 
