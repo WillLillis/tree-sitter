@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -181,12 +182,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
     }
 
-    #[cold]
     fn error(&self, kind: ParseErrorKind) -> ParseError {
         ParseError::new(kind, self.span())
     }
 
-    #[cold]
     fn dup_err(&self, kind: ParseErrorKind, span: Span, first_span: Span) -> ParseError {
         ParseError::with_note(
             kind,
@@ -212,7 +211,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         Ok(())
     }
 
-    #[cold]
     fn err_arg_count(&self, name: TokenKind, expected: u8, got: usize, start: Span) -> ParseError {
         ParseError::new(
             ParseErrorKind::WrongArgumentCount {
@@ -903,10 +901,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             this.expect(TokenKind::Colon)?;
             Ok((key, this.parse_expr()?))
         })?;
-        let mut seen = rustc_hash::FxHashMap::with_capacity_and_hasher(
-            fields.len(),
-            rustc_hash::FxBuildHasher,
-        );
+        let mut seen = FxHashMap::with_capacity_and_hasher(fields.len(), FxBuildHasher);
         for &(span, _) in &fields {
             let key = self.ctx.text(span);
             if let Some(first_span) = seen.insert(key, span) {

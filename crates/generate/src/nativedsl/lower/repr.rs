@@ -1,6 +1,5 @@
 //! Intermediate representation used during lowering.
 
-use std::borrow::Cow;
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -22,8 +21,7 @@ pub enum StrEntry {
 pub struct StringPool {
     pub entries: Vec<StrEntry>,
     /// Dedup table for `Owned` entries. The `Rc<str>` key shares its allocation
-    /// with the matching `StrEntry::Owned`, so each unique string only allocates
-    /// once.
+    /// with the matching `StrEntry::Owned`.
     owned_lookup: FxHashMap<Rc<str>, Str>,
 }
 
@@ -44,11 +42,11 @@ impl StringPool {
         id
     }
 
-    pub fn intern_owned(&mut self, s: Cow<'_, str>) -> Str {
-        if let Some(&id) = self.owned_lookup.get(s.as_ref()) {
+    pub fn intern_owned(&mut self, s: &str) -> Str {
+        if let Some(&id) = self.owned_lookup.get(s) {
             return id;
         }
-        let owned: Rc<str> = Rc::from(s.as_ref());
+        let owned: Rc<str> = Rc::from(s);
         // Safety: entries always starts with one sentinel, so len() >= 1.
         let id = Str(unsafe { NonZeroU32::new_unchecked(self.entries.len() as u32) });
         self.entries.push(StrEntry::Owned(Rc::clone(&owned)));

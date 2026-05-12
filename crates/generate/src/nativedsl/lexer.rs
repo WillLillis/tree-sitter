@@ -14,7 +14,6 @@ const CLASS_IDENT_CONTINUE: u8 = 2;
 const CLASS_IDENT_START: u8 = 4;
 
 /// Lookup table mapping byte value to classification flags.
-/// Replaces per-byte range checks with a single indexed load.
 const BYTE_CLASS: [u8; 256] = {
     let mut t = [0u8; 256];
     t[b' ' as usize] = CLASS_WHITESPACE;
@@ -41,7 +40,6 @@ const BYTE_CLASS: [u8; 256] = {
     t
 };
 
-/// Classify a byte using the lookup table.
 #[inline]
 const fn byte_is(b: u8, class: u8) -> bool {
     BYTE_CLASS[b as usize] & class != 0
@@ -55,7 +53,6 @@ pub enum TokenKind {
     /// String literal. Token span covers `"..."` including quotes.
     StringLit,
     /// Raw string literal. Token span covers `r"..."`, `r#"..."#`, etc.
-    /// `hash_count` is the number of `#` delimiters.
     RawStringLit {
         hash_count: u8,
     },
@@ -148,8 +145,7 @@ keywords! {
     KwPrecDynamic => "prec_dynamic", KwReserved => "reserved",
     KwTokenImmediate => "token_immediate", KwConcat => "concat", KwRegexp => "regexp",
     KwInherit => "inherit", KwImport => "import", KwOverride => "override",
-    KwAppend => "append", KwGrammarConfig => "grammar_config",
-    KwExternal => "external",
+    KwAppend => "append", KwGrammarConfig => "grammar_config", KwExternal => "external",
 }
 
 impl std::fmt::Display for TokenKind {
