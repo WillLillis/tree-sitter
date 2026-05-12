@@ -53,6 +53,7 @@ pub mod serialize;
 mod tests;
 pub mod typecheck;
 
+pub use crate::grammars::InputGrammar;
 pub use diagnostic::NativeDslError;
 pub use lexer::{LexErrorKind, LexResult};
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
@@ -67,7 +68,6 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::grammars::InputGrammar;
 use crate::rules::Rule;
 
 use ast::{ModuleContext, SharedAst, Span};
