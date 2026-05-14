@@ -244,6 +244,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_item(&mut self) -> ParseResult<NodeId> {
+        if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
+            let child = self.parse_item()?;
+            let end = self.shared.arena.span(child);
+            return Ok(self
+                .shared
+                .arena
+                .push(Node::Cfg { name, child }, cfg_start.merge(end)));
+        }
         match &self.current().kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
             TokenKind::KwRule => self.parse_rule_def(false),
@@ -253,6 +261,45 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwExternal => self.parse_external_decl(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
+    }
+
+    /// If the next token is `#`, consume `#[cfg(IDENT)]` and return the
+    /// `(attribute span, flag-name span)` pair. Otherwise return `None`
+    /// without consuming anything.
+    fn try_parse_cfg_attribute(&mut self) -> ParseResult<Option<(Span, Span)>> {
+        let Some(start) = self.eat(TokenKind::Pound) else {
+            return Ok(None);
+        };
+        self.expect(TokenKind::LBracket)?;
+        let kw = self.expect_ident()?;
+        let kw_text = self.ctx.text(kw);
+        if kw_text != "cfg" {
+            return Err(ParseError::new(
+                ParseErrorKind::ExpectedCfgKeyword(kw_text.to_string()),
+                kw,
+            ));
+        }
+        self.expect(TokenKind::LParen)?;
+        let name = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+        let end = self.expect(TokenKind::RBracket)?;
+        Ok(Some((start.merge(end), name)))
+    }
+
+    /// Parse an expression, optionally preceded by one or more `#[cfg(NAME)]`
+    /// attributes. Used in list-member positions (seq/choice members, list
+    /// literal elements). Nested cfgs are intersection: all must be active for
+    /// the wrapped expression to survive.
+    fn parse_expr_with_cfg(&mut self) -> ParseResult<NodeId> {
+        if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
+            let child = self.parse_expr_with_cfg()?;
+            let end = self.shared.arena.span(child);
+            return Ok(self
+                .shared
+                .arena
+                .push(Node::Cfg { name, child }, cfg_start.merge(end)));
+        }
+        self.parse_expr()
     }
 
     fn parse_external_decl(&mut self) -> ParseResult<NodeId> {
@@ -322,6 +369,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 ConfigField::Precedences => config.precedences = Some(self.parse_expr()?),
                 ConfigField::Reserved => config.reserved = Some(self.parse_expr()?),
                 ConfigField::Start => config.start = Some(self.parse_expr()?),
+                ConfigField::Flags => config.flags = Some(self.parse_expr()?),
             }
             if !self.at(TokenKind::RBrace) {
                 self.expect(TokenKind::Comma)?;
@@ -558,8 +606,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     .arena
                     .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
             }
-            TokenKind::LBracket => self.parse_delimited(start, TokenKind::RBracket, Node::List),
-            TokenKind::LParen => self.parse_delimited(start, TokenKind::RParen, Node::Tuple),
+            TokenKind::LBracket => {
+                self.parse_delimited(start, TokenKind::RBracket, Node::List, Self::parse_expr_with_cfg)
+            }
+            TokenKind::LParen => {
+                self.parse_delimited(start, TokenKind::RParen, Node::Tuple, Self::parse_expr)
+            }
             TokenKind::LBrace => self.parse_object(start),
             _ => Err(self.error(ParseErrorKind::ExpectedExpression)),
         }
@@ -572,7 +624,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
-        let range = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
+        let range = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr_with_cfg)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.shared.arena.push(make(range), start.merge(end)))
     }
@@ -610,7 +662,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let field_name = self.ctx.text(field_span);
         let field = ConfigField::try_from(field_name)
             .ok()
-            .filter(|f| !matches!(f, ConfigField::Language | ConfigField::Inherits))
+            .filter(|f| !matches!(f, ConfigField::Language | ConfigField::Inherits | ConfigField::Flags))
             .ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::UnknownGrammarField(field_name.to_string()),
@@ -887,9 +939,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         start: Span,
         close: TokenKind,
         make: fn(ChildRange) -> Node,
+        item: fn(&mut Self) -> ParseResult<NodeId>,
     ) -> ParseResult<NodeId> {
         self.advance_pos();
-        let range = self.comma_sep_children(&[], close, Self::parse_expr)?;
+        let range = self.comma_sep_children(&[], close, item)?;
         let end = self.expect(close)?;
         Ok(self.shared.arena.push(make(range), start.merge(end)))
     }
@@ -1023,6 +1076,8 @@ pub enum ParseErrorKind {
         expected: u8,
         got: usize,
     },
+    #[error("expected 'cfg' inside attribute, got '{0}'")]
+    ExpectedCfgKeyword(String),
 }
 
 #[expect(

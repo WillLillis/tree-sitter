@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 
 use crate::nativedsl::{
     DisallowedItemKind, DslError, DslResult, LexError, LexErrorKind, LowerError, LowerErrorKind,
-    LoweringState, Module, ModuleError, ModuleId,
+    LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
+    apply_cfg::{CfgState, apply_cfg},
     ast::{ModuleContext, Node, SharedAst, Span},
     lexer, lower, parser, resolve,
+    resolve::ResolveErrorKind,
     typecheck::{self, TypeEnv},
 };
 
@@ -20,6 +22,7 @@ pub struct Loader<'a> {
     pub modules: &'a mut Vec<Module>,
     pub env: &'a mut TypeEnv,
     pub state: &'a mut LoweringState,
+    pub cfg: &'a mut CfgState,
     pub ancestor_paths: Vec<PathBuf>,
     /// Loader-wide dedup cache: each (canonical path, kind) loads at most once
     /// across the whole import graph for a single `parse_native_dsl` call. Keyed
@@ -60,8 +63,20 @@ impl Loader<'_> {
         let module_dir = path.parent().unwrap();
 
         let tokens = lexer::Lexer::new(source).tokenize()?;
-        let ctx = parser::Parser::new(&tokens, source.to_string(), path.to_path_buf(), self.shared)
-            .parse()?;
+        let mut ctx =
+            parser::Parser::new(&tokens, source.to_string(), path.to_path_buf(), self.shared)
+                .parse()?;
+
+        // Register this module's flag declarations into the global state.
+        // First-write-wins, so descendants (loaded earlier) override ancestors.
+        let cfg_module_idx = self.cfg.merge_module_flags(self.shared, &ctx)?;
+
+        // Apply cfg gating *before* loading children so cfg-disabled
+        // `inherit(...)` / `import(...)` calls don't trigger file loads (and
+        // don't merge their rules into this module). Also runs before module
+        // validation so the inherit/inherits consistency check sees the
+        // post-gating state.
+        apply_cfg(self.shared, &mut ctx, self.cfg, cfg_module_idx, kind)?;
 
         match kind {
             ModuleKind::Grammar => self.validate_grammar(&ctx)?,
@@ -95,7 +110,8 @@ impl Loader<'_> {
         let base = ctx
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
-        resolve::resolve(self.shared, &ctx, self.modules, base)?;
+        resolve::resolve(self.shared, &ctx, self.modules, base)
+            .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
 
@@ -120,6 +136,43 @@ impl Loader<'_> {
         self.modules.push(module);
 
         Ok(global_id)
+    }
+
+    /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped
+    /// declaration, attach a note pointing at the gated decl with the cfg
+    /// flag named in the message. Otherwise pass through unchanged.
+    fn enrich_resolve_error(&self, current: &ModuleContext, e: ResolveError) -> ResolveError {
+        let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
+            return e;
+        };
+        let Some(dropped) = self.cfg.dropped_decls.get(name) else {
+            return e;
+        };
+        let Node::Cfg {
+            name: flag_span, ..
+        } = *self.shared.arena.get(*dropped)
+        else {
+            return e; // shouldn't happen - apply_cfg only stores Cfg nodes here
+        };
+        // Find the module that owns this node by checking which node_range
+        // contains the cfg_node's index. Falls back to `current` for the
+        // module-being-processed case (not yet pushed to self.modules).
+        let node_idx = u32::from(*dropped);
+        let module_ctx = self
+            .modules
+            .iter()
+            .map(Module::ctx)
+            .chain(std::iter::once(current))
+            .find(|m| m.node_range.contains(&node_idx))
+            .unwrap_or(current);
+        let flag_name = module_ctx.text(flag_span).to_owned();
+        let decl_span = self.shared.arena.span(*dropped);
+        let span = e.span.unwrap_or(decl_span);
+        ResolveError::with_note(
+            e.kind,
+            span,
+            module_ctx.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span),
+        )
     }
 
     fn load_child_module(

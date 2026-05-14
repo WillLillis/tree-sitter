@@ -103,6 +103,7 @@ pub enum TokenKind {
     Eq,
     Lt,
     Gt,
+    Pound,
     // Other
     Comment,
     Eof,
@@ -172,6 +173,7 @@ impl std::fmt::Display for TokenKind {
             Self::Eq => "'='",
             Self::Lt => "'<'",
             Self::Gt => "'>'",
+            Self::Pound => "'#'",
             Self::Comment => "comment",
             Self::Eof => "end of file",
             _ => unreachable!(),
@@ -284,6 +286,7 @@ impl<'src> Lexer<'src> {
             b'<' => TokenKind::Lt,
             b'>' => TokenKind::Gt,
             b'-' => TokenKind::Minus,
+            b'#' => TokenKind::Pound,
             b'"' => self.lex_string(start)?,
             b'0'..=b'9' => self.lex_int(start)?,
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(&mut start)?,

@@ -575,6 +575,20 @@ pub enum ResolveErrorKind {
     ShadowedBinding(String),
     #[error("externals must be a list literal, append(), or variable reference")]
     InvalidExternalsExpression,
+    #[error("`flags` must be an object literal `{{ enabled: [...], disabled: [...] }}`")]
+    CfgFlagsNotObject,
+    #[error("`flags` only accepts `enabled` and `disabled` keys, got '{0}'")]
+    CfgFlagsUnknownKey(String),
+    #[error("`flags.{{enabled,disabled}}` must be a list literal of string flag names")]
+    CfgFlagsNotList,
+    #[error("`flags.{{enabled,disabled}}` entries must be string literals")]
+    CfgFlagsNonLiteral,
+    #[error(
+        "`#[cfg(...)]` is not allowed inside the `flags` field; flag declarations are read before cfg gating runs"
+    )]
+    CfgHasCfg,
+    #[error("`#[cfg({0})]` references an unknown flag; declare it in this grammar's `flags`")]
+    CfgFlagUnknown(String),
 }
 
 /// Build an `UnknownIdentifier` error, attaching a "defined later" note if the
