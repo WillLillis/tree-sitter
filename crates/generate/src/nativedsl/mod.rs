@@ -41,6 +41,7 @@ macro_rules! expect_pat {
     };
 }
 
+pub mod apply_cfg;
 pub mod ast;
 pub mod diagnostic;
 pub mod lexer;
@@ -174,11 +175,13 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
+    let mut cfg = apply_cfg::CfgState::default();
     let mut dsl_loader = Loader {
         shared: &mut shared,
         modules: &mut modules,
         env: &mut env,
         state: &mut state,
+        cfg: &mut cfg,
         ancestor_paths: vec![canonical.clone()],
         loaded: Vec::new(),
     };
@@ -283,11 +286,13 @@ pub struct Note {
     pub source: String,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,
     DefinedLater,
+    /// Carries the cfg flag name; the note's span points at the gated decl.
+    GatedByDisabledCfg(String),
 }
 
 impl std::fmt::Display for NoteMessage {
@@ -296,6 +301,9 @@ impl std::fmt::Display for NoteMessage {
             Self::FirstDefinedHere => write!(f, "first defined here"),
             Self::ReferencedFromHere => write!(f, "referenced from here"),
             Self::DefinedLater => write!(f, "let binding defined here (move it before the usage)"),
+            Self::GatedByDisabledCfg(flag) => {
+                write!(f, "this declaration is gated by `#[cfg({flag})]`, currently disabled")
+            }
         }
     }
 }
