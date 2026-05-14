@@ -450,7 +450,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 }
                 Ok(self.alloc_object(map))
             }
-            C::Language | C::Inherits => unreachable!(),
+            C::Language | C::Inherits | C::Flags => unreachable!(),
         }
     }
 

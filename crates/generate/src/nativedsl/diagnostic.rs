@@ -65,14 +65,14 @@ struct Source<'a> {
     path: &'a Path,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SnippetKind {
     Error,
     Note(NoteMessage),
 }
 
 impl SnippetKind {
-    const fn marker(self) -> SnippetMarker {
+    const fn marker(&self) -> SnippetMarker {
         match self {
             Self::Error => ERROR_MARKER,
             Self::Note(_) => NOTE_MARKER,
@@ -180,7 +180,7 @@ fn render_error(
                 text: source,
                 path,
             },
-            SnippetKind::Note(*message),
+            SnippetKind::Note(message.clone()),
             false,
         )?;
     }

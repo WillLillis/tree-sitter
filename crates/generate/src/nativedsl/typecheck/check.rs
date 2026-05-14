@@ -232,7 +232,7 @@ fn type_of(
                 C::Conflicts | C::Precedences => Ty::LIST_LIST_RULE,
                 C::Word | C::Start => Ty::RULE,
                 C::Reserved => Ty::OBJ_LIST_RULE,
-                C::Language | C::Inherits => unreachable!(),
+                C::Language | C::Inherits | C::Flags => unreachable!(),
             })
         }
         &Node::MacroParam { ty, .. } | &Node::ForBinding { ty, .. } => Ok(ty),
