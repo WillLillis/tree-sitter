@@ -37,6 +37,7 @@ macro_rules! assert_err {
 }
 
 mod bindings;
+mod cfg;
 mod combinators;
 mod config;
 mod errors;
