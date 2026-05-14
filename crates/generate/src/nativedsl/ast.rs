@@ -38,6 +38,12 @@ impl NodeId {
     }
 }
 
+impl From<NodeId> for u32 {
+    fn from(id: NodeId) -> Self {
+        id.0.get()
+    }
+}
+
 /// Arena for AST nodes and their spans.
 pub struct NodeArena {
     nodes: Vec<Node>,
@@ -70,6 +76,10 @@ impl NodeArena {
         &self.nodes[id.index()]
     }
 
+    pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
+        &mut self.nodes[id.index()]
+    }
+
     #[must_use]
     pub fn span(&self, id: NodeId) -> Span {
         self.spans[id.index()]
@@ -77,6 +87,10 @@ impl NodeArena {
 
     pub fn set(&mut self, id: NodeId, node: Node) {
         self.nodes[id.index()] = node;
+    }
+
+    pub fn set_span(&mut self, id: NodeId, span: Span) {
+        self.spans[id.index()] = span;
     }
 
     #[inline]
@@ -162,10 +176,11 @@ pub enum ConfigField {
     Precedences,
     Reserved,
     Start,
+    Flags,
 }
 
 impl ConfigField {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
 }
 
 impl TryFrom<&str> for ConfigField {
@@ -183,6 +198,7 @@ impl TryFrom<&str> for ConfigField {
             "precedences" => Self::Precedences,
             "reserved" => Self::Reserved,
             "start" => Self::Start,
+            "flags" => Self::Flags,
             _ => return Err(()),
         })
     }
@@ -472,7 +488,7 @@ impl ChildRange {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Node {
     Grammar,
     Rule {
@@ -597,6 +613,12 @@ pub enum Node {
         ty: Ty,
         index: u8,
     },
+    /// `#[cfg(NAME)] ITEM` — gates `child` on the named flag. Survives parse;
+    /// dropped (or unwrapped) by the `apply_cfg` pass before resolve.
+    Cfg {
+        name: Span,
+        child: NodeId,
+    },
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.
     #[doc(hidden)]
     Unreachable,
@@ -617,6 +639,19 @@ impl Node {
             _ => None,
         }
     }
+
+    /// Mutable counterpart to [`Self::child_range`]. Lets callers shrink a
+    /// variadic node's range in place (e.g. after dropping cfg-gated members)
+    /// without rebuilding the whole `Node` value.
+    pub fn child_range_mut(&mut self) -> Option<&mut ChildRange> {
+        match self {
+            Self::SeqOrChoice { range: r, .. }
+            | Self::List(r)
+            | Self::Tuple(r)
+            | Self::Concat(r) => Some(r),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -632,6 +667,7 @@ pub struct GrammarConfig {
     pub precedences: Option<NodeId>,
     pub reserved: Option<NodeId>,
     pub start: Option<NodeId>,
+    pub flags: Option<NodeId>,
 }
 
 impl GrammarConfig {
@@ -645,6 +681,7 @@ impl GrammarConfig {
             (C::Supertypes, self.supertypes), (C::Word, self.word),
             (C::Conflicts, self.conflicts),   (C::Precedences, self.precedences),
             (C::Reserved, self.reserved),     (C::Start, self.start),
+            (C::Flags, self.flags),
         ];
         fields
             .into_iter()
