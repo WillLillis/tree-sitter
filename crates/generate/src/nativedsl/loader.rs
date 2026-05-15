@@ -75,8 +75,12 @@ impl Loader<'_> {
         // `inherit(...)` / `import(...)` calls don't trigger file loads (and
         // don't merge their rules into this module). Also runs before module
         // validation so the inherit/inherits consistency check sees the
-        // post-gating state.
-        apply_cfg(self.shared, &mut ctx, self.cfg, cfg_module_idx, kind)?;
+        // post-gating state. Skip the whole walk when no `#[cfg(...)]`
+        // appears anywhere in this module (the common case for grammars that
+        // don't use the feature).
+        if ctx.has_cfg {
+            apply_cfg(self.shared, &mut ctx, self.cfg, cfg_module_idx, kind)?;
+        }
 
         match kind {
             ModuleKind::Grammar => self.validate_grammar(&ctx)?,
@@ -111,7 +115,7 @@ impl Loader<'_> {
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
         resolve::resolve(self.shared, &ctx, self.modules, base)
-            .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
+            .map_err(|e| self.enrich_resolve_error(&ctx, cfg_module_idx, e))?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
 
@@ -141,38 +145,53 @@ impl Loader<'_> {
     /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped
     /// declaration, attach a note pointing at the gated decl with the cfg
     /// flag named in the message. Otherwise pass through unchanged.
-    fn enrich_resolve_error(&self, current: &ModuleContext, e: ResolveError) -> ResolveError {
+    fn enrich_resolve_error(
+        &self,
+        current: &ModuleContext,
+        current_idx: usize,
+        mut e: ResolveError,
+    ) -> ResolveError {
         let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
             return e;
         };
-        let Some(dropped) = self.cfg.dropped_decls.get(name) else {
+        // Prefer the failing module's own drops (resolves the collision case
+        // where two modules both gate a decl with the same name); fall back
+        // to scanning other modules so inherited / imported drops are still
+        // attributed correctly.
+        let cfg_node = self
+            .cfg
+            .dropped_decls_per_module
+            .get(current_idx)
+            .and_then(|m| m.get(name).copied())
+            .or_else(|| {
+                self.cfg
+                    .dropped_decls_per_module
+                    .iter()
+                    .find_map(|m| m.get(name).copied())
+            });
+        let Some(cfg_node) = cfg_node else {
             return e;
         };
         let Node::Cfg {
             name: flag_span, ..
-        } = *self.shared.arena.get(*dropped)
+        } = *self.shared.arena.get(cfg_node)
         else {
             return e; // shouldn't happen - apply_cfg only stores Cfg nodes here
         };
-        // Find the module that owns this node by checking which node_range
-        // contains the cfg_node's index. Falls back to `current` for the
-        // module-being-processed case (not yet pushed to self.modules).
-        let node_idx = u32::from(*dropped);
+        // Find which module's source the cfg flag span resolves against.
+        // `current` covers the module-being-processed case (not yet pushed
+        // to `self.modules`).
         let module_ctx = self
             .modules
             .iter()
             .map(Module::ctx)
             .chain(std::iter::once(current))
-            .find(|m| m.node_range.contains(&node_idx))
+            .find(|m| m.owns_node(cfg_node))
             .unwrap_or(current);
         let flag_name = module_ctx.text(flag_span).to_owned();
-        let decl_span = self.shared.arena.span(*dropped);
-        let span = e.span.unwrap_or(decl_span);
-        ResolveError::with_note(
-            e.kind,
-            span,
-            module_ctx.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span),
-        )
+        let decl_span = self.shared.arena.span(cfg_node);
+        e.add_note(module_ctx.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
+        e
     }
 
     fn load_child_module(

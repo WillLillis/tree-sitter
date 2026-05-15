@@ -38,12 +38,6 @@ impl NodeId {
     }
 }
 
-impl From<NodeId> for u32 {
-    fn from(id: NodeId) -> Self {
-        id.0.get()
-    }
-}
-
 /// Arena for AST nodes and their spans.
 pub struct NodeArena {
     nodes: Vec<Node>,
@@ -415,6 +409,10 @@ pub struct ModuleContext {
     /// Populated by the parser. Used by resolve and lower to look up
     /// `helper::external_name` references without scanning `root_items`.
     pub external_names: Vec<Span>,
+    /// `true` if the parser pushed at least one `Node::Cfg` for this module.
+    /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
+    /// attributes appear in source.
+    pub has_cfg: bool,
     /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously
     /// before any child loads, so this slice is well-defined and stable.
@@ -613,8 +611,8 @@ pub enum Node {
         ty: Ty,
         index: u8,
     },
-    /// `#[cfg(NAME)] ITEM` — gates `child` on the named flag. Survives parse;
-    /// dropped (or unwrapped) by the `apply_cfg` pass before resolve.
+    /// `#[cfg(NAME)] ITEM`: gates `child` on the named flag. Survives parse,
+    /// and is then dropped (or unwrapped) by the `apply_cfg` pass before resolve.
     Cfg {
         name: Span,
         child: NodeId,
@@ -643,7 +641,7 @@ impl Node {
     /// Mutable counterpart to [`Self::child_range`]. Lets callers shrink a
     /// variadic node's range in place (e.g. after dropping cfg-gated members)
     /// without rebuilding the whole `Node` value.
-    pub fn child_range_mut(&mut self) -> Option<&mut ChildRange> {
+    pub const fn child_range_mut(&mut self) -> Option<&mut ChildRange> {
         match self {
             Self::SeqOrChoice { range: r, .. }
             | Self::List(r)
