@@ -3,6 +3,7 @@
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use super::typecheck::Ty;
@@ -413,6 +414,12 @@ pub struct ModuleContext {
     /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
     /// attributes appear in source.
     pub has_cfg: bool,
+    /// Flag names declared in this module's `flags`, mapped to the span of
+    /// their first occurrence (used for `FirstDefinedHere` notes).
+    pub cfg_declared: FxHashMap<String, Span>,
+    /// Top-level declarations dropped by cfg in this module: name -> Cfg
+    /// node id. Drives `GatedByDisabledCfg` enrichment.
+    pub cfg_dropped: FxHashMap<String, NodeId>,
     /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously
     /// before any child loads, so this slice is well-defined and stable.

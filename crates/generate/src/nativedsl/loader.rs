@@ -69,7 +69,7 @@ impl Loader<'_> {
 
         // Register this module's flag declarations into the global state.
         // First-write-wins, so descendants (loaded earlier) override ancestors.
-        let cfg_module_idx = self.cfg.merge_module_flags(self.shared, &ctx)?;
+        self.cfg.merge_module_flags(self.shared, &mut ctx)?;
 
         // Apply cfg gating *before* loading children so cfg-disabled
         // `inherit(...)` / `import(...)` calls don't trigger file loads (and
@@ -79,7 +79,7 @@ impl Loader<'_> {
         // appears anywhere in this module (the common case for grammars that
         // don't use the feature).
         if ctx.has_cfg {
-            apply_cfg(self.shared, &mut ctx, self.cfg, cfg_module_idx, kind)?;
+            apply_cfg(self.shared, &mut ctx, self.cfg, kind)?;
         }
 
         match kind {
@@ -115,7 +115,7 @@ impl Loader<'_> {
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
         resolve::resolve(self.shared, &ctx, self.modules, base)
-            .map_err(|e| self.enrich_resolve_error(&ctx, cfg_module_idx, e))?;
+            .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
 
@@ -145,12 +145,7 @@ impl Loader<'_> {
     /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped
     /// declaration, attach a note pointing at the gated decl with the cfg
     /// flag named in the message. Otherwise pass through unchanged.
-    fn enrich_resolve_error(
-        &self,
-        current: &ModuleContext,
-        current_idx: usize,
-        mut e: ResolveError,
-    ) -> ResolveError {
+    fn enrich_resolve_error(&self, current: &ModuleContext, mut e: ResolveError) -> ResolveError {
         let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
             return e;
         };
@@ -158,17 +153,12 @@ impl Loader<'_> {
         // where two modules both gate a decl with the same name); fall back
         // to scanning other modules so inherited / imported drops are still
         // attributed correctly.
-        let cfg_node = self
-            .cfg
-            .dropped_decls_per_module
-            .get(current_idx)
-            .and_then(|m| m.get(name).copied())
-            .or_else(|| {
-                self.cfg
-                    .dropped_decls_per_module
-                    .iter()
-                    .find_map(|m| m.get(name).copied())
-            });
+        let cfg_node = current.cfg_dropped.get(name).copied().or_else(|| {
+            self.modules
+                .iter()
+                .map(Module::ctx)
+                .find_map(|m| m.cfg_dropped.get(name).copied())
+        });
         let Some(cfg_node) = cfg_node else {
             return e;
         };
