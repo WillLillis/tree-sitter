@@ -65,6 +65,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 external_names: Vec::new(),
                 node_range: 0..0,
                 has_cfg: false,
+                cfg_declared: FxHashMap::default(),
+                cfg_dropped: FxHashMap::default(),
             },
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
