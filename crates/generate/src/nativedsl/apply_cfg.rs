@@ -14,87 +14,72 @@ use super::{
 
 #[derive(Default)]
 pub struct CfgState {
-    /// Union of `declared_per_module`: every flag name declared in any
-    /// module loaded so far. Cached as a flat set for the helper-module
-    /// visibility check, which would otherwise scan all per-module sets
-    /// on each `#[cfg(...)]` attribute.
+    /// Union of every module's `cfg_declared`: every flag name declared
+    /// anywhere in the load chain. Cached for the helper-module visibility
+    /// check (which sees the global declared set, not per-module).
     pub declared_any: FxHashSet<String>,
     /// `name -> enabled?`. Descendants (loaded earlier) win via `or_insert`.
     pub active: FxHashMap<String, bool>,
-    /// Per-module local declarations: flag name -> span of its first
-    /// occurrence in this module's `flags` declaration. Cfg attrs in M may
-    /// only name flags in `declared_per_module[M]`; cross-module refs must
-    /// re-declare. Spans drive the `FirstDefinedHere` note on duplicate-
-    /// declaration errors.
-    pub declared_per_module: Vec<FxHashMap<String, Span>>,
-    /// Per-module map of `decl_name -> Cfg node id` for top-level declarations
-    /// (rule, macro, let, external) dropped by cfg in that module. Used by
-    /// resolve enrichment to turn "undefined symbol" into "definition exists
-    /// but gated by ...". Keyed per-module so a name dropped in two modules
-    /// doesn't collide, and so the failing module's own drops are preferred.
-    pub dropped_decls_per_module: Vec<FxHashMap<String, NodeId>>,
 }
 
 impl CfgState {
-    /// Read this module's `flags: { enabled: [...], disabled: [...] }` and
-    /// merge into the global state. Returns the assigned per-module index.
+    /// Read this module's `flags: { enabled: [...], disabled: [...] }`,
+    /// populate `ctx.cfg_declared`, and merge into global state.
     pub fn merge_module_flags(
         &mut self,
         shared: &SharedAst,
-        ctx: &ModuleContext,
-    ) -> Result<usize, ResolveError> {
-        let mut local: FxHashMap<String, Span> = FxHashMap::default();
-        if let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) {
-            let Node::Object(range) = *shared.arena.get(flags_id) else {
+        ctx: &mut ModuleContext,
+    ) -> Result<(), ResolveError> {
+        let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) else {
+            return Ok(());
+        };
+        let Node::Object(range) = *shared.arena.get(flags_id) else {
+            return Err(err(
+                ResolveErrorKind::CfgFlagsNotObject,
+                shared.arena.span(flags_id),
+            ));
+        };
+        for &(key_span, value_id) in shared.pools.get_object(range) {
+            let enable = match ctx.text(key_span) {
+                "enabled" => true,
+                "disabled" => false,
+                other => {
+                    return Err(err(
+                        ResolveErrorKind::CfgFlagsUnknownKey(other.into()),
+                        key_span,
+                    ));
+                }
+            };
+            let Node::List(items) = shared.arena.get(value_id) else {
                 return Err(err(
-                    ResolveErrorKind::CfgFlagsNotObject,
-                    shared.arena.span(flags_id),
+                    ResolveErrorKind::CfgFlagsNotList,
+                    shared.arena.span(value_id),
                 ));
             };
-            for &(key_span, value_id) in shared.pools.get_object(range) {
-                let enable = match ctx.text(key_span) {
-                    "enabled" => true,
-                    "disabled" => false,
-                    other => {
-                        return Err(err(
-                            ResolveErrorKind::CfgFlagsUnknownKey(other.into()),
-                            key_span,
-                        ));
+            for &elem in shared.pools.child_slice(*items) {
+                let span = shared.arena.span(elem);
+                match shared.arena.get(elem) {
+                    Node::StringLit => {}
+                    Node::Cfg { .. } => {
+                        return Err(err(ResolveErrorKind::CfgInsideFlags, span));
                     }
-                };
-                let Node::List(items) = shared.arena.get(value_id) else {
-                    return Err(err(
-                        ResolveErrorKind::CfgFlagsNotList,
-                        shared.arena.span(value_id),
-                    ));
-                };
-                for &elem in shared.pools.child_slice(*items) {
-                    let span = shared.arena.span(elem);
-                    match shared.arena.get(elem) {
-                        Node::StringLit => {}
-                        Node::Cfg { .. } => {
-                            return Err(err(ResolveErrorKind::CfgInsideFlags, span));
-                        }
-                        _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
-                    }
-                    let name_text = ctx.text(span);
-                    if let Some(&first_span) = local.get(name_text) {
-                        return Err(ResolveError::with_note(
-                            ResolveErrorKind::CfgFlagDeclaredTwice(name_text.to_owned()),
-                            span,
-                            ctx.note(NoteMessage::FirstDefinedHere, first_span),
-                        ));
-                    }
-                    let name = name_text.to_owned();
-                    self.declared_any.insert(name.clone());
-                    local.insert(name.clone(), span);
-                    self.active.entry(name).or_insert(enable);
+                    _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
                 }
+                let name_text = ctx.text(span);
+                if let Some(&first_span) = ctx.cfg_declared.get(name_text) {
+                    return Err(ResolveError::with_note(
+                        ResolveErrorKind::CfgFlagDeclaredTwice(name_text.to_owned()),
+                        span,
+                        ctx.note(NoteMessage::FirstDefinedHere, first_span),
+                    ));
+                }
+                let name = name_text.to_owned();
+                self.declared_any.insert(name.clone());
+                ctx.cfg_declared.insert(name.clone(), span);
+                self.active.entry(name).or_insert(enable);
             }
         }
-        self.declared_per_module.push(local);
-        self.dropped_decls_per_module.push(FxHashMap::default());
-        Ok(self.declared_per_module.len() - 1)
+        Ok(())
     }
 }
 
@@ -102,16 +87,16 @@ impl CfgState {
 pub fn apply_cfg(
     shared: &mut SharedAst,
     ctx: &mut ModuleContext,
-    state: &mut CfgState,
-    module_idx: usize,
+    state: &CfgState,
     kind: ModuleKind,
 ) -> Result<(), ResolveError> {
     let mut w = Walker {
         shared,
         state,
         kind,
-        module_idx,
         source: &ctx.source,
+        cfg_declared: &ctx.cfg_declared,
+        cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
         inherit_ref: &mut ctx.inherit_ref,
     };
@@ -142,14 +127,16 @@ pub fn apply_cfg(
 
 struct Walker<'a> {
     shared: &'a mut SharedAst,
-    state: &'a mut CfgState,
+    state: &'a CfgState,
     kind: ModuleKind,
-    /// Index into `state.declared_per_module`.
-    module_idx: usize,
     source: &'a str,
-    /// Disjoint borrows of `ctx`. When we drop a cfg-gated `let h = import(...)`
-    /// we also pull its `ModuleRef` id out of these so the loader doesn't
-    /// load the file.
+    /// Disjoint borrows of `ctx`. `cfg_declared` is the local declared set
+    /// for the grammar visibility check; `cfg_dropped` records cfg-dropped
+    /// top-level decls for `enrich_resolve_error` to use later. `module_refs`
+    /// / `inherit_ref` get pruned when a cfg-gated `let h = import(...)` is
+    /// dropped, so the loader doesn't load the file.
+    cfg_declared: &'a FxHashMap<String, Span>,
+    cfg_dropped: &'a mut FxHashMap<String, NodeId>,
     module_refs: &'a mut Vec<NodeId>,
     inherit_ref: &'a mut Option<NodeId>,
 }
@@ -170,9 +157,7 @@ impl Walker<'_> {
         // Grammar modules require local declaration. Helper modules transparently
         // see the importing grammar's declared set.
         let visible = match self.kind {
-            ModuleKind::Grammar => {
-                self.state.declared_per_module[self.module_idx].contains_key(name_text)
-            }
+            ModuleKind::Grammar => self.cfg_declared.contains_key(name_text),
             ModuleKind::Helper => self.state.declared_any.contains(name_text),
         };
         if !visible {
@@ -198,9 +183,7 @@ impl Walker<'_> {
             };
             if let Some(decl_name) = dropped_name {
                 let key = decl_name.resolve(self.source).to_owned();
-                self.state.dropped_decls_per_module[self.module_idx]
-                    .entry(key)
-                    .or_insert(id);
+                self.cfg_dropped.entry(key).or_insert(id);
             }
             // `let h = import/inherit(...)` is the only shape that puts a
             // `ModuleRef` at item level. Pull it out of the loader's worklist.
