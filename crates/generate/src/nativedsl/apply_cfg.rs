@@ -7,24 +7,32 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    Diagnostic, ResolveError, ResolveErrorKind,
+    Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, SharedAst, Span},
     loader::ModuleKind,
 };
 
 #[derive(Default)]
 pub struct CfgState {
-    /// All flag names declared anywhere in the chain.
-    pub declared: FxHashSet<String>,
+    /// Union of `declared_per_module`: every flag name declared in any
+    /// module loaded so far. Cached as a flat set for the helper-module
+    /// visibility check, which would otherwise scan all per-module sets
+    /// on each `#[cfg(...)]` attribute.
+    pub declared_any: FxHashSet<String>,
     /// `name -> enabled?`. Descendants (loaded earlier) win via `or_insert`.
     pub active: FxHashMap<String, bool>,
-    /// Per-module local declarations. Cfg attrs in M may only name flags in
-    /// `declared_per_module[M]`; cross-module refs must re-declare.
-    pub declared_per_module: Vec<FxHashSet<String>>,
-    /// `decl_name` -> node id for a top-level declaration (rule, macro, let,
-    /// external) dropped by cfg. Used by resolve to turn "undefined symbol"
-    /// into "definition exists but gated by ...".
-    pub dropped_decls: FxHashMap<String, NodeId>,
+    /// Per-module local declarations: flag name -> span of its first
+    /// occurrence in this module's `flags` declaration. Cfg attrs in M may
+    /// only name flags in `declared_per_module[M]`; cross-module refs must
+    /// re-declare. Spans drive the `FirstDefinedHere` note on duplicate-
+    /// declaration errors.
+    pub declared_per_module: Vec<FxHashMap<String, Span>>,
+    /// Per-module map of `decl_name -> Cfg node id` for top-level declarations
+    /// (rule, macro, let, external) dropped by cfg in that module. Used by
+    /// resolve enrichment to turn "undefined symbol" into "definition exists
+    /// but gated by ...". Keyed per-module so a name dropped in two modules
+    /// doesn't collide, and so the failing module's own drops are preferred.
+    pub dropped_decls_per_module: Vec<FxHashMap<String, NodeId>>,
 }
 
 impl CfgState {
@@ -35,7 +43,7 @@ impl CfgState {
         shared: &SharedAst,
         ctx: &ModuleContext,
     ) -> Result<usize, ResolveError> {
-        let mut local = FxHashSet::default();
+        let mut local: FxHashMap<String, Span> = FxHashMap::default();
         if let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) {
             let Node::Object(range) = *shared.arena.get(flags_id) else {
                 return Err(err(
@@ -65,18 +73,27 @@ impl CfgState {
                     match shared.arena.get(elem) {
                         Node::StringLit => {}
                         Node::Cfg { .. } => {
-                            return Err(err(ResolveErrorKind::CfgHasCfg, span));
+                            return Err(err(ResolveErrorKind::CfgInsideFlags, span));
                         }
                         _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
                     }
-                    let name = ctx.text(span).to_owned();
-                    self.declared.insert(name.clone());
-                    local.insert(name.clone());
+                    let name_text = ctx.text(span);
+                    if let Some(&first_span) = local.get(name_text) {
+                        return Err(ResolveError::with_note(
+                            ResolveErrorKind::CfgFlagDeclaredTwice(name_text.to_owned()),
+                            span,
+                            ctx.note(NoteMessage::FirstDefinedHere, first_span),
+                        ));
+                    }
+                    let name = name_text.to_owned();
+                    self.declared_any.insert(name.clone());
+                    local.insert(name.clone(), span);
                     self.active.entry(name).or_insert(enable);
                 }
             }
         }
         self.declared_per_module.push(local);
+        self.dropped_decls_per_module.push(FxHashMap::default());
         Ok(self.declared_per_module.len() - 1)
     }
 }
@@ -154,9 +171,9 @@ impl Walker<'_> {
         // see the importing grammar's declared set.
         let visible = match self.kind {
             ModuleKind::Grammar => {
-                self.state.declared_per_module[self.module_idx].contains(name_text)
+                self.state.declared_per_module[self.module_idx].contains_key(name_text)
             }
-            ModuleKind::Helper => self.state.declared.contains(name_text),
+            ModuleKind::Helper => self.state.declared_any.contains(name_text),
         };
         if !visible {
             return Err(err(
@@ -181,7 +198,9 @@ impl Walker<'_> {
             };
             if let Some(decl_name) = dropped_name {
                 let key = decl_name.resolve(self.source).to_owned();
-                self.state.dropped_decls.entry(key).or_insert(id);
+                self.state.dropped_decls_per_module[self.module_idx]
+                    .entry(key)
+                    .or_insert(id);
             }
             // `let h = import/inherit(...)` is the only shape that puts a
             // `ModuleRef` at item level. Pull it out of the loader's worklist.
@@ -212,9 +231,10 @@ impl Walker<'_> {
     fn walk_children(&mut self, id: NodeId) -> Result<(), ResolveError> {
         let node = *self.shared.arena.get(id);
         match node {
-            // List-shaped variants where cfg members are allowed: filter
-            // dropped members in place, shrink the node's range if any change.
-            Node::SeqOrChoice { range, .. } | Node::List(range) => {
+            // List-shaped variants where cfg members are allowed (per the
+            // parser's `parse_expr_with_cfg` routing): filter dropped members
+            // in place, shrink the node's range if any change.
+            Node::SeqOrChoice { range, .. } | Node::List(range) | Node::Concat(range) => {
                 self.filter(id, range)?;
             }
             // Variadic but cfg not allowed in members: just recurse. Index
@@ -222,7 +242,7 @@ impl Walker<'_> {
             // the recursive `walk` call (which needs `&mut self.shared`).
             // Recursive walks only ever append to the pools, never touching
             // existing slots, so indices in our range stay valid.
-            Node::Tuple(r) | Node::Concat(r) | Node::QualifiedCall(r) => {
+            Node::Tuple(r) | Node::QualifiedCall(r) => {
                 for i in r.start as usize..r.start as usize + r.len as usize {
                     let c = self.shared.pools.children[i];
                     self.walk(c)?;

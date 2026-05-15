@@ -586,9 +586,11 @@ pub enum ResolveErrorKind {
     #[error(
         "`#[cfg(...)]` is not allowed inside the `flags` field; flag declarations are read before cfg gating runs"
     )]
-    CfgHasCfg,
-    #[error("`#[cfg({0})]` references an unknown flag; declare it in this grammar's `flags`")]
+    CfgInsideFlags,
+    #[error("`#[cfg({0})]` references an unknown flag")]
     CfgFlagUnknown(String),
+    #[error("flag '{0}' is declared more than once in this grammar's `flags`")]
+    CfgFlagDeclaredTwice(String),
 }
 
 /// Build an `UnknownIdentifier` error, attaching a "defined later" note if the
