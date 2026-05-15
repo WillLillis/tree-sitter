@@ -204,8 +204,8 @@ pub type LowerError = Diagnostic<LowerErrorKind>;
 pub struct Diagnostic<K> {
     pub kind: K,
     pub span: Option<Span>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<Box<Note>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
 }
 
 impl<K> Diagnostic<K> {
@@ -213,7 +213,7 @@ impl<K> Diagnostic<K> {
         Self {
             kind,
             span: Some(span),
-            note: None,
+            notes: Vec::new(),
         }
     }
 
@@ -221,7 +221,7 @@ impl<K> Diagnostic<K> {
         Self {
             kind,
             span: None,
-            note: None,
+            notes: Vec::new(),
         }
     }
 
@@ -229,8 +229,14 @@ impl<K> Diagnostic<K> {
         Self {
             kind,
             span: Some(span),
-            note: Some(Box::new(note)),
+            notes: vec![note],
         }
+    }
+
+    /// Append an additional note (e.g. enrichment running after the primary
+    /// note was attached). Preserves existing notes.
+    pub fn add_note(&mut self, note: Note) {
+        self.notes.push(note);
     }
 }
 
@@ -302,7 +308,10 @@ impl std::fmt::Display for NoteMessage {
             Self::ReferencedFromHere => write!(f, "referenced from here"),
             Self::DefinedLater => write!(f, "let binding defined here (move it before the usage)"),
             Self::GatedByDisabledCfg(flag) => {
-                write!(f, "this declaration is gated by `#[cfg({flag})]`, currently disabled")
+                write!(
+                    f,
+                    "this declaration is gated by `#[cfg({flag})]`, currently disabled"
+                )
             }
         }
     }
@@ -333,14 +342,14 @@ impl DslError {
     }
 
     #[must_use]
-    pub fn note(&self) -> Option<&Note> {
+    pub fn notes(&self) -> &[Note] {
         match self {
-            Self::Lex(e) => e.note.as_deref(),
-            Self::Parse(e) => e.note.as_deref(),
-            Self::Resolve(e) => e.note.as_deref(),
-            Self::Type(e) => e.note.as_deref(),
-            Self::Lower(e) => e.note.as_deref(),
-            Self::Module(e) => e.inner.note(),
+            Self::Lex(e) => &e.notes,
+            Self::Parse(e) => &e.notes,
+            Self::Resolve(e) => &e.notes,
+            Self::Type(e) => &e.notes,
+            Self::Lower(e) => &e.notes,
+            Self::Module(e) => e.inner.notes(),
         }
     }
 }

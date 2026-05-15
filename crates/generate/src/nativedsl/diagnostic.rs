@@ -7,8 +7,6 @@ use anstyle::{AnsiColor, Color, Style};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::nativedsl::Note;
-
 use super::{Diagnostic, DslError, NoteMessage, ast::Span, lower::LowerErrorKind};
 
 struct Paint<T>(Style, T);
@@ -165,22 +163,16 @@ fn render_error(
 
     render_snippet(f, Source { span, text, path }, SnippetKind::Error, true)?;
 
-    if let Some(Note {
-        message,
-        span,
-        path,
-        source,
-    }) = error.note()
-    {
+    for note in error.notes() {
         writeln!(f)?;
         render_snippet(
             f,
             Source {
-                span: *span,
-                text: source,
-                path,
+                span: note.span,
+                text: &note.source,
+                path: &note.path,
             },
-            SnippetKind::Note(message.clone()),
+            SnippetKind::Note(note.message.clone()),
             false,
         )?;
     }

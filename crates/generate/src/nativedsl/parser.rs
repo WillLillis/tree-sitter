@@ -64,6 +64,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 module_refs: Vec::new(),
                 external_names: Vec::new(),
                 node_range: 0..0,
+                has_cfg: false,
             },
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
@@ -245,7 +246,25 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_item(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
+            // Cfg attribute layers stack via recursion here and through
+            // apply_cfg's walk_cfg later. Cap nesting via the shared parse
+            // depth budget to keep both recursive paths safe.
+            self.depth += 1;
+            if self.depth > MAX_PARSE_DEPTH {
+                return Err(self.error(ParseErrorKind::NestingTooDeep));
+            }
             let child = self.parse_item()?;
+            self.depth -= 1;
+            // A cfg-gated grammar block is structurally meaningless: the
+            // grammar's `flags` declaration is read before cfg gating runs,
+            // so the block would either fail to declare its own gating flag
+            // or self-disable inconsistently. Reject at parse time.
+            if matches!(self.shared.arena.get(child), Node::Grammar) {
+                return Err(ParseError::new(
+                    ParseErrorKind::CfgOnGrammarBlock,
+                    cfg_start,
+                ));
+            }
             let end = self.shared.arena.span(child);
             return Ok(self
                 .shared
@@ -283,6 +302,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let name = self.expect_ident()?;
         self.expect(TokenKind::RParen)?;
         let end = self.expect(TokenKind::RBracket)?;
+        self.ctx.has_cfg = true;
         Ok(Some((start.merge(end), name)))
     }
 
@@ -292,7 +312,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// the wrapped expression to survive.
     fn parse_expr_with_cfg(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
+            self.depth += 1;
+            if self.depth > MAX_PARSE_DEPTH {
+                return Err(self.error(ParseErrorKind::NestingTooDeep));
+            }
             let child = self.parse_expr_with_cfg()?;
+            self.depth -= 1;
             let end = self.shared.arena.span(child);
             return Ok(self
                 .shared
@@ -606,9 +631,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     .arena
                     .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
             }
-            TokenKind::LBracket => {
-                self.parse_delimited(start, TokenKind::RBracket, Node::List, Self::parse_expr_with_cfg)
-            }
+            TokenKind::LBracket => self.parse_delimited(
+                start,
+                TokenKind::RBracket,
+                Node::List,
+                Self::parse_expr_with_cfg,
+            ),
             TokenKind::LParen => {
                 self.parse_delimited(start, TokenKind::RParen, Node::Tuple, Self::parse_expr)
             }
@@ -662,7 +690,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let field_name = self.ctx.text(field_span);
         let field = ConfigField::try_from(field_name)
             .ok()
-            .filter(|f| !matches!(f, ConfigField::Language | ConfigField::Inherits | ConfigField::Flags))
+            .filter(|f| {
+                !matches!(
+                    f,
+                    ConfigField::Language | ConfigField::Inherits | ConfigField::Flags
+                )
+            })
             .ok_or_else(|| {
                 ParseError::new(
                     ParseErrorKind::UnknownGrammarField(field_name.to_string()),
@@ -1078,6 +1111,8 @@ pub enum ParseErrorKind {
     },
     #[error("expected 'cfg' inside attribute, got '{0}'")]
     ExpectedCfgKeyword(String),
+    #[error("`#[cfg(...)]` is not allowed on a grammar block")]
+    CfgOnGrammarBlock,
 }
 
 #[expect(
