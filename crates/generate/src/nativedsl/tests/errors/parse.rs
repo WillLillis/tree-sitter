@@ -134,7 +134,7 @@ fn error_duplicates_have_notes() {
     ] {
         let e = assert_err!(dsl_err(src), Parse);
         assert_eq!(e.kind, expected);
-        assert!(e.note.is_some());
+        assert!(!e.notes.is_empty());
     }
 }
 
