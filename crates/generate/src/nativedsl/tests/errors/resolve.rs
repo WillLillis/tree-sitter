@@ -87,9 +87,9 @@ fn error_self_ref_in_container_no_misleading_note() {
     );
     assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("X".into()));
     assert!(
-        e.note.is_none(),
+        e.notes.is_empty(),
         "self-reference inside container should not attach DefinedLater note: {:?}",
-        e.note
+        e.notes
     );
 }
 
@@ -117,8 +117,8 @@ fn error_duplicate_declaration_has_note() {
     );
     assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("foo".into()));
     let note = e
-        .note
-        .as_ref()
+        .notes
+        .first()
         .expect("DuplicateDeclaration should have a note");
     assert_eq!(note.message, NoteMessage::FirstDefinedHere);
     // The note span should point to the first declaration, not the duplicate.
