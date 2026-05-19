@@ -1,0 +1,9 @@
+let PREC = { a: 5, b: 3, base: 10 }
+let TIGHTER = PREC.base + 1
+grammar { language: "test" }
+rule a { prec(PREC.a + 1, "x") }
+rule b { prec(PREC.a + PREC.b, "x") }
+rule c { prec(PREC.a - PREC.b + PREC.base, "x") }
+rule d { prec(TIGHTER, "x") }
+rule e { prec(TIGHTER + 1, "x") }
+rule f { prec(-PREC.a + 10, "x") }
