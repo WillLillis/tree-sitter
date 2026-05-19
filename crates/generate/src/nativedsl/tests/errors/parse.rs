@@ -79,6 +79,10 @@ error_tests! { Parse {
         r#"grammar { language: "test" } rule program {"#,
         ParseErrorKind::ExpectedExpression
     }
+    error_int_arith_trailing_op {
+        r#"grammar { language: "test" } rule program { prec(1 +, "x") }"#,
+        ParseErrorKind::ExpectedExpression
+    }
     error_nesting_too_deep {
         // Constructed inline since it needs dynamic depth
         &{

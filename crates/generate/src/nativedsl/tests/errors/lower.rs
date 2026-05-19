@@ -54,6 +54,18 @@ error_tests! { Lower {
         rule program { prec(-x, "y") }"#,
         LowerErrorKind::IntegerOverflow(2_147_483_648)
     }
+    error_int_arith_add_overflow {
+        r#"grammar { language: "test" }
+        let x: int_t = 2000000000
+        rule program { prec(x + x, "y") }"#,
+        LowerErrorKind::IntegerOverflow(4_000_000_000)
+    }
+    error_int_arith_sub_underflow {
+        r#"grammar { language: "test" }
+        let x: int_t = -2000000000
+        rule program { prec(x - 2000000000, "y") }"#,
+        LowerErrorKind::IntegerOverflow(-4_000_000_000)
+    }
 }}
 
 #[test]

@@ -1,0 +1,9 @@
+let X = 5 + 3
+let Y = X + 1
+let Z = X + Y - 4
+let OBJ = { foo: 1 + 2, bar: 10 - 5 + 3 }
+grammar { language: "test" }
+rule a { prec(X, "x") }
+rule b { prec(Y, "x") }
+rule c { prec(Z, "x") }
+rule d { prec(OBJ.foo + OBJ.bar, "x") }
