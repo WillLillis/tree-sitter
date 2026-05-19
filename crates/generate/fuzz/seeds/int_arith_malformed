@@ -1,0 +1,6 @@
+grammar { language: "test" }
+rule a { prec(1 +, "x") }
+rule b { prec(+, "x") }
+rule c { prec("x" + 1, "y") }
+rule d { prec(1 + "x", "y") }
+rule e { prec(1 + seq("a", "b"), "x") }
