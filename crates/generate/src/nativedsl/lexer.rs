@@ -347,6 +347,8 @@ impl<'src> Lexer<'src> {
                             // SAFETY: pos < source.len() checked above.
                             match unsafe { *source.get_unchecked(pos) } {
                                 b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
+                                b'x' => pos = validate_hex_escape(source, esc_pos, pos)?,
+                                b'u' => pos = validate_unicode_escape(source, esc_pos, pos)?,
                                 _ => {
                                     // SAFETY: source is valid UTF-8 (from &str).
                                     let rest =
@@ -486,6 +488,12 @@ pub enum LexErrorKind {
     UnterminatedEscape,
     #[error("invalid escape sequence: \\{0}")]
     InvalidEscape(char),
+    #[error("invalid hex escape: expected \\xHH with HH in 00..7F (ASCII range)")]
+    InvalidHexEscape,
+    #[error(
+        "invalid unicode escape: expected \\uHHHH or \\u{{H..H}} (max 0x10FFFF, no surrogates)"
+    )]
+    InvalidUnicodeEscape,
     #[error("unexpected character: {0}")]
     UnexpectedChar(char),
     #[error("unterminated string literal (newline before closing quote)")]
@@ -498,4 +506,54 @@ pub enum LexErrorKind {
     TooManyHashes,
     #[error("input exceeds maximum size")]
     InputTooLarge,
+}
+
+/// Validate `\xHH` (exactly 2 hex digits, value 0x00-0x7F). Returns the new
+/// position past the escape on success. `esc_pos` points at the backslash;
+/// `pos` points at the `x`.
+fn validate_hex_escape(source: &[u8], esc_pos: usize, pos: usize) -> LexResult<usize> {
+    let end = pos + 3; // 'x' + 2 hex digits
+    let bad = |e| LexError::new(LexErrorKind::InvalidHexEscape, Span::from_usize(esc_pos, e));
+    if end > source.len() {
+        return Err(bad(source.len()));
+    }
+    // SAFETY: source is valid UTF-8 (from &str).
+    let hex = unsafe { std::str::from_utf8_unchecked(&source[pos + 1..end]) };
+    match u8::from_str_radix(hex, 16) {
+        Ok(v) if v <= 0x7F => Ok(end),
+        _ => Err(bad(end)),
+    }
+}
+
+/// Validate `\uHHHH` (4 hex digits) or `\u{H..H}` (1-6 hex digits in braces).
+/// Codepoint must be <= 0x10FFFF and not a surrogate (0xD800-0xDFFF).
+fn validate_unicode_escape(source: &[u8], esc_pos: usize, pos: usize) -> LexResult<usize> {
+    let after_u = pos + 1;
+    let bad = |e: usize| {
+        LexError::new(
+            LexErrorKind::InvalidUnicodeEscape,
+            Span::from_usize(esc_pos, e.min(source.len())),
+        )
+    };
+    let (hex_range, end) = if after_u < source.len() && source[after_u] == b'{' {
+        let h = after_u + 1;
+        let close = memchr(b'}', &source[h..]).map(|o| h + o);
+        match close {
+            Some(p) if (1..=6).contains(&(p - h)) => (h..p, p + 1),
+            Some(p) => return Err(bad(p + 1)),
+            None => return Err(bad(source.len())),
+        }
+    } else {
+        let e = after_u + 4;
+        if e > source.len() {
+            return Err(bad(source.len()));
+        }
+        (after_u..e, e)
+    };
+    // SAFETY: source is valid UTF-8 (from &str).
+    let hex = unsafe { std::str::from_utf8_unchecked(&source[hex_range]) };
+    match u32::from_str_radix(hex, 16) {
+        Ok(cp) if cp <= 0x0010_FFFF && !(0xD800..=0xDFFF).contains(&cp) => Ok(end),
+        _ => Err(bad(end)),
+    }
 }

@@ -57,6 +57,38 @@ error_tests! { Lex {
         "grammar { language: \"te\\ést\" } rule program { \"x\" }",
         LexErrorKind::InvalidEscape('é')
     }
+    error_hex_escape_too_short {
+        r#"grammar { language: "x\x0" } rule program { "x" }"#,
+        LexErrorKind::InvalidHexEscape
+    }
+    error_hex_escape_non_hex {
+        r#"grammar { language: "x\xZZ" } rule program { "x" }"#,
+        LexErrorKind::InvalidHexEscape
+    }
+    error_hex_escape_out_of_ascii_range {
+        r#"grammar { language: "x\x80" } rule program { "x" }"#,
+        LexErrorKind::InvalidHexEscape
+    }
+    error_unicode_escape_too_short {
+        r#"grammar { language: "x\u123" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
+    error_unicode_escape_braced_empty {
+        r#"grammar { language: "x\u{}" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
+    error_unicode_escape_braced_unclosed {
+        r#"grammar { language: "x\u{1234" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
+    error_unicode_escape_surrogate {
+        r#"grammar { language: "x\uD800" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
+    error_unicode_escape_out_of_range {
+        r#"grammar { language: "x\u{110000}" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
 }}
 
 inherit_error_tests! { Lex {
