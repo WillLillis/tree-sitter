@@ -103,6 +103,21 @@ rule_tests! {
         rule r#let { "in" }"#,
         Rule::NamedSymbol("let".into())
     }
+    string_hex_escape {
+        // \xHH (ASCII range) decodes to the literal byte. Matches perl's __DATA__ ctrl-D usage.
+        "grammar { language: \"test\" } rule program { \"a\\x04b\" }",
+        Rule::String("a\x04b".into())
+    }
+    string_unicode_escape_4digit {
+        // \uHHHH (4 hex) decodes to UTF-8.
+        r#"grammar { language: "test" } rule program { "\u00A0" }"#,
+        Rule::String("\u{00A0}".into())
+    }
+    string_unicode_escape_braced {
+        // \u{H..H} (1-6 hex in braces) decodes to UTF-8, allows non-BMP.
+        r#"grammar { language: "test" } rule program { "\u{1F389}" }"#,
+        Rule::String("\u{1F389}".into())
+    }
     raw_ident_keyword_collisions {
         // Shadowing builtin combinator/keyword names: r#field, r#import, r#alias.
         // Each is a normal rule whose grammar.json key is the bare keyword.
