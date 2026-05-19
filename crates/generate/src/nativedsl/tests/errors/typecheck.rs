@@ -252,6 +252,16 @@ error_tests! { Type {
         rule program { prec_dynamic("high", "x") }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
+    error_int_arith_lhs_not_int {
+        r#"grammar { language: "test" }
+        rule program { prec("x" + 1, "y") }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
+    }
+    error_int_arith_rhs_not_int {
+        r#"grammar { language: "test" }
+        rule program { prec(1 + "x", "y") }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
+    }
 }}
 
 inherit_error_tests! { Type {

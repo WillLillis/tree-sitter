@@ -339,6 +339,7 @@ fn resolve_children(
         | Node::Field { content: c, .. }
         | Node::Reserved { content: c, .. } => resolve_expr(arena, pools, ctx, decls, modules, *c),
         &Node::Append { left: a, right: b }
+        | &Node::BinOp { lhs: a, rhs: b, .. }
         | &Node::Prec {
             value: a,
             content: b,

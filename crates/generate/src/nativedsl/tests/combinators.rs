@@ -118,6 +118,39 @@ rule_tests! {
         r#"grammar { language: "test" } rule program { "\u{1F389}" }"#,
         Rule::String("\u{1F389}".into())
     }
+    int_arith_add_literals {
+        r#"grammar { language: "test" } rule program { prec(1 + 2, "x") }"#,
+        Rule::prec(Precedence::Integer(3), Rule::String("x".into()))
+    }
+    int_arith_sub_literals {
+        r#"grammar { language: "test" } rule program { prec(10 - 3, "x") }"#,
+        Rule::prec(Precedence::Integer(7), Rule::String("x".into()))
+    }
+    int_arith_chained {
+        // Left-associative: 1 + 2 - 5 + 10 = 8.
+        r#"grammar { language: "test" } rule program { prec(1 + 2 - 5 + 10, "x") }"#,
+        Rule::prec(Precedence::Integer(8), Rule::String("x".into()))
+    }
+    int_arith_named_plus_literal {
+        // Named-int + literal: PREC.foo = 5, +1 = 6.
+        r#"let PREC = { foo: 5 } grammar { language: "test" } rule program { prec(PREC.foo + 1, "x") }"#,
+        Rule::prec(Precedence::Integer(6), Rule::String("x".into()))
+    }
+    int_arith_two_named {
+        // Both sides named: PREC.a + PREC.b = 8.
+        r#"let PREC = { a: 5, b: 3 } grammar { language: "test" } rule program { prec(PREC.a + PREC.b, "x") }"#,
+        Rule::prec(Precedence::Integer(8), Rule::String("x".into()))
+    }
+    int_arith_in_let_binding {
+        // Arithmetic in a let RHS is folded at bind time.
+        r#"let PREC = { base: 10 } let X = PREC.base + 1 grammar { language: "test" } rule program { prec(X, "x") }"#,
+        Rule::prec(Precedence::Integer(11), Rule::String("x".into()))
+    }
+    int_arith_with_unary_neg {
+        // -PREC.foo combined with new + arithmetic: -5 + 10 = 5.
+        r#"let PREC = { foo: 5 } grammar { language: "test" } rule program { prec(-PREC.foo + 10, "x") }"#,
+        Rule::prec(Precedence::Integer(5), Rule::String("x".into()))
+    }
     raw_ident_keyword_collisions {
         // Shadowing builtin combinator/keyword names: r#field, r#import, r#alias.
         // Each is a normal rule whose grammar.json key is the bare keyword.
