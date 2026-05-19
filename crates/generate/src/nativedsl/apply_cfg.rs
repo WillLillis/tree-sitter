@@ -258,6 +258,7 @@ impl Walker<'_> {
                 target: b,
             }
             | Node::Append { left: a, right: b }
+            | Node::BinOp { lhs: a, rhs: b, .. }
             | Node::Prec {
                 value: a,
                 content: b,

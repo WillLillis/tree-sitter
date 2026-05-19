@@ -207,6 +207,12 @@ pub enum RepeatKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BinOp {
+    Add,
+    Sub,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IdentKind {
     Unresolved,
     Rule,
@@ -604,6 +610,14 @@ pub enum Node {
     /// `{ key0: val0, key1: val1, ... }`. Fields stored in `SharedAst::object_fields`.
     Object(ChildRange),
     Neg(NodeId),
+    /// Integer arithmetic: `lhs + rhs` or `lhs - rhs`. Both operands typecheck
+    /// as `int_t`. No multiplication, division, parens, or precedence; the
+    /// parser only emits left-associative chains of `+`/`-`.
+    BinOp {
+        op: BinOp,
+        lhs: NodeId,
+        rhs: NodeId,
+    },
     /// Parameter reference in a macro body. `index` is the position into the
     /// call's arg list; `ty` lets the typechecker avoid a macro-context lookup.
     MacroParam {

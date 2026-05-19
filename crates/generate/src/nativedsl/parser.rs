@@ -9,7 +9,7 @@ use thiserror::Error;
 use super::{
     InnerTy, NoteMessage, ParseError,
     ast::{
-        ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
+        BinOp, ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
         ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
@@ -528,6 +528,26 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         if self.depth > MAX_PARSE_DEPTH {
             return Err(self.error(ParseErrorKind::NestingTooDeep));
         }
+        let mut lhs = self.parse_postfix()?;
+        // Left-associative chain of `+` / `-` at int_t positions.
+        while let Some(op) = match self.current().kind {
+            TokenKind::Plus => Some(BinOp::Add),
+            TokenKind::Minus => Some(BinOp::Sub),
+            _ => None,
+        } {
+            self.advance_pos();
+            let rhs = self.parse_postfix()?;
+            let span = self.shared.arena.span(lhs).merge(self.shared.arena.span(rhs));
+            lhs = self.shared.arena.push(Node::BinOp { op, lhs, rhs }, span);
+        }
+        self.depth -= 1;
+        Ok(lhs)
+    }
+
+    /// Primary expression + post-primary `.field` chaining. Used as the
+    /// operand parser for the `+`/`-` chain in `parse_expr` so RHS doesn't
+    /// recurse into more arithmetic.
+    fn parse_postfix(&mut self) -> ParseResult<NodeId> {
         let mut result = self.parse_primary()?;
         // Post-primary `.field` chaining, e.g. `grammar_config(base).extras`.
         while self.at(TokenKind::Dot) {
@@ -539,7 +559,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 .arena
                 .push(Node::FieldAccess { obj: result, field }, start.merge(field));
         }
-        self.depth -= 1;
         Ok(result)
     }
 
@@ -627,7 +646,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             }
             TokenKind::Minus => {
                 self.advance_pos();
-                let inner = self.parse_expr()?;
+                // parse_postfix (not parse_expr) so unary `-` binds tighter
+                // than the trailing `+`/`-` chain: `-X + Y` is `(-X) + Y`.
+                let inner = self.parse_postfix()?;
                 Ok(self
                     .shared
                     .arena

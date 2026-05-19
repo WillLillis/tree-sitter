@@ -7,7 +7,7 @@ use super::{
     super::{
         LowerError, Module, ModuleId,
         ast::{
-            ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId,
+            BinOp, ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId,
             PrecKind, RepeatKind, SharedAst, Span,
         },
     },
@@ -603,6 +603,20 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     LowerError::new(LowerErrorKind::IntegerOverflow(-i64::from(n)), span)
                 })?;
                 Ok(self.alloc_val(Value::Int(neg)))
+            }
+            Node::BinOp { op, lhs, rhs } => {
+                let lhs_val = self.eval_expr(*lhs)?;
+                let rhs_val = self.eval_expr(*rhs)?;
+                // Guarded by typecheck (Node::BinOp), both sides are int.
+                let l = self.int_val(lhs_val);
+                let r = self.int_val(rhs_val);
+                let (narrow, wide) = match op {
+                    BinOp::Add => (l.checked_add(r), i64::from(l) + i64::from(r)),
+                    BinOp::Sub => (l.checked_sub(r), i64::from(l) - i64::from(r)),
+                };
+                let v = narrow
+                    .ok_or_else(|| LowerError::new(LowerErrorKind::IntegerOverflow(wide), span))?;
+                Ok(self.alloc_val(Value::Int(v)))
             }
             // Guarded by super::resolve + typecheck
             Node::Ident(IdentKind::Unresolved | IdentKind::Macro(_)) => unreachable!(),

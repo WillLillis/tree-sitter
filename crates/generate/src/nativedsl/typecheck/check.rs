@@ -247,6 +247,11 @@ fn type_of(
             type_of(shared, ctx, *inner, env, Constraint::Exact(Ty::INT))?;
             Ok(Ty::INT)
         }
+        Node::BinOp { lhs, rhs, .. } => {
+            type_of(shared, ctx, *lhs, env, Constraint::Exact(Ty::INT))?;
+            type_of(shared, ctx, *rhs, env, Constraint::Exact(Ty::INT))?;
+            Ok(Ty::INT)
+        }
         Node::Append { left, right } => {
             type_of_append(shared, ctx, *left, *right, span, env, expected)
         }
@@ -281,10 +286,7 @@ fn type_of(
             Ok(Ty::RULE)
         }
         Node::SeqOrChoice { range, .. } => {
-            let leaf = |shared: &SharedAst,
-                        ctx: &ModuleContext,
-                        id: NodeId,
-                        env: &mut TypeEnv| {
+            let leaf = |shared: &SharedAst, ctx: &ModuleContext, id: NodeId, env: &mut TypeEnv| {
                 type_of(shared, ctx, id, env, Constraint::RULE_LIKE)
             };
             for &member in shared.pools.child_slice(*range) {
