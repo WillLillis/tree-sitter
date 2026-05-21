@@ -280,6 +280,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwExternal => self.parse_external_decl(),
+            TokenKind::KwFor => self.parse_for_block(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
@@ -871,7 +872,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .push(Node::Append { left, right }, start.merge(end)))
     }
 
-    fn parse_for(&mut self, start: Span) -> ParseResult<NodeId> {
+    /// Parse the `for (bindings) in <iterable>` header (consumes through the
+    /// iterable; does NOT consume the opening `{`). Caller continues with a
+    /// body parser appropriate to its context.
+    fn parse_for_header(&mut self) -> ParseResult<ForId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
@@ -892,7 +896,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
-        let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
+        Ok(self.shared.pools.push_for(ForConfig { bindings, iterable }))
+    }
+
+    fn parse_for(&mut self, start: Span) -> ParseResult<NodeId> {
+        let for_id = self.parse_for_header()?;
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
             let config = self.shared.pools.get_for(for_id);
@@ -906,6 +914,50 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         })?;
         // Expression-context for-loop: body holds exactly one child.
         let body_range = self.shared.pools.push_single_child(body);
+        Ok(self.shared.arena.push(
+            Node::For {
+                for_id,
+                body: body_range,
+            },
+            start.merge(end),
+        ))
+    }
+
+    /// Top-level for-block: `for (bindings) in <iter> { <rule_decls> }`. The
+    /// body holds N rule decls. Expanded by the `expand_for_loops` pass into
+    /// concrete rule decls before `resolve`.
+    fn parse_for_block(&mut self) -> ParseResult<NodeId> {
+        let start = self.current().span;
+        let for_id = self.parse_for_header()?;
+        self.expect(TokenKind::LBrace)?;
+        let (decls, end) = stack_scope!(self.locals, |_saved| {
+            let config = self.shared.pools.get_for(for_id);
+            for (i, &Param { name, ty }) in config.bindings.iter().enumerate() {
+                self.locals
+                    .push((name, LocalBinding::ForBinding(for_id, ty, i as u8)));
+            }
+            let mut decls = Vec::new();
+            let end = loop {
+                if let Some(end) = self.eat(TokenKind::RBrace) {
+                    break end;
+                }
+                let id = match &self.current().kind {
+                    TokenKind::KwRule => self.parse_rule_def(false)?,
+                    TokenKind::KwOverride => self.parse_rule_def(true)?,
+                    TokenKind::KwFor => self.parse_for_block()?,
+                    _ => {
+                        return Err(self.error(ParseErrorKind::ForBlockBodyRequiresRuleDecl));
+                    }
+                };
+                decls.push(id);
+            };
+            ParseResult::Ok((decls, end))
+        })?;
+        let body_range = self
+            .shared
+            .pools
+            .push_children(&decls)
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
         Ok(self.shared.arena.push(
             Node::For {
                 for_id,
@@ -1145,6 +1197,8 @@ pub enum ParseErrorKind {
     ExpectedCfgKeyword(String),
     #[error("`#[cfg(...)]` is not allowed on a grammar block")]
     CfgOnGrammarBlock,
+    #[error("top-level `for` block body may only contain rule declarations")]
+    ForBlockBodyRequiresRuleDecl,
 }
 
 #[expect(
