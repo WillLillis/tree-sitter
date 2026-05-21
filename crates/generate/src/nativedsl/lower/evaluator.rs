@@ -10,9 +10,10 @@ use super::{
             BinOp, ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId,
             PrecKind, RepeatKind, SharedAst, Span,
         },
+        string_pool::{Str, StrEntry, StringPool},
     },
     CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
-    repr::{APrec, ARule, RuleId, Str, StrEntry, Value, ValueId},
+    repr::{APrec, ARule, RuleId, Value, ValueId},
 };
 
 use crate::{
@@ -23,6 +24,7 @@ use crate::{
 /// Per-grammar evaluation wrapper around long-lived [`LoweringState`].
 pub(super) struct Evaluator<'a, 'ast> {
     pub state: &'a mut LoweringState,
+    pub strings: &'a mut StringPool,
     pub shared: &'ast SharedAst,
     /// Modules already loaded before this evaluation. The module being lowered
     /// ("root") is not in this slice; it lives in `root_ctx`. Its module id is
@@ -37,6 +39,7 @@ pub(super) struct Evaluator<'a, 'ast> {
 impl<'a, 'ast> Evaluator<'a, 'ast> {
     pub fn new(
         state: &'a mut LoweringState,
+        strings: &'a mut StringPool,
         shared: &'ast SharedAst,
         previous: &'a [Module],
         root_ctx: &'a ModuleContext,
@@ -48,6 +51,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         state.loaded.set_loaded(root_id);
         Self {
             state,
+            strings,
             shared,
             previous,
             root_ctx,
@@ -77,7 +81,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn resolve_str(&self, id: Str) -> &str {
-        match self.state.ir.strings.entry(id) {
+        match self.strings.entry(id) {
             &StrEntry::Source(span, mod_id) => span.resolve(&self.module_ctx(mod_id).source),
             StrEntry::Owned(s) => s,
             StrEntry::Unreachable => unreachable!(),
@@ -173,13 +177,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Intern a span using the current module's source text.
     fn intern_span(&mut self, span: Span) -> Str {
-        self.state.ir.strings.intern_span(span, self.current_module)
+        self.strings.intern_span(span, self.current_module)
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
         let raw = self.ctx().text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-            self.state.ir.strings.intern_owned(&unescape_string(raw))
+            self.strings.intern_owned(&unescape_string(raw))
         } else {
             self.intern_span(span)
         }
@@ -193,7 +197,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Intern a string, create a `NamedSymbol` rule, and wrap as a `Value::Rule`.
     fn owned_symbol_val(&mut self, name: &str) -> ValueId {
-        let sid = self.state.ir.strings.intern_owned(name);
+        let sid = self.strings.intern_owned(name);
         let rid = self.alloc_rule(ARule::NamedSymbol(sid));
         self.alloc_val(Value::Rule(rid))
     }
@@ -416,7 +420,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         for entry in group {
                             let vid = match entry {
                                 PrecedenceEntry::Name(s) => {
-                                    let sid = self.state.ir.strings.intern_owned(s);
+                                    let sid = self.strings.intern_owned(s);
                                     self.alloc_val(Value::Str(sid))
                                 }
                                 PrecedenceEntry::Symbol(s) => self.owned_symbol_val(s),
@@ -479,16 +483,16 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match rule {
             Rule::Blank => self.alloc_rule(ARule::Blank),
             Rule::String(s) => {
-                let sid = self.state.ir.strings.intern_owned(s);
+                let sid = self.strings.intern_owned(s);
                 self.alloc_rule(ARule::String(sid))
             }
             Rule::Pattern(p, f) => {
-                let pid = self.state.ir.strings.intern_owned(p);
-                let fid = (!f.is_empty()).then(|| self.state.ir.strings.intern_owned(f));
+                let pid = self.strings.intern_owned(p);
+                let fid = (!f.is_empty()).then(|| self.strings.intern_owned(f));
                 self.alloc_rule(ARule::Pattern(pid, fid))
             }
             Rule::NamedSymbol(name) => {
-                let sid = self.state.ir.strings.intern_owned(name);
+                let sid = self.strings.intern_owned(name);
                 self.alloc_rule(ARule::NamedSymbol(sid))
             }
             Rule::Choice(members) | Rule::Seq(members) => {
@@ -529,15 +533,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let aprec = APrec::Integer(*n);
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 } else if let Precedence::Name(s) = &params.precedence {
-                    let aprec = APrec::Name(self.state.ir.strings.intern_owned(s));
+                    let aprec = APrec::Name(self.strings.intern_owned(s));
                     rid = self.import_prec_rule(aprec, rid, params.associativity);
                 }
                 if let Some(crate::rules::Alias { value, is_named }) = &params.alias {
-                    let sid = self.state.ir.strings.intern_owned(value);
+                    let sid = self.strings.intern_owned(value);
                     rid = self.alloc_rule(ARule::Alias(sid, *is_named, rid));
                 }
                 if let Some(field_name) = &params.field_name {
-                    let sid = self.state.ir.strings.intern_owned(field_name);
+                    let sid = self.strings.intern_owned(field_name);
                     rid = self.alloc_rule(ARule::Field(sid, rid));
                 }
                 if params.is_token {
@@ -550,7 +554,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 context_name,
             } => {
                 let inner = self.import_rule(inner);
-                let sid = self.state.ir.strings.intern_owned(context_name);
+                let sid = self.strings.intern_owned(context_name);
                 self.alloc_rule(ARule::Reserved(sid, inner))
             }
             Rule::Symbol(_) => unreachable!(),
@@ -700,7 +704,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .copied()
                     .find(|&s| target_ctx.text(s) == member_name)
                 {
-                    let sid = self.state.ir.strings.intern_span(name_span, mod_idx);
+                    let sid = self.strings.intern_span(name_span, mod_idx);
                     let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                     return Ok(self.alloc_val(Value::Rule(rid)));
                 }
@@ -773,7 +777,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let vid = self.eval_expr(part_id)?;
                     result.push_str(self.resolve_str(self.str_id(vid)));
                 }
-                let sid = self.state.ir.strings.intern_owned(&result);
+                let sid = self.strings.intern_owned(&result);
                 Ok(self.alloc_val(Value::Str(sid)))
             }
             &Node::DynRegex { pattern, flags } => {
