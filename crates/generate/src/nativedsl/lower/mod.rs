@@ -25,6 +25,7 @@ use crate::{
 use super::{
     LowerError, ModuleId,
     ast::{ForId, Node, NodeId, SharedAst, Span},
+    string_pool::StringPool,
 };
 
 use evaluator::Evaluator;
@@ -98,6 +99,7 @@ struct EvalResult {
 /// - `state` persists across the whole `parse_native_dsl` pipeline.
 pub fn lower_with_base(
     state: &mut LoweringState,
+    strings: &mut StringPool,
     shared: &SharedAst,
     previous: &[Module],
     current: &ModuleContext,
@@ -106,7 +108,7 @@ pub fn lower_with_base(
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[idx as usize].lowered());
     let helper_rules = collect_helper_rules(shared, current, previous);
-    let result = evaluate(state, shared, previous, current)?;
+    let result = evaluate(state, strings, shared, previous, current)?;
     build_grammar(result, base_grammar, helper_rules)
 }
 
@@ -141,11 +143,12 @@ fn collect_helper_rules(
 ///     validation rejects grammar blocks and override rules.
 pub fn lower_helper(
     state: &mut LoweringState,
+    strings: &mut StringPool,
     shared: &SharedAst,
     previous: &[super::Module],
     current: &super::ModuleContext,
 ) -> LowerResult<Vec<(String, Rule)>> {
-    let mut eval = Evaluator::new(state, shared, previous, current);
+    let mut eval = Evaluator::new(state, strings, shared, previous, current);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::new();
 
     for &item_id in &current.root_items {
@@ -175,11 +178,12 @@ pub fn lower_helper(
 
 fn evaluate(
     state: &mut LoweringState,
+    strings: &mut StringPool,
     shared: &SharedAst,
     previous: &[super::Module],
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
-    let mut eval = Evaluator::new(state, shared, previous, ctx);
+    let mut eval = Evaluator::new(state, strings, shared, previous, ctx);
     let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ctx.root_items.len());
     let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
 
