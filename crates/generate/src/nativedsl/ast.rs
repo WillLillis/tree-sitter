@@ -329,6 +329,15 @@ impl AstPools {
         Some(ChildRange::new(start, len))
     }
 
+    /// Push a single child and return its range. Fallibility-free since
+    /// `len = 1` is always within `u16`.
+    #[inline]
+    pub fn push_single_child(&mut self, item: NodeId) -> ChildRange {
+        let start = self.children.len() as u32;
+        self.children.push(item);
+        ChildRange::new(start, 1)
+    }
+
     #[must_use]
     pub fn get_macro(&self, id: MacroId) -> &MacroConfig {
         &self.macro_configs[id.index()]
@@ -594,9 +603,24 @@ pub enum Node {
         left: NodeId,
         right: NodeId,
     },
+    /// `for (binding) in <iter> { <body> }`. Context-discriminated by
+    /// where it appears: in expression context, `body` holds exactly one
+    /// child (the body expression to be repeated); at top-level decl
+    /// context, `body` holds N decl children (currently only `Node::Rule`).
+    /// Top-level form is expanded by the `expand_for_loops` pass before
+    /// `resolve`: each iteration emits a copy of the body decls with the
+    /// binding substituted and any `SymRef` names/refs resolved to
+    /// concrete strings.
     For {
         for_id: ForId,
-        body: NodeId,
+        body: ChildRange,
+    },
+    /// `@<str_expr>` - late-bound rule reference by computed name. Only
+    /// valid inside top-level `For` bodies. `expr` must typecheck to
+    /// `str_t`. Resolved by `expand_for_loops` into a concrete name;
+    /// should not survive past that pass.
+    SymRef {
+        expr: NodeId,
     },
     /// `name(arg0, arg1, ...)`. `args` children: `[arg0, arg1, ...]`.
     Call {
