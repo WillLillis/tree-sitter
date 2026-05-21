@@ -468,7 +468,7 @@ fn error_import_bad_path() {
 fn error_import_nested_error() {
     let dir = tempfile::tempdir().unwrap();
     let bad_helper = dir.path().join("bad_syntax.tsg");
-    std::fs::write(&bad_helper, "let x = @@@").unwrap();
+    std::fs::write(&bad_helper, "let x = ~~~").unwrap();
 
     let input = format!(
         r#"
@@ -489,7 +489,7 @@ fn error_import_transitive_nested_error() {
     // Error should be double-wrapped: Module(Module(Lex(...)))
     let dir = tempfile::tempdir().unwrap();
     let bad = dir.path().join("bad.tsg");
-    std::fs::write(&bad, "let x = @@@").unwrap();
+    std::fs::write(&bad, "let x = ~~~").unwrap();
     let middle = dir.path().join("middle.tsg");
     std::fs::write(&middle, format!("let h = import(\"{}\")", dsl_path(&bad))).unwrap();
 
