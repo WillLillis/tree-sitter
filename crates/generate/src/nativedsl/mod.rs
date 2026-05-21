@@ -50,6 +50,7 @@ pub mod lower;
 pub mod parser;
 pub mod resolve;
 pub mod serialize;
+pub(crate) mod string_pool;
 #[cfg(test)]
 mod tests;
 pub mod typecheck;
