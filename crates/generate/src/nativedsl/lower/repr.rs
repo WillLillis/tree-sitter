@@ -4,10 +4,7 @@ use rustc_hash::FxHashMap;
 
 use super::super::ModuleId;
 use super::super::ast::ChildRange;
-
-// Re-export from the shared string pool location so existing `repr::Str`
-// and `repr::StrEntry` imports keep working.
-pub use super::super::string_pool::{Str, StrEntry, StringPool};
+use super::super::string_pool::Str;
 
 /// Index into the lowering rule pool.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -67,7 +64,6 @@ pub struct IrPools {
     pub value_children: Vec<ValueId>,
     pub rule_children: Vec<RuleId>,
     pub object_pool: Vec<FxHashMap<String, ValueId>>,
-    pub strings: StringPool,
 }
 
 const LOADED_MODULES_WORDS: usize = (u8::MAX as usize + 1) / u64::BITS as usize;
