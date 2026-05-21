@@ -291,11 +291,14 @@ fn resolve_expr(
     }
 
     // For-loop bindings are resolved by the parser (ForBinding nodes).
-    // Just recurse into iterable and body.
+    // Just recurse into iterable and body. Expression-context For has
+    // exactly 1 body child (top-level decl-context For uses N children
+    // and is handled before resolve by the expand_for_loops pass).
     if let &Node::For { for_id, body } = arena.get(id) {
         let iterable = pools.get_for(for_id).iterable;
         resolve_expr(arena, pools, ctx, decls, modules, iterable)?;
-        return resolve_expr(arena, pools, ctx, decls, modules, body);
+        let body_id = pools.child_slice(body)[0];
+        return resolve_expr(arena, pools, ctx, decls, modules, body_id);
     }
 
     resolve_children(arena, pools, ctx, decls, modules, id)

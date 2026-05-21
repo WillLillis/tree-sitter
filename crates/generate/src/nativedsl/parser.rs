@@ -537,7 +537,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         } {
             self.advance_pos();
             let rhs = self.parse_postfix()?;
-            let span = self.shared.arena.span(lhs).merge(self.shared.arena.span(rhs));
+            let span = self
+                .shared
+                .arena
+                .span(lhs)
+                .merge(self.shared.arena.span(rhs));
             lhs = self.shared.arena.push(Node::BinOp { op, lhs, rhs }, span);
         }
         self.depth -= 1;
@@ -900,10 +904,15 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             let end = self.expect(TokenKind::RBrace)?;
             ParseResult::Ok((body, end))
         })?;
-        Ok(self
-            .shared
-            .arena
-            .push(Node::For { for_id, body }, start.merge(end)))
+        // Expression-context for-loop: body holds exactly one child.
+        let body_range = self.shared.pools.push_single_child(body);
+        Ok(self.shared.arena.push(
+            Node::For {
+                for_id,
+                body: body_range,
+            },
+            start.merge(end),
+        ))
     }
 
     fn parse_ident_expr(&mut self, start: Span) -> ParseResult<NodeId> {
