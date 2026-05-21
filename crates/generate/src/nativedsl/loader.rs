@@ -11,6 +11,7 @@ use crate::nativedsl::{
     ast::{ModuleContext, Node, SharedAst, Span},
     lexer, lower, parser, resolve,
     resolve::ResolveErrorKind,
+    string_pool::StringPool,
     typecheck::{self, TypeEnv},
 };
 
@@ -22,6 +23,7 @@ pub struct Loader<'a> {
     pub modules: &'a mut Vec<Module>,
     pub env: &'a mut TypeEnv,
     pub state: &'a mut LoweringState,
+    pub strings: &'a mut StringPool,
     pub cfg: &'a mut CfgState,
     pub ancestor_paths: Vec<PathBuf>,
     /// Loader-wide dedup cache: each (canonical path, kind) loads at most once
@@ -125,6 +127,7 @@ impl Loader<'_> {
             ModuleKind::Grammar => {
                 let lowered = Box::new(lower::lower_with_base(
                     self.state,
+                    self.strings,
                     self.shared,
                     self.modules,
                     &ctx,
@@ -132,8 +135,13 @@ impl Loader<'_> {
                 Module::Grammar { ctx, lowered }
             }
             ModuleKind::Helper => {
-                let lowered_rules =
-                    lower::lower_helper(self.state, self.shared, self.modules, &ctx)?;
+                let lowered_rules = lower::lower_helper(
+                    self.state,
+                    self.strings,
+                    self.shared,
+                    self.modules,
+                    &ctx,
+                )?;
                 Module::Helper { ctx, lowered_rules }
             }
         };

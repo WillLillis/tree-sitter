@@ -50,7 +50,7 @@ pub mod lower;
 pub mod parser;
 pub mod resolve;
 pub mod serialize;
-pub(crate) mod string_pool;
+pub mod string_pool;
 #[cfg(test)]
 mod tests;
 pub mod typecheck;
@@ -176,12 +176,14 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
+    let mut strings = string_pool::StringPool::default();
     let mut cfg = apply_cfg::CfgState::default();
     let mut dsl_loader = Loader {
         shared: &mut shared,
         modules: &mut modules,
         env: &mut env,
         state: &mut state,
+        strings: &mut strings,
         cfg: &mut cfg,
         ancestor_paths: vec![canonical.clone()],
         loaded: Vec::new(),
