@@ -415,7 +415,7 @@ fn clone_range(
         .ok_or_else(|| ExpandError::without_span(ExpandErrorKind::TooManyChildren))
 }
 
-pub type ExpandError = super::Diagnostic<ExpandErrorKind>;
+use super::ExpandError;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Error)]
 pub enum ExpandErrorKind {
