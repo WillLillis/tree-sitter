@@ -16,7 +16,11 @@ use crate::{
     grammars::InputGrammar,
     nativedsl::{
         Module, NoteMessage, ResolveError,
-        ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span},
+        ast::{
+            AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
+            Span,
+        },
+        string_pool::StringPool,
     },
 };
 
@@ -44,10 +48,11 @@ struct ExternalNameCtx<'src, 'a, 'b> {
 pub fn resolve(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
+    strings: &StringPool,
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
 ) -> ResolveResult<()> {
-    let mut decls = collect_decls(shared, ctx, &ctx.root_items, base, modules)?;
+    let mut decls = collect_decls(shared, ctx, strings, &ctx.root_items, base, modules)?;
 
     for &item_id in &ctx.root_items {
         resolve_item(
@@ -99,6 +104,7 @@ fn insert_decl<'src>(
 fn collect_decls<'a>(
     shared: &SharedAst,
     ctx: &'a ModuleContext,
+    strings: &'a StringPool,
     root_items: &[NodeId],
     base: Option<(&'a InputGrammar, Span)>,
     modules: &'a [Module],
@@ -115,6 +121,20 @@ fn collect_decls<'a>(
                 name, is_override, ..
             } => {
                 let name_text = ctx.text(*name);
+                insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
+                if *is_override {
+                    override_names.insert(name_text);
+                }
+            }
+            Node::ExpandedRule {
+                name, is_override, ..
+            } => {
+                // ExpandedRule's name lives in the StringPool (either
+                // intern_span of the macro body's source-text name, or
+                // intern_owned of a concat-evaluated computed name). Source
+                // entries here always reference the current module, so we
+                // can resolve against ctx.source directly.
+                let name_text = strings.resolve_local(*name, &ctx.source);
                 insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
                 if *is_override {
                     override_names.insert(name_text);
@@ -233,7 +253,9 @@ fn resolve_item(
             }
             Ok(())
         }
-        &Node::Rule { body: inner, .. } | &Node::Let { value: inner, .. } => {
+        &Node::Rule { body: inner, .. }
+        | &Node::ExpandedRule { body: inner, .. }
+        | &Node::Let { value: inner, .. } => {
             resolve_expr(arena, pools, ctx, decls, modules, inner)
         }
         Node::Macro(macro_id) => {
@@ -249,8 +271,17 @@ fn resolve_item(
                     ));
                 }
             }
-            let body = macro_cfg.body;
-            resolve_expr(arena, pools, ctx, decls, modules, body)
+            // Expression macros: resolve the body expression. Rule-set
+            // macros: body was deep-cloned into ExpandedRule decls during
+            // expand_macro_calls; the original is orphaned (no further
+            // references), so resolving it would be wasted work and would
+            // misfire (the body is a RuleSet of decls, not an expression).
+            match macro_cfg.kind {
+                MacroKind::Expression(_) => {
+                    resolve_expr(arena, pools, ctx, decls, modules, macro_cfg.body)
+                }
+                MacroKind::RuleSet => Ok(()),
+            }
         }
         _ => Ok(()),
     }
