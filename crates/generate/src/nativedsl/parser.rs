@@ -16,7 +16,7 @@ use super::{
     typecheck::{DataTy, Ty},
 };
 
-const MAX_PARSE_DEPTH: u16 = 256;
+const MAX_PARSE_DEPTH: u16 = 192;
 
 #[derive(Clone, Copy)]
 enum LocalBinding {
@@ -413,6 +413,22 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         } else {
             self.expect(TokenKind::KwRule)?
         };
+        // `rule @<expr> { ... }` — computed name; only meaningful inside a
+        // top-level `for` block. expand_for_loops consumes ComputedRule.
+        if self.eat(TokenKind::At).is_some() {
+            let name_expr = self.parse_postfix()?;
+            self.expect(TokenKind::LBrace)?;
+            let body = self.parse_expr()?;
+            let end = self.expect(TokenKind::RBrace)?;
+            return Ok(self.shared.arena.push(
+                Node::ComputedRule {
+                    is_override,
+                    name_expr,
+                    body,
+                },
+                start.merge(end),
+            ));
+        }
         let name = self.expect_ident()?;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
@@ -658,6 +674,17 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     .shared
                     .arena
                     .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
+            }
+            TokenKind::At => {
+                // `@<primary>` — late-bound rule reference by computed name.
+                // Only valid inside top-level for-block bodies; resolved by
+                // expand_for_loops.
+                self.advance_pos();
+                let inner = self.parse_postfix()?;
+                Ok(self.shared.arena.push(
+                    Node::SymRef { expr: inner },
+                    start.merge(self.shared.arena.span(inner)),
+                ))
             }
             TokenKind::LBracket => self.parse_delimited(
                 start,

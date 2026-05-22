@@ -516,6 +516,15 @@ pub enum Node {
         name: Span,
         body: NodeId,
     },
+    /// `rule @<str_expr> { ... }` inside a top-level for-block. The
+    /// `name_expr` typechecks to `str_t`. `expand_for_loops` consumes this
+    /// variant and emits a synthesized rule (with the computed name interned
+    /// into the StringPool) before resolve runs.
+    ComputedRule {
+        is_override: bool,
+        name_expr: NodeId,
+        body: NodeId,
+    },
     Let {
         name: Span,
         ty: Option<Ty>,
