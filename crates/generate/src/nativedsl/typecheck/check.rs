@@ -81,10 +81,7 @@ pub(super) fn check_item(
                 MacroKind::Expression(return_ty) => {
                     type_of(shared, ctx, config.body, env, Constraint::Exact(return_ty))?;
                 }
-                // Rule-set macros' bodies are decl-shaped, not expressions.
-                // Their inner rule bodies are typechecked after
-                // `expand_macro_calls` inlines them at each call site.
-                MacroKind::RuleSet => {}
+                MacroKind::RuleSet => check_rule_set_body(shared, ctx, config.body, env)?,
             }
             Ok(())
         }
@@ -95,6 +92,35 @@ pub(super) fn check_item(
         Node::External { .. } => Ok(()),
         _ => unreachable!(),
     }
+}
+
+/// Typecheck a rule-set macro body (`Node::RuleSet`). For each inner
+/// `ComputedRule`, validate `name_expr` is `str_t`. Both `Rule` and
+/// `ComputedRule` bodies typecheck as rule expressions; `MacroParam` refs
+/// resolve via their stamped `Ty` so this catches type errors at macro
+/// definition time rather than at each call site.
+fn check_rule_set_body(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    body_id: NodeId,
+    env: &mut TypeEnv,
+) -> TypeResult<()> {
+    let Node::RuleSet(range) = shared.arena.get(body_id) else {
+        unreachable!("parser guarantees RuleSet body for RuleSet-kind macros")
+    };
+    for &decl_id in shared.pools.child_slice(*range) {
+        match shared.arena.get(decl_id) {
+            Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env)?,
+            Node::ComputedRule {
+                name_expr, body, ..
+            } => {
+                type_of(shared, ctx, *name_expr, env, Constraint::Exact(Ty::STR))?;
+                expect_rule(shared, ctx, *body, env)?;
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }
 
 /// Check a list config field. For literal lists, checks each element with
@@ -214,6 +240,10 @@ fn type_of(
         Node::IntLit(_) => Ok(Ty::INT),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::STR),
         Node::Ident(IdentKind::Rule) | Node::Blank | Node::SynthRef { .. } => Ok(Ty::RULE),
+        &Node::SymRef { expr } => {
+            type_of(shared, ctx, expr, env, Constraint::Exact(Ty::STR))?;
+            Ok(Ty::RULE)
+        }
         Node::ModuleRef { import, module, .. } => {
             let idx = module.expect("module index not set by loading pre-pass");
             Ok(Ty::Module(if *import {
