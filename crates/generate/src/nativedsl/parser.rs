@@ -553,6 +553,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             };
             decls.push(id);
         }
+        // Rule-set macros must emit at least one rule per invocation -
+        // expand_macro_calls relies on this for in-place slot placement.
+        if decls.is_empty() {
+            return Err(self.error(ParseErrorKind::EmptyRuleSetMacroBody));
+        }
         let range = self
             .shared
             .pools
@@ -1249,6 +1254,8 @@ pub enum ParseErrorKind {
     CfgOnGrammarBlock,
     #[error("rule-set macro body may only contain rule declarations")]
     RuleSetBodyRequiresRuleDecl,
+    #[error("rule-set macro body must declare at least one rule")]
+    EmptyRuleSetMacroBody,
 }
 
 #[expect(
