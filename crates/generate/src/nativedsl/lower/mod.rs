@@ -25,8 +25,20 @@ use crate::{
 use super::{
     LowerError, ModuleId,
     ast::{ForId, Node, NodeId, SharedAst, Span},
-    string_pool::StringPool,
+    string_pool::{Str, StringPool},
 };
+
+/// Source of a rule decl's name. Resolution to `String` is deferred to the
+/// final build step so we don't have to hold a `StringPool` borrow across
+/// `lower_to_rule` calls (which may intern more entries during lowering).
+#[derive(Clone, Copy)]
+enum NameSource {
+    /// `Node::Rule` - name is a source span; resolves via `current.text()`.
+    Span(Span),
+    /// `Node::ExpandedRule` - name is a `StringPool` handle; resolves via
+    /// `strings.resolve_local()`.
+    Str(Str),
+}
 
 use evaluator::Evaluator;
 use repr::{IrPools, LoadedModules, RuleId, ValueId};
@@ -149,7 +161,7 @@ pub fn lower_helper(
     current: &super::ModuleContext,
 ) -> LowerResult<Vec<(String, Rule)>> {
     let mut eval = Evaluator::new(state, strings, shared, previous, current);
-    let mut rule_entries: Vec<(&str, RuleId)> = Vec::new();
+    let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::new();
 
     for &item_id in &current.root_items {
         match shared.arena.get(item_id) {
@@ -163,7 +175,15 @@ pub fn lower_helper(
                 is_override: false,
             } => {
                 let rule_id = eval.lower_to_rule(body)?;
-                rule_entries.push((current.text(name), rule_id));
+                rule_entries.push((NameSource::Span(name), rule_id));
+            }
+            &Node::ExpandedRule {
+                name,
+                body,
+                is_override: false,
+            } => {
+                let rule_id = eval.lower_to_rule(body)?;
+                rule_entries.push((NameSource::Str(name), rule_id));
             }
             // Validation rejects grammar blocks and override rules in helpers.
             _ => unreachable!(),
@@ -171,9 +191,19 @@ pub fn lower_helper(
     }
 
     Ok(rule_entries
-        .iter()
-        .map(|(name, rid)| (name.to_string(), eval.build_rule(*rid)))
+        .into_iter()
+        .map(|(src, rid)| (resolve_name(src, &mut eval, current), eval.build_rule(rid)))
         .collect())
+}
+
+/// Resolve a `NameSource` to an owned `String`. Done at build time (after
+/// per-rule lowering) so the loop never holds a `StringPool` borrow across
+/// `lower_to_rule`'s mutations.
+fn resolve_name(src: NameSource, eval: &Evaluator, ctx: &super::ModuleContext) -> String {
+    match src {
+        NameSource::Span(s) => ctx.text(s).to_string(),
+        NameSource::Str(s) => eval.strings.resolve_local(s, &ctx.source).to_string(),
+    }
 }
 
 fn evaluate(
@@ -184,8 +214,8 @@ fn evaluate(
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
     let mut eval = Evaluator::new(state, strings, shared, previous, ctx);
-    let mut rule_entries: Vec<(&str, RuleId)> = Vec::with_capacity(ctx.root_items.len());
-    let mut override_entries: Vec<(&str, RuleId, Span)> = Vec::new();
+    let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::with_capacity(ctx.root_items.len());
+    let mut override_entries: Vec<(NameSource, RuleId, Span)> = Vec::new();
 
     for &item_id in &ctx.root_items {
         match shared.arena.get(item_id) {
@@ -201,9 +231,25 @@ fn evaluate(
             } => {
                 let rule_id = eval.lower_to_rule(*body)?;
                 if *is_override {
-                    override_entries.push((ctx.text(*name), rule_id, *name));
+                    override_entries.push((NameSource::Span(*name), rule_id, *name));
                 } else {
-                    rule_entries.push((ctx.text(*name), rule_id));
+                    rule_entries.push((NameSource::Span(*name), rule_id));
+                }
+            }
+            Node::ExpandedRule {
+                is_override,
+                name,
+                body,
+            } => {
+                let rule_id = eval.lower_to_rule(*body)?;
+                // ExpandedRule's diagnostic span is the macro call site
+                // (set by expand_macro_calls); reuse it for override
+                // attribution.
+                let span = shared.arena.span(item_id);
+                if *is_override {
+                    override_entries.push((NameSource::Str(*name), rule_id, span));
+                } else {
+                    rule_entries.push((NameSource::Str(*name), rule_id));
                 }
             }
             _ => unreachable!(),
@@ -215,12 +261,12 @@ fn evaluate(
     let language = config.language.as_ref().unwrap();
 
     let rules: Vec<(String, Rule)> = rule_entries
-        .iter()
-        .map(|(name, rid)| (name.to_string(), eval.build_rule(*rid)))
+        .into_iter()
+        .map(|(src, rid)| (resolve_name(src, &eval, ctx), eval.build_rule(rid)))
         .collect();
     let overrides: Vec<(String, Rule, Span)> = override_entries
-        .iter()
-        .map(|(name, rid, span)| (name.to_string(), eval.build_rule(*rid), *span))
+        .into_iter()
+        .map(|(src, rid, span)| (resolve_name(src, &eval, ctx), eval.build_rule(rid), span))
         .collect();
 
     Ok(EvalResult {
