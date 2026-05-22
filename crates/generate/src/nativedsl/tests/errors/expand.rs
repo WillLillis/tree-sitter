@@ -54,6 +54,26 @@ error_tests! { Type {
            rule program { rs() }"#,
         TypeErrorKind::RuleSetMacroInExpressionContext("rs".into())
     }
+    error_computed_name_expr_not_str {
+        // Passing an int_t param into a name position fails at macro
+        // definition time, before any call site exercises it.
+        r#"macro bad(n: int_t) { rule @n { "x" } }
+           grammar { language: "test" }
+           rule program { "y" }"#,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::STR,
+            got: Ty::INT,
+        }
+    }
+    error_symref_inner_not_str {
+        r#"macro bad(n: int_t) { rule a { @n } }
+           grammar { language: "test" }
+           rule program { "y" }"#,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::STR,
+            got: Ty::INT,
+        }
+    }
 }}
 
 error_tests! { Resolve {
