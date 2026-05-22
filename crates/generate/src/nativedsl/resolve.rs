@@ -59,6 +59,7 @@ pub fn resolve(
             &mut shared.arena,
             &shared.pools,
             ctx,
+            strings,
             &decls,
             modules,
             item_id,
@@ -240,6 +241,7 @@ fn resolve_item(
     arena: &mut NodeArena,
     pools: &AstPools,
     ctx: &ModuleContext,
+    strings: &StringPool,
     decls: &Decls,
     modules: &[Module],
     item_id: NodeId,
@@ -249,14 +251,14 @@ fn resolve_item(
             // INVARIANT: set during grammar block parsing, always present here
             let grammar_config = ctx.grammar_config.as_ref().unwrap();
             for (_, id) in grammar_config.node_fields() {
-                resolve_expr(arena, pools, ctx, decls, modules, id)?;
+                resolve_expr(arena, pools, ctx, strings, decls, modules, id)?;
             }
             Ok(())
         }
         &Node::Rule { body: inner, .. }
         | &Node::ExpandedRule { body: inner, .. }
         | &Node::Let { value: inner, .. } => {
-            resolve_expr(arena, pools, ctx, decls, modules, inner)
+            resolve_expr(arena, pools, ctx, strings, decls, modules, inner)
         }
         Node::Macro(macro_id) => {
             let macro_cfg = pools.get_macro(*macro_id);
@@ -278,7 +280,7 @@ fn resolve_item(
             // misfire (the body is a RuleSet of decls, not an expression).
             match macro_cfg.kind {
                 MacroKind::Expression(_) => {
-                    resolve_expr(arena, pools, ctx, decls, modules, macro_cfg.body)
+                    resolve_expr(arena, pools, ctx, strings, decls, modules, macro_cfg.body)
                 }
                 MacroKind::RuleSet => Ok(()),
             }
@@ -292,6 +294,7 @@ fn resolve_expr(
     arena: &mut NodeArena,
     pools: &AstPools,
     ctx: &ModuleContext,
+    strings: &StringPool,
     decls: &Decls,
     modules: &[Module],
     id: NodeId,
@@ -309,14 +312,29 @@ fn resolve_expr(
         return Ok(());
     }
 
+    // SynthRef: rule reference by interned name (emitted by
+    // expand_macro_calls from @<expr>). Validate the name exists in
+    // Decls; the node itself doesn't need rewriting since it already
+    // carries the resolved name.
+    if let &Node::SynthRef { name } = arena.get(id) {
+        let text = strings.resolve_local(name, &ctx.source);
+        if decls.get(text).is_none() {
+            return Err(ResolveError::new(
+                ResolveErrorKind::UnknownIdentifier(text.to_string()),
+                arena.span(id),
+            ));
+        }
+        return Ok(());
+    }
+
     // Alias target: a bare identifier becomes a named-alias rule reference,
     // even if undeclared (mirrors grammar.js `alias($.x, $.undeclared)`).
     if let &Node::Alias { content, target } = arena.get(id) {
-        resolve_expr(arena, pools, ctx, decls, modules, content)?;
+        resolve_expr(arena, pools, ctx, strings, decls, modules, content)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             arena.resolve_as(target, IdentKind::Rule);
         } else {
-            resolve_expr(arena, pools, ctx, decls, modules, target)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, target)?;
         }
         return Ok(());
     }
@@ -327,12 +345,12 @@ fn resolve_expr(
     // and is handled before resolve by the expand_for_loops pass).
     if let &Node::For { for_id, body } = arena.get(id) {
         let iterable = pools.get_for(for_id).iterable;
-        resolve_expr(arena, pools, ctx, decls, modules, iterable)?;
+        resolve_expr(arena, pools, ctx, strings, decls, modules, iterable)?;
         let body_id = pools.child_slice(body)[0];
-        return resolve_expr(arena, pools, ctx, decls, modules, body_id);
+        return resolve_expr(arena, pools, ctx, strings, decls, modules, body_id);
     }
 
-    resolve_children(arena, pools, ctx, decls, modules, id)
+    resolve_children(arena, pools, ctx, strings, decls, modules, id)
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
@@ -340,6 +358,7 @@ fn resolve_children(
     arena: &mut NodeArena,
     pools: &AstPools,
     ctx: &ModuleContext,
+    strings: &StringPool,
     decls: &Decls,
     modules: &[Module],
     id: NodeId,
@@ -347,22 +366,22 @@ fn resolve_children(
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
         for child in pools.child_slice(range) {
-            resolve_expr(arena, pools, ctx, decls, modules, *child)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, *child)?;
         }
         return Ok(());
     }
 
     match arena.get(id) {
         &Node::Call { name, args } => {
-            resolve_expr(arena, pools, ctx, decls, modules, name)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, name)?;
             for arg in pools.child_slice(args) {
-                resolve_expr(arena, pools, ctx, decls, modules, *arg)?;
+                resolve_expr(arena, pools, ctx, strings, decls, modules, *arg)?;
             }
             Ok(())
         }
         Node::Object(range) => {
             for field in pools.get_object(*range) {
-                resolve_expr(arena, pools, ctx, decls, modules, field.1)?;
+                resolve_expr(arena, pools, ctx, strings, decls, modules, field.1)?;
             }
             Ok(())
         }
@@ -371,7 +390,7 @@ fn resolve_children(
         | Node::Neg(c)
         | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
-        | Node::Reserved { content: c, .. } => resolve_expr(arena, pools, ctx, decls, modules, *c),
+        | Node::Reserved { content: c, .. } => resolve_expr(arena, pools, ctx, strings, decls, modules, *c),
         &Node::Append { left: a, right: b }
         | &Node::BinOp { lhs: a, rhs: b, .. }
         | &Node::Prec {
@@ -379,19 +398,19 @@ fn resolve_children(
             content: b,
             ..
         } => {
-            resolve_expr(arena, pools, ctx, decls, modules, a)?;
-            resolve_expr(arena, pools, ctx, decls, modules, b)
+            resolve_expr(arena, pools, ctx, strings, decls, modules, a)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, b)
         }
         &Node::DynRegex { pattern, flags } => {
-            resolve_expr(arena, pools, ctx, decls, modules, pattern)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, pattern)?;
             if let Some(flags) = flags {
-                resolve_expr(arena, pools, ctx, decls, modules, flags)?;
+                resolve_expr(arena, pools, ctx, strings, decls, modules, flags)?;
             }
             Ok(())
         }
-        &Node::FieldAccess { obj, .. } => resolve_expr(arena, pools, ctx, decls, modules, obj),
+        &Node::FieldAccess { obj, .. } => resolve_expr(arena, pools, ctx, strings, decls, modules, obj),
         &Node::QualifiedAccess { obj, member } => {
-            resolve_expr(arena, pools, ctx, decls, modules, obj)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, obj)?;
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let member_name = ctx.text(member);
@@ -401,14 +420,14 @@ fn resolve_children(
         }
         Node::QualifiedCall(range) => {
             let (obj, name, args) = pools.get_qualified_call(*range);
-            resolve_expr(arena, pools, ctx, decls, modules, obj)?;
+            resolve_expr(arena, pools, ctx, strings, decls, modules, obj)?;
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let macro_name = ctx.text(arena.span(name));
                 resolve_qualified_call_name(arena, pools, &modules[idx], name, macro_name);
             }
             for &arg in args {
-                resolve_expr(arena, pools, ctx, decls, modules, arg)?;
+                resolve_expr(arena, pools, ctx, strings, decls, modules, arg)?;
             }
             Ok(())
         }

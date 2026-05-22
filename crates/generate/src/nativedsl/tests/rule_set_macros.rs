@@ -103,6 +103,32 @@ fn rule_set_macro_multiple_invocations() {
 }
 
 #[test]
+fn rule_set_macro_symref_in_expr_position() {
+    // pair("foo") produces a_foo and b_foo; b_foo's body references
+    // a_foo by computed name via @concat(...) in expression position.
+    let g = dsl(
+        r#"
+        macro pair(s: str_t) {
+            rule @concat("a_", s) { "x" }
+            rule @concat("b_", s) { seq(@concat("a_", s), "y") }
+        }
+        grammar { language: "test", start: a_foo }
+        pair("foo")
+        "#,
+    );
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["a_foo", "b_foo"]);
+    let b = g.variables.iter().find(|v| v.name == "b_foo").unwrap();
+    assert_eq!(
+        b.rule,
+        Rule::seq(vec![
+            Rule::NamedSymbol("a_foo".into()),
+            Rule::String("y".into()),
+        ])
+    );
+}
+
+#[test]
 fn rule_set_macro_with_regular_rules_around() {
     let g = dsl(
         r#"

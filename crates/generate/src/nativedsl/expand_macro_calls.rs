@@ -155,7 +155,7 @@ fn expand_rule(
             body,
         } => {
             let name_str = strings.intern_span(name, mod_id);
-            let cloned_body = clone_with_subst(shared, args_start, body)?;
+            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, arg_count, body)?;
             (is_override, name_str, cloned_body)
         }
         Node::ComputedRule {
@@ -166,7 +166,7 @@ fn expand_rule(
             let name_span = shared.arena.span(name_expr);
             let evaluated =
                 eval_name(shared, strings, ctx, args_start, arg_count, name_expr, name_span)?;
-            let cloned_body = clone_with_subst(shared, args_start, body)?;
+            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, arg_count, body)?;
             (is_override, evaluated, cloned_body)
         }
         _ => {
@@ -254,10 +254,16 @@ fn eval_name_into(
 }
 
 /// Deep-copy `src_id` into the arena, substituting each `MacroParam` ref
-/// with a fresh copy of the corresponding arg subtree.
+/// with a fresh copy of the corresponding arg subtree. `SymRef` is
+/// consumed here: its name expression is evaluated (with the same arg
+/// substitution applied) and replaced with a `SynthRef` carrying the
+/// interned name.
 fn clone_with_subst(
     shared: &mut SharedAst,
+    strings: &mut StringPool,
+    ctx: &ModuleContext,
     args_start: usize,
+    arg_count: usize,
     src_id: NodeId,
 ) -> Result<NodeId, ExpandError> {
     let span = shared.arena.span(src_id);
@@ -266,7 +272,13 @@ fn clone_with_subst(
     // uses don't share NodeIds; keeps per-use span attribution distinct).
     if let Node::MacroParam { index, .. } = src {
         let arg_id = shared.pools.children[args_start + index as usize];
-        return clone_with_subst(shared, args_start, arg_id);
+        return clone_with_subst(shared, strings, ctx, args_start, arg_count, arg_id);
+    }
+    // SymRef: evaluate the inner name expression (eval_name already chases
+    // MacroParam refs into args), intern, replace with SynthRef.
+    if let Node::SymRef { expr } = src {
+        let name = eval_name(shared, strings, ctx, args_start, arg_count, expr, span)?;
+        return Ok(shared.arena.push(Node::SynthRef { name }, span));
     }
     let new_node = match src {
         // Leaves: identical copy.
@@ -283,49 +295,46 @@ fn clone_with_subst(
         // Single-child wrappers.
         Node::Repeat { kind, inner } => Node::Repeat {
             kind,
-            inner: clone_with_subst(shared, args_start, inner)?,
+            inner: clone_with_subst(shared, strings, ctx, args_start, arg_count, inner)?,
         },
         Node::Token { immediate, inner } => Node::Token {
             immediate,
-            inner: clone_with_subst(shared, args_start, inner)?,
+            inner: clone_with_subst(shared, strings, ctx, args_start, arg_count, inner)?,
         },
-        Node::Neg(c) => Node::Neg(clone_with_subst(shared, args_start, c)?),
+        Node::Neg(c) => Node::Neg(clone_with_subst(shared, strings, ctx, args_start, arg_count, c)?),
         Node::Field { name, content } => Node::Field {
             name,
-            content: clone_with_subst(shared, args_start, content)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
         },
         Node::Reserved { context, content } => Node::Reserved {
             context,
-            content: clone_with_subst(shared, args_start, content)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
         },
         Node::FieldAccess { obj, field } => Node::FieldAccess {
-            obj: clone_with_subst(shared, args_start, obj)?,
+            obj: clone_with_subst(shared, strings, ctx, args_start, arg_count, obj)?,
             field,
         },
         Node::QualifiedAccess { obj, member } => Node::QualifiedAccess {
-            obj: clone_with_subst(shared, args_start, obj)?,
+            obj: clone_with_subst(shared, strings, ctx, args_start, arg_count, obj)?,
             member,
         },
         Node::GrammarConfig { module, field } => Node::GrammarConfig {
-            module: clone_with_subst(shared, args_start, module)?,
+            module: clone_with_subst(shared, strings, ctx, args_start, arg_count, module)?,
             field,
-        },
-        Node::SymRef { expr } => Node::SymRef {
-            expr: clone_with_subst(shared, args_start, expr)?,
         },
         // Two-child wrappers.
         Node::Alias { content, target } => Node::Alias {
-            content: clone_with_subst(shared, args_start, content)?,
-            target: clone_with_subst(shared, args_start, target)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
+            target: clone_with_subst(shared, strings, ctx, args_start, arg_count, target)?,
         },
         Node::Append { left, right } => Node::Append {
-            left: clone_with_subst(shared, args_start, left)?,
-            right: clone_with_subst(shared, args_start, right)?,
+            left: clone_with_subst(shared, strings, ctx, args_start, arg_count, left)?,
+            right: clone_with_subst(shared, strings, ctx, args_start, arg_count, right)?,
         },
         Node::BinOp { op, lhs, rhs } => Node::BinOp {
             op,
-            lhs: clone_with_subst(shared, args_start, lhs)?,
-            rhs: clone_with_subst(shared, args_start, rhs)?,
+            lhs: clone_with_subst(shared, strings, ctx, args_start, arg_count, lhs)?,
+            rhs: clone_with_subst(shared, strings, ctx, args_start, arg_count, rhs)?,
         },
         Node::Prec {
             kind,
@@ -333,13 +342,13 @@ fn clone_with_subst(
             content,
         } => Node::Prec {
             kind,
-            value: clone_with_subst(shared, args_start, value)?,
-            content: clone_with_subst(shared, args_start, content)?,
+            value: clone_with_subst(shared, strings, ctx, args_start, arg_count, value)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
         },
         Node::DynRegex { pattern, flags } => {
-            let p = clone_with_subst(shared, args_start, pattern)?;
+            let p = clone_with_subst(shared, strings, ctx, args_start, arg_count, pattern)?;
             let f = flags
-                .map(|id| clone_with_subst(shared, args_start, id))
+                .map(|id| clone_with_subst(shared, strings, ctx, args_start, arg_count, id))
                 .transpose()?;
             Node::DynRegex {
                 pattern: p,
@@ -349,21 +358,21 @@ fn clone_with_subst(
         // Variadic via ChildRange.
         Node::SeqOrChoice { seq, range } => Node::SeqOrChoice {
             seq,
-            range: clone_range(shared, args_start, range)?,
+            range: clone_range(shared, strings, ctx, args_start, arg_count, range)?,
         },
-        Node::List(range) => Node::List(clone_range(shared, args_start, range)?),
-        Node::Tuple(range) => Node::Tuple(clone_range(shared, args_start, range)?),
-        Node::Concat(range) => Node::Concat(clone_range(shared, args_start, range)?),
+        Node::List(range) => Node::List(clone_range(shared, strings, ctx, args_start, arg_count, range)?),
+        Node::Tuple(range) => Node::Tuple(clone_range(shared, strings, ctx, args_start, arg_count, range)?),
+        Node::Concat(range) => Node::Concat(clone_range(shared, strings, ctx, args_start, arg_count, range)?),
         Node::Call { name, args: cr } => Node::Call {
-            name: clone_with_subst(shared, args_start, name)?,
-            args: clone_range(shared, args_start, cr)?,
+            name: clone_with_subst(shared, strings, ctx, args_start, arg_count, name)?,
+            args: clone_range(shared, strings, ctx, args_start, arg_count, cr)?,
         },
         Node::QualifiedCall(range) => {
-            Node::QualifiedCall(clone_range(shared, args_start, range)?)
+            Node::QualifiedCall(clone_range(shared, strings, ctx, args_start, arg_count, range)?)
         }
         Node::For { for_id, body } => Node::For {
             for_id,
-            body: clone_range(shared, args_start, body)?,
+            body: clone_range(shared, strings, ctx, args_start, arg_count, body)?,
         },
         Node::Object(range) => {
             // Object children live in object_fields as (Span, NodeId). Read by
@@ -373,7 +382,7 @@ fn clone_with_subst(
             let mut new_pairs: Vec<(Span, NodeId)> = Vec::with_capacity(end - start);
             for i in start..end {
                 let (k, v) = shared.pools.object_fields[i];
-                let v2 = clone_with_subst(shared, args_start, v)?;
+                let v2 = clone_with_subst(shared, strings, ctx, args_start, arg_count, v)?;
                 new_pairs.push((k, v2));
             }
             let new_range = shared
@@ -390,16 +399,20 @@ fn clone_with_subst(
         | Node::RuleSet(_)
         | Node::Let { .. }
         | Node::ExpandedRule { .. }
+        | Node::SynthRef { .. }
         | Node::Cfg { .. } => unreachable!(),
-        // Handled by the early MacroParam guard above.
-        Node::MacroParam { .. } => unreachable!(),
+        // Handled by early guards above.
+        Node::MacroParam { .. } | Node::SymRef { .. } => unreachable!(),
     };
     Ok(shared.arena.push(new_node, span))
 }
 
 fn clone_range(
     shared: &mut SharedAst,
+    strings: &mut StringPool,
+    ctx: &ModuleContext,
     args_start: usize,
+    arg_count: usize,
     range: ChildRange,
 ) -> Result<ChildRange, ExpandError> {
     let start = range.start as usize;
@@ -407,7 +420,7 @@ fn clone_range(
     let mut new_ids: Vec<NodeId> = Vec::with_capacity(end - start);
     for i in start..end {
         let id = shared.pools.children[i];
-        new_ids.push(clone_with_subst(shared, args_start, id)?);
+        new_ids.push(clone_with_subst(shared, strings, ctx, args_start, arg_count, id)?);
     }
     shared
         .pools

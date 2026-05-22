@@ -629,6 +629,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
+            // SynthRef carries a Str into the StringPool directly (no
+            // intern needed). Resolve already validated the name exists in
+            // the rule table.
+            &Node::SynthRef { name } => {
+                let rid = self.alloc_rule(ARule::NamedSymbol(name));
+                Ok(self.alloc_val(Value::Rule(rid)))
+            }
             Node::MacroParam { index, .. } => {
                 let base = *self.state.macro_arg_bases.last().unwrap();
                 Ok(self.state.macro_args[base + *index as usize])
@@ -825,6 +832,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let sid = self.intern_span(span);
                 Ok(self.alloc_rule(ARule::NamedSymbol(sid)))
             }
+            &Node::SynthRef { name } => Ok(self.alloc_rule(ARule::NamedSymbol(name))),
             Node::StringLit => {
                 let sid = self.intern_string_lit(span);
                 Ok(self.alloc_rule(ARule::String(sid)))
