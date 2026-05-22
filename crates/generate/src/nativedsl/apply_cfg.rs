@@ -272,6 +272,11 @@ impl Walker<'_> {
                 value: a,
                 content: b,
                 ..
+            }
+            | Node::ComputedRule {
+                name_expr: a,
+                body: b,
+                ..
             } => {
                 self.walk(a)?;
                 self.walk(b)?;
