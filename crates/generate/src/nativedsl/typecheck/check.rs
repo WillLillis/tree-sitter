@@ -138,7 +138,7 @@ fn expect_name_ref(
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
     match shared.arena.get(id) {
-        Node::Ident(IdentKind::Rule) => Ok(()),
+        Node::Ident(IdentKind::Rule) | Node::SynthRef { .. } => Ok(()),
         Node::Ident(IdentKind::Var(_))
         | Node::FieldAccess { .. }
         | Node::GrammarConfig { .. }
@@ -213,7 +213,7 @@ fn type_of(
     let ty = match shared.arena.get(id) {
         Node::IntLit(_) => Ok(Ty::INT),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::STR),
-        Node::Ident(IdentKind::Rule) | Node::Blank => Ok(Ty::RULE),
+        Node::Ident(IdentKind::Rule) | Node::Blank | Node::SynthRef { .. } => Ok(Ty::RULE),
         Node::ModuleRef { import, module, .. } => {
             let idx = module.expect("module index not set by loading pre-pass");
             Ok(Ty::Module(if *import {
