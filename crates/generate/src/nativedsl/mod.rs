@@ -59,7 +59,7 @@ pub mod typecheck;
 pub use crate::grammars::InputGrammar;
 pub use diagnostic::NativeDslError;
 pub use lexer::{LexErrorKind, LexResult};
-pub use expand_macro_calls::{ExpandError, ExpandErrorKind};
+pub use expand_macro_calls::ExpandErrorKind;
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
 pub use parser::{ParseErrorKind, ParseResult};
 pub use resolve::{ResolveErrorKind, ResolveResult};
@@ -203,6 +203,7 @@ pub type ParseError = Diagnostic<ParseErrorKind>;
 pub type ResolveError = Diagnostic<ResolveErrorKind>;
 pub type TypeError = Diagnostic<TypeErrorKind>;
 pub type LowerError = Diagnostic<LowerErrorKind>;
+pub type ExpandError = Diagnostic<ExpandErrorKind>;
 
 /// Diagnostic error shared by all pipeline stages.
 #[derive(Debug, Serialize, Error)]
@@ -256,6 +257,7 @@ impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
 pub enum DslError {
     Lex(#[from] LexError),
     Parse(#[from] ParseError),
+    Expand(#[from] ExpandError),
     Resolve(#[from] ResolveError),
     Type(#[from] TypeError),
     Lower(#[from] LowerError),
@@ -328,6 +330,7 @@ impl DslError {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
+            Self::Expand(e) => e.span,
             Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
@@ -351,6 +354,7 @@ impl DslError {
         match self {
             Self::Lex(e) => &e.notes,
             Self::Parse(e) => &e.notes,
+            Self::Expand(e) => &e.notes,
             Self::Resolve(e) => &e.notes,
             Self::Type(e) => &e.notes,
             Self::Lower(e) => &e.notes,

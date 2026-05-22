@@ -9,7 +9,7 @@ use crate::nativedsl::{
     LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
     apply_cfg::{CfgState, apply_cfg},
     ast::{ModuleContext, Node, SharedAst, Span},
-    lexer, lower, parser, resolve,
+    expand_macro_calls, lexer, lower, parser, resolve,
     resolve::ResolveErrorKind,
     string_pool::StringPool,
     typecheck::{self, TypeEnv},
@@ -111,6 +111,19 @@ impl Loader<'_> {
 
         self.load_import_children(&ctx, module_dir)?;
 
+        // Module index is fixed at this point (this module is not yet pushed
+        // into `self.modules`, so it'll land at `self.modules.len()`). The
+        // bounds check moves up here from its old post-typecheck spot so
+        // `expand_macro_calls` can attach source-span Str entries with the
+        // correct mod_id.
+        let global_id = u8::try_from(self.modules.len())
+            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+
+        // Inline top-level rule-set macro invocations into ExpandedRule
+        // decls. Runs before resolve so the name table sees the post-
+        // expansion shape of root_items.
+        expand_macro_calls::expand_macro_calls(self.shared, self.strings, &mut ctx, global_id)?;
+
         // Resolve identifiers + typecheck. Child modules already populated env
         // during their own load_module calls.
         let base = ctx
@@ -120,9 +133,6 @@ impl Loader<'_> {
             .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
-
-        let global_id = u8::try_from(self.modules.len())
-            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
         let module = match kind {
             ModuleKind::Grammar => {
                 let lowered = Box::new(lower::lower_with_base(
