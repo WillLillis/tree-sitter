@@ -129,7 +129,7 @@ impl Loader<'_> {
         let base = ctx
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
-        resolve::resolve(self.shared, &ctx, self.modules, base)
+        resolve::resolve(self.shared, &ctx, self.strings, self.modules, base)
             .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
