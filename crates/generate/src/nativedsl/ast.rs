@@ -395,12 +395,9 @@ pub struct MacroConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub enum MacroKind {
-    /// `macro foo(...) <return_ty> { <expr> }` - body is an expression node
-    /// that typechecks to `return_ty`.
+    /// Body is an expression typechecking to the carried return type.
     Expression(Ty),
-    /// `macro foo(...) { rule a {...} rule b {...} }` - body is a
-    /// `Node::RuleSet` wrapper holding rule decls. Expanded inline at each
-    /// top-level call site by `expand_macro_calls`.
+    /// Body is `Node::RuleSet`; expanded inline at each top-level call site.
     RuleSet,
 }
 
@@ -528,25 +525,18 @@ pub enum Node {
         name: Span,
         body: NodeId,
     },
-    /// `rule @<str_expr> { ... }` inside a rule-set macro body. The
-    /// `name_expr` typechecks to `str_t`. `expand_macro_calls` evaluates
-    /// the (substituted) `name_expr` against the macro call's args, interns
-    /// the result into the StringPool, and emits an `ExpandedRule`.
+    /// `rule @<str_expr> { ... }` inside a rule-set macro body.
+    /// `name_expr` is str_t; `expand_macro_calls` evaluates it and emits
+    /// an `ExpandedRule`.
     ComputedRule {
         is_override: bool,
         name_expr: NodeId,
         body: NodeId,
     },
-    /// Body of a rule-set macro: a sequence of `Rule` and `ComputedRule`
-    /// decls. Lives as `MacroConfig::body` for rule-set macros (expression
-    /// macros store the body expression directly). Produced by parser,
-    /// consumed by `expand_macro_calls`.
+    /// Body of a rule-set macro (sequence of `Rule` / `ComputedRule`).
     RuleSet(ChildRange),
-    /// Synthesized rule decl emitted by `expand_macro_calls`. Mirrors
-    /// `Rule` but the name lives in the StringPool (either intern_span of
-    /// the source-text name in the macro body, or intern_owned of the
-    /// concat-evaluated computed name). Downstream stages (resolve,
-    /// typecheck, lower) handle alongside `Rule`.
+    /// Synthesized rule decl from `expand_macro_calls`. Same shape as
+    /// `Rule` but the name lives in the StringPool.
     ExpandedRule {
         is_override: bool,
         name: Str,
@@ -639,29 +629,18 @@ pub enum Node {
         left: NodeId,
         right: NodeId,
     },
-    /// `for (binding) in <iter> { <body> }`. Context-discriminated by
-    /// where it appears: in expression context, `body` holds exactly one
-    /// child (the body expression to be repeated); at top-level decl
-    /// context, `body` holds N decl children (currently only `Node::Rule`).
-    /// Top-level form is expanded by the `expand_for_loops` pass before
-    /// `resolve`: each iteration emits a copy of the body decls with the
-    /// binding substituted and any `SymRef` names/refs resolved to
-    /// concrete strings.
+    /// `for (binding) in <iter> { <body> }`. Expression-context only;
+    /// `body` holds exactly one child.
     For {
         for_id: ForId,
         body: ChildRange,
     },
-    /// `@<str_expr>` - late-bound rule reference by computed name inside
-    /// a rule-set macro body. `expr` must typecheck to `str_t`.
-    /// `expand_macro_calls` evaluates the (substituted) `expr` and emits
-    /// a `SynthRef` in its place; SymRef should not survive that pass.
+    /// `@<str_expr>` inside a rule-set macro body. `expr` is str_t;
+    /// `expand_macro_calls` evaluates and emits `SynthRef`.
     SymRef {
         expr: NodeId,
     },
-    /// Post-expand rule reference by interned name. Emitted by
-    /// `expand_macro_calls` from `SymRef`; resolve validates the name
-    /// exists in `Decls`, typecheck yields rule_t, lower emits a
-    /// `NamedSymbol` keyed by `strings.resolve_local(name, ...)`.
+    /// Post-expand rule reference. Carries the interned name directly.
     SynthRef {
         name: Str,
     },
