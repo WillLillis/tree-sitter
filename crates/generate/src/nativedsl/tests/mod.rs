@@ -44,6 +44,7 @@ mod errors;
 // mod hardening; // local testing only
 mod imports;
 mod inheritance;
+mod rule_set_macros;
 mod types;
 
 /// Directory containing DSL-specific helper fixtures (inherit bases, import helpers).
