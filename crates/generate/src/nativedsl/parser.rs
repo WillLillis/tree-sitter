@@ -280,6 +280,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwExternal => self.parse_external_decl(),
+            // `name(args...)` at top level: invocation of a rule-set macro.
+            // Validated and expanded by `expand_macro_calls` (which checks
+            // that `name` resolves to a `MacroKind::RuleSet` macro).
+            TokenKind::Ident if self.next_is(TokenKind::LParen) => {
+                self.parse_top_level_call()
+            }
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
@@ -506,6 +512,28 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .shared
             .arena
             .push(Node::Macro(macro_idx), start.merge(end)))
+    }
+
+    /// Top-level macro invocation `name(arg0, arg1, ...)`. Emits a
+    /// `Node::Call` whose `name` is an unresolved `Ident`. Consumed by
+    /// `expand_macro_calls`, which validates `name` resolves to a
+    /// `MacroKind::RuleSet` macro and inlines its body.
+    fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
+        let name_span = self.expect_ident()?;
+        let name_id = self
+            .shared
+            .arena
+            .push(Node::Ident(IdentKind::Unresolved), name_span);
+        self.expect(TokenKind::LParen)?;
+        let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
+        let end = self.expect(TokenKind::RParen)?;
+        Ok(self.shared.arena.push(
+            Node::Call {
+                name: name_id,
+                args,
+            },
+            name_span.merge(end),
+        ))
     }
 
     /// Parse the body of a rule-set macro: a sequence of `rule` /
