@@ -55,3 +55,12 @@ error_tests! { Type {
         TypeErrorKind::RuleSetMacroInExpressionContext("rs".into())
     }
 }}
+
+error_tests! { Resolve {
+    error_symref_to_unknown_rule {
+        r#"macro bad(s: str_t) { rule a { @concat("no_", s) } }
+           grammar { language: "test", start: a }
+           bad("such")"#,
+        ResolveErrorKind::UnknownIdentifier("no_such".into())
+    }
+}}
