@@ -102,6 +102,8 @@ pub enum TypeErrorKind {
     ImportMacroNotFound(String),
     #[error("'{0}' is a macro, not a value; call it with {0}(...)")]
     MacroUsedAsValue(String),
+    #[error("rule-set macro '{0}' can only be invoked at top level, not in expression context")]
+    RuleSetMacroInExpressionContext(String),
 }
 
 const fn non_bindable_message(ty: Ty) -> &'static str {
