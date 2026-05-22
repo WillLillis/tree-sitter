@@ -651,12 +651,19 @@ pub enum Node {
         for_id: ForId,
         body: ChildRange,
     },
-    /// `@<str_expr>` - late-bound rule reference by computed name. Only
-    /// valid inside top-level `For` bodies. `expr` must typecheck to
-    /// `str_t`. Resolved by `expand_for_loops` into a concrete name;
-    /// should not survive past that pass.
+    /// `@<str_expr>` - late-bound rule reference by computed name inside
+    /// a rule-set macro body. `expr` must typecheck to `str_t`.
+    /// `expand_macro_calls` evaluates the (substituted) `expr` and emits
+    /// a `SynthRef` in its place; SymRef should not survive that pass.
     SymRef {
         expr: NodeId,
+    },
+    /// Post-expand rule reference by interned name. Emitted by
+    /// `expand_macro_calls` from `SymRef`; resolve validates the name
+    /// exists in `Decls`, typecheck yields rule_t, lower emits a
+    /// `NamedSymbol` keyed by `strings.resolve_local(name, ...)`.
+    SynthRef {
+        name: Str,
     },
     /// `name(arg0, arg1, ...)`. `args` children: `[arg0, arg1, ...]`.
     Call {
