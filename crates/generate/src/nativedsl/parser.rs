@@ -280,9 +280,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwExternal => self.parse_external_decl(),
-            // `name(args...)` at top level: invocation of a rule-set macro.
-            // Validated and expanded by `expand_macro_calls` (which checks
-            // that `name` resolves to a `MacroKind::RuleSet` macro).
+            // `name(args...)` - rule-set macro invocation, expanded later.
             TokenKind::Ident if self.next_is(TokenKind::LParen) => {
                 self.parse_top_level_call()
             }
@@ -418,8 +416,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         } else {
             self.expect(TokenKind::KwRule)?
         };
-        // `rule @<expr> { ... }` — computed name; only meaningful inside a
-        // top-level `for` block. expand_for_loops consumes ComputedRule.
+        // `rule @<expr> { ... }` - computed name; consumed by expand.
         if self.eat(TokenKind::At).is_some() {
             let name_expr = self.parse_postfix()?;
             self.expect(TokenKind::LBrace)?;
@@ -514,10 +511,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .push(Node::Macro(macro_idx), start.merge(end)))
     }
 
-    /// Top-level macro invocation `name(arg0, arg1, ...)`. Emits a
-    /// `Node::Call` whose `name` is an unresolved `Ident`. Consumed by
-    /// `expand_macro_calls`, which validates `name` resolves to a
-    /// `MacroKind::RuleSet` macro and inlines its body.
+    /// Emits `Node::Call` at item position; consumed by `expand_macro_calls`.
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
         let name_span = self.expect_ident()?;
         let name_id = self
@@ -536,10 +530,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         ))
     }
 
-    /// Parse the body of a rule-set macro: a sequence of `rule` /
-    /// `override rule` decls (including `rule @<expr>` computed-name decls)
-    /// terminated by `}` (the closing brace is consumed by the caller).
-    /// Wraps the decls in a `Node::RuleSet`.
+    /// Parse `rule` / `override rule` decls until `}`, wrap in `Node::RuleSet`.
+    /// Caller consumes the closing brace.
     fn parse_rule_set_body(&mut self, brace_start: Span) -> ParseResult<NodeId> {
         let mut decls = Vec::new();
         loop {
@@ -553,8 +545,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             };
             decls.push(id);
         }
-        // Rule-set macros must emit at least one rule per invocation -
-        // expand_macro_calls relies on this for in-place slot placement.
+        // expand_macro_calls relies on >=1 rule for in-place slot placement.
         if decls.is_empty() {
             return Err(self.error(ParseErrorKind::EmptyRuleSetMacroBody));
         }
@@ -748,9 +739,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
             }
             TokenKind::At => {
-                // `@<primary>` — late-bound rule reference by computed name.
-                // Only valid inside top-level for-block bodies; resolved by
-                // expand_for_loops.
+                // `@<primary>` - computed-name rule ref; valid in rule-set
+                // macro bodies, resolved by expand_macro_calls.
                 self.advance_pos();
                 let inner = self.parse_postfix()?;
                 Ok(self.shared.arena.push(

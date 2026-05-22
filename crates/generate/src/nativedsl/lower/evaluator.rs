@@ -629,9 +629,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
-            // SynthRef carries a Str into the StringPool directly (no
-            // intern needed). Resolve already validated the name exists in
-            // the rule table.
+            // Name already interned by expand; validated by resolve.
             &Node::SynthRef { name } => {
                 let rid = self.alloc_rule(ARule::NamedSymbol(name));
                 Ok(self.alloc_val(Value::Rule(rid)))
