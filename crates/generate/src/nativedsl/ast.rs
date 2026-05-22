@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
+use super::string_pool::Str;
 use super::typecheck::Ty;
 use super::{ModuleId, Note, NoteMessage};
 
@@ -516,13 +517,28 @@ pub enum Node {
         name: Span,
         body: NodeId,
     },
-    /// `rule @<str_expr> { ... }` inside a top-level for-block. The
-    /// `name_expr` typechecks to `str_t`. `expand_for_loops` consumes this
-    /// variant and emits a synthesized rule (with the computed name interned
-    /// into the StringPool) before resolve runs.
+    /// `rule @<str_expr> { ... }` inside a rule-set macro body. The
+    /// `name_expr` typechecks to `str_t`. `expand_macro_calls` evaluates
+    /// the (substituted) `name_expr` against the macro call's args, interns
+    /// the result into the StringPool, and emits an `ExpandedRule`.
     ComputedRule {
         is_override: bool,
         name_expr: NodeId,
+        body: NodeId,
+    },
+    /// Body of a rule-set macro: a sequence of `Rule` and `ComputedRule`
+    /// decls. Lives as `MacroConfig::body` for rule-set macros (expression
+    /// macros store the body expression directly). Produced by parser,
+    /// consumed by `expand_macro_calls`.
+    RuleSet(ChildRange),
+    /// Synthesized rule decl emitted by `expand_macro_calls`. Mirrors
+    /// `Rule` but the name lives in the StringPool (either intern_span of
+    /// the source-text name in the macro body, or intern_owned of the
+    /// concat-evaluated computed name). Downstream stages (resolve,
+    /// typecheck, lower) handle alongside `Rule`.
+    ExpandedRule {
+        is_override: bool,
+        name: Str,
         body: NodeId,
     },
     Let {
