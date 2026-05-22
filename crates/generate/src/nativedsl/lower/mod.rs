@@ -28,16 +28,13 @@ use super::{
     string_pool::{Str, StringPool},
 };
 
-/// Source of a rule decl's name. Resolution to `String` is deferred to the
-/// final build step so we don't have to hold a `StringPool` borrow across
-/// `lower_to_rule` calls (which may intern more entries during lowering).
+/// Rule-decl name source. Resolution is deferred to the final build step
+/// so the body-lowering loop doesn't hold a StringPool borrow across
+/// `lower_to_rule` calls (which may intern further entries).
 #[derive(Clone, Copy)]
 enum NameSource {
-    /// `Node::Rule` - name is a source span; resolves via `current.text()`.
-    Span(Span),
-    /// `Node::ExpandedRule` - name is a `StringPool` handle; resolves via
-    /// `strings.resolve_local()`.
-    Str(Str),
+    Span(Span), // Node::Rule
+    Str(Str),   // Node::ExpandedRule
 }
 
 use evaluator::Evaluator;
@@ -196,9 +193,6 @@ pub fn lower_helper(
         .collect())
 }
 
-/// Resolve a `NameSource` to an owned `String`. Done at build time (after
-/// per-rule lowering) so the loop never holds a `StringPool` borrow across
-/// `lower_to_rule`'s mutations.
 fn resolve_name(src: NameSource, eval: &Evaluator, ctx: &super::ModuleContext) -> String {
     match src {
         NameSource::Span(s) => ctx.text(s).to_string(),
@@ -242,9 +236,8 @@ fn evaluate(
                 body,
             } => {
                 let rule_id = eval.lower_to_rule(*body)?;
-                // ExpandedRule's diagnostic span is the macro call site
-                // (set by expand_macro_calls); reuse it for override
-                // attribution.
+                // Set by expand_macro_calls to the macro call's span; use
+                // for override attribution diagnostics.
                 let span = shared.arena.span(item_id);
                 if *is_override {
                     override_entries.push((NameSource::Str(*name), rule_id, span));

@@ -1,22 +1,11 @@
-//! Inlines top-level rule-set macro invocations. Runs between apply_cfg and
-//! resolve so the rest of the pipeline only sees concrete rule decls.
+//! Inlines top-level rule-set macro invocations between apply_cfg and
+//! resolve. Each `Node::Call` at item position is replaced by the
+//! `Node::ExpandedRule`s produced from the macro's body, with `MacroParam`
+//! refs substituted by call-site args. `Node::SymRef` becomes
+//! `Node::SynthRef` carrying the evaluated name.
 //!
-//! For each `Node::Call` in `root_items`:
-//!   - Look up the named macro in the **current module** (imported and
-//!     qualified macro calls are intentionally not supported at top level;
-//!     the parser rejects `mod::name(...)` shape at item position).
-//!   - Require `MacroKind::RuleSet` (else error).
-//!   - For each rule decl in the macro's `Node::RuleSet` body, deep-clone
-//!     the subtree substituting `MacroParam` refs with copies of the
-//!     corresponding arg subtree, then emit a `Node::ExpandedRule`:
-//!       - `Node::Rule` -> name interned via `intern_span` (source span)
-//!       - `Node::ComputedRule` -> evaluate the substituted `name_expr` via
-//!         the tiny 3-arm string evaluator (StringLit / RawStringLit /
-//!         Concat), intern via `intern_owned`
-//!
-//! `SymRef` in expression position currently clones literally; the
-//! synthesized-name reference path lands in a followup (needs IdentKind
-//! extension + StringPool plumbing in resolve).
+//! Only local macros are visible at item position; qualified calls aren't
+//! supported (the parser rejects `mod::foo(...)` there).
 
 use serde::Serialize;
 use thiserror::Error;
@@ -28,19 +17,15 @@ use super::{
     string_pool::{Str, StringPool},
 };
 
-/// Expand all top-level rule-set macro invocations in `ctx.root_items`,
-/// replacing each `Node::Call` with the sequence of `Node::ExpandedRule`
-/// nodes its expansion produced.
 pub fn expand_macro_calls(
     shared: &mut SharedAst,
     strings: &mut StringPool,
     ctx: &mut ModuleContext,
     mod_id: ModuleId,
 ) -> Result<(), ExpandError> {
-    // Walk only the original indices. Each Call replaces itself in place
-    // (first expanded rule into its slot; remaining rules pushed to the end
-    // of root_items). Parser enforces >=1 rule per rule-set macro body so
-    // the slot is always filled.
+    // Walk only the original indices. Each Call writes its first expanded
+    // rule into its own slot; the rest are pushed to the end. Parser's
+    // EmptyRuleSetMacroBody guarantees the slot is always filled.
     let original_len = ctx.root_items.len();
     for i in 0..original_len {
         let id = ctx.root_items[i];
@@ -51,8 +36,6 @@ pub fn expand_macro_calls(
     Ok(())
 }
 
-/// Linear scan of `ctx.root_items` for a local macro by name. Helper /
-/// imported macros are intentionally not visible at item position.
 fn lookup_local_macro(shared: &SharedAst, ctx: &ModuleContext, name: &str) -> Option<MacroId> {
     ctx.root_items.iter().find_map(|&item_id| {
         if let Node::Macro(macro_id) = shared.arena.get(item_id) {
@@ -77,19 +60,13 @@ fn expand_one_call(
     };
     let name_span = shared.arena.span(name);
     let name_text = ctx.text(name_span);
-    // Linear scan over root_items for the matching local macro. Helper /
-    // imported macros are intentionally not visible at item position (the
-    // parser also rejects `mod::name(...)` here). For typical grammars with
-    // <50 macros, this is fast enough that a cache is not worth its borrow
-    // complexity.
     let macro_id = lookup_local_macro(shared, ctx, name_text).ok_or_else(|| {
         ExpandError::new(
             ExpandErrorKind::UnknownMacro(name_text.to_string()),
             name_span,
         )
     })?;
-    // Snapshot the bits of the macro config we need before recursive calls
-    // start borrowing `shared` mutably.
+    // Snapshot before recursive calls reborrow shared mutably.
     let config = shared.pools.get_macro(macro_id);
     let kind = config.kind;
     let param_count = config.params.len();
@@ -101,7 +78,6 @@ fn expand_one_call(
         ));
     };
     let Node::RuleSet(rule_range) = *shared.arena.get(body_id) else {
-        // Parser guarantees RuleSet body for RuleSet-kind macros.
         unreachable!()
     };
     if args.len as usize != param_count {
@@ -114,18 +90,16 @@ fn expand_one_call(
             shared.arena.span(call_id),
         ));
     }
-    // Reading by absolute index keeps the iteration safe across recursive
-    // calls that only ever *append* to `pools.children` (per the established
-    // walker pattern in apply_cfg).
+    // Read by absolute index: recursive expansion only appends to
+    // pools.children (same walker pattern apply_cfg uses).
     let call_span = shared.arena.span(call_id);
     let args_start = args.start as usize;
     let rule_start = rule_range.start as usize;
     let rule_end = rule_start + rule_range.len as usize;
     for (offset, i) in (rule_start..rule_end).enumerate() {
         let rule_id = shared.pools.children[i];
-        let expanded = expand_rule(
-            shared, strings, ctx, args_start, param_count, mod_id, rule_id, call_span,
-        )?;
+        let expanded =
+            expand_rule(shared, strings, ctx, args_start, mod_id, rule_id, call_span)?;
         if offset == 0 {
             ctx.root_items[slot] = expanded;
         } else {
@@ -135,14 +109,11 @@ fn expand_one_call(
     Ok(())
 }
 
-/// Expand one `Node::Rule` or `Node::ComputedRule` from a macro body into a
-/// `Node::ExpandedRule`. Args live at `pools.children[args_start..args_start+arg_count]`.
 fn expand_rule(
     shared: &mut SharedAst,
     strings: &mut StringPool,
     ctx: &ModuleContext,
     args_start: usize,
-    arg_count: usize,
     mod_id: ModuleId,
     rule_id: NodeId,
     call_span: Span,
@@ -155,7 +126,7 @@ fn expand_rule(
             body,
         } => {
             let name_str = strings.intern_span(name, mod_id);
-            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, arg_count, body)?;
+            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body)?;
             (is_override, name_str, cloned_body)
         }
         Node::ComputedRule {
@@ -165,14 +136,12 @@ fn expand_rule(
         } => {
             let name_span = shared.arena.span(name_expr);
             let evaluated =
-                eval_name(shared, strings, ctx, args_start, arg_count, name_expr, name_span)?;
-            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, arg_count, body)?;
+                eval_name(shared, strings, ctx, args_start, name_expr, name_span)?;
+            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body)?;
             (is_override, evaluated, cloned_body)
         }
-        _ => {
-            // Parser only places Rule/ComputedRule in a RuleSet body.
-            unreachable!()
-        }
+        // Parser only places Rule/ComputedRule in a RuleSet body.
+        _ => unreachable!(),
     };
     Ok(shared.arena.push(
         Node::ExpandedRule {
@@ -184,21 +153,20 @@ fn expand_rule(
     ))
 }
 
-/// Tiny 3-arm name evaluator. Accepts string literals, macro params
-/// (whose arg substring resolves recursively), and `concat(...)` of
-/// string-shaped children. Anything else is an error here; typecheck
-/// would catch most of these earlier in a later iteration.
+/// Accepts string literals, macro params (resolved into args), and
+/// `concat(...)` of those. Typecheck catches non-str_t at definition
+/// time; this errors at expand time for shapes outside the limited
+/// compile-time evaluator subset (e.g. references to lets).
 fn eval_name(
     shared: &SharedAst,
     strings: &mut StringPool,
     ctx: &ModuleContext,
     args_start: usize,
-    arg_count: usize,
     node_id: NodeId,
     name_expr_span: Span,
 ) -> Result<Str, ExpandError> {
     let mut buf = String::new();
-    eval_name_into(shared, ctx, args_start, arg_count, node_id, &mut buf)?;
+    eval_name_into(shared, ctx, args_start, node_id, &mut buf)?;
     if !is_ident_str(&buf) {
         return Err(ExpandError::new(
             ExpandErrorKind::InvalidRuleName(buf),
@@ -212,7 +180,6 @@ fn eval_name_into(
     shared: &SharedAst,
     ctx: &ModuleContext,
     args_start: usize,
-    arg_count: usize,
     node_id: NodeId,
     out: &mut String,
 ) -> Result<(), ExpandError> {
@@ -220,14 +187,11 @@ fn eval_name_into(
     let span = shared.arena.span(node_id);
     match node {
         Node::StringLit => {
-            // Span is quote-stripped by parse_primary. Push the raw bytes;
-            // escapes that aren't valid identifier chars (`\n`, etc.) fall
-            // out at the post-eval `is_ident_str` check.
+            // Span is quote-stripped by parse_primary.
             out.push_str(ctx.text(span));
             Ok(())
         }
         Node::RawStringLit { hash_count } => {
-            // `r#"text"#`: strip `r` + (hash_count+1) quote-side chars.
             let prefix = 2 + u32::from(hash_count);
             let suffix = 1 + u32::from(hash_count);
             let inner = Span::new(span.start + prefix, span.end - suffix);
@@ -235,17 +199,15 @@ fn eval_name_into(
             Ok(())
         }
         Node::MacroParam { index, .. } => {
-            let idx = index as usize;
-            assert!(idx < arg_count, "param index out of range; checked at call site");
-            let arg_id = shared.pools.children[args_start + idx];
-            eval_name_into(shared, ctx, args_start, arg_count, arg_id, out)
+            let arg_id = shared.pools.children[args_start + index as usize];
+            eval_name_into(shared, ctx, args_start, arg_id, out)
         }
         Node::Concat(range) => {
             let start = range.start as usize;
             let end = start + range.len as usize;
             for i in start..end {
                 let child = shared.pools.children[i];
-                eval_name_into(shared, ctx, args_start, arg_count, child, out)?;
+                eval_name_into(shared, ctx, args_start, child, out)?;
             }
             Ok(())
         }
@@ -253,31 +215,27 @@ fn eval_name_into(
     }
 }
 
-/// Deep-copy `src_id` into the arena, substituting each `MacroParam` ref
-/// with a fresh copy of the corresponding arg subtree. `SymRef` is
-/// consumed here: its name expression is evaluated (with the same arg
-/// substitution applied) and replaced with a `SynthRef` carrying the
-/// interned name.
+/// Deep-copy `src_id`, substituting each `MacroParam` with a fresh clone
+/// of the corresponding arg subtree (per-use clones keep span attribution
+/// distinct). `SymRef` collapses to a `SynthRef` carrying the evaluated
+/// name.
 fn clone_with_subst(
     shared: &mut SharedAst,
     strings: &mut StringPool,
     ctx: &ModuleContext,
     args_start: usize,
-    arg_count: usize,
     src_id: NodeId,
 ) -> Result<NodeId, ExpandError> {
     let span = shared.arena.span(src_id);
     let src = *shared.arena.get(src_id);
-    // MacroParam: substitute with a fresh clone of args[index] (so multiple
-    // uses don't share NodeIds; keeps per-use span attribution distinct).
     if let Node::MacroParam { index, .. } = src {
         let arg_id = shared.pools.children[args_start + index as usize];
-        return clone_with_subst(shared, strings, ctx, args_start, arg_count, arg_id);
+        return clone_with_subst(shared, strings, ctx, args_start, arg_id);
     }
-    // SymRef: evaluate the inner name expression (eval_name already chases
-    // MacroParam refs into args), intern, replace with SynthRef.
     if let Node::SymRef { expr } = src {
-        let name = eval_name(shared, strings, ctx, args_start, arg_count, expr, span)?;
+        // eval_name handles MacroParam substitution inline, so no separate
+        // clone of `expr` is needed.
+        let name = eval_name(shared, strings, ctx, args_start, expr, span)?;
         return Ok(shared.arena.push(Node::SynthRef { name }, span));
     }
     let new_node = match src {
@@ -295,46 +253,46 @@ fn clone_with_subst(
         // Single-child wrappers.
         Node::Repeat { kind, inner } => Node::Repeat {
             kind,
-            inner: clone_with_subst(shared, strings, ctx, args_start, arg_count, inner)?,
+            inner: clone_with_subst(shared, strings, ctx, args_start, inner)?,
         },
         Node::Token { immediate, inner } => Node::Token {
             immediate,
-            inner: clone_with_subst(shared, strings, ctx, args_start, arg_count, inner)?,
+            inner: clone_with_subst(shared, strings, ctx, args_start, inner)?,
         },
-        Node::Neg(c) => Node::Neg(clone_with_subst(shared, strings, ctx, args_start, arg_count, c)?),
+        Node::Neg(c) => Node::Neg(clone_with_subst(shared, strings, ctx, args_start, c)?),
         Node::Field { name, content } => Node::Field {
             name,
-            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
         },
         Node::Reserved { context, content } => Node::Reserved {
             context,
-            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
         },
         Node::FieldAccess { obj, field } => Node::FieldAccess {
-            obj: clone_with_subst(shared, strings, ctx, args_start, arg_count, obj)?,
+            obj: clone_with_subst(shared, strings, ctx, args_start, obj)?,
             field,
         },
         Node::QualifiedAccess { obj, member } => Node::QualifiedAccess {
-            obj: clone_with_subst(shared, strings, ctx, args_start, arg_count, obj)?,
+            obj: clone_with_subst(shared, strings, ctx, args_start, obj)?,
             member,
         },
         Node::GrammarConfig { module, field } => Node::GrammarConfig {
-            module: clone_with_subst(shared, strings, ctx, args_start, arg_count, module)?,
+            module: clone_with_subst(shared, strings, ctx, args_start, module)?,
             field,
         },
         // Two-child wrappers.
         Node::Alias { content, target } => Node::Alias {
-            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
-            target: clone_with_subst(shared, strings, ctx, args_start, arg_count, target)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
+            target: clone_with_subst(shared, strings, ctx, args_start, target)?,
         },
         Node::Append { left, right } => Node::Append {
-            left: clone_with_subst(shared, strings, ctx, args_start, arg_count, left)?,
-            right: clone_with_subst(shared, strings, ctx, args_start, arg_count, right)?,
+            left: clone_with_subst(shared, strings, ctx, args_start, left)?,
+            right: clone_with_subst(shared, strings, ctx, args_start, right)?,
         },
         Node::BinOp { op, lhs, rhs } => Node::BinOp {
             op,
-            lhs: clone_with_subst(shared, strings, ctx, args_start, arg_count, lhs)?,
-            rhs: clone_with_subst(shared, strings, ctx, args_start, arg_count, rhs)?,
+            lhs: clone_with_subst(shared, strings, ctx, args_start, lhs)?,
+            rhs: clone_with_subst(shared, strings, ctx, args_start, rhs)?,
         },
         Node::Prec {
             kind,
@@ -342,13 +300,13 @@ fn clone_with_subst(
             content,
         } => Node::Prec {
             kind,
-            value: clone_with_subst(shared, strings, ctx, args_start, arg_count, value)?,
-            content: clone_with_subst(shared, strings, ctx, args_start, arg_count, content)?,
+            value: clone_with_subst(shared, strings, ctx, args_start, value)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
         },
         Node::DynRegex { pattern, flags } => {
-            let p = clone_with_subst(shared, strings, ctx, args_start, arg_count, pattern)?;
+            let p = clone_with_subst(shared, strings, ctx, args_start, pattern)?;
             let f = flags
-                .map(|id| clone_with_subst(shared, strings, ctx, args_start, arg_count, id))
+                .map(|id| clone_with_subst(shared, strings, ctx, args_start, id))
                 .transpose()?;
             Node::DynRegex {
                 pattern: p,
@@ -358,21 +316,21 @@ fn clone_with_subst(
         // Variadic via ChildRange.
         Node::SeqOrChoice { seq, range } => Node::SeqOrChoice {
             seq,
-            range: clone_range(shared, strings, ctx, args_start, arg_count, range)?,
+            range: clone_range(shared, strings, ctx, args_start, range)?,
         },
-        Node::List(range) => Node::List(clone_range(shared, strings, ctx, args_start, arg_count, range)?),
-        Node::Tuple(range) => Node::Tuple(clone_range(shared, strings, ctx, args_start, arg_count, range)?),
-        Node::Concat(range) => Node::Concat(clone_range(shared, strings, ctx, args_start, arg_count, range)?),
+        Node::List(range) => Node::List(clone_range(shared, strings, ctx, args_start, range)?),
+        Node::Tuple(range) => Node::Tuple(clone_range(shared, strings, ctx, args_start, range)?),
+        Node::Concat(range) => Node::Concat(clone_range(shared, strings, ctx, args_start, range)?),
         Node::Call { name, args: cr } => Node::Call {
-            name: clone_with_subst(shared, strings, ctx, args_start, arg_count, name)?,
-            args: clone_range(shared, strings, ctx, args_start, arg_count, cr)?,
+            name: clone_with_subst(shared, strings, ctx, args_start, name)?,
+            args: clone_range(shared, strings, ctx, args_start, cr)?,
         },
         Node::QualifiedCall(range) => {
-            Node::QualifiedCall(clone_range(shared, strings, ctx, args_start, arg_count, range)?)
+            Node::QualifiedCall(clone_range(shared, strings, ctx, args_start, range)?)
         }
         Node::For { for_id, body } => Node::For {
             for_id,
-            body: clone_range(shared, strings, ctx, args_start, arg_count, body)?,
+            body: clone_range(shared, strings, ctx, args_start, body)?,
         },
         Node::Object(range) => {
             // Object children live in object_fields as (Span, NodeId). Read by
@@ -382,7 +340,7 @@ fn clone_with_subst(
             let mut new_pairs: Vec<(Span, NodeId)> = Vec::with_capacity(end - start);
             for i in start..end {
                 let (k, v) = shared.pools.object_fields[i];
-                let v2 = clone_with_subst(shared, strings, ctx, args_start, arg_count, v)?;
+                let v2 = clone_with_subst(shared, strings, ctx, args_start, v)?;
                 new_pairs.push((k, v2));
             }
             let new_range = shared
@@ -412,7 +370,6 @@ fn clone_range(
     strings: &mut StringPool,
     ctx: &ModuleContext,
     args_start: usize,
-    arg_count: usize,
     range: ChildRange,
 ) -> Result<ChildRange, ExpandError> {
     let start = range.start as usize;
@@ -420,7 +377,7 @@ fn clone_range(
     let mut new_ids: Vec<NodeId> = Vec::with_capacity(end - start);
     for i in start..end {
         let id = shared.pools.children[i];
-        new_ids.push(clone_with_subst(shared, strings, ctx, args_start, arg_count, id)?);
+        new_ids.push(clone_with_subst(shared, strings, ctx, args_start, id)?);
     }
     shared
         .pools

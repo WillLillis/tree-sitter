@@ -45,11 +45,9 @@ const fn byte_is(b: u8, class: u8) -> bool {
     BYTE_CLASS[b as usize] & class != 0
 }
 
-/// True iff `s` is shaped like an `Ident` token: starts with a letter or
-/// underscore, continues with letters, digits, or underscores. Shared with
-/// expand_macro_calls, which validates the result of computed name eval
-/// (e.g. `@concat(...)`) against the same rule the lexer enforces on
-/// source-text rule names.
+/// True iff `s` is shaped like an `Ident` token. Used by expand to
+/// validate computed names against the same predicate the lexer uses
+/// for source-text idents.
 pub fn is_ident_str(s: &str) -> bool {
     let bytes = s.as_bytes();
     let Some((&first, rest)) = bytes.split_first() else {

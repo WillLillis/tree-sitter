@@ -65,12 +65,8 @@ impl StringPool {
         unsafe { self.entries.get_unchecked(id.0.get() as usize) }
     }
 
-    /// Resolve a `Str` whose `Source` entries refer to the local module's
-    /// source (caller-provided). The returned `&str` borrows from either
-    /// `self` (Owned) or `source` (Source); both lifetimes are unified
-    /// behind `'a`. Used by resolve / collect_decls when registering
-    /// `ExpandedRule` names emitted by `expand_macro_calls` for the
-    /// currently-loading module.
+    /// Resolve a `Str` whose `Source` entries are known to reference
+    /// `source` (caller asserts the local-module invariant).
     pub fn resolve_local<'a>(&'a self, id: Str, source: &'a str) -> &'a str {
         match self.entry(id) {
             StrEntry::Source(span, _) => span.resolve(source),

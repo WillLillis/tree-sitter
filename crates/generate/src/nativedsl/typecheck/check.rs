@@ -94,11 +94,9 @@ pub(super) fn check_item(
     }
 }
 
-/// Typecheck a rule-set macro body (`Node::RuleSet`). For each inner
-/// `ComputedRule`, validate `name_expr` is `str_t`. Both `Rule` and
-/// `ComputedRule` bodies typecheck as rule expressions; `MacroParam` refs
-/// resolve via their stamped `Ty` so this catches type errors at macro
-/// definition time rather than at each call site.
+/// Typecheck rule decls inside a rule-set macro body at definition time.
+/// `MacroParam` refs resolve via their stamped `Ty` so type errors point
+/// at the macro definition, not each call site.
 fn check_rule_set_body(
     shared: &SharedAst,
     ctx: &ModuleContext,
@@ -106,7 +104,7 @@ fn check_rule_set_body(
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
     let Node::RuleSet(range) = shared.arena.get(body_id) else {
-        unreachable!("parser guarantees RuleSet body for RuleSet-kind macros")
+        unreachable!()
     };
     for &decl_id in shared.pools.child_slice(*range) {
         match shared.arena.get(decl_id) {
