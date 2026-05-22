@@ -44,6 +44,7 @@ macro_rules! expect_pat {
 pub mod apply_cfg;
 pub mod ast;
 pub mod diagnostic;
+pub mod expand_macro_calls;
 pub mod lexer;
 pub mod loader;
 pub mod lower;
@@ -58,6 +59,7 @@ pub mod typecheck;
 pub use crate::grammars::InputGrammar;
 pub use diagnostic::NativeDslError;
 pub use lexer::{LexErrorKind, LexResult};
+pub use expand_macro_calls::{ExpandError, ExpandErrorKind};
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
 pub use parser::{ParseErrorKind, ParseResult};
 pub use resolve::{ResolveErrorKind, ResolveResult};
