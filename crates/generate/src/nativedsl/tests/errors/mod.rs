@@ -25,6 +25,7 @@ macro_rules! inherit_error_tests {
     };
 }
 
+mod expand;
 mod lex;
 mod lower;
 mod parse;
