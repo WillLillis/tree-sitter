@@ -10,7 +10,7 @@ use super::{
     InnerTy, NoteMessage, ParseError,
     ast::{
         BinOp, ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
-        ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
+        MacroKind, ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
     typecheck::{DataTy, Ty},
@@ -475,26 +475,66 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         if params.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
-        let return_ty = self.parse_type()?.0;
-        self.expect(TokenKind::LBrace)?;
+        // `(<params>) <ret_ty> { <expr> }` is an expression macro.
+        // `(<params>) { rule a {...} rule b {...} }` (no return type) is a
+        // rule-set macro: body is a sequence of rule decls expanded at each
+        // top-level call site by `expand_macro_calls`.
+        let kind = if self.at(TokenKind::LBrace) {
+            MacroKind::RuleSet
+        } else {
+            MacroKind::Expression(self.parse_type()?.0)
+        };
+        let brace_start = self.expect(TokenKind::LBrace)?;
         let body = stack_scope!(self.locals, |_saved| {
             for (i, p) in params.iter().enumerate() {
                 self.locals
                     .push((p.name, LocalBinding::MacroParam(p.ty, i as u8)));
             }
-            self.parse_expr()
+            match kind {
+                MacroKind::Expression(_) => self.parse_expr(),
+                MacroKind::RuleSet => self.parse_rule_set_body(brace_start),
+            }
         })?;
         let end = self.expect(TokenKind::RBrace)?;
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,
-            return_ty,
             body,
+            kind,
         });
         Ok(self
             .shared
             .arena
             .push(Node::Macro(macro_idx), start.merge(end)))
+    }
+
+    /// Parse the body of a rule-set macro: a sequence of `rule` /
+    /// `override rule` decls (including `rule @<expr>` computed-name decls)
+    /// terminated by `}` (the closing brace is consumed by the caller).
+    /// Wraps the decls in a `Node::RuleSet`.
+    fn parse_rule_set_body(&mut self, brace_start: Span) -> ParseResult<NodeId> {
+        let mut decls = Vec::new();
+        loop {
+            if self.at(TokenKind::RBrace) {
+                break;
+            }
+            let id = match self.current().kind {
+                TokenKind::KwRule => self.parse_rule_def(false)?,
+                TokenKind::KwOverride => self.parse_rule_def(true)?,
+                _ => return Err(self.error(ParseErrorKind::RuleSetBodyRequiresRuleDecl)),
+            };
+            decls.push(id);
+        }
+        let range = self
+            .shared
+            .pools
+            .push_children(&decls)
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
+        let end = self.span();
+        Ok(self
+            .shared
+            .arena
+            .push(Node::RuleSet(range), brace_start.merge(end)))
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -1179,6 +1219,8 @@ pub enum ParseErrorKind {
     ExpectedCfgKeyword(String),
     #[error("`#[cfg(...)]` is not allowed on a grammar block")]
     CfgOnGrammarBlock,
+    #[error("rule-set macro body may only contain rule declarations")]
+    RuleSetBodyRequiresRuleDecl,
 }
 
 #[expect(

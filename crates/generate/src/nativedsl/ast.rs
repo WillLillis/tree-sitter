@@ -389,8 +389,19 @@ impl AstPools {
 pub struct MacroConfig {
     pub name: Span,
     pub params: Vec<Param>,
-    pub return_ty: Ty,
     pub body: NodeId,
+    pub kind: MacroKind,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum MacroKind {
+    /// `macro foo(...) <return_ty> { <expr> }` - body is an expression node
+    /// that typechecks to `return_ty`.
+    Expression(Ty),
+    /// `macro foo(...) { rule a {...} rule b {...} }` - body is a
+    /// `Node::RuleSet` wrapper holding rule decls. Expanded inline at each
+    /// top-level call site by `expand_macro_calls`.
+    RuleSet,
 }
 
 #[derive(Copy, Clone)]

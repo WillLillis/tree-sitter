@@ -1,8 +1,8 @@
 use crate::nativedsl::{
     ContainerKind, DataTy, InnerTy, ModuleTy, Ty, TypeError, TypeErrorKind,
     ast::{
-        ChildRange, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId, Param, PrecKind,
-        SharedAst, Span,
+        ChildRange, ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, Param,
+        PrecKind, SharedAst, Span,
     },
     typecheck::{Constraint, TypeEnv, TypeResult},
 };
@@ -77,13 +77,15 @@ pub(super) fn check_item(
         }
         Node::Macro(macro_id) => {
             let config = shared.pools.get_macro(*macro_id);
-            type_of(
-                shared,
-                ctx,
-                config.body,
-                env,
-                Constraint::Exact(config.return_ty),
-            )?;
+            match config.kind {
+                MacroKind::Expression(return_ty) => {
+                    type_of(shared, ctx, config.body, env, Constraint::Exact(return_ty))?;
+                }
+                // Rule-set macros' bodies are decl-shaped, not expressions.
+                // Their inner rule bodies are typechecked after
+                // `expand_macro_calls` inlines them at each call site.
+                MacroKind::RuleSet => {}
+            }
             Ok(())
         }
         Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
@@ -500,7 +502,13 @@ fn check_macro_args(
             Constraint::Exact(config.params[i].ty),
         )?;
     }
-    Ok(config.return_ty)
+    match config.kind {
+        MacroKind::Expression(return_ty) => Ok(return_ty),
+        MacroKind::RuleSet => Err(TypeError::new(
+            TypeErrorKind::RuleSetMacroInExpressionContext(macro_name.to_string()),
+            span,
+        )),
+    }
 }
 
 fn type_of_object(
