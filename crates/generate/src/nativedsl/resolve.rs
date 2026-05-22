@@ -130,11 +130,7 @@ fn collect_decls<'a>(
             Node::ExpandedRule {
                 name, is_override, ..
             } => {
-                // ExpandedRule's name lives in the StringPool (either
-                // intern_span of the macro body's source-text name, or
-                // intern_owned of a concat-evaluated computed name). Source
-                // entries here always reference the current module, so we
-                // can resolve against ctx.source directly.
+                // Source entries from expand always reference ctx.source.
                 let name_text = strings.resolve_local(*name, &ctx.source);
                 insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
                 if *is_override {
@@ -273,11 +269,8 @@ fn resolve_item(
                     ));
                 }
             }
-            // Expression macros: resolve the body expression. Rule-set
-            // macros: body was deep-cloned into ExpandedRule decls during
-            // expand_macro_calls; the original is orphaned (no further
-            // references), so resolving it would be wasted work and would
-            // misfire (the body is a RuleSet of decls, not an expression).
+            // Rule-set bodies were deep-cloned into ExpandedRule decls by
+            // expand_macro_calls; the original is orphaned.
             match macro_cfg.kind {
                 MacroKind::Expression(_) => {
                     resolve_expr(arena, pools, ctx, strings, decls, modules, macro_cfg.body)
@@ -312,10 +305,7 @@ fn resolve_expr(
         return Ok(());
     }
 
-    // SynthRef: rule reference by interned name (emitted by
-    // expand_macro_calls from @<expr>). Validate the name exists in
-    // Decls; the node itself doesn't need rewriting since it already
-    // carries the resolved name.
+    // SynthRef already carries the resolved name; just validate it exists.
     if let &Node::SynthRef { name } = arena.get(id) {
         let text = strings.resolve_local(name, &ctx.source);
         if decls.get(text).is_none() {
