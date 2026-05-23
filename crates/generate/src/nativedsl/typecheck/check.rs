@@ -370,8 +370,7 @@ fn type_of(
             Ok(Ty::RULE)
         }
         Node::For { for_id, body } => {
-            let body_id = shared.pools.child_slice(*body)[0];
-            check_for_expr(shared, ctx, *for_id, body_id, env, |body, env| {
+            check_for_expr(shared, ctx, *for_id, *body, env, |body, env| {
                 expect_rule(shared, ctx, body, env).map(|()| Ty::RULE)
             })?;
             Ok(Ty::Spread)
@@ -646,8 +645,7 @@ where
     Leaf: Fn(&SharedAst, &ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<Ty> + Copy,
 {
     if let &Node::For { for_id, body } = shared.arena.get(item) {
-        let body_id = shared.pools.child_slice(body)[0];
-        check_for_expr(shared, ctx, for_id, body_id, env, |body, env| {
+        check_for_expr(shared, ctx, for_id, body, env, |body, env| {
             check_spread_item(shared, ctx, body, env, leaf)
         })
     } else {
