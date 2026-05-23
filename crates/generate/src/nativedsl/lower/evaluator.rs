@@ -755,7 +755,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let range = stack_scope!(self.state.val_scratch, |base| {
                     for &item_id in items {
                         if let Node::For { for_id, body } = *self.shared.arena.get(item_id) {
-                            self.eval_for_to_values(for_id, self.shared.pools.child_slice(body)[0])?;
+                            self.eval_for_to_values(for_id, body)?;
                         } else {
                             let val = self.eval_expr(item_id)?;
                             self.state.val_scratch.push(val);
@@ -867,7 +867,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let child_range = stack_scope!(self.state.rule_scratch, |base| {
                     for &member in children {
                         if let Node::For { for_id, body } = *self.shared.arena.get(member) {
-                            self.eval_for_to_rules(for_id, self.shared.pools.child_slice(body)[0])?;
+                            self.eval_for_to_rules(for_id, body)?;
                         } else {
                             let rid = self.lower_to_rule(member)?;
                             self.state.rule_scratch.push(rid);
@@ -1069,8 +1069,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Evaluate a for-loop, pushing each iteration's rule into `rule_scratch`.
     /// If the body is itself a for-loop, recurses (flatMap semantics).
-    /// `body` is the single-element NodeId from the For's body ChildRange
-    /// (extracted by the caller since expression-context for has exactly 1 child).
     fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
         self.eval_for_each(for_id, |evaluator| {
             if let &Node::For {
@@ -1078,7 +1076,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 body: inner_body,
             } = evaluator.shared.arena.get(body)
             {
-                let inner_body = evaluator.shared.pools.child_slice(inner_body)[0];
                 evaluator.eval_for_to_rules(inner, inner_body)
             } else {
                 let rule_id = evaluator.lower_to_rule(body)?;
@@ -1090,7 +1087,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Evaluate a for-loop, pushing each iteration's value into `val_scratch`.
     /// If the body is itself a for-loop, recurses (flatMap semantics).
-    /// `body` is the single-element NodeId from the For's body ChildRange.
     fn eval_for_to_values(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
         self.eval_for_each(for_id, |evaluator| {
             if let &Node::For {
@@ -1098,7 +1094,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 body: inner_body,
             } = evaluator.shared.arena.get(body)
             {
-                let inner_body = evaluator.shared.pools.child_slice(inner_body)[0];
                 evaluator.eval_for_to_values(inner, inner_body)
             } else {
                 let value_id = evaluator.eval_expr(body)?;

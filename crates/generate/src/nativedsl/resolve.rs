@@ -269,13 +269,30 @@ fn resolve_item(
                     ));
                 }
             }
-            // Rule-set bodies were deep-cloned into ExpandedRule decls by
-            // expand_macro_calls; the original is orphaned.
             match macro_cfg.kind {
                 MacroKind::Expression(_) => {
                     resolve_expr(arena, pools, ctx, strings, decls, modules, macro_cfg.body)
                 }
-                MacroKind::RuleSet => Ok(()),
+                // Walk the RuleSet body so the original (template) decls'
+                // identifiers get resolved too. Typecheck reuses these to
+                // catch errors at definition time.
+                MacroKind::RuleSet => {
+                    let Node::RuleSet(range) = arena.get(macro_cfg.body) else {
+                        unreachable!()
+                    };
+                    let range = *range;
+                    let start = range.start as usize;
+                    let end = start + range.len as usize;
+                    for i in start..end {
+                        let decl_id = pools.children[i];
+                        let body = match arena.get(decl_id) {
+                            Node::Rule { body, .. } | Node::ComputedRule { body, .. } => *body,
+                            _ => unreachable!(),
+                        };
+                        resolve_expr(arena, pools, ctx, strings, decls, modules, body)?;
+                    }
+                    Ok(())
+                }
             }
         }
         _ => Ok(()),
@@ -330,14 +347,11 @@ fn resolve_expr(
     }
 
     // For-loop bindings are resolved by the parser (ForBinding nodes).
-    // Just recurse into iterable and body. Expression-context For has
-    // exactly 1 body child (top-level decl-context For uses N children
-    // and is handled before resolve by the expand_for_loops pass).
+    // Just recurse into iterable and body.
     if let &Node::For { for_id, body } = arena.get(id) {
         let iterable = pools.get_for(for_id).iterable;
         resolve_expr(arena, pools, ctx, strings, decls, modules, iterable)?;
-        let body_id = pools.child_slice(body)[0];
-        return resolve_expr(arena, pools, ctx, strings, decls, modules, body_id);
+        return resolve_expr(arena, pools, ctx, strings, decls, modules, body);
     }
 
     resolve_children(arena, pools, ctx, strings, decls, modules, id)

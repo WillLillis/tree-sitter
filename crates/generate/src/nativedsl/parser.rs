@@ -1001,15 +1001,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             let end = self.expect(TokenKind::RBrace)?;
             ParseResult::Ok((body, end))
         })?;
-        // Expression-context for-loop: body holds exactly one child.
-        let body_range = self.shared.pools.push_single_child(body);
-        Ok(self.shared.arena.push(
-            Node::For {
-                for_id,
-                body: body_range,
-            },
-            start.merge(end),
-        ))
+        Ok(self
+            .shared
+            .arena
+            .push(Node::For { for_id, body }, start.merge(end)))
     }
 
     fn parse_ident_expr(&mut self, start: Span) -> ParseResult<NodeId> {
