@@ -330,7 +330,7 @@ fn clone_with_subst(
         }
         Node::For { for_id, body } => Node::For {
             for_id,
-            body: clone_range(shared, strings, ctx, args_start, body)?,
+            body: clone_with_subst(shared, strings, ctx, args_start, body)?,
         },
         Node::Object(range) => {
             // Object children live in object_fields as (Span, NodeId). Read by
