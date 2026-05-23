@@ -26,11 +26,17 @@ pub fn expand_macro_calls(
     // Walk only the original indices. Each Call writes its first expanded
     // rule into its own slot; the rest are pushed to the end. Parser's
     // EmptyRuleSetMacroBody guarantees the slot is always filled.
+    //
+    // `scratch` is a stack reused across every variadic clone in the macro
+    // bodies (SeqOrChoice, List, Tuple, Concat, Call args, QualifiedCall).
+    // stack_scope! saves the current len at entry and truncates on exit, so
+    // nested recursion just stacks above the parent's range.
+    let mut scratch: Vec<NodeId> = Vec::new();
     let original_len = ctx.root_items.len();
     for i in 0..original_len {
         let id = ctx.root_items[i];
         if matches!(shared.arena.get(id), Node::Call { .. }) {
-            expand_one_call(shared, strings, ctx, mod_id, id, i)?;
+            expand_one_call(shared, strings, ctx, mod_id, id, i, &mut scratch)?;
         }
     }
     Ok(())
@@ -54,6 +60,7 @@ fn expand_one_call(
     mod_id: ModuleId,
     call_id: NodeId,
     slot: usize,
+    scratch: &mut Vec<NodeId>,
 ) -> Result<(), ExpandError> {
     let Node::Call { name, args } = *shared.arena.get(call_id) else {
         unreachable!()
@@ -98,8 +105,9 @@ fn expand_one_call(
     let rule_end = rule_start + rule_range.len as usize;
     for (offset, i) in (rule_start..rule_end).enumerate() {
         let rule_id = shared.pools.children[i];
-        let expanded =
-            expand_rule(shared, strings, ctx, args_start, mod_id, rule_id, call_span)?;
+        let expanded = expand_rule(
+            shared, strings, ctx, args_start, mod_id, rule_id, call_span, scratch,
+        )?;
         if offset == 0 {
             ctx.root_items[slot] = expanded;
         } else {
@@ -117,6 +125,7 @@ fn expand_rule(
     mod_id: ModuleId,
     rule_id: NodeId,
     call_span: Span,
+    scratch: &mut Vec<NodeId>,
 ) -> Result<NodeId, ExpandError> {
     let node = *shared.arena.get(rule_id);
     let (is_override, name, body) = match node {
@@ -126,7 +135,7 @@ fn expand_rule(
             body,
         } => {
             let name_str = strings.intern_span(name, mod_id);
-            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body)?;
+            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
             (is_override, name_str, cloned_body)
         }
         Node::ComputedRule {
@@ -135,9 +144,8 @@ fn expand_rule(
             body,
         } => {
             let name_span = shared.arena.span(name_expr);
-            let evaluated =
-                eval_name(shared, strings, ctx, args_start, name_expr, name_span)?;
-            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body)?;
+            let evaluated = eval_name(shared, strings, ctx, args_start, name_expr, name_span)?;
+            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
             (is_override, evaluated, cloned_body)
         }
         // Parser only places Rule/ComputedRule in a RuleSet body.
@@ -225,12 +233,18 @@ fn clone_with_subst(
     ctx: &ModuleContext,
     args_start: usize,
     src_id: NodeId,
+    scratch: &mut Vec<NodeId>,
 ) -> Result<NodeId, ExpandError> {
     let span = shared.arena.span(src_id);
     let src = *shared.arena.get(src_id);
     if let Node::MacroParam { index, .. } = src {
-        let arg_id = shared.pools.children[args_start + index as usize];
-        return clone_with_subst(shared, strings, ctx, args_start, arg_id);
+        // Top-level rule-set macro args come from grammar-level expressions
+        // (no enclosing macro), so they can't contain MacroParam themselves.
+        // Return the arg id directly instead of deep-cloning - downstream
+        // passes are read-only on resolved nodes and tolerate the resulting
+        // DAG. For a body that references the same param N times, this
+        // collapses N deep clones into N references to one subtree.
+        return Ok(shared.pools.children[args_start + index as usize]);
     }
     if let Node::SymRef { expr } = src {
         // eval_name handles MacroParam substitution inline, so no separate
@@ -253,46 +267,48 @@ fn clone_with_subst(
         // Single-child wrappers.
         Node::Repeat { kind, inner } => Node::Repeat {
             kind,
-            inner: clone_with_subst(shared, strings, ctx, args_start, inner)?,
+            inner: clone_with_subst(shared, strings, ctx, args_start, inner, scratch)?,
         },
         Node::Token { immediate, inner } => Node::Token {
             immediate,
-            inner: clone_with_subst(shared, strings, ctx, args_start, inner)?,
+            inner: clone_with_subst(shared, strings, ctx, args_start, inner, scratch)?,
         },
-        Node::Neg(c) => Node::Neg(clone_with_subst(shared, strings, ctx, args_start, c)?),
+        Node::Neg(c) => Node::Neg(clone_with_subst(
+            shared, strings, ctx, args_start, c, scratch,
+        )?),
         Node::Field { name, content } => Node::Field {
             name,
-            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content, scratch)?,
         },
         Node::Reserved { context, content } => Node::Reserved {
             context,
-            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content, scratch)?,
         },
         Node::FieldAccess { obj, field } => Node::FieldAccess {
-            obj: clone_with_subst(shared, strings, ctx, args_start, obj)?,
+            obj: clone_with_subst(shared, strings, ctx, args_start, obj, scratch)?,
             field,
         },
         Node::QualifiedAccess { obj, member } => Node::QualifiedAccess {
-            obj: clone_with_subst(shared, strings, ctx, args_start, obj)?,
+            obj: clone_with_subst(shared, strings, ctx, args_start, obj, scratch)?,
             member,
         },
         Node::GrammarConfig { module, field } => Node::GrammarConfig {
-            module: clone_with_subst(shared, strings, ctx, args_start, module)?,
+            module: clone_with_subst(shared, strings, ctx, args_start, module, scratch)?,
             field,
         },
         // Two-child wrappers.
         Node::Alias { content, target } => Node::Alias {
-            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
-            target: clone_with_subst(shared, strings, ctx, args_start, target)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content, scratch)?,
+            target: clone_with_subst(shared, strings, ctx, args_start, target, scratch)?,
         },
         Node::Append { left, right } => Node::Append {
-            left: clone_with_subst(shared, strings, ctx, args_start, left)?,
-            right: clone_with_subst(shared, strings, ctx, args_start, right)?,
+            left: clone_with_subst(shared, strings, ctx, args_start, left, scratch)?,
+            right: clone_with_subst(shared, strings, ctx, args_start, right, scratch)?,
         },
         Node::BinOp { op, lhs, rhs } => Node::BinOp {
             op,
-            lhs: clone_with_subst(shared, strings, ctx, args_start, lhs)?,
-            rhs: clone_with_subst(shared, strings, ctx, args_start, rhs)?,
+            lhs: clone_with_subst(shared, strings, ctx, args_start, lhs, scratch)?,
+            rhs: clone_with_subst(shared, strings, ctx, args_start, rhs, scratch)?,
         },
         Node::Prec {
             kind,
@@ -300,13 +316,13 @@ fn clone_with_subst(
             content,
         } => Node::Prec {
             kind,
-            value: clone_with_subst(shared, strings, ctx, args_start, value)?,
-            content: clone_with_subst(shared, strings, ctx, args_start, content)?,
+            value: clone_with_subst(shared, strings, ctx, args_start, value, scratch)?,
+            content: clone_with_subst(shared, strings, ctx, args_start, content, scratch)?,
         },
         Node::DynRegex { pattern, flags } => {
-            let p = clone_with_subst(shared, strings, ctx, args_start, pattern)?;
+            let p = clone_with_subst(shared, strings, ctx, args_start, pattern, scratch)?;
             let f = flags
-                .map(|id| clone_with_subst(shared, strings, ctx, args_start, id))
+                .map(|id| clone_with_subst(shared, strings, ctx, args_start, id, scratch))
                 .transpose()?;
             Node::DynRegex {
                 pattern: p,
@@ -316,21 +332,27 @@ fn clone_with_subst(
         // Variadic via ChildRange.
         Node::SeqOrChoice { seq, range } => Node::SeqOrChoice {
             seq,
-            range: clone_range(shared, strings, ctx, args_start, range)?,
+            range: clone_range(shared, strings, ctx, args_start, range, scratch)?,
         },
-        Node::List(range) => Node::List(clone_range(shared, strings, ctx, args_start, range)?),
-        Node::Tuple(range) => Node::Tuple(clone_range(shared, strings, ctx, args_start, range)?),
-        Node::Concat(range) => Node::Concat(clone_range(shared, strings, ctx, args_start, range)?),
+        Node::List(range) => Node::List(clone_range(
+            shared, strings, ctx, args_start, range, scratch,
+        )?),
+        Node::Tuple(range) => Node::Tuple(clone_range(
+            shared, strings, ctx, args_start, range, scratch,
+        )?),
+        Node::Concat(range) => Node::Concat(clone_range(
+            shared, strings, ctx, args_start, range, scratch,
+        )?),
         Node::Call { name, args: cr } => Node::Call {
-            name: clone_with_subst(shared, strings, ctx, args_start, name)?,
-            args: clone_range(shared, strings, ctx, args_start, cr)?,
+            name: clone_with_subst(shared, strings, ctx, args_start, name, scratch)?,
+            args: clone_range(shared, strings, ctx, args_start, cr, scratch)?,
         },
-        Node::QualifiedCall(range) => {
-            Node::QualifiedCall(clone_range(shared, strings, ctx, args_start, range)?)
-        }
+        Node::QualifiedCall(range) => Node::QualifiedCall(clone_range(
+            shared, strings, ctx, args_start, range, scratch,
+        )?),
         Node::For { for_id, body } => Node::For {
             for_id,
-            body: clone_with_subst(shared, strings, ctx, args_start, body)?,
+            body: clone_with_subst(shared, strings, ctx, args_start, body, scratch)?,
         },
         Node::Object(range) => {
             // Object children live in object_fields as (Span, NodeId). Read by
@@ -340,7 +362,7 @@ fn clone_with_subst(
             let mut new_pairs: Vec<(Span, NodeId)> = Vec::with_capacity(end - start);
             for i in start..end {
                 let (k, v) = shared.pools.object_fields[i];
-                let v2 = clone_with_subst(shared, strings, ctx, args_start, v)?;
+                let v2 = clone_with_subst(shared, strings, ctx, args_start, v, scratch)?;
                 new_pairs.push((k, v2));
             }
             let new_range = shared
@@ -371,18 +393,21 @@ fn clone_range(
     ctx: &ModuleContext,
     args_start: usize,
     range: ChildRange,
+    scratch: &mut Vec<NodeId>,
 ) -> Result<ChildRange, ExpandError> {
     let start = range.start as usize;
     let end = start + range.len as usize;
-    let mut new_ids: Vec<NodeId> = Vec::with_capacity(end - start);
-    for i in start..end {
-        let id = shared.pools.children[i];
-        new_ids.push(clone_with_subst(shared, strings, ctx, args_start, id)?);
-    }
-    shared
-        .pools
-        .push_children(&new_ids)
-        .ok_or_else(|| ExpandError::without_span(ExpandErrorKind::TooManyChildren))
+    stack_scope!(scratch, |saved| {
+        for i in start..end {
+            let id = shared.pools.children[i];
+            let cloned = clone_with_subst(shared, strings, ctx, args_start, id, scratch)?;
+            scratch.push(cloned);
+        }
+        shared
+            .pools
+            .push_children(&scratch[saved..])
+            .ok_or_else(|| ExpandError::without_span(ExpandErrorKind::TooManyChildren))
+    })
 }
 
 use super::ExpandError;
