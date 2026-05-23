@@ -250,16 +250,8 @@ impl Walker<'_> {
             | Node::Token { inner: c, .. } | Node::Field { content: c, .. }
             | Node::Reserved { content: c, .. } | Node::FieldAccess { obj: c, .. }  | Node::Neg(c)
             | Node::QualifiedAccess { obj: c, .. } | Node::GrammarConfig { module: c, .. }
-            | Node::SymRef { expr: c } => {
+            | Node::SymRef { expr: c } | Node::For { body: c, .. } => {
                 self.walk(c)?;
-            }
-            // For has a ChildRange body (1 element in expression context,
-            // N in top-level decl context; latter handled before this pass).
-            Node::For { body, .. } => {
-                for i in body.as_range() {
-                    let child = self.shared.pools.children[i];
-                    self.walk(child)?;
-                }
             }
             // Two-child wrappers.
             Node::Alias {

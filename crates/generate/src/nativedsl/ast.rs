@@ -330,15 +330,6 @@ impl AstPools {
         Some(ChildRange::new(start, len))
     }
 
-    /// Push a single child and return its range. Fallibility-free since
-    /// `len = 1` is always within `u16`.
-    #[inline]
-    pub fn push_single_child(&mut self, item: NodeId) -> ChildRange {
-        let start = self.children.len() as u32;
-        self.children.push(item);
-        ChildRange::new(start, 1)
-    }
-
     #[must_use]
     pub fn get_macro(&self, id: MacroId) -> &MacroConfig {
         &self.macro_configs[id.index()]
@@ -629,11 +620,10 @@ pub enum Node {
         left: NodeId,
         right: NodeId,
     },
-    /// `for (binding) in <iter> { <body> }`. Expression-context only;
-    /// `body` holds exactly one child.
+    /// `for (binding) in <iter> { <body> }`. Expression-context only.
     For {
         for_id: ForId,
-        body: ChildRange,
+        body: NodeId,
     },
     /// `@<str_expr>` inside a rule-set macro body. `expr` is str_t;
     /// `expand_macro_calls` evaluates and emits `SynthRef`.
