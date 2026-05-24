@@ -39,11 +39,27 @@ const SMALL_STATE_THRESHOLD: usize = 64;
 // ~11pp size win available from the unbiased picker.
 const SMALL_VS_CSR_BIAS: f64 = 0.6;
 
+// Picker bias: prefer Dense to Csr unless Csr is at least DENSE_VS_CSR_BIAS
+// fraction smaller. Dense lookup is O(1) (one indexed load), Csr is
+// O(log NNZ) binary search. For grammars with wide states (e.g. kotlin
+// sym_count=374, typical NNZ 100-200), Csr saves only ~20% bytes per state
+// but costs ~7 comparisons per lookup, regressing the parse hot path.
+// 0.5 keeps states Dense unless Csr literally halves their size.
+const DENSE_VS_CSR_BIAS: f64 = 0.5;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Repr {
     Dense,
     Csr,
     Small,
+}
+
+// Byte cost of representing one state under each candidate tier.
+#[derive(Copy, Clone, Debug)]
+struct StateCosts {
+    dense: usize,
+    csr: usize,
+    small: usize,
 }
 
 pub type RenderResult<T> = Result<T, RenderError>;
@@ -548,7 +564,7 @@ impl Generator {
     // [N][SYMBOL_COUNT] matrix). CSR adds one row_offsets entry (4 bytes).
     // Small adds the group-count u16 header (2 bytes) and the
     // small_parse_table_map u32 entry (4 bytes) on top of body bytes.
-    fn compute_standalone_costs(&self) -> Vec<[usize; 3]> {
+    fn compute_standalone_costs(&self) -> Vec<StateCosts> {
         let symbol_count = self.parse_table.symbols.len();
         let mut term_groups: FxHashSet<&ParseTableEntry> = FxHashSet::default();
         let mut nonterm_groups: FxHashSet<usize> = FxHashSet::default();
@@ -570,7 +586,11 @@ impl Generator {
             }
             let group_count = term_groups.len() + nonterm_groups.len();
 
-            out.push([symbol_count * 2, nnz * 4 + 4, 2 * nnz + 4 * group_count + 6]);
+            out.push(StateCosts {
+                dense: symbol_count * 2,
+                csr: nnz * 4 + 4,
+                small: 2 * nnz + 4 * group_count + 6,
+            });
         }
         out
     }
@@ -585,10 +605,10 @@ impl Generator {
         let mut sum_small: usize = 0;
         let mut sum_opt_pre_dedup: usize = 0;
         for c in &costs {
-            sum_dense += c[0];
-            sum_csr += c[1];
-            sum_small += c[2];
-            sum_opt_pre_dedup += c[0].min(c[1]).min(c[2]);
+            sum_dense += c.dense;
+            sum_csr += c.csr;
+            sum_small += c.small;
+            sum_opt_pre_dedup += c.dense.min(c.csr).min(c.small);
         }
 
         let mut pick_dense = 0;
@@ -600,11 +620,11 @@ impl Generator {
             match repr {
                 Repr::Dense => {
                     pick_dense += 1;
-                    sum_opt += costs[i][0];
+                    sum_opt += costs[i].dense;
                 }
                 Repr::Csr => {
                     pick_csr += 1;
-                    sum_opt += costs[i][1];
+                    sum_opt += costs[i].csr;
                 }
                 Repr::Small => {
                     pick_small += 1;
@@ -612,7 +632,7 @@ impl Generator {
                     if canonical_seen.insert(h, i).is_some() {
                         sum_opt += 4;
                     } else {
-                        sum_opt += costs[i][2];
+                        sum_opt += costs[i].small;
                     }
                 }
             }
@@ -637,21 +657,34 @@ impl Generator {
     // small when all-small (one full body + N-1 map entries) beats the sum
     // of their standalone picks. One pass suffices because dedup only
     // affects the small tier.
-    fn decide_state_representations(&self, standalone_costs: &[[usize; 3]]) -> Vec<Repr> {
+    fn decide_state_representations(&self, standalone_costs: &[StateCosts]) -> Vec<Repr> {
         let n = self.parse_table.states.len();
         let mut picks = Vec::with_capacity(n);
 
         for c in standalone_costs {
-            // Picker bias: prefer Csr to Small unless Small is at least
-            // SMALL_VS_CSR_BIAS fraction smaller (Csr binary search is much
-            // faster than Small linear scan at parse time).
-            let small_beats_csr = (c[2] as f64) <= SMALL_VS_CSR_BIAS * (c[1] as f64);
-            let pick = if c[0] <= c[1] && (c[0] <= c[2] || !small_beats_csr) {
-                Repr::Dense
-            } else if !small_beats_csr || c[1] <= c[2] {
-                Repr::Csr
-            } else {
-                Repr::Small
+            // Biases gate movement from a faster tier to a slower one.
+            //   Dense -> Csr   requires csr   <= DENSE_VS_CSR_BIAS * dense.
+            //   Csr   -> Small requires small <= SMALL_VS_CSR_BIAS * csr.
+            //   Dense -> Small composes both biases (must be much smaller
+            //   than dense to justify skipping straight to the slowest tier).
+            let dense = c.dense as f64;
+            let csr = c.csr as f64;
+            let small = c.small as f64;
+            let csr_beats_dense = csr <= DENSE_VS_CSR_BIAS * dense;
+            let small_beats_csr = small <= SMALL_VS_CSR_BIAS * csr;
+            let small_beats_dense =
+                small <= DENSE_VS_CSR_BIAS * SMALL_VS_CSR_BIAS * dense;
+            let pick = match (csr_beats_dense, small_beats_csr, small_beats_dense) {
+                (false, _, false) => Repr::Dense,
+                (false, _, true) => Repr::Small,
+                (true, false, _) => Repr::Csr,
+                (true, true, _) => {
+                    if c.csr <= c.small {
+                        Repr::Csr
+                    } else {
+                        Repr::Small
+                    }
+                }
             };
             picks.push(pick);
         }
@@ -668,18 +701,25 @@ impl Generator {
                 .push(i);
         }
 
-        for (_, group) in by_hash.into_iter().filter(|(_, g)| g.len() > 1) {
+        for (_, mut group) in by_hash.into_iter().filter(|(_, g)| g.len() > 1) {
+            // Dense states stay Dense: dedup-demoting them to Small would
+            // bypass the composed bias chain that kept them Dense in the
+            // first place. Only Csr/Small members participate in promotion.
+            group.retain(|&i| picks[i] != Repr::Dense);
+            if group.len() < 2 {
+                continue;
+            }
             let current: usize = group
                 .iter()
                 .map(|&i| match picks[i] {
-                    Repr::Dense => standalone_costs[i][0],
-                    Repr::Csr => standalone_costs[i][1],
-                    Repr::Small => standalone_costs[i][2],
+                    Repr::Dense => standalone_costs[i].dense,
+                    Repr::Csr => standalone_costs[i].csr,
+                    Repr::Small => standalone_costs[i].small,
                 })
                 .sum();
             // First state in the group pays full small_cost (body + map);
             // each subsequent state pays only 4 bytes (its map entry).
-            let promoted = standalone_costs[group[0]][2] + 4 * (group.len() - 1);
+            let promoted = standalone_costs[group[0]].small + 4 * (group.len() - 1);
             // Apply the same Csr-vs-Small bias here as the per-state pick:
             // a tiny dedup win shouldn't drag a whole group out of Csr into
             // the slower Small linear-scan path.
