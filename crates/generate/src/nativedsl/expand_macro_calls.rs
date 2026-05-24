@@ -13,7 +13,6 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::{
-    ModuleId,
     ast::{ChildRange, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span},
     lexer::is_ident_str,
     string_pool::{Str, StringPool},
@@ -23,7 +22,6 @@ pub fn expand_macro_calls(
     shared: &mut SharedAst,
     strings: &mut StringPool,
     ctx: &mut ModuleContext,
-    mod_id: ModuleId,
 ) -> Result<(), ExpandError> {
     // Walk only the original indices. Each Call writes its first expanded
     // rule into its own slot; the rest are pushed to the end. Parser's
@@ -38,7 +36,7 @@ pub fn expand_macro_calls(
     for i in 0..original_len {
         let id = ctx.root_items[i];
         if matches!(shared.arena.get(id), Node::Call { .. }) {
-            expand_one_call(shared, strings, ctx, mod_id, id, i, &mut scratch)?;
+            expand_one_call(shared, strings, ctx, id, i, &mut scratch)?;
         }
     }
     Ok(())
@@ -59,7 +57,6 @@ fn expand_one_call(
     shared: &mut SharedAst,
     strings: &mut StringPool,
     ctx: &mut ModuleContext,
-    mod_id: ModuleId,
     call_id: NodeId,
     slot: usize,
     scratch: &mut Vec<NodeId>,
@@ -113,7 +110,7 @@ fn expand_one_call(
                 name,
                 body,
             } => {
-                let name_str = strings.intern_span(name, mod_id);
+                let name_str = strings.intern_owned(ctx.text(name));
                 let cloned_body =
                     clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
                 (is_override, name_str, cloned_body)
