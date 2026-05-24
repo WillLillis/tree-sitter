@@ -89,6 +89,13 @@ impl Loader<'_> {
             ModuleKind::Helper => self.validate_import_items(&ctx)?,
         }
 
+        // Inline top-level rule-set macro invocations into ExpandedRule
+        // decls. Runs before child loads so all nodes this module owns
+        // sit in one contiguous arena range; runs before resolve so the
+        // name table sees the post-expansion shape of root_items.
+        expand_macro_calls::expand_macro_calls(self.shared, self.strings, &mut ctx)?;
+        ctx.node_range.end = self.shared.arena.len() as u32;
+
         // Load inherited grammar (Grammar kind only, must happen before typecheck).
         if let Some(inherit_id) = ctx.inherit_ref
             && let Node::ModuleRef {
@@ -110,19 +117,6 @@ impl Loader<'_> {
         }
 
         self.load_import_children(&ctx, module_dir)?;
-
-        // Module index is fixed at this point (this module is not yet pushed
-        // into `self.modules`, so it'll land at `self.modules.len()`). The
-        // bounds check moves up here from its old post-typecheck spot so
-        // `expand_macro_calls` can attach source-span Str entries with the
-        // correct mod_id.
-        let global_id = u8::try_from(self.modules.len())
-            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
-
-        // Inline top-level rule-set macro invocations into ExpandedRule
-        // decls. Runs before resolve so the name table sees the post-
-        // expansion shape of root_items.
-        expand_macro_calls::expand_macro_calls(self.shared, self.strings, &mut ctx, global_id)?;
 
         // Resolve identifiers + typecheck. Child modules already populated env
         // during their own load_module calls.
@@ -150,6 +144,8 @@ impl Loader<'_> {
                 Module::Helper { ctx, lowered_rules }
             }
         };
+        let global_id = u8::try_from(self.modules.len())
+            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
         self.modules.push(module);
 
         Ok(global_id)
