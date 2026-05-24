@@ -529,13 +529,15 @@ pub fn load_grammar_file(
         Some("tsg") => {
             let src = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(&e, Some(grammar_path))))?;
-            let grammar = nativedsl::parse_native_dsl(&src, grammar_path).map_err(|error| {
-                LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
-                    error,
-                    src,
-                    path: grammar_path.to_owned(),
-                }))
-            })?.normalize();
+            let grammar = nativedsl::parse_native_dsl(&src, grammar_path)
+                .map_err(|error| {
+                    LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
+                        error,
+                        src,
+                        path: grammar_path.to_owned(),
+                    }))
+                })?
+                .normalize();
             Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,

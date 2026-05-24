@@ -163,6 +163,7 @@ impl InputGrammar {
     /// A variable is "used" if it is the start rule, the word token, named in
     /// `extras`/`externals`, or transitively reachable via rule references from
     /// any of the above.
+    #[must_use]
     pub fn normalize(mut self) -> Self {
         // Compute the used set via forward DFS from the implicit roots
         // (start rule, word_token, refs in extras and externals).
