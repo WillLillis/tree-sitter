@@ -58,8 +58,8 @@ pub mod typecheck;
 
 pub use crate::grammars::InputGrammar;
 pub use diagnostic::NativeDslError;
-pub use lexer::{LexErrorKind, LexResult};
 pub use expand_macro_calls::ExpandErrorKind;
+pub use lexer::{LexErrorKind, LexResult};
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
 pub use parser::{ParseErrorKind, ParseResult};
 pub use resolve::{ResolveErrorKind, ResolveResult};
