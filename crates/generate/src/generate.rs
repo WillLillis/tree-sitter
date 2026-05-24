@@ -29,7 +29,14 @@ mod prepare_grammar;
 #[cfg(feature = "qjs-rt")]
 mod quickjs;
 mod render;
-mod rules;
+// TODO(native-dsl PR): revert to `mod rules;`. Temporarily exposed so
+// `tree-sitter-dsl-tests` can build a `Rule`-shape normalizer for the
+// roundtrip comparison while the native DSL is still being iterated on.
+// Before the native DSL lands, either move the comparison helper into
+// `tree_sitter_generate` or add a real public API for grammar shape
+// normalization.
+#[doc(hidden)]
+pub mod rules;
 mod tables;
 
 pub use build_tables::ParseTableBuilderError;
@@ -624,14 +631,13 @@ pub fn load_grammar_file(
         Some("tsg") => {
             let src = fs::read_to_string(grammar_path)
                 .map_err(|e| LoadGrammarError::IO(IoError::new(e, Some(grammar_path))))?;
-            let mut grammar = nativedsl::parse_native_dsl(&src, grammar_path).map_err(|error| {
+            let grammar = nativedsl::parse_native_dsl(&src, grammar_path).map_err(|error| {
                 LoadGrammarError::NativeDsl(Box::new(nativedsl::NativeDslError {
                     error,
                     src,
                     path: grammar_path.to_owned(),
                 }))
-            })?;
-            parse_grammar::normalize_grammar(&mut grammar);
+            })?.normalize();
             Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,
