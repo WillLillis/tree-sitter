@@ -29,7 +29,7 @@ use super::{
 };
 
 /// Rule-decl name source. Resolution is deferred to the final build step
-/// so the body-lowering loop doesn't hold a StringPool borrow across
+/// so the body-lowering loop doesn't hold a `StringPool` borrow across
 /// `lower_to_rule` calls (which may intern further entries).
 #[derive(Clone, Copy)]
 enum NameSource {
@@ -189,7 +189,7 @@ pub fn lower_helper(
 
     Ok(rule_entries
         .into_iter()
-        .map(|(src, rid)| (resolve_name(src, &mut eval, current), eval.build_rule(rid)))
+        .map(|(src, rid)| (resolve_name(src, &eval, current), eval.build_rule(rid)))
         .collect())
 }
 

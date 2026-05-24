@@ -41,7 +41,6 @@ mod cfg;
 mod combinators;
 mod config;
 mod errors;
-// mod hardening; // local testing only
 mod imports;
 mod inheritance;
 mod rule_set_macros;

@@ -281,9 +281,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwExternal => self.parse_external_decl(),
             // `name(args...)` - rule-set macro invocation, expanded later.
-            TokenKind::Ident if self.next_is(TokenKind::LParen) => {
-                self.parse_top_level_call()
-            }
+            TokenKind::Ident if self.next_is(TokenKind::LParen) => self.parse_top_level_call(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
