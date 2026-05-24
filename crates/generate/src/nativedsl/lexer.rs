@@ -48,6 +48,7 @@ const fn byte_is(b: u8, class: u8) -> bool {
 /// True iff `s` is shaped like an `Ident` token. Used by expand to
 /// validate computed names against the same predicate the lexer uses
 /// for source-text idents.
+#[must_use]
 pub fn is_ident_str(s: &str) -> bool {
     let bytes = s.as_bytes();
     let Some((&first, rest)) = bytes.split_first() else {

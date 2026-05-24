@@ -517,8 +517,8 @@ pub enum Node {
         body: NodeId,
     },
     /// `rule @<str_expr> { ... }` inside a rule-set macro body.
-    /// `name_expr` is str_t; `expand_macro_calls` evaluates it and emits
-    /// an `ExpandedRule`.
+    /// `name_expr` is `str_t`. The `expand_macro_calls` evaluates
+    /// it and emits an `ExpandedRule` node.
     ComputedRule {
         is_override: bool,
         name_expr: NodeId,
@@ -527,7 +527,7 @@ pub enum Node {
     /// Body of a rule-set macro (sequence of `Rule` / `ComputedRule`).
     RuleSet(ChildRange),
     /// Synthesized rule decl from `expand_macro_calls`. Same shape as
-    /// `Rule` but the name lives in the StringPool.
+    /// `Rule` but the name lives in the `StringPool`.
     ExpandedRule {
         is_override: bool,
         name: Str,
@@ -625,7 +625,7 @@ pub enum Node {
         for_id: ForId,
         body: NodeId,
     },
-    /// `@<str_expr>` inside a rule-set macro body. `expr` is str_t;
+    /// `@<str_expr>` inside a rule-set macro body. `expr` is `str_t`;
     /// `expand_macro_calls` evaluates and emits `SynthRef`.
     SymRef {
         expr: NodeId,

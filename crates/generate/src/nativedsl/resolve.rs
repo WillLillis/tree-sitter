@@ -17,8 +17,7 @@ use crate::{
     nativedsl::{
         Module, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
-            Span,
+            AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
         },
         string_pool::StringPool,
     },
@@ -394,7 +393,9 @@ fn resolve_children(
         | Node::Neg(c)
         | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
-        | Node::Reserved { content: c, .. } => resolve_expr(arena, pools, ctx, strings, decls, modules, *c),
+        | Node::Reserved { content: c, .. } => {
+            resolve_expr(arena, pools, ctx, strings, decls, modules, *c)
+        }
         &Node::Append { left: a, right: b }
         | &Node::BinOp { lhs: a, rhs: b, .. }
         | &Node::Prec {
@@ -412,7 +413,9 @@ fn resolve_children(
             }
             Ok(())
         }
-        &Node::FieldAccess { obj, .. } => resolve_expr(arena, pools, ctx, strings, decls, modules, obj),
+        &Node::FieldAccess { obj, .. } => {
+            resolve_expr(arena, pools, ctx, strings, decls, modules, obj)
+        }
         &Node::QualifiedAccess { obj, member } => {
             resolve_expr(arena, pools, ctx, strings, decls, modules, obj)?;
             // None when obj isn't a module ref - type checker reports the error
