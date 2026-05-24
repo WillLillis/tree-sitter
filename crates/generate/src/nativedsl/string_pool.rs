@@ -59,6 +59,7 @@ impl StringPool {
     /// Get the raw entry. Resolution to `&str` lives on the caller since
     /// `Source` entries may reference an in-progress module whose source
     /// isn't yet in the `previous` modules slice.
+    #[must_use]
     pub fn entry(&self, id: Str) -> &StrEntry {
         // Safety: id was produced by intern_span/intern_owned which return
         // sequential indices into self.entries.
@@ -67,6 +68,7 @@ impl StringPool {
 
     /// Resolve a `Str` whose `Source` entries are known to reference
     /// `source` (caller asserts the local-module invariant).
+    #[must_use]
     pub fn resolve_local<'a>(&'a self, id: Str, source: &'a str) -> &'a str {
         match self.entry(id) {
             StrEntry::Source(span, _) => span.resolve(source),

@@ -145,13 +145,8 @@ impl Loader<'_> {
                 Module::Grammar { ctx, lowered }
             }
             ModuleKind::Helper => {
-                let lowered_rules = lower::lower_helper(
-                    self.state,
-                    self.strings,
-                    self.shared,
-                    self.modules,
-                    &ctx,
-                )?;
+                let lowered_rules =
+                    lower::lower_helper(self.state, self.strings, self.shared, self.modules, &ctx)?;
                 Module::Helper { ctx, lowered_rules }
             }
         };

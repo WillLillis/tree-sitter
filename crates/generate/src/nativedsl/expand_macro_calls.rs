@@ -1,8 +1,10 @@
-//! Inlines top-level rule-set macro invocations between apply_cfg and
-//! resolve. Each `Node::Call` at item position is replaced by the
-//! `Node::ExpandedRule`s produced from the macro's body, with `MacroParam`
-//! refs substituted by call-site args. `Node::SymRef` becomes
-//! `Node::SynthRef` carrying the evaluated name.
+//! Inlines top-level rule-set macro invocations between `apply_cfg` and
+//! `resolve`.
+//!
+//! Each `Node::Call` at item position is replaced by the `Node::ExpandedRule`s
+//! produced from the macro's body, with `MacroParam` refs substituted by
+//! call-site args. `Node::SymRef` becomes `Node::SynthRef` carrying the evaluated
+//! name.
 //!
 //! Only local macros are visible at item position; qualified calls aren't
 //! supported (the parser rejects `mod::foo(...)` there).
@@ -105,9 +107,39 @@ fn expand_one_call(
     let rule_end = rule_start + rule_range.len as usize;
     for (offset, i) in (rule_start..rule_end).enumerate() {
         let rule_id = shared.pools.children[i];
-        let expanded = expand_rule(
-            shared, strings, ctx, args_start, mod_id, rule_id, call_span, scratch,
-        )?;
+        let (is_override, name, body) = match *shared.arena.get(rule_id) {
+            Node::Rule {
+                is_override,
+                name,
+                body,
+            } => {
+                let name_str = strings.intern_span(name, mod_id);
+                let cloned_body =
+                    clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
+                (is_override, name_str, cloned_body)
+            }
+            Node::ComputedRule {
+                is_override,
+                name_expr,
+                body,
+            } => {
+                let name_span = shared.arena.span(name_expr);
+                let evaluated = eval_name(shared, strings, ctx, args_start, name_expr, name_span)?;
+                let cloned_body =
+                    clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
+                (is_override, evaluated, cloned_body)
+            }
+            // Parser only places Rule/ComputedRule in a RuleSet body.
+            _ => unreachable!(),
+        };
+        let expanded = shared.arena.push(
+            Node::ExpandedRule {
+                is_override,
+                name,
+                body,
+            },
+            call_span,
+        );
         if offset == 0 {
             ctx.root_items[slot] = expanded;
         } else {
@@ -115,50 +147,6 @@ fn expand_one_call(
         }
     }
     Ok(())
-}
-
-fn expand_rule(
-    shared: &mut SharedAst,
-    strings: &mut StringPool,
-    ctx: &ModuleContext,
-    args_start: usize,
-    mod_id: ModuleId,
-    rule_id: NodeId,
-    call_span: Span,
-    scratch: &mut Vec<NodeId>,
-) -> Result<NodeId, ExpandError> {
-    let node = *shared.arena.get(rule_id);
-    let (is_override, name, body) = match node {
-        Node::Rule {
-            is_override,
-            name,
-            body,
-        } => {
-            let name_str = strings.intern_span(name, mod_id);
-            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
-            (is_override, name_str, cloned_body)
-        }
-        Node::ComputedRule {
-            is_override,
-            name_expr,
-            body,
-        } => {
-            let name_span = shared.arena.span(name_expr);
-            let evaluated = eval_name(shared, strings, ctx, args_start, name_expr, name_span)?;
-            let cloned_body = clone_with_subst(shared, strings, ctx, args_start, body, scratch)?;
-            (is_override, evaluated, cloned_body)
-        }
-        // Parser only places Rule/ComputedRule in a RuleSet body.
-        _ => unreachable!(),
-    };
-    Ok(shared.arena.push(
-        Node::ExpandedRule {
-            is_override,
-            name,
-            body,
-        },
-        call_span,
-    ))
 }
 
 /// Accepts string literals, macro params (resolved into args), and
@@ -380,9 +368,9 @@ fn clone_with_subst(
         | Node::Let { .. }
         | Node::ExpandedRule { .. }
         | Node::SynthRef { .. }
-        | Node::Cfg { .. } => unreachable!(),
+        | Node::Cfg { .. }
         // Handled by early guards above.
-        Node::MacroParam { .. } | Node::SymRef { .. } => unreachable!(),
+        | Node::MacroParam { .. } | Node::SymRef { .. } => unreachable!(),
     };
     Ok(shared.arena.push(new_node, span))
 }
