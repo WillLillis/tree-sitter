@@ -122,6 +122,13 @@ error_tests! { Parse {
         rule program { choice(for () in [program] { "x" }) }"#,
         ParseErrorKind::EmptyForBindings
     }
+    error_qualified_rule_set_call {
+        r#"let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { "x" }
+        @h::pair()"#,
+        ParseErrorKind::QualifiedRuleSetCall
+    }
 }}
 
 #[test]
