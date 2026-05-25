@@ -279,9 +279,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwOverride => self.parse_rule_def(true),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
+            TokenKind::KwRules => self.parse_rule_set_def(),
             TokenKind::KwExternal => self.parse_external_decl(),
-            // `name(args...)` - rule-set macro invocation, expanded later.
-            TokenKind::Ident if self.next_is(TokenKind::LParen) => self.parse_top_level_call(),
+            // `@name(args...)` - rule-set macro invocation, expanded later.
+            TokenKind::At => self.parse_top_level_call(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
@@ -461,6 +462,19 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_macro_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwMacro)?;
+        self.parse_macro_like(start, /* rule_set */ false)
+    }
+
+    /// `rules NAME(params) { rule decls... }` - expanded at each top-level
+    /// `@NAME(args)` call site by `expand_macro_calls`. Distinct keyword from
+    /// `macro` so the file-local, top-level-emitting nature of the binding is
+    /// visible at the def.
+    fn parse_rule_set_def(&mut self) -> ParseResult<NodeId> {
+        let start = self.expect(TokenKind::KwRules)?;
+        self.parse_macro_like(start, /* rule_set */ true)
+    }
+
+    fn parse_macro_like(&mut self, start: Span, rule_set: bool) -> ParseResult<NodeId> {
         let name = self.expect_ident()?;
         self.expect(TokenKind::LParen)?;
         let params = self.comma_sep(TokenKind::RParen, |this| {
@@ -476,11 +490,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         if params.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
-        // `(<params>) <ret_ty> { <expr> }` is an expression macro.
-        // `(<params>) { rule a {...} rule b {...} }` (no return type) is a
-        // rule-set macro: body is a sequence of rule decls expanded at each
-        // top-level call site by `expand_macro_calls`.
-        let kind = if self.at(TokenKind::LBrace) {
+        let kind = if rule_set {
             MacroKind::RuleSet
         } else {
             MacroKind::Expression(self.parse_type()?.0)
@@ -510,7 +520,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     /// Emits `Node::Call` at item position; consumed by `expand_macro_calls`.
+    /// Caller is positioned at the leading `@`.
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
+        let at_span = self.expect(TokenKind::At)?;
         let name_span = self.expect_ident()?;
         let name_id = self
             .shared
@@ -524,7 +536,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 name: name_id,
                 args,
             },
-            name_span.merge(end),
+            at_span.merge(end),
         ))
     }
 
