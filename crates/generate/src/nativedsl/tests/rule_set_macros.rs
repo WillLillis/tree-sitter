@@ -115,6 +115,35 @@ fn rule_set_macro_symref_in_expr_position() {
 }
 
 #[test]
+fn rule_set_macro_with_for_loop_over_param() {
+    // For-loop inside a rule-set body iterates over a list_t<rule_t> macro
+    // param. The iterable lives in ForConfig (indexed by ForId), separate from
+    // the cloned body subtree - so substituting the param requires either a
+    // fresh ForId per expansion or some other plumbing. Without that, `items`
+    // is read from the macro template (where it's a MacroParam) instead of
+    // the substituted arg.
+    let g = dsl(r#"
+        rules with_choices(items: list_t<rule_t>) {
+            rule program {
+                choice(for (x: rule_t) in items { x })
+            }
+        }
+        rule a { "a" }
+        rule b { "b" }
+        grammar { language: "test", start: program }
+        @with_choices([a, b])
+    "#);
+    let program = g.variables.iter().find(|v| v.name == "program").unwrap();
+    assert_eq!(
+        program.rule,
+        Rule::choice(vec![
+            Rule::NamedSymbol("a".into()),
+            Rule::NamedSymbol("b".into()),
+        ])
+    );
+}
+
+#[test]
 fn rule_set_macro_with_regular_rules_around() {
     let g = dsl(r#"
         rules extras() {
