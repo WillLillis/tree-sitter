@@ -72,6 +72,7 @@ pub enum TokenKind {
     // Structural keywords
     KwGrammar,
     KwRule,
+    KwRules,
     KwLet,
     KwMacro,
     KwFor,
@@ -152,7 +153,7 @@ macro_rules! keywords {
 }
 
 keywords! {
-    KwGrammar => "grammar", KwRule => "rule", KwLet => "let", KwMacro => "macro",
+    KwGrammar => "grammar", KwRule => "rule", KwRules => "rules", KwLet => "let", KwMacro => "macro",
     KwFor => "for", KwIn => "in", KwSeq => "seq", KwChoice => "choice",
     KwRepeat => "repeat", KwRepeat1 => "repeat1", KwOptional => "optional",
     KwBlank => "blank", KwField => "field", KwAlias => "alias", KwToken => "token",
