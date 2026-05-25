@@ -223,12 +223,16 @@ fn clone_with_subst(
     let span = shared.arena.span(src_id);
     let src = *shared.arena.get(src_id);
     if let Node::MacroParam { index, .. } = src {
-        // Top-level rule-set macro args come from grammar-level expressions
-        // (no enclosing macro), so they can't contain MacroParam themselves.
         // Return the arg id directly instead of deep-cloning - downstream
         // passes are read-only on resolved nodes and tolerate the resulting
         // DAG. For a body that references the same param N times, this
         // collapses N deep clones into N references to one subtree.
+        //
+        // Safety: this relies on the arg subtree containing no MacroParam of
+        // its own (else we'd alias the wrong arg under the outer args_start).
+        // Enforced structurally by Parser::parse_top_level_call, which runs
+        // at module-grammar scope with empty self.locals - no MacroParam
+        // binding is in scope, so parse_expr can't produce one inside an arg.
         return Ok(shared.pools.children[args_start + index as usize]);
     }
     if let Node::SymRef { expr } = src {
@@ -239,16 +243,12 @@ fn clone_with_subst(
     }
     let new_node = match src {
         // Leaves: identical copy.
-        Node::Grammar
-        | Node::StringLit
+        Node::StringLit
         | Node::RawStringLit { .. }
         | Node::IntLit(_)
         | Node::Blank
         | Node::Ident(_)
-        | Node::ModuleRef { .. }
-        | Node::ForBinding { .. }
-        | Node::Unreachable
-        | Node::External { .. } => src,
+        | Node::ForBinding { .. } => src,
         // Single-child wrappers.
         Node::Repeat { kind, inner } => Node::Repeat {
             kind,
@@ -356,9 +356,14 @@ fn clone_with_subst(
                 .ok_or_else(|| ExpandError::without_span(ExpandErrorKind::TooManyChildren))?;
             Node::Object(new_range)
         }
-        // Not expected inside a rule body — parser/validation prevents these
-        // shapes here, but match exhaustively.
-        Node::Macro(_)
+        // Not expected inside a rule body - parser/validation prevents these
+        // shapes here, but match exhaustively. Grammar/External/ModuleRef are
+        // top-level decls; Unreachable is the arena's index-0 sentinel.
+        Node::Grammar
+        | Node::External { .. }
+        | Node::ModuleRef { .. }
+        | Node::Unreachable
+        | Node::Macro(_)
         | Node::Rule { .. }
         | Node::ComputedRule { .. }
         | Node::RuleSet(_)
