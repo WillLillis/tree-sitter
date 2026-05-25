@@ -958,6 +958,23 @@ fn chained_let_alias_to_import_module() {
 }
 
 #[test]
+fn import_helper_rule_set_macro_expands_locally() {
+    // A helper that defines a `rules` macro and calls it via `@pair(...)` at
+    // its own item position should expand into ExpandedRule items that flow
+    // into the importing grammar's variable table.
+    let g = dsl(r#"
+        let h = import("import_helpers/rule_set_self.tsg")
+        grammar { language: "test", start: program }
+        rule program { seq(a_helper, b_helper) }
+    "#);
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert!(names.contains(&"a_helper"), "missing a_helper in {names:?}");
+    assert!(names.contains(&"b_helper"), "missing b_helper in {names:?}");
+    assert_eq!(*find_rule(&g, "a_helper"), Rule::String("x".into()));
+    assert_eq!(*find_rule(&g, "b_helper"), Rule::String("y".into()));
+}
+
+#[test]
 fn import_call_depth_shared_across_modules() {
     let err = dsl_err(
         r#"
