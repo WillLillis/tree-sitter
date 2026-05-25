@@ -75,6 +75,33 @@ fn config_expr_word() {
 }
 
 #[test]
+fn override_rule_emitted_by_rule_set_macro() {
+    // `override rule` decls inside a `rules` body should propagate is_override
+    // through expansion, so the macro-generated rule replaces the inherited
+    // base rule rather than colliding with it.
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        rules wrap_expression(rhs: rule_t) {
+            override rule expression { choice(identifier, rhs) }
+        }
+        grammar { language: "derived", inherits: base }
+        @wrap_expression("99")
+    "#);
+    assert_eq!(
+        *find_rule(&g, "expression"),
+        Rule::choice(vec![
+            Rule::NamedSymbol("identifier".into()),
+            Rule::String("99".into()),
+        ])
+    );
+    // Sibling inherited rules untouched.
+    assert_eq!(
+        *find_rule(&g, "_inline_rule"),
+        Rule::String("inline".into())
+    );
+}
+
+#[test]
 fn override_rule_replaces_body() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
