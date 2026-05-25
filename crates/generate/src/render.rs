@@ -47,6 +47,14 @@ const SMALL_VS_CSR_BIAS: f64 = 0.6;
 // 0.5 keeps states Dense unless Csr literally halves their size.
 const DENSE_VS_CSR_BIAS: f64 = 0.5;
 
+// Picker bias: prefer Dense to Small unless Small is at least
+// DENSE_VS_SMALL_BIAS fraction smaller. Small lookup is O(group_count + nnz)
+// linear scan, typically a handful of comparisons. Independent of the
+// Csr-related biases: composing them would over-constrain Small for
+// narrow-state grammars (e.g. python sym=273), forcing those states to
+// Dense and inflating .so size where master efficiently used Small.
+const DENSE_VS_SMALL_BIAS: f64 = 0.5;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Repr {
     Dense,
@@ -662,18 +670,20 @@ impl Generator {
         let mut picks = Vec::with_capacity(n);
 
         for c in standalone_costs {
-            // Biases gate movement from a faster tier to a slower one.
-            //   Dense -> Csr   requires csr   <= DENSE_VS_CSR_BIAS * dense.
-            //   Csr   -> Small requires small <= SMALL_VS_CSR_BIAS * csr.
-            //   Dense -> Small composes both biases (must be much smaller
-            //   than dense to justify skipping straight to the slowest tier).
+            // Each pairwise transition has its own independent bias.
+            //   Dense -> Csr   requires csr   <= DENSE_VS_CSR_BIAS   * dense.
+            //   Dense -> Small requires small <= DENSE_VS_SMALL_BIAS * dense.
+            //   Csr   -> Small requires small <= SMALL_VS_CSR_BIAS   * csr.
+            // The Dense -> Small bias is *not* the product of the other two;
+            // composing them is too strict for narrow-state grammars where
+            // Small naturally fits (e.g. python with sym=273), incorrectly
+            // forcing those states to Dense.
             let dense = c.dense as f64;
             let csr = c.csr as f64;
             let small = c.small as f64;
             let csr_beats_dense = csr <= DENSE_VS_CSR_BIAS * dense;
             let small_beats_csr = small <= SMALL_VS_CSR_BIAS * csr;
-            let small_beats_dense =
-                small <= DENSE_VS_CSR_BIAS * SMALL_VS_CSR_BIAS * dense;
+            let small_beats_dense = small <= DENSE_VS_SMALL_BIAS * dense;
             let pick = match (csr_beats_dense, small_beats_csr, small_beats_dense) {
                 (false, _, false) => Repr::Dense,
                 (false, _, true) => Repr::Small,
