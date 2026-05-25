@@ -524,6 +524,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
         let at_span = self.expect(TokenKind::At)?;
         let name_span = self.expect_ident()?;
+        if self.at(TokenKind::ColonColon) {
+            return Err(self.error(ParseErrorKind::QualifiedRuleSetCall));
+        }
         let name_id = self
             .shared
             .arena
@@ -1251,6 +1254,8 @@ pub enum ParseErrorKind {
     RuleSetBodyRequiresRuleDecl,
     #[error("rule-set macro body must declare at least one rule")]
     EmptyRuleSetMacroBody,
+    #[error("qualified calls to rule-set macros are not supported")]
+    QualifiedRuleSetCall,
 }
 
 #[expect(
