@@ -45,6 +45,12 @@ error_tests! { Expand {
            @bad()"#,
         ExpandErrorKind::NonStringInName
     }
+    error_computed_name_empty_string {
+        r#"rules bad() { rule @concat("", "") { "x" } }
+           grammar { language: "test" }
+           @bad()"#,
+        ExpandErrorKind::InvalidRuleName(String::new())
+    }
 }}
 
 error_tests! { Type {
@@ -82,5 +88,12 @@ error_tests! { Resolve {
            grammar { language: "test", start: a }
            @bad("such")"#,
         ResolveErrorKind::UnknownIdentifier("no_such".into())
+    }
+    error_computed_name_collides_with_static_rule {
+        r#"rules emit() { rule program { "x" } }
+           grammar { language: "test", start: program }
+           rule program { "y" }
+           @emit()"#,
+        ResolveErrorKind::DuplicateDeclaration("program".into())
     }
 }}

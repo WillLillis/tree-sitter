@@ -634,6 +634,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let rid = self.alloc_rule(ARule::NamedSymbol(name));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
+            // SymRef should have been rewritten to SynthRef during rule-set
+            // expansion. If one survives to lower, it's in a static rule body
+            // (or another non-macro-body slot), where @-syntax isn't supported.
+            Node::SymRef { .. } => Err(LowerError::new(
+                LowerErrorKind::SymRefOutsideMacroBody,
+                span,
+            )),
             Node::MacroParam { index, .. } => {
                 let base = *self.state.macro_arg_bases.last().unwrap();
                 Ok(self.state.macro_args[base + *index as usize])
