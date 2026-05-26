@@ -430,6 +430,8 @@ pub enum LowerErrorKind {
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]
     IntegerOverflow(i64),
+    #[error("@-expressions are only valid inside `rules` macro bodies")]
+    SymRefOutsideMacroBody,
 }
 
 fn format_override_names(entries: &[(String, Span)]) -> String {
