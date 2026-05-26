@@ -377,7 +377,14 @@ fn build_grammar(
     Ok(InputGrammar {
         name: result.language,
         variables,
-        extra_symbols: inherit(result.extras, base, |b| &b.extra_symbols),
+        // Default extras matches grammar.js (dsl.js:254): `[/\s/]` applied
+        // when neither the grammar nor its base specifies extras.
+        extra_symbols: result.extras.unwrap_or_else(|| {
+            base.map_or_else(
+                || vec![Rule::Pattern("\\s".into(), String::new())],
+                |b| b.extra_symbols.clone(),
+            )
+        }),
         expected_conflicts: inherit(result.conflicts, base, |b| &b.expected_conflicts),
         precedence_orderings: inherit(result.precedences, base, |b| &b.precedence_orderings),
         external_tokens: inherit(result.externals, base, |b| &b.external_tokens),
