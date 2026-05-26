@@ -30,30 +30,31 @@ const ABI_VERSION_WITH_RESERVED_WORDS: usize = 15;
 const ABI_VERSION_WITH_COMPRESSED_TABLES: usize = 16;
 const SMALL_STATE_THRESHOLD: usize = 64;
 
-// Picker bias: only place a state in the Small tier if it is at most this
-// fraction of the corresponding CSR cost. CSR (binary search, O(log n))
-// is meaningfully faster at parse time than Small (linear scan over groups,
-// O(group_count + nnz)), so we only switch when Small is clearly smaller.
-// 0.6 keeps each grammar's parse-time delta within roughly the ±10% band
-// that csr-clean already occupies vs master, while delivering ~7pp of the
-// ~11pp size win available from the unbiased picker.
-const SMALL_VS_CSR_BIAS: f64 = 0.6;
+// Lookup-cost picker: for each state pick the tier that minimizes
+// `bytes + PICKER_LAMBDA * lookup_cycles`. Bytes are the standalone size
+// estimate; lookup_cycles is an approximation of the per-lookup CPU work
+// for each tier:
+//   Dense: 1                   (single indexed load)
+//   Csr:   ceil(log2(nnz+1))   (binary search comparisons)
+//   Small: (group_count + nnz) (average linear scan across groups)
+//
+// Bias-style ratios (the previous DENSE_VS_CSR / DENSE_VS_SMALL /
+// SMALL_VS_CSR constants) couldn't satisfy both wide- and narrow-state
+// grammars simultaneously: the optimal tier depends on a state's density
+// (nnz/sym_count), not on absolute byte ratios. The cost model handles
+// both naturally because lookup_cycles scales with nnz/group_count rather
+// than with bytes.
+//
+// PICKER_LAMBDA is "bytes of state-table size equivalent to one cycle of
+// lookup work". 0 = pure size minimization (no lookup penalty). Larger
+// values bias toward faster tiers (Dense > Csr > Small).
+const PICKER_LAMBDA: f64 = 100.0;
 
-// Picker bias: prefer Dense to Csr unless Csr is at least DENSE_VS_CSR_BIAS
-// fraction smaller. Dense lookup is O(1) (one indexed load), Csr is
-// O(log NNZ) binary search. For grammars with wide states (e.g. kotlin
-// sym_count=374, typical NNZ 100-200), Csr saves only ~20% bytes per state
-// but costs ~7 comparisons per lookup, regressing the parse hot path.
-// 0.5 keeps states Dense unless Csr literally halves their size.
-const DENSE_VS_CSR_BIAS: f64 = 0.5;
-
-// Picker bias: prefer Dense to Small unless Small is at least
-// DENSE_VS_SMALL_BIAS fraction smaller. Small lookup is O(group_count + nnz)
-// linear scan, typically a handful of comparisons. Independent of the
-// Csr-related biases: composing them would over-constrain Small for
-// narrow-state grammars (e.g. python sym=273), forcing those states to
-// Dense and inflating .so size where master efficiently used Small.
-const DENSE_VS_SMALL_BIAS: f64 = 0.5;
+// Bias used by the dedup-promotion pass for groups of canonically-identical
+// Small candidates. Promotion is locally cheaper than per-state Small/Csr
+// emission only by a margin, so this avoids dragging close-call groups
+// into Small purely on the basis of map-entry savings.
+const SMALL_DEDUP_BIAS: f64 = 0.6;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Repr {
@@ -62,12 +63,27 @@ enum Repr {
     Small,
 }
 
-// Byte cost of representing one state under each candidate tier.
+// Per-state byte cost and lookup-cycle estimate for each candidate tier.
 #[derive(Copy, Clone, Debug)]
 struct StateCosts {
-    dense: usize,
-    csr: usize,
-    small: usize,
+    dense_bytes: usize,
+    csr_bytes: usize,
+    small_bytes: usize,
+    dense_cycles: f64,
+    csr_cycles: f64,
+    small_cycles: f64,
+}
+
+impl StateCosts {
+    fn dense_total(&self) -> f64 {
+        self.dense_bytes as f64 + PICKER_LAMBDA * self.dense_cycles
+    }
+    fn csr_total(&self) -> f64 {
+        self.csr_bytes as f64 + PICKER_LAMBDA * self.csr_cycles
+    }
+    fn small_total(&self) -> f64 {
+        self.small_bytes as f64 + PICKER_LAMBDA * self.small_cycles
+    }
 }
 
 pub type RenderResult<T> = Result<T, RenderError>;
@@ -594,10 +610,29 @@ impl Generator {
             }
             let group_count = term_groups.len() + nonterm_groups.len();
 
+            // Lookup-cycle estimates per tier:
+            //   Dense: 1 indexed load.
+            //   Csr:   binary search depth = ceil(log2(nnz+1)). +1 inside the
+            //          log to avoid log2(0); clamp to >=1 for the trivial
+            //          one-entry case.
+            //   Small: linear scan walks every group header plus the symbols
+            //          in the matching group; average expected work is
+            //          group_count + nnz/2 if hit, group_count + nnz if miss.
+            //          Use the miss estimate (worst case for hot symbols).
+            let csr_cycles = if nnz <= 1 {
+                1.0
+            } else {
+                ((nnz + 1) as f64).log2().ceil()
+            };
+            let small_cycles = (group_count + nnz) as f64;
+
             out.push(StateCosts {
-                dense: symbol_count * 2,
-                csr: nnz * 4 + 4,
-                small: 2 * nnz + 4 * group_count + 6,
+                dense_bytes: symbol_count * 2,
+                csr_bytes: nnz * 4 + 4,
+                small_bytes: 2 * nnz + 4 * group_count + 6,
+                dense_cycles: 1.0,
+                csr_cycles,
+                small_cycles,
             });
         }
         out
@@ -613,10 +648,10 @@ impl Generator {
         let mut sum_small: usize = 0;
         let mut sum_opt_pre_dedup: usize = 0;
         for c in &costs {
-            sum_dense += c.dense;
-            sum_csr += c.csr;
-            sum_small += c.small;
-            sum_opt_pre_dedup += c.dense.min(c.csr).min(c.small);
+            sum_dense += c.dense_bytes;
+            sum_csr += c.csr_bytes;
+            sum_small += c.small_bytes;
+            sum_opt_pre_dedup += c.dense_bytes.min(c.csr_bytes).min(c.small_bytes);
         }
 
         let mut pick_dense = 0;
@@ -628,11 +663,11 @@ impl Generator {
             match repr {
                 Repr::Dense => {
                     pick_dense += 1;
-                    sum_opt += costs[i].dense;
+                    sum_opt += costs[i].dense_bytes;
                 }
                 Repr::Csr => {
                     pick_csr += 1;
-                    sum_opt += costs[i].csr;
+                    sum_opt += costs[i].csr_bytes;
                 }
                 Repr::Small => {
                     pick_small += 1;
@@ -640,7 +675,7 @@ impl Generator {
                     if canonical_seen.insert(h, i).is_some() {
                         sum_opt += 4;
                     } else {
-                        sum_opt += costs[i].small;
+                        sum_opt += costs[i].small_bytes;
                     }
                 }
             }
@@ -660,41 +695,25 @@ impl Generator {
     }
 
     // Choose dense / CSR / small per state. Two-pass: per-state argmin on
-    // standalone overhead-aware costs, then a dedup-promotion pass that
-    // groups states by canonical small-data and promotes a whole group to
-    // small when all-small (one full body + N-1 map entries) beats the sum
-    // of their standalone picks. One pass suffices because dedup only
-    // affects the small tier.
+    // `bytes + PICKER_LAMBDA * lookup_cycles`, then a dedup-promotion pass
+    // that groups states by canonical small-data and promotes a whole group
+    // to Small when all-small (one full body + N-1 map entries) beats the
+    // sum of their standalone picks. One pass suffices because dedup only
+    // affects the Small tier.
     fn decide_state_representations(&self, standalone_costs: &[StateCosts]) -> Vec<Repr> {
         let n = self.parse_table.states.len();
         let mut picks = Vec::with_capacity(n);
 
         for c in standalone_costs {
-            // Each pairwise transition has its own independent bias.
-            //   Dense -> Csr   requires csr   <= DENSE_VS_CSR_BIAS   * dense.
-            //   Dense -> Small requires small <= DENSE_VS_SMALL_BIAS * dense.
-            //   Csr   -> Small requires small <= SMALL_VS_CSR_BIAS   * csr.
-            // The Dense -> Small bias is *not* the product of the other two;
-            // composing them is too strict for narrow-state grammars where
-            // Small naturally fits (e.g. python with sym=273), incorrectly
-            // forcing those states to Dense.
-            let dense = c.dense as f64;
-            let csr = c.csr as f64;
-            let small = c.small as f64;
-            let csr_beats_dense = csr <= DENSE_VS_CSR_BIAS * dense;
-            let small_beats_csr = small <= SMALL_VS_CSR_BIAS * csr;
-            let small_beats_dense = small <= DENSE_VS_SMALL_BIAS * dense;
-            let pick = match (csr_beats_dense, small_beats_csr, small_beats_dense) {
-                (false, _, false) => Repr::Dense,
-                (false, _, true) => Repr::Small,
-                (true, false, _) => Repr::Csr,
-                (true, true, _) => {
-                    if c.csr <= c.small {
-                        Repr::Csr
-                    } else {
-                        Repr::Small
-                    }
-                }
+            let d = c.dense_total();
+            let cs = c.csr_total();
+            let sm = c.small_total();
+            let pick = if d <= cs && d <= sm {
+                Repr::Dense
+            } else if cs <= sm {
+                Repr::Csr
+            } else {
+                Repr::Small
             };
             picks.push(pick);
         }
@@ -713,27 +732,30 @@ impl Generator {
 
         for (_, mut group) in by_hash.into_iter().filter(|(_, g)| g.len() > 1) {
             // Dense states stay Dense: dedup-demoting them to Small would
-            // bypass the composed bias chain that kept them Dense in the
-            // first place. Only Csr/Small members participate in promotion.
+            // bypass the per-state cost decision that kept them Dense in
+            // the first place. Only Csr/Small members participate.
             group.retain(|&i| picks[i] != Repr::Dense);
             if group.len() < 2 {
                 continue;
             }
-            let current: usize = group
+            // Cost-aware comparison: current cost is the sum of each member's
+            // (bytes + lambda*cycles) under its current pick. Promoted cost
+            // pays one full Small body's cycles (shared) plus per-member 4
+            // bytes for the map entry. Bias-style margin (SMALL_DEDUP_BIAS)
+            // prevents pulling a close-call group into the slower tier.
+            let current_total: f64 = group
                 .iter()
                 .map(|&i| match picks[i] {
-                    Repr::Dense => standalone_costs[i].dense,
-                    Repr::Csr => standalone_costs[i].csr,
-                    Repr::Small => standalone_costs[i].small,
+                    Repr::Csr => standalone_costs[i].csr_total(),
+                    Repr::Small => standalone_costs[i].small_total(),
+                    Repr::Dense => unreachable!(),
                 })
                 .sum();
-            // First state in the group pays full small_cost (body + map);
-            // each subsequent state pays only 4 bytes (its map entry).
-            let promoted = standalone_costs[group[0]].small + 4 * (group.len() - 1);
-            // Apply the same Csr-vs-Small bias here as the per-state pick:
-            // a tiny dedup win shouldn't drag a whole group out of Csr into
-            // the slower Small linear-scan path.
-            if (promoted as f64) <= SMALL_VS_CSR_BIAS * (current as f64) {
+            let canonical = &standalone_costs[group[0]];
+            let promoted_total = canonical.small_bytes as f64
+                + 4.0 * (group.len() - 1) as f64
+                + PICKER_LAMBDA * canonical.small_cycles * group.len() as f64;
+            if promoted_total <= SMALL_DEDUP_BIAS * current_total {
                 for &i in &group {
                     picks[i] = Repr::Small;
                 }
