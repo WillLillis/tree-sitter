@@ -77,14 +77,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     pub fn parse(mut self) -> ParseResult<ModuleContext> {
         // Capture this module's NodeId range so consumers (e.g. LSP) can
         // attribute nodes back to the right ModuleContext / source text.
-        let start = self.shared.arena.len() as u32 + 1;
+        let start = self.shared.arena.next_id().into();
         self.skip_comments();
         while !self.at_eof() {
             let id = self.parse_item()?;
             self.ctx.root_items.push(id);
             self.skip_comments();
         }
-        let end = self.shared.arena.len() as u32 + 1;
+        let end = self.shared.arena.next_id().into();
         debug_assert!(start <= end);
         self.ctx.node_range = start..end;
         Ok(self.ctx)
