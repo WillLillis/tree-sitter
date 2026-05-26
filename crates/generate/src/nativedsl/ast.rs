@@ -40,6 +40,12 @@ impl NodeId {
     }
 }
 
+impl From<NodeId> for u32 {
+    fn from(id: NodeId) -> Self {
+        id.0.get()
+    }
+}
+
 /// Arena for AST nodes and their spans.
 pub struct NodeArena {
     nodes: Vec<Node>,
@@ -99,6 +105,14 @@ impl NodeArena {
     #[must_use]
     pub const fn len(&self) -> usize {
         self.nodes.len() - 1
+    }
+
+    /// The `NodeId` that the next `push` will assign. Equivalently, the
+    /// exclusive end of a half-open range over all current nodes.
+    #[must_use]
+    pub const fn next_id(&self) -> NodeId {
+        // SAFETY: nodes always contains the sentinel, so len >= 1.
+        NodeId(unsafe { NonZeroU32::new_unchecked(self.nodes.len() as u32) })
     }
 
     /// Returns `true` if the arena contains no nodes (excluding sentinel).

@@ -94,7 +94,7 @@ impl Loader<'_> {
         // sit in one contiguous arena range; runs before resolve so the
         // name table sees the post-expansion shape of root_items.
         expand_macro_calls::expand_macro_calls(self.shared, self.strings, &mut ctx)?;
-        ctx.node_range.end = self.shared.arena.len() as u32;
+        ctx.node_range.end = self.shared.arena.next_id().into();
 
         // Load inherited grammar (Grammar kind only, must happen before typecheck).
         if let Some(inherit_id) = ctx.inherit_ref
