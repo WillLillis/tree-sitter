@@ -144,6 +144,109 @@ fn rule_set_macro_with_for_loop_over_param() {
 }
 
 #[test]
+fn rule_set_macro_param_in_combinator_positions() {
+    // Hits Repeat, Optional, Field, Alias, Prec arms of clone_with_subst all
+    // at once - a regression in any arm's recursive subst would corrupt the
+    // assertion below.
+    let g = dsl(r#"
+        rules wrap(inner: rule_t, name: rule_t) {
+            rule program {
+                prec(1, seq(
+                    repeat1(inner),
+                    optional(inner),
+                    field(label, inner),
+                    alias(inner, name),
+                ))
+            }
+        }
+        rule digit { "1" }
+        rule pretty { "pretty" }
+        grammar { language: "test", start: program }
+        @wrap(digit, pretty)
+    "#);
+    let digit = || Rule::NamedSymbol("digit".into());
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::prec(
+            Precedence::Integer(1),
+            Rule::seq(vec![
+                Rule::repeat(digit()),
+                Rule::choice(vec![digit(), Rule::Blank]),
+                Rule::field("label".into(), digit()),
+                Rule::alias(digit(), "pretty".into(), /* is_named */ true),
+            ]),
+        )
+    );
+}
+
+#[test]
+fn rule_set_macro_cfg_gated_top_level_call() {
+    // apply_cfg runs before expand_macro_calls; a cfg-disabled @call should
+    // be dropped entirely, leaving no ExpandedRule items behind.
+    let g = dsl(r#"
+        rules extra_rules() {
+            rule extra_a { "ea" }
+            rule extra_b { "eb" }
+        }
+        grammar { language: "test", flags: { disabled: ["GFM"] } }
+        rule program { "p" }
+        #[cfg(GFM)]
+        @extra_rules()
+    "#);
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["program"]);
+}
+
+#[test]
+fn rule_set_macro_cfg_gated_top_level_call_enabled() {
+    // Mirror of the above with the flag enabled - the @call survives apply_cfg
+    // and expands as normal.
+    let g = dsl(r#"
+        rules extra_rules() {
+            rule extra_a { "ea" }
+            rule extra_b { "eb" }
+        }
+        grammar { language: "test", flags: { enabled: ["GFM"] } }
+        rule program { "p" }
+        #[cfg(GFM)]
+        @extra_rules()
+    "#);
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["program", "extra_a", "extra_b"]);
+}
+
+#[test]
+fn rule_set_macro_only_decls_no_static_rules() {
+    // Grammar has zero static `rule` decls outside the macro - all variables
+    // come from expansion.
+    let g = dsl(r#"
+        rules core(name: str_t) {
+            rule @concat(name, "_a") { "a" }
+            rule @concat(name, "_b") { "b" }
+        }
+        grammar { language: "test", start: x_a }
+        @core("x")
+    "#);
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["x_a", "x_b"]);
+}
+
+#[test]
+fn rule_set_macro_literal_name_via_at_string() {
+    // `@"foo"` evaluates the StringLit to "foo" and produces a rule named foo.
+    // Pins behavior - shape is unusual but parser+expand accept it.
+    let g = dsl(r#"
+        rules emit() {
+            rule @"foo" { "x" }
+        }
+        grammar { language: "test", start: foo }
+        @emit()
+    "#);
+    assert_eq!(g.variables[0].name, "foo");
+    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+}
+
+#[test]
 fn rule_set_macro_with_regular_rules_around() {
     let g = dsl(r#"
         rules extras() {

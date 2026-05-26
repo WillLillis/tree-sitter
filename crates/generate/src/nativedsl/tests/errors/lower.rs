@@ -66,6 +66,12 @@ error_tests! { Lower {
         rule program { prec(x - 2000000000, "y") }"#,
         LowerErrorKind::IntegerOverflow(-4_000_000_000)
     }
+    error_symref_in_static_rule_body {
+        r#"grammar { language: "test", start: program }
+           rule program { @"foo" }
+           rule foo { "x" }"#,
+        LowerErrorKind::SymRefOutsideMacroBody
+    }
 }}
 
 #[test]
