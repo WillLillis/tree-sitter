@@ -48,13 +48,18 @@ const SMALL_STATE_THRESHOLD: usize = 64;
 // PICKER_LAMBDA is "bytes of state-table size equivalent to one cycle of
 // lookup work". 0 = pure size minimization (no lookup penalty). Larger
 // values bias toward faster tiers (Dense > Csr > Small).
-const PICKER_LAMBDA: f64 = 100.0;
+const PICKER_LAMBDA: f64 = 0.0;
 
-// Bias used by the dedup-promotion pass for groups of canonically-identical
-// Small candidates. Promotion is locally cheaper than per-state Small/Csr
-// emission only by a margin, so this avoids dragging close-call groups
-// into Small purely on the basis of map-entry savings.
-const SMALL_DEDUP_BIAS: f64 = 0.6;
+// Separate "bytes-per-cycle" coefficient for the dedup-promotion pass.
+// Dedup converts N Csr rows (each their own bytes) into one shared Small
+// body plus N map entries. The per-state lookup goes from O(log nnz) to
+// the Small linear scan, so each state's cycle cost rises by the diff.
+// At the per-state PICKER_LAMBDA, that scaled-by-N cycle penalty dwarfs
+// any byte saving and dedup never fires. DEDUP_LAMBDA is intentionally
+// lower because dedup is fundamentally a size optimization - the cycle
+// hit is real but amortized across states that, by definition, share
+// behavior and are rarely on the hot path simultaneously.
+const DEDUP_LAMBDA: f64 = 0.0;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Repr {
@@ -615,16 +620,17 @@ impl Generator {
             //   Csr:   binary search depth = ceil(log2(nnz+1)). +1 inside the
             //          log to avoid log2(0); clamp to >=1 for the trivial
             //          one-entry case.
-            //   Small: linear scan walks every group header plus the symbols
-            //          in the matching group; average expected work is
-            //          group_count + nnz/2 if hit, group_count + nnz if miss.
-            //          Use the miss estimate (worst case for hot symbols).
+            //   Small: average-case scan walks (group_count/2) outer-loop
+            //          iterations to reach the matching group, plus (nnz/2)
+            //          inner-loop comparisons to the hit. Miss-case is twice
+            //          that, but we model the common hit case since this is
+            //          per-state hot-path lookup cost.
             let csr_cycles = if nnz <= 1 {
                 1.0
             } else {
                 ((nnz + 1) as f64).log2().ceil()
             };
-            let small_cycles = (group_count + nnz) as f64;
+            let small_cycles = (group_count as f64 + nnz as f64) / 2.0;
 
             out.push(StateCosts {
                 dense_bytes: symbol_count * 2,
@@ -694,23 +700,24 @@ impl Generator {
         add_line!(self, "#define PER_STATE_PICK_SMALL {pick_small}");
     }
 
-    // Choose dense / CSR / small per state. Two-pass: per-state argmin on
-    // `bytes + PICKER_LAMBDA * lookup_cycles`, then a dedup-promotion pass
-    // that groups states by canonical small-data and promotes a whole group
-    // to Small when all-small (one full body + N-1 map entries) beats the
-    // sum of their standalone picks. One pass suffices because dedup only
-    // affects the Small tier.
+    // Choose dense / CSR / small per state. Defer to master's Dense decision
+    // (already computed in `self.large_state_count` from the
+    // SMALL_STATE_THRESHOLD heuristic) to avoid changing which states get
+    // O(1) lookups - that's the source of parse-time regressions in earlier
+    // Plan B iterations. For the non-Dense states, the cost picker chooses
+    // CSR vs Small by minimizing `bytes + PICKER_LAMBDA * lookup_cycles`.
+    //
+    // Then a dedup-promotion pass groups non-Dense states by canonical
+    // small-data and promotes a whole group to Small when all-small (one
+    // full body + N-1 map entries) beats the sum of their standalone picks.
     fn decide_state_representations(&self, standalone_costs: &[StateCosts]) -> Vec<Repr> {
         let n = self.parse_table.states.len();
         let mut picks = Vec::with_capacity(n);
 
-        for c in standalone_costs {
-            let d = c.dense_total();
-            let cs = c.csr_total();
-            let sm = c.small_total();
-            let pick = if d <= cs && d <= sm {
+        for (i, c) in standalone_costs.iter().enumerate() {
+            let pick = if i < self.large_state_count {
                 Repr::Dense
-            } else if cs <= sm {
+            } else if c.csr_total() <= c.small_total() {
                 Repr::Csr
             } else {
                 Repr::Small
@@ -732,30 +739,33 @@ impl Generator {
 
         for (_, mut group) in by_hash.into_iter().filter(|(_, g)| g.len() > 1) {
             // Dense states stay Dense: dedup-demoting them to Small would
-            // bypass the per-state cost decision that kept them Dense in
-            // the first place. Only Csr/Small members participate.
+            // change which states get O(1) lookups, the very thing the
+            // master-derived large_state_count protects.
             group.retain(|&i| picks[i] != Repr::Dense);
             if group.len() < 2 {
                 continue;
             }
-            // Cost-aware comparison: current cost is the sum of each member's
-            // (bytes + lambda*cycles) under its current pick. Promoted cost
-            // pays one full Small body's cycles (shared) plus per-member 4
-            // bytes for the map entry. Bias-style margin (SMALL_DEDUP_BIAS)
-            // prevents pulling a close-call group into the slower tier.
+            // Dedup is a size-vs-speed trade. Cost-aware comparison with a
+            // separate DEDUP_LAMBDA (smaller than PICKER_LAMBDA): per-state
+            // lookup still scales by N members, but each gets weighted less
+            // because dedup-able states share behavior and are unlikely to
+            // be on the hot path simultaneously.
             let current_total: f64 = group
                 .iter()
-                .map(|&i| match picks[i] {
-                    Repr::Csr => standalone_costs[i].csr_total(),
-                    Repr::Small => standalone_costs[i].small_total(),
-                    Repr::Dense => unreachable!(),
+                .map(|&i| {
+                    let c = &standalone_costs[i];
+                    match picks[i] {
+                        Repr::Csr => c.csr_bytes as f64 + DEDUP_LAMBDA * c.csr_cycles,
+                        Repr::Small => c.small_bytes as f64 + DEDUP_LAMBDA * c.small_cycles,
+                        Repr::Dense => unreachable!(),
+                    }
                 })
                 .sum();
             let canonical = &standalone_costs[group[0]];
             let promoted_total = canonical.small_bytes as f64
                 + 4.0 * (group.len() - 1) as f64
-                + PICKER_LAMBDA * canonical.small_cycles * group.len() as f64;
-            if promoted_total <= SMALL_DEDUP_BIAS * current_total {
+                + DEDUP_LAMBDA * canonical.small_cycles * group.len() as f64;
+            if promoted_total <= current_total {
                 for &i in &group {
                     picks[i] = Repr::Small;
                 }
