@@ -30,66 +30,9 @@ const ABI_VERSION_WITH_RESERVED_WORDS: usize = 15;
 const ABI_VERSION_WITH_COMPRESSED_TABLES: usize = 16;
 const SMALL_STATE_THRESHOLD: usize = 64;
 
-// Lookup-cost picker: for each state pick the tier that minimizes
-// `bytes + PICKER_LAMBDA * lookup_cycles`. Bytes are the standalone size
-// estimate; lookup_cycles is an approximation of the per-lookup CPU work
-// for each tier:
-//   Dense: 1                   (single indexed load)
-//   Csr:   ceil(log2(nnz+1))   (binary search comparisons)
-//   Small: (group_count + nnz) (average linear scan across groups)
-//
-// Bias-style ratios (the previous DENSE_VS_CSR / DENSE_VS_SMALL /
-// SMALL_VS_CSR constants) couldn't satisfy both wide- and narrow-state
-// grammars simultaneously: the optimal tier depends on a state's density
-// (nnz/sym_count), not on absolute byte ratios. The cost model handles
-// both naturally because lookup_cycles scales with nnz/group_count rather
-// than with bytes.
-//
-// PICKER_LAMBDA is "bytes of state-table size equivalent to one cycle of
-// lookup work". 0 = pure size minimization (no lookup penalty). Larger
-// values bias toward faster tiers (Dense > Csr > Small).
-const PICKER_LAMBDA: f64 = 0.0;
-
-// Separate "bytes-per-cycle" coefficient for the dedup-promotion pass.
-// Dedup converts N Csr rows (each their own bytes) into one shared Small
-// body plus N map entries. The per-state lookup goes from O(log nnz) to
-// the Small linear scan, so each state's cycle cost rises by the diff.
-// At the per-state PICKER_LAMBDA, that scaled-by-N cycle penalty dwarfs
-// any byte saving and dedup never fires. DEDUP_LAMBDA is intentionally
-// lower because dedup is fundamentally a size optimization - the cycle
-// hit is real but amortized across states that, by definition, share
-// behavior and are rarely on the hot path simultaneously.
-const DEDUP_LAMBDA: f64 = 0.0;
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Repr {
-    Dense,
-    Csr,
-    Small,
-}
-
-// Per-state byte cost and lookup-cycle estimate for each candidate tier.
-#[derive(Copy, Clone, Debug)]
-struct StateCosts {
-    dense_bytes: usize,
-    csr_bytes: usize,
-    small_bytes: usize,
-    dense_cycles: f64,
-    csr_cycles: f64,
-    small_cycles: f64,
-}
-
-impl StateCosts {
-    fn dense_total(&self) -> f64 {
-        self.dense_bytes as f64 + PICKER_LAMBDA * self.dense_cycles
-    }
-    fn csr_total(&self) -> f64 {
-        self.csr_bytes as f64 + PICKER_LAMBDA * self.csr_cycles
-    }
-    fn small_total(&self) -> f64 {
-        self.small_bytes as f64 + PICKER_LAMBDA * self.small_cycles
-    }
-}
+use crate::picker::{
+    canonical_small_hash, compute_standalone_costs, decide_state_representations, Repr,
+};
 
 pub type RenderResult<T> = Result<T, RenderError>;
 
@@ -408,8 +351,9 @@ impl Generator {
         // grammars keep the legacy 2-way layout (Dense + Small) since the
         // runtime there has no notion of a CSR tier.
         if self.abi_version >= ABI_VERSION_WITH_COMPRESSED_TABLES {
-            let costs = self.compute_standalone_costs();
-            self.state_repr = self.decide_state_representations(&costs);
+            let costs = compute_standalone_costs(&self.parse_table);
+            self.state_repr =
+                decide_state_representations(&self.parse_table, &costs, self.large_state_count);
         } else {
             let n = self.parse_table.states.len();
             let mut v = vec![Repr::Dense; self.large_state_count.min(n)];
@@ -588,67 +532,12 @@ impl Generator {
         add_line!(self, "");
     }
 
-    // Compute the standalone overhead-aware per-state cost in each
-    // representation. Dense has no per-state overhead (state slots into the
-    // [N][SYMBOL_COUNT] matrix). CSR adds one row_offsets entry (4 bytes).
-    // Small adds the group-count u16 header (2 bytes) and the
-    // small_parse_table_map u32 entry (4 bytes) on top of body bytes.
-    fn compute_standalone_costs(&self) -> Vec<StateCosts> {
-        let symbol_count = self.parse_table.symbols.len();
-        let mut term_groups: FxHashSet<&ParseTableEntry> = FxHashSet::default();
-        let mut nonterm_groups: FxHashSet<usize> = FxHashSet::default();
-        let mut out = Vec::with_capacity(self.parse_table.states.len());
-
-        for (state_idx, state) in self.parse_table.states.iter().enumerate() {
-            let nnz = state.terminal_entries.len() + state.nonterminal_entries.len();
-            term_groups.clear();
-            nonterm_groups.clear();
-            for entry in state.terminal_entries.values() {
-                term_groups.insert(entry);
-            }
-            for action in state.nonterminal_entries.values() {
-                let id = match action {
-                    GotoAction::Goto(s) => *s,
-                    GotoAction::ShiftExtra => state_idx,
-                };
-                nonterm_groups.insert(id);
-            }
-            let group_count = term_groups.len() + nonterm_groups.len();
-
-            // Lookup-cycle estimates per tier:
-            //   Dense: 1 indexed load.
-            //   Csr:   binary search depth = ceil(log2(nnz+1)). +1 inside the
-            //          log to avoid log2(0); clamp to >=1 for the trivial
-            //          one-entry case.
-            //   Small: average-case scan walks (group_count/2) outer-loop
-            //          iterations to reach the matching group, plus (nnz/2)
-            //          inner-loop comparisons to the hit. Miss-case is twice
-            //          that, but we model the common hit case since this is
-            //          per-state hot-path lookup cost.
-            let csr_cycles = if nnz <= 1 {
-                1.0
-            } else {
-                ((nnz + 1) as f64).log2().ceil()
-            };
-            let small_cycles = (group_count as f64 + nnz as f64) / 2.0;
-
-            out.push(StateCosts {
-                dense_bytes: symbol_count * 2,
-                csr_bytes: nnz * 4 + 4,
-                small_bytes: 2 * nnz + 4 * group_count + 6,
-                dense_cycles: 1.0,
-                csr_cycles,
-                small_cycles,
-            });
-        }
-        out
-    }
-
     // Emit per-state cost analytics for the corpus runner. Reflects the
     // post-reorder state list, so picks here align with what the emitter
-    // actually wrote.
+    // actually wrote. Uses the picker module's cost estimates so the
+    // analytics stay in lockstep with the picker's actual decisions.
     fn add_per_state_cost_stats(&mut self) {
-        let costs = self.compute_standalone_costs();
+        let costs = compute_standalone_costs(&self.parse_table);
         let mut sum_dense: usize = 0;
         let mut sum_csr: usize = 0;
         let mut sum_small: usize = 0;
@@ -677,7 +566,7 @@ impl Generator {
                 }
                 Repr::Small => {
                     pick_small += 1;
-                    let h = self.canonical_small_hash(i);
+                    let h = canonical_small_hash(&self.parse_table, i);
                     if canonical_seen.insert(h, i).is_some() {
                         sum_opt += 4;
                     } else {
@@ -698,131 +587,6 @@ impl Generator {
         add_line!(self, "#define PER_STATE_PICK_DENSE {pick_dense}");
         add_line!(self, "#define PER_STATE_PICK_CSR {pick_csr}");
         add_line!(self, "#define PER_STATE_PICK_SMALL {pick_small}");
-    }
-
-    // Choose dense / CSR / small per state. Defer to master's Dense decision
-    // (already computed in `self.large_state_count` from the
-    // SMALL_STATE_THRESHOLD heuristic) to avoid changing which states get
-    // O(1) lookups - that's the source of parse-time regressions in earlier
-    // Plan B iterations. For the non-Dense states, the cost picker chooses
-    // CSR vs Small by minimizing `bytes + PICKER_LAMBDA * lookup_cycles`.
-    //
-    // Then a dedup-promotion pass groups non-Dense states by canonical
-    // small-data and promotes a whole group to Small when all-small (one
-    // full body + N-1 map entries) beats the sum of their standalone picks.
-    fn decide_state_representations(&self, standalone_costs: &[StateCosts]) -> Vec<Repr> {
-        let n = self.parse_table.states.len();
-        let mut picks = Vec::with_capacity(n);
-
-        for (i, c) in standalone_costs.iter().enumerate() {
-            let pick = if i < self.large_state_count {
-                Repr::Dense
-            } else if c.csr_total() <= c.small_total() {
-                Repr::Csr
-            } else {
-                Repr::Small
-            };
-            picks.push(pick);
-        }
-
-        // Group states by canonical small-data hash. FxHasher 64-bit
-        // collisions across O(10K) states are negligible; a false dedup
-        // would slightly mis-estimate cost but not produce incorrect picks
-        // since we still verify the promotion is locally cheaper.
-        let mut by_hash: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
-        for i in 0..n {
-            by_hash
-                .entry(self.canonical_small_hash(i))
-                .or_default()
-                .push(i);
-        }
-
-        for (_, mut group) in by_hash.into_iter().filter(|(_, g)| g.len() > 1) {
-            // Dense states stay Dense: dedup-demoting them to Small would
-            // change which states get O(1) lookups, the very thing the
-            // master-derived large_state_count protects.
-            group.retain(|&i| picks[i] != Repr::Dense);
-            if group.len() < 2 {
-                continue;
-            }
-            // Dedup is a size-vs-speed trade. Cost-aware comparison with a
-            // separate DEDUP_LAMBDA (smaller than PICKER_LAMBDA): per-state
-            // lookup still scales by N members, but each gets weighted less
-            // because dedup-able states share behavior and are unlikely to
-            // be on the hot path simultaneously.
-            let current_total: f64 = group
-                .iter()
-                .map(|&i| {
-                    let c = &standalone_costs[i];
-                    match picks[i] {
-                        Repr::Csr => c.csr_bytes as f64 + DEDUP_LAMBDA * c.csr_cycles,
-                        Repr::Small => c.small_bytes as f64 + DEDUP_LAMBDA * c.small_cycles,
-                        Repr::Dense => unreachable!(),
-                    }
-                })
-                .sum();
-            let canonical = &standalone_costs[group[0]];
-            let promoted_total = canonical.small_bytes as f64
-                + 4.0 * (group.len() - 1) as f64
-                + DEDUP_LAMBDA * canonical.small_cycles * group.len() as f64;
-            if promoted_total <= current_total {
-                for &i in &group {
-                    picks[i] = Repr::Small;
-                }
-            }
-        }
-
-        picks
-    }
-
-    // Hash the canonical small-table representation of a state. Two states
-    // with equal hashes are presumed to emit byte-identical small entries.
-    fn canonical_small_hash(&self, state_idx: usize) -> u64 {
-        let state = &self.parse_table.states[state_idx];
-
-        // Group symbols by action. Terminals key on &ParseTableEntry (Eq
-        // distinguishes distinct action sequences); nonterminals key on
-        // resolved goto state ID. Renumbering preserves equality (both
-        // states remap goto values the same way), so original IDs are fine.
-        let mut term_groups: FxHashMap<&ParseTableEntry, Vec<(u8, u32)>> = FxHashMap::default();
-        let mut nonterm_groups: FxHashMap<usize, Vec<(u8, u32)>> = FxHashMap::default();
-
-        for (sym, entry) in &state.terminal_entries {
-            term_groups
-                .entry(entry)
-                .or_default()
-                .push((sym.kind as u8, sym.index as u32));
-        }
-        for (sym, action) in &state.nonterminal_entries {
-            let id = match action {
-                GotoAction::Goto(s) => *s,
-                GotoAction::ShiftExtra => state_idx,
-            };
-            nonterm_groups
-                .entry(id)
-                .or_default()
-                .push((sym.kind as u8, sym.index as u32));
-        }
-
-        for v in term_groups.values_mut() {
-            v.sort_unstable();
-        }
-        for v in nonterm_groups.values_mut() {
-            v.sort_unstable();
-        }
-
-        // Sort groups deterministically. Each group's symbol set is
-        // disjoint from every other group's (a symbol belongs to exactly
-        // one action group), so symbol-sequence ordering is total.
-        let mut term_vec: Vec<_> = term_groups.into_iter().collect();
-        let mut nonterm_vec: Vec<_> = nonterm_groups.into_iter().collect();
-        term_vec.sort_by(|a, b| a.1.cmp(&b.1));
-        nonterm_vec.sort_by(|a, b| a.1.cmp(&b.1));
-
-        let mut h = FxHasher::default();
-        term_vec.hash(&mut h);
-        nonterm_vec.hash(&mut h);
-        h.finish()
     }
 
     fn add_symbol_enum(&mut self) {
