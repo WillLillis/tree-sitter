@@ -69,7 +69,7 @@ pub use typecheck::{
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::rules::Rule;
@@ -206,7 +206,7 @@ pub type LowerError = Diagnostic<LowerErrorKind>;
 pub type ExpandError = Diagnostic<ExpandErrorKind>;
 
 /// Diagnostic error shared by all pipeline stages.
-#[derive(Debug, Serialize, Error)]
+#[derive(Debug, Serialize, Deserialize, Error)]
 pub struct Diagnostic<K> {
     pub kind: K,
     pub span: Option<Span>,
@@ -252,7 +252,7 @@ impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
     }
 }
 
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 #[error(transparent)]
 pub enum DslError {
     Lex(#[from] LexError),
@@ -265,7 +265,7 @@ pub enum DslError {
 }
 
 /// Error from loading a child module (inherited or imported).
-#[derive(Debug, Serialize, Error)]
+#[derive(Debug, Serialize, Deserialize, Error)]
 #[error("{inner}")]
 pub struct ModuleError {
     pub inner: Box<DslError>,
@@ -289,7 +289,7 @@ impl ModuleError {
 }
 
 /// Secondary annotation on an error, pointing to a related source location.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub message: NoteMessage,
     pub span: Span,
@@ -299,7 +299,7 @@ pub struct Note {
     pub source: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,

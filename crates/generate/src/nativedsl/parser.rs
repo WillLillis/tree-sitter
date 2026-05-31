@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
@@ -1194,7 +1194,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
 pub type ParseResult<T> = Result<T, super::ParseError>;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Error)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ParseErrorKind {
     #[error("expected {expected}, got {got}")]
     ExpectedToken { expected: TokenKind, got: TokenKind },
