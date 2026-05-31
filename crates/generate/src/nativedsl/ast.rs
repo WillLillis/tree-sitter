@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::string_pool::Str;
 use super::typecheck::Ty;
@@ -236,7 +236,7 @@ pub enum IdentKind {
 }
 
 /// Byte offset range `[start, end)` in the source text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start: u32,
     pub end: u32,

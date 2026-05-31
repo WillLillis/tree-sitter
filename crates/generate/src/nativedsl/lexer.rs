@@ -2,7 +2,7 @@
 //! source bytes.
 
 use memchr::{memchr, memchr2};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::LexError;
@@ -58,7 +58,7 @@ pub fn is_ident_str(s: &str) -> bool {
 }
 
 /// The kind of a lexer token.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenKind {
     // Identifiers and literals
     Ident,
@@ -497,7 +497,7 @@ impl<'src> Lexer<'src> {
 pub type LexResult<T> = Result<T, super::LexError>;
 
 /// The specific kind of lexer error.
-#[derive(Debug, PartialEq, Eq, Serialize, Error)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum LexErrorKind {
     #[error("unterminated string literal")]
     UnterminatedString,
