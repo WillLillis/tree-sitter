@@ -4,36 +4,26 @@
 //! The Dense decision is deferred to master's existing heuristic via the
 //! `large_state_count` input - the picker does not promote states out of
 //! Dense or move Dense states elsewhere. For non-Dense states, it picks
-//! between CSR and Small per state using a cost model
-//! `total = bytes + LAMBDA * lookup_cycles`, then runs a dedup-promotion
-//! pass that moves CSR rows back to Small when many states share a
-//! canonical body and the byte savings outweigh the cycle cost.
+//! between CSR and Small per state by minimum byte cost, then runs a
+//! dedup-promotion pass that moves CSR rows back to Small when many
+//! states share a canonical body and one shared body + N map entries
+//! beats N independent CSR rows.
 //!
-//! With both LAMBDAs at 0, the picker reduces to pure bytes minimization.
-//! See the per-constant comments for the rationale behind the defaults.
+//! Earlier picker iterations added cost-model tunables (PICKER_LAMBDA /
+//! DEDUP_LAMBDA) that weighted estimated lookup cycles against bytes.
+//! A static corpus sweep confirmed that any non-zero value either
+//! changed picks for ~90% of grammars (PICKER_LAMBDA) or ~25% of
+//! grammars (DEDUP_LAMBDA) but with no aggregate size benefit and no
+//! empirical evidence that the resulting tier shifts actually improved
+//! parse-time. The simpler bytes-only picker matches or beats master on
+//! all 126 validated grammars; the knobs were removed to keep the
+//! shipped surface small.
 
 use std::hash::{Hash, Hasher};
 
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
 use crate::tables::{GotoAction, ParseTable, ParseTableEntry};
-
-/// Per-state cost weight on lookup cycles when choosing between CSR and
-/// Small. Higher values bias the per-state pick toward faster tiers
-/// (CSR's binary search over Small's linear scan). 0 reduces to pure
-/// argmin-bytes, which is the validated default - the corpus comparison
-/// (126 grammars) showed no per-grammar size regressions at LAMBDA=0,
-/// and no clear evidence that non-zero values would beat that.
-const PICKER_LAMBDA: f64 = 0.0;
-
-/// Cost weight for the dedup-promotion comparison. Dedup converts N CSR
-/// rows (each their own bytes) into one shared Small body plus N map
-/// entries; per-state lookup goes from O(log nnz) to a Small linear scan.
-/// A non-zero value scales that cycle penalty by group size and quickly
-/// dominates any byte saving. At LAMBDA=0 dedup fires whenever bytes
-/// drop, matching master's heavy Small dedup. Kept distinct from
-/// PICKER_LAMBDA so the two decisions can be tuned independently.
-const DEDUP_LAMBDA: f64 = 0.0;
 
 /// Which storage tier the picker assigned to a state.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -47,42 +37,23 @@ pub enum Repr {
     Small,
 }
 
-/// Per-state cost estimate for each candidate tier. `dense_cycles` and
-/// `dense_total()` are unused today (Dense is always pinned by the
-/// master-derived `large_state_count`, not selected via cost) but are
-/// kept for symmetry so the struct describes the full picker model.
+/// Per-state byte cost estimate for each candidate tier.
+///
+///   * Dense: no per-state overhead. The state slots into the
+///     `parse_table[LARGE_STATE_COUNT][SYMBOL_COUNT]` matrix.
+///   * Csr:   one `row_offsets` u32 entry (4 bytes) plus
+///     `nnz * 4` bytes for the interleaved (sym, val) pairs.
+///   * Small: the body bytes (`4 * group_count + 2 * nnz`) plus the
+///     `group_count` u16 header (2 bytes) plus the
+///     `small_parse_table_map` u32 entry (4 bytes).
 #[derive(Copy, Clone, Debug)]
 pub struct StateCosts {
     pub dense_bytes: usize,
     pub csr_bytes: usize,
     pub small_bytes: usize,
-    pub dense_cycles: f64,
-    pub csr_cycles: f64,
-    pub small_cycles: f64,
 }
 
-impl StateCosts {
-    #[expect(dead_code, reason = "kept for symmetry; see struct doc")]
-    pub fn dense_total(&self) -> f64 {
-        self.dense_bytes as f64 + PICKER_LAMBDA * self.dense_cycles
-    }
-    pub fn csr_total(&self) -> f64 {
-        self.csr_bytes as f64 + PICKER_LAMBDA * self.csr_cycles
-    }
-    pub fn small_total(&self) -> f64 {
-        self.small_bytes as f64 + PICKER_LAMBDA * self.small_cycles
-    }
-}
-
-/// Compute byte cost and lookup-cycle estimate for each tier per state.
-///
-/// Lookup-cycle estimates:
-///   * Dense: 1 indexed load.
-///   * Csr:   `ceil(log2(nnz + 1))` binary search depth, clamped to >= 1
-///            for the trivial one-entry case.
-///   * Small: average-case scan `(group_count + nnz) / 2`. Walks half the
-///            outer-loop groups on average to reach the matching group,
-///            plus half the inner-loop symbol comparisons to the hit.
+/// Compute byte-cost estimates for each tier per state.
 pub fn compute_standalone_costs(parse_table: &ParseTable) -> Vec<StateCosts> {
     let symbol_count = parse_table.symbols.len();
     let mut term_groups: FxHashSet<&ParseTableEntry> = FxHashSet::default();
@@ -105,20 +76,10 @@ pub fn compute_standalone_costs(parse_table: &ParseTable) -> Vec<StateCosts> {
         }
         let group_count = term_groups.len() + nonterm_groups.len();
 
-        let csr_cycles = if nnz <= 1 {
-            1.0
-        } else {
-            ((nnz + 1) as f64).log2().ceil()
-        };
-        let small_cycles = (group_count as f64 + nnz as f64) / 2.0;
-
         out.push(StateCosts {
             dense_bytes: symbol_count * 2,
             csr_bytes: nnz * 4 + 4,
             small_bytes: 2 * nnz + 4 * group_count + 6,
-            dense_cycles: 1.0,
-            csr_cycles,
-            small_cycles,
         });
     }
     out
@@ -129,14 +90,12 @@ pub fn compute_standalone_costs(parse_table: &ParseTable) -> Vec<StateCosts> {
 /// State ids `0..large_state_count` are forced to Dense (this is master's
 /// per-state heuristic - pinning to it guarantees no parse-time
 /// regression on the hot path). For state ids >= `large_state_count`,
-/// the picker chooses between CSR and Small by argmin of
-/// `bytes + PICKER_LAMBDA * lookup_cycles`.
+/// the picker chooses between CSR and Small by argmin of byte cost.
 ///
 /// A dedup-promotion pass then groups non-Dense states by their canonical
 /// small-body hash and demotes a whole group to Small when one shared
-/// body plus N map entries beats N independent CSR rows under the
-/// DEDUP_LAMBDA-weighted cost. Dense states never participate; they keep
-/// their O(1) lookup guarantee.
+/// body plus N map entries beats N independent CSR rows. Dense states
+/// never participate; they keep their O(1) lookup guarantee.
 pub fn decide_state_representations(
     parse_table: &ParseTable,
     standalone_costs: &[StateCosts],
@@ -148,7 +107,7 @@ pub fn decide_state_representations(
     for (i, c) in standalone_costs.iter().enumerate() {
         let pick = if i < large_state_count {
             Repr::Dense
-        } else if c.csr_total() <= c.small_total() {
+        } else if c.csr_bytes <= c.small_bytes {
             Repr::Csr
         } else {
             Repr::Small
@@ -174,22 +133,20 @@ pub fn decide_state_representations(
         if group.len() < 2 {
             continue;
         }
-        let current_total: f64 = group
+        // Sum each member's current bytes (whatever tier the per-state
+        // pick chose) and compare against the promoted layout: one shared
+        // Small body plus (N - 1) u32 map entries for the duplicates.
+        let current_bytes: usize = group
             .iter()
-            .map(|&i| {
-                let c = &standalone_costs[i];
-                match picks[i] {
-                    Repr::Csr => c.csr_bytes as f64 + DEDUP_LAMBDA * c.csr_cycles,
-                    Repr::Small => c.small_bytes as f64 + DEDUP_LAMBDA * c.small_cycles,
-                    Repr::Dense => unreachable!(),
-                }
+            .map(|&i| match picks[i] {
+                Repr::Csr => standalone_costs[i].csr_bytes,
+                Repr::Small => standalone_costs[i].small_bytes,
+                Repr::Dense => unreachable!(),
             })
             .sum();
         let canonical = &standalone_costs[group[0]];
-        let promoted_total = canonical.small_bytes as f64
-            + 4.0 * (group.len() - 1) as f64
-            + DEDUP_LAMBDA * canonical.small_cycles * group.len() as f64;
-        if promoted_total <= current_total {
+        let promoted_bytes = canonical.small_bytes + 4 * (group.len() - 1);
+        if promoted_bytes <= current_bytes {
             for &i in &group {
                 picks[i] = Repr::Small;
             }
