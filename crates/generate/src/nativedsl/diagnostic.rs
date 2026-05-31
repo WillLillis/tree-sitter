@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anstyle::{AnsiColor, Color, Style};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{Diagnostic, DslError, NoteMessage, ast::Span, lower::LowerErrorKind};
@@ -79,7 +79,7 @@ impl SnippetKind {
 }
 
 /// A [`DslError`] bundled with source text and file path for diagnostic rendering.
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub struct NativeDslError {
     pub error: DslError,
     #[serde(skip)]
