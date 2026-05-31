@@ -7,7 +7,7 @@ pub mod types;
 pub use types::{Constraint, DataTy, InnerTy, ModuleTy, ScalarTy, Ty};
 
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use check::check_item;
@@ -36,7 +36,7 @@ pub fn check(shared: &mut SharedAst, ctx: &ModuleContext, env: &mut TypeEnv) -> 
 
 pub type TypeResult<T> = Result<T, TypeError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerKind {
     List,
     Object,
@@ -51,7 +51,7 @@ impl std::fmt::Display for ContainerKind {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Error)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum TypeErrorKind {
     #[error("expected {expected}, got {got}")]
     TypeMismatch { expected: Ty, got: Ty },

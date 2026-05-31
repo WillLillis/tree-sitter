@@ -9,7 +9,7 @@
 //! Let bindings register into the decl table after their RHS is resolved.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -624,7 +624,7 @@ fn find_let_value(
 
 pub type ResolveResult<T> = Result<T, ResolveError>;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Error)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ResolveErrorKind {
     #[error("imported module has no member '{0}'")]
     ImportMemberNotFound(String),

@@ -9,7 +9,7 @@
 //! Only local macros are visible at item position; qualified calls aren't
 //! supported (the parser rejects `mod::foo(...)` there).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
@@ -480,7 +480,7 @@ fn clone_range(
 
 use super::ExpandError;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Error)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ExpandErrorKind {
     #[error("unknown macro '{0}'")]
     UnknownMacro(String),

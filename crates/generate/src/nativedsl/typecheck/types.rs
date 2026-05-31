@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level type of any DSL expression. Splits into three structural classes:
 /// first-class data values, module references, and non-bindable sentinels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ty {
     Data(DataTy),
     Module(ModuleTy),
@@ -20,7 +20,7 @@ pub enum Ty {
 
 /// First-class data values: things that can be bound to a let, returned from
 /// a macro, passed as an argument, or stored in a list/object.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataTy {
     Scalar(ScalarTy),
     /// `list_t<X>` for `X` in `{Rule, Str, Int}`.
@@ -33,7 +33,7 @@ pub enum DataTy {
 }
 
 /// Atomic data types: `rule_t`, `str_t`, `int_t`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScalarTy {
     Rule,
     Str,
@@ -42,7 +42,7 @@ pub enum ScalarTy {
 
 /// Element types allowed inside `obj_t<...>`. Mirrors [`DataTy`] minus the
 /// `Object` variant, so `obj_t<obj_t<X>>` is structurally impossible.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InnerTy {
     Scalar(ScalarTy),
     List(ScalarTy),
@@ -51,7 +51,7 @@ pub enum InnerTy {
 
 /// Module types: results of `import(...)` / `inherit(...)` and the user-facing
 /// `module_t` annotation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleTy {
     /// Result of `import(...)`. The `u8` indexes into the module list.
     Import(u8),
@@ -296,7 +296,7 @@ impl std::fmt::Display for InnerTy {
 /// Used by `type_of` to give nested empty containers (`[]`, `{}`) enough
 /// context to infer their type, and to surface more accurate errors when
 /// a value is used in a position with a known shape constraint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Constraint {
     /// No constraint; the typed value can be anything bindable.
     None,
@@ -306,13 +306,27 @@ pub enum Constraint {
     Strict(Ty),
     /// Must be `Object<?>` for any inner; specific inner is unknown.
     AnyObject,
-    /// Must satisfy at least one of these types.
-    OneOf(&'static [Ty]),
+    /// Must be either `str_t` or `rule_t`.
+    RuleLike,
+    /// Must be either `int_t` or `str_t`.
+    IntOrStr,
 }
 
 impl Constraint {
-    pub const RULE_LIKE: Self = Self::OneOf(&[Ty::STR, Ty::RULE]);
-    pub const INT_OR_STR: Self = Self::OneOf(&[Ty::INT, Ty::STR]);
+    /// Backwards-compat aliases for the previous `OneOf(&[...])` callers.
+    pub const RULE_LIKE: Self = Self::RuleLike;
+    pub const INT_OR_STR: Self = Self::IntOrStr;
+
+    /// Set of types this constraint accepts. Returns a static slice so callers
+    /// can iterate, print, or check compatibility without allocating.
+    #[must_use]
+    pub const fn accepted_types(self) -> &'static [Ty] {
+        match self {
+            Self::RuleLike => &[Ty::STR, Ty::RULE],
+            Self::IntOrStr => &[Ty::INT, Ty::STR],
+            _ => &[],
+        }
+    }
 
     /// True if `ty` satisfies this constraint via [`Ty::is_compatible`]
     /// (or strict equality, for [`Self::Strict`]).
@@ -323,7 +337,9 @@ impl Constraint {
             Self::Exact(t) => ty.is_compatible(t),
             Self::Strict(t) => ty == t,
             Self::AnyObject => ty.is_object(),
-            Self::OneOf(ts) => ts.iter().any(|&t| ty.is_compatible(t)),
+            Self::RuleLike | Self::IntOrStr => {
+                self.accepted_types().iter().any(|&t| ty.is_compatible(t))
+            }
         }
     }
 
@@ -356,7 +372,8 @@ impl std::fmt::Display for Constraint {
             Self::None => f.write_str("any value"),
             Self::Exact(ty) | Self::Strict(ty) => ty.fmt(f),
             Self::AnyObject => f.write_str("an object"),
-            Self::OneOf(tys) => {
+            Self::RuleLike | Self::IntOrStr => {
+                let tys = self.accepted_types();
                 let last = tys.len().saturating_sub(1);
                 for (i, ty) in tys.iter().enumerate() {
                     if i > 0 {

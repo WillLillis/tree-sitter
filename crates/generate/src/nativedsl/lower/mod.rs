@@ -13,7 +13,7 @@ mod repr;
 use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -399,13 +399,13 @@ fn build_grammar(
 
 pub type LowerResult<T> = Result<T, super::LowerError>;
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisallowedItemKind {
     OverrideRule,
     GrammarBlock,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Error)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
