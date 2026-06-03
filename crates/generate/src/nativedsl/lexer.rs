@@ -126,17 +126,26 @@ pub enum TokenKind {
 
 /// Maps keyword text to `TokenKind` variant. Used by the lexer, Display, and `is_keyword`.
 macro_rules! keywords {
-    ($($variant:ident => $str:literal),* $(,)?) => {
+    (
+        decls { $($d_variant:ident => $d_str:literal),* $(,)? }
+        combinators { $($c_variant:ident => $c_str:literal),* $(,)? }
+    ) => {
         impl TokenKind {
+            /// Keywords callable in expression position. Used to seed
+            /// "did you mean?" suggestions when an identifier in a rule body
+            /// fails to resolve.
+            pub(super) const COMBINATOR_KEYWORD_NAMES: &'static [&'static str] = &[$($c_str),*];
+
             #[must_use]
             pub const fn is_keyword(self) -> bool {
-                matches!(self, $(Self::$variant)|*)
+                matches!(self, $(Self::$d_variant)|* $(| Self::$c_variant)*)
             }
 
             /// Return the keyword string if this is a keyword token, or `None`.
             const fn keyword_str(self) -> Option<&'static str> {
                 match self {
-                    $(Self::$variant => Some($str),)*
+                    $(Self::$d_variant => Some($d_str),)*
+                    $(Self::$c_variant => Some($c_str),)*
                     _ => None,
                 }
             }
@@ -144,7 +153,8 @@ macro_rules! keywords {
             /// Map keyword text to a `TokenKind`, or return `Ident`.
             pub(super) fn from_keyword(text: &str) -> Self {
                 match text {
-                    $($str => Self::$variant,)*
+                    $($d_str => Self::$d_variant,)*
+                    $($c_str => Self::$c_variant,)*
                     _ => Self::Ident,
                 }
             }
@@ -153,15 +163,21 @@ macro_rules! keywords {
 }
 
 keywords! {
-    KwGrammar => "grammar", KwRule => "rule", KwRules => "rules", KwLet => "let", KwMacro => "macro",
-    KwFor => "for", KwIn => "in", KwSeq => "seq", KwChoice => "choice",
-    KwRepeat => "repeat", KwRepeat1 => "repeat1", KwOptional => "optional",
-    KwBlank => "blank", KwField => "field", KwAlias => "alias", KwToken => "token",
-    KwPrec => "prec", KwPrecLeft => "prec_left", KwPrecRight => "prec_right",
-    KwPrecDynamic => "prec_dynamic", KwReserved => "reserved",
-    KwTokenImmediate => "token_immediate", KwConcat => "concat", KwRegexp => "regexp",
-    KwInherit => "inherit", KwImport => "import", KwOverride => "override",
-    KwAppend => "append", KwGrammarConfig => "grammar_config", KwExternal => "external",
+    decls {
+        KwGrammar => "grammar", KwRule => "rule", KwRules => "rules", KwLet => "let",
+        KwMacro => "macro", KwOverride => "override", KwExternal => "external",
+        KwIn => "in",
+    }
+    combinators {
+        KwFor => "for", KwSeq => "seq", KwChoice => "choice",
+        KwRepeat => "repeat", KwRepeat1 => "repeat1", KwOptional => "optional",
+        KwBlank => "blank", KwField => "field", KwAlias => "alias", KwToken => "token",
+        KwPrec => "prec", KwPrecLeft => "prec_left", KwPrecRight => "prec_right",
+        KwPrecDynamic => "prec_dynamic", KwReserved => "reserved",
+        KwTokenImmediate => "token_immediate", KwConcat => "concat", KwRegexp => "regexp",
+        KwInherit => "inherit", KwImport => "import",
+        KwAppend => "append", KwGrammarConfig => "grammar_config",
+    }
 }
 
 impl std::fmt::Display for TokenKind {
@@ -341,7 +357,7 @@ impl<'src> Lexer<'src> {
                     ))?;
                 }
                 Some(offset) => {
-                    if let Some(nl) = memchr(b'\n', &source[pos..pos + offset]) {
+                    if let Some(nl) = memchr2(b'\n', b'\r', &source[pos..pos + offset]) {
                         Err(LexError::new(
                             LexErrorKind::NewlineInString,
                             Span::from_usize(start, pos + nl),
@@ -519,7 +535,7 @@ pub enum LexErrorKind {
     NewlineInString,
     #[error("expected '\"' after 'r' and '#' delimiters")]
     ExpectedRawStringQuote,
-    #[error("integer literal out of range")]
+    #[error("integer literal out of range (maximum {})", u32::MAX)]
     IntegerOverflow,
     #[error("raw string has too many '#' delimiters (maximum 255)")]
     TooManyHashes,

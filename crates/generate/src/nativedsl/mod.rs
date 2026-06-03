@@ -1,7 +1,7 @@
 //! Native DSL front-end for tree-sitter grammar definitions.
 //!
-//! Pipeline: lex -> parse -> resolve+typecheck -> lower, producing an
-//! [`InputGrammar`] equivalent to what `grammar.json` parsing produces.
+//! Pipeline: lex -> parse -> `expand_macro_calls` -> resolve -> typecheck -> lower,
+//! producing an [`InputGrammar`] equivalent to what `grammar.json` parsing produces.
 
 /// Save the length of one or more `Vec`s used as stacks, run a body, then
 /// truncate each back. The body is wrapped in a closure so `?` inside
@@ -52,6 +52,7 @@ pub mod parser;
 pub mod resolve;
 pub mod serialize;
 pub mod string_pool;
+mod suggest;
 #[cfg(test)]
 mod tests;
 pub mod typecheck;
@@ -119,11 +120,11 @@ impl Module {
     }
 }
 
-/// Walk the import graph BFS from `initial_refs`, calling `f` for each
-/// transitively-reachable helper module exactly once. The `Span` argument
-/// is the span of the original import statement that brought the helper
-/// into scope (used for "first defined here" notes when registering
-/// helper rule names).
+/// Walk the import graph depth-first from `initial_refs`, calling `f` for
+/// each transitively-reachable helper module exactly once. The `Span`
+/// argument is the span of the import statement that brought the helper
+/// into scope (used for "first defined here" notes when registering helper
+/// rule names).
 pub(super) fn for_each_imported_helper<'a, E>(
     arena: &ast::NodeArena,
     initial_refs: &[ast::NodeId],
@@ -306,6 +307,12 @@ pub enum NoteMessage {
     DefinedLater,
     /// Carries the cfg flag name; the note's span points at the gated decl.
     GatedByDisabledCfg(String),
+    /// Carries the suggested name; emitted when an unknown identifier or
+    /// macro is close to a known name.
+    DidYouMean(String),
+    /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the
+    /// imported path string so the note can show the exact transformation.
+    SwitchImportToInherit(String),
 }
 
 impl std::fmt::Display for NoteMessage {
@@ -319,6 +326,10 @@ impl std::fmt::Display for NoteMessage {
                     f,
                     "this declaration is gated by `#[cfg({flag})]`, currently disabled"
                 )
+            }
+            Self::DidYouMean(name) => write!(f, "did you mean `{name}`?"),
+            Self::SwitchImportToInherit(path) => {
+                write!(f, "switch `import(\"{path}\")` to `inherit(\"{path}\")`")
             }
         }
     }
