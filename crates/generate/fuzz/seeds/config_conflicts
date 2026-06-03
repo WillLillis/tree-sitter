@@ -1,5 +1,0 @@
-grammar { language: "test", conflicts: [[a, b], [b, c]] }
-rule program { a }
-rule a { "a" }
-rule b { "b" }
-rule c { "c" }

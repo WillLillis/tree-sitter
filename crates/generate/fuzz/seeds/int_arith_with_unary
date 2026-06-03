@@ -1,7 +1,0 @@
-let X = 5
-grammar { language: "test" }
-rule a { prec(-X + 10, "x") }
-rule b { prec(-X - 10, "x") }
-rule c { prec(10 + -X, "x") }
-rule d { prec(10 - -X, "x") }
-rule e { prec(-1 + -2 + -3, "x") }
