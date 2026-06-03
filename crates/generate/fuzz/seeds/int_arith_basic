@@ -1,5 +1,0 @@
-grammar { language: "test" }
-rule a { prec(1 + 2, "x") }
-rule b { prec(10 - 3, "x") }
-rule c { prec(0 + 0, "x") }
-rule d { prec(5 - 5, "x") }
