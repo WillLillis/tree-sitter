@@ -1,3 +1,0 @@
-grammar { language: "test", word: ident }
-rule program { ident }
-rule ident { regexp("[a-z]+") }

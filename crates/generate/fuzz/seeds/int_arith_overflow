@@ -1,8 +1,0 @@
-let MAX: int_t = 2147483647
-let MIN: int_t = -2147483648
-grammar { language: "test" }
-rule a { prec(MAX + 1, "x") }
-rule b { prec(MIN - 1, "x") }
-rule c { prec(MAX - MAX, "x") }
-rule d { prec(MAX + MAX, "x") }
-rule e { prec(MIN + MIN, "x") }

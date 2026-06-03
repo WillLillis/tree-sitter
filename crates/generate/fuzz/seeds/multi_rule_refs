@@ -1,3 +1,0 @@
-grammar { language: "test" }
-rule program { choice(expr, "x") }
-rule expr { seq(program, "+", program) }

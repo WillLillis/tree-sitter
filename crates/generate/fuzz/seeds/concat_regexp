@@ -1,4 +1,0 @@
-grammar { language: "test" }
-rule program { concat("a", "b", "c") }
-rule other { regexp("[a-z]+") }
-rule third { regexp("[0-9]+", "i") }
