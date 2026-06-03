@@ -207,10 +207,7 @@ fn eval_name_into(
             Ok(())
         }
         Node::RawStringLit { hash_count } => {
-            let prefix = 2 + u32::from(hash_count);
-            let suffix = 1 + u32::from(hash_count);
-            let inner = Span::new(span.start + prefix, span.end - suffix);
-            out.push_str(ctx.text(inner));
+            out.push_str(ctx.text(span.strip_raw(hash_count)));
             Ok(())
         }
         Node::MacroParam { index, .. } => {
