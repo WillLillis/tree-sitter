@@ -226,20 +226,20 @@ impl Walker<'_> {
             // Recursive walks only ever append to the pools, never touching
             // existing slots, so indices in our range stay valid.
             Node::Tuple(r) | Node::QualifiedCall(r) | Node::RuleSet(r) => {
-                for i in r.start as usize..r.start as usize + r.len as usize {
+                for i in r.as_range() {
                     let c = self.shared.pools.children[i];
                     self.walk(c)?;
                 }
             }
             Node::Object(range) => {
-                for i in range.start as usize..range.start as usize + range.len as usize {
+                for i in range.as_range() {
                     let v = self.shared.pools.object_fields[i].1;
                     self.walk(v)?;
                 }
             }
             Node::Call { name, args } => {
                 self.walk(name)?;
-                for i in args.start as usize..args.start as usize + args.len as usize {
+                for i in args.as_range() {
                     let c = self.shared.pools.children[i];
                     self.walk(c)?;
                 }

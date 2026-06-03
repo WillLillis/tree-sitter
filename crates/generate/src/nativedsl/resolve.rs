@@ -316,7 +316,7 @@ fn resolve_expr(
         if let Some(&(kind, _)) = decls.get(name) {
             arena.resolve_as(id, kind);
         } else {
-            return Err(unknown_ident_error(arena, ctx, name, span));
+            return Err(unknown_ident_error(arena, ctx, decls, name, span));
         }
         return Ok(());
     }
@@ -530,7 +530,19 @@ fn resolve_qualified_member(
 /// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
 /// a `ModuleRef`, returning its module index. Handles `let h = import(...)`
 /// directly as well as chained aliases like `let h2 = h`.
-fn resolve_module_index(arena: &NodeArena, mut obj: NodeId) -> Option<usize> {
+fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
+    let ref_id = resolve_module_ref(arena, obj)?;
+    match arena.get(ref_id) {
+        Node::ModuleRef {
+            module: Some(idx), ..
+        } => Some(*idx as usize),
+        _ => None,
+    }
+}
+
+/// Walk `Ident(Var) -> Let.value` chains to find the underlying `ModuleRef`
+/// node, returning its `NodeId` so callers can read its span or fields.
+pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<NodeId> {
     loop {
         match arena.get(obj) {
             Node::Ident(IdentKind::Var(let_id)) => {
@@ -539,9 +551,7 @@ fn resolve_module_index(arena: &NodeArena, mut obj: NodeId) -> Option<usize> {
                 };
                 obj = *value;
             }
-            Node::ModuleRef {
-                module: Some(idx), ..
-            } => return Some(*idx as usize),
+            Node::ModuleRef { .. } => return Some(obj),
             _ => return None,
         }
     }
@@ -655,10 +665,12 @@ pub enum ResolveErrorKind {
 }
 
 /// Build an `UnknownIdentifier` error, attaching a "defined later" note if the
-/// name matches a let binding that appears later in the same module.
+/// name matches a let binding that appears later in the same module, or a
+/// "did you mean" note if it's close to a known decl or keyword.
 fn unknown_ident_error(
     arena: &NodeArena,
     ctx: &ModuleContext,
+    decls: &Decls,
     name: &str,
     span: Span,
 ) -> ResolveError {
@@ -674,8 +686,19 @@ fn unknown_ident_error(
     });
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
     if let Some(let_span) = forward_span {
-        ResolveError::with_note(kind, span, ctx.note(NoteMessage::DefinedLater, let_span))
-    } else {
-        ResolveError::new(kind, span)
+        return ResolveError::with_note(kind, span, ctx.note(NoteMessage::DefinedLater, let_span));
     }
+    let candidates = decls.keys().copied().chain(
+        super::lexer::TokenKind::COMBINATOR_KEYWORD_NAMES
+            .iter()
+            .copied(),
+    );
+    if let Some(suggestion) = super::suggest::suggest_name(name, candidates) {
+        return ResolveError::with_note(
+            kind,
+            span,
+            ctx.note(NoteMessage::DidYouMean(suggestion), span),
+        );
+    }
+    ResolveError::new(kind, span)
 }

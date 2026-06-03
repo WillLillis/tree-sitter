@@ -190,9 +190,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn intern_raw_string_lit(&mut self, span: Span, hash_count: u8) -> Str {
-        let prefix = 2 + u32::from(hash_count);
-        let suffix = 1 + u32::from(hash_count);
-        self.intern_span(Span::new(span.start + prefix, span.end - suffix))
+        self.intern_span(span.strip_raw(hash_count))
     }
 
     /// Intern a string, create a `NamedSymbol` rule, and wrap as a `Value::Rule`.
@@ -497,18 +495,18 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             Rule::Choice(members) | Rule::Seq(members) => {
                 let is_seq = matches!(rule, Rule::Seq(_));
-                self.state.rule_scratch.reserve(members.len());
+                self.state.scratch.rule_scratch.reserve(members.len());
                 self.state.ir.rule_children.reserve(members.len());
-                let (start, count) = stack_scope!(self.state.rule_scratch, |base| {
+                let (start, count) = stack_scope!(self.state.scratch.rule_scratch, |base| {
                     for m in members {
                         let rid = self.import_rule(m);
-                        self.state.rule_scratch.push(rid);
+                        self.state.scratch.rule_scratch.push(rid);
                     }
                     let start = self.children_start();
                     self.state
                         .ir
                         .rule_children
-                        .extend_from_slice(&self.state.rule_scratch[base..]);
+                        .extend_from_slice(&self.state.scratch.rule_scratch[base..]);
                     (start, self.state.ir.rule_children.len() as u32 - start)
                 });
                 debug_assert!(u16::try_from(count).is_ok());
@@ -642,19 +640,20 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 span,
             )),
             Node::MacroParam { index, .. } => {
-                let base = *self.state.macro_arg_bases.last().unwrap();
-                Ok(self.state.macro_args[base + *index as usize])
+                let base = *self.state.scratch.macro_arg_bases.last().unwrap();
+                Ok(self.state.scratch.macro_args[base + *index as usize])
             }
             Node::ForBinding { for_id, index, .. } => {
                 let base = self
                     .state
+                    .scratch
                     .for_binding_frames
                     .iter()
                     .rev()
                     .find(|(id, _)| *id == *for_id)
                     .unwrap()
                     .1;
-                Ok(self.state.for_binding_values[base + *index as usize])
+                Ok(self.state.scratch.for_binding_values[base + *index as usize])
             }
             // Guarded by super::resolve - all variable names validated
             Node::Ident(IdentKind::Var(let_id)) => Ok(*self.state.let_values.get(let_id).unwrap()),
@@ -759,22 +758,22 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             node @ (&Node::List(range) | &Node::Tuple(range)) => {
                 let is_list = matches!(node, Node::List(_));
                 let items = self.shared.pools.child_slice(range);
-                let range = stack_scope!(self.state.val_scratch, |base| {
+                let range = stack_scope!(self.state.scratch.val_scratch, |base| {
                     for &item_id in items {
                         if let Node::For { for_id, body } = *self.shared.arena.get(item_id) {
                             self.eval_for_to_values(for_id, body)?;
                         } else {
                             let val = self.eval_expr(item_id)?;
-                            self.state.val_scratch.push(val);
+                            self.state.scratch.val_scratch.push(val);
                         }
                     }
                     let start = self.state.ir.value_children.len() as u32;
-                    let len = u16::try_from(self.state.val_scratch.len() - base)
+                    let len = u16::try_from(self.state.scratch.val_scratch.len() - base)
                         .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
                     self.state
                         .ir
                         .value_children
-                        .extend_from_slice(&self.state.val_scratch[base..]);
+                        .extend_from_slice(&self.state.scratch.val_scratch[base..]);
                     Ok(ChildRange::new(start, len))
                 })?;
                 if is_list {
@@ -852,17 +851,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             | Node::Prec { .. } | Node::Reserved { .. } => self.eval_combinator(id),
             _ => {
                 let vid = self.eval_expr(id)?;
-                Ok(self.value_to_rule(vid))
+                Ok(match self.get_val(vid) {
+                    Value::Rule(rid) => *rid,
+                    Value::Str(s) => self.alloc_rule(ARule::String(*s)),
+                    // Guarded by super::typecheck::expect_rule - only rule-like values reach here
+                    _ => unreachable!(),
+                })
             }
-        }
-    }
-
-    fn value_to_rule(&mut self, id: ValueId) -> RuleId {
-        match self.get_val(id) {
-            Value::Rule(rid) => *rid,
-            Value::Str(s) => self.alloc_rule(ARule::String(*s)),
-            // Guarded by super::typecheck::expect_rule - only rule-like values reach here
-            _ => unreachable!(),
         }
     }
 
@@ -871,20 +866,20 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match self.shared.arena.get(id) {
             &Node::SeqOrChoice { seq, range } => {
                 let children = self.shared.pools.child_slice(range);
-                let child_range = stack_scope!(self.state.rule_scratch, |base| {
+                let child_range = stack_scope!(self.state.scratch.rule_scratch, |base| {
                     for &member in children {
                         if let Node::For { for_id, body } = *self.shared.arena.get(member) {
                             self.eval_for_to_rules(for_id, body)?;
                         } else {
                             let rid = self.lower_to_rule(member)?;
-                            self.state.rule_scratch.push(rid);
+                            self.state.scratch.rule_scratch.push(rid);
                         }
                     }
                     let start = self.children_start();
                     self.state
                         .ir
                         .rule_children
-                        .extend_from_slice(&self.state.rule_scratch[base..]);
+                        .extend_from_slice(&self.state.scratch.rule_scratch[base..]);
                     self.children_range(start, span)
                 })?;
                 Ok(self.alloc_rule(ARule::SeqOrChoice(seq, child_range)))
@@ -985,15 +980,16 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     ) -> LowerResult<()> {
         // Push first, then check, so the reported trace includes the call that
         // tripped the limit.
-        self.state.call_stack.push(CallFrame {
+        self.state.scratch.call_stack.push(CallFrame {
             name_span,
             name_mod,
             call_span,
             caller_mod: self.current_module,
         });
-        if self.state.call_stack.len() > MAX_CALL_DEPTH as usize {
+        if self.state.scratch.call_stack.len() > MAX_CALL_DEPTH as usize {
             let trace = self
                 .state
+                .scratch
                 .call_stack
                 .iter()
                 .map(|frame| {
@@ -1007,7 +1003,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     (name, call_ctx.path.clone(), line, col)
                 })
                 .collect();
-            let root_span = self.state.call_stack[0].call_span;
+            let root_span = self.state.scratch.call_stack[0].call_span;
             return Err(LowerError::new(
                 LowerErrorKind::CallDepthExceeded(trace),
                 root_span,
@@ -1028,16 +1024,16 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         // Args evaluate in the caller's macro context, not the callee's, so
         // arg eval happens before macro_arg_bases is pushed.
         stack_scope!(
-            self.state.macro_args => args_base,
-            self.state.call_stack => _call_base,
-            self.state.macro_arg_bases => _bases_base;
+            self.state.scratch.macro_args => args_base,
+            self.state.scratch.call_stack => _call_base,
+            self.state.scratch.macro_arg_bases => _bases_base;
             {
                 self.push_call(config.name, def_module, span)?;
                 for &arg_id in self.shared.pools.child_slice(args) {
                     let v = self.eval_expr(arg_id)?;
-                    self.state.macro_args.push(v);
+                    self.state.scratch.macro_args.push(v);
                 }
-                self.state.macro_arg_bases.push(args_base);
+                self.state.scratch.macro_arg_bases.push(args_base);
                 let saved = self.current_module;
                 self.current_module = def_module;
                 let result = self.eval_expr(config.body);
@@ -1086,7 +1082,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 evaluator.eval_for_to_rules(inner, inner_body)
             } else {
                 let rule_id = evaluator.lower_to_rule(body)?;
-                evaluator.state.rule_scratch.push(rule_id);
+                evaluator.state.scratch.rule_scratch.push(rule_id);
                 Ok(())
             }
         })
@@ -1104,7 +1100,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 evaluator.eval_for_to_values(inner, inner_body)
             } else {
                 let value_id = evaluator.eval_expr(body)?;
-                evaluator.state.val_scratch.push(value_id);
+                evaluator.state.scratch.val_scratch.push(value_id);
                 Ok(())
             }
         })
@@ -1121,10 +1117,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let iter_range = self.list_range(iter_vid);
         let n_items = iter_range.len as usize;
         stack_scope!(
-            self.state.for_binding_values => base,
-            self.state.for_binding_frames => _frames_base;
+            self.state.scratch.for_binding_values => base,
+            self.state.scratch.for_binding_frames => _frames_base;
             {
-                self.state.for_binding_frames.push((for_id, base));
+                self.state.scratch.for_binding_frames.push((for_id, base));
                 for i in 0..n_items {
                     let item_id = self.state.ir.value_children[iter_range.start as usize + i];
                     for j in 0..n_bindings {
@@ -1133,9 +1129,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                             _ => item_id,
                         };
                         if i == 0 {
-                            self.state.for_binding_values.push(val);
+                            self.state.scratch.for_binding_values.push(val);
                         } else {
-                            self.state.for_binding_values[base + j] = val;
+                            self.state.scratch.for_binding_values[base + j] = val;
                         }
                     }
                     each_iter(self)?;

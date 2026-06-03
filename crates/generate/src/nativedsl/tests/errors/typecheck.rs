@@ -102,7 +102,7 @@ error_tests! { Type {
         rule program { prec(identifier, "x") }
         rule identifier { "id" }"#,
         TypeErrorKind::ConstraintMismatch {
-            expected: Constraint::INT_OR_STR,
+            expected: Constraint::IntOrStr,
             got: Ty::RULE,
         }
     }

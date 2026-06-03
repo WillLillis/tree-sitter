@@ -236,6 +236,7 @@ pub enum IdentKind {
 }
 
 /// Byte offset range `[start, end)` in the source text.
+#[expect(clippy::unsafe_derive_deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start: u32,
@@ -259,10 +260,18 @@ impl Span {
     /// Strip the first and last byte (e.g. surrounding quotes).
     #[must_use]
     pub const fn strip_quotes(self) -> Self {
-        debug_assert!(self.end >= self.start + 2);
         Self {
             start: self.start + 1,
             end: self.end - 1,
+        }
+    }
+
+    /// Strip the `r#...#"` prefix and `"#...#` suffix from a raw string span.
+    #[must_use]
+    pub const fn strip_raw(self, hash_count: u8) -> Self {
+        Self {
+            start: self.start + 2 + hash_count as u32,
+            end: self.end - 1 - hash_count as u32,
         }
     }
 
@@ -356,12 +365,12 @@ impl AstPools {
 
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
-        &self.object_fields[range.start as usize..range.start as usize + range.len as usize]
+        &self.object_fields[range.as_range()]
     }
 
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
-        &self.children[range.start as usize..range.start as usize + range.len as usize]
+        &self.children[range.as_range()]
     }
 
     /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.

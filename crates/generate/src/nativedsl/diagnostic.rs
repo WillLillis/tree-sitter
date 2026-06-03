@@ -270,13 +270,13 @@ impl SpanContext<'_> {
         };
         let line_end =
             memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |pos| line_start + pos);
-        let col = offset - line_start + 1;
         let line_text = &source_text[line_start..line_end];
-        let span_start_in_line = col.saturating_sub(1);
-        let span_len = (span.end - span.start) as usize;
-        let underline_len = span_len
-            .min(line_text.len().saturating_sub(span_start_in_line))
-            .max(1);
+        // Char-counted so the printed column and caret padding align with the
+        // displayed glyphs on lines containing multibyte UTF-8.
+        let span_start_in_line = source_text[line_start..offset].chars().count();
+        let col = span_start_in_line + 1;
+        let underline_end = (span.end as usize).min(line_end);
+        let underline_len = source_text[offset..underline_end].chars().count().max(1);
 
         let prev_line_text =
             prev_line_start.map(|ps| &source_text[ps..line_start.saturating_sub(1)]);

@@ -91,6 +91,30 @@ error_tests! { Parse {
         },
         ParseErrorKind::NestingTooDeep
     }
+    error_nesting_too_deep_bare_unary {
+        // Long unparenthesized unary `-` run; recurses via parse_postfix.
+        &{
+            let deep = "-".repeat(300);
+            format!("grammar {{ language: \"test\" }} rule foo {{ {deep}x }}")
+        },
+        ParseErrorKind::NestingTooDeep
+    }
+    error_nesting_too_deep_bare_at {
+        // Long `@` run; SymRef recurses via parse_postfix.
+        &{
+            let deep = "@".repeat(300);
+            format!("grammar {{ language: \"test\" }} rule foo {{ {deep}x }}")
+        },
+        ParseErrorKind::NestingTooDeep
+    }
+    error_nesting_too_deep_computed_rule_name {
+        // `rule @<expr> { ... }` enters parse_postfix directly for the name.
+        &{
+            let deep = "-".repeat(300);
+            format!("grammar {{ language: \"test\" }} rule @{deep}name {{ \"x\" }}")
+        },
+        ParseErrorKind::NestingTooDeep
+    }
     error_too_many_children {
         &{
             let args = vec!["\"x\""; 65_536].join(",");
@@ -271,7 +295,7 @@ fn error_duplicate_for_binding() {
         ),
         Parse
     );
-    assert_eq!(e.kind, ParseErrorKind::DuplicateParameter("x".into()));
+    assert_eq!(e.kind, ParseErrorKind::DuplicateBinding("x".into()));
 }
 
 inherit_error_tests! { Parse {

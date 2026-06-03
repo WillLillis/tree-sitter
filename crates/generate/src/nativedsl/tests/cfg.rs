@@ -362,7 +362,7 @@ fn helper_module_inherits_cfg_from_importer() {
 #[test]
 fn cfg_attribute_nesting_is_bounded() {
     // Pathological nesting must error rather than blow the parse / apply_cfg
-    // recursion stack. 300 layers exceeds MAX_PARSE_DEPTH (256).
+    // recursion stack. 300 layers exceeds MAX_PARSE_DEPTH.
     let nest = "#[cfg(X)] ".repeat(300);
     let src = format!(
         r#"grammar {{ language: "t", flags: {{ enabled: ["X"] }} }} {nest} rule r {{ "x" }}"#

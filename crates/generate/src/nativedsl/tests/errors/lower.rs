@@ -107,6 +107,29 @@ fn error_inherit_bad_path() {
     assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
 }
 
+#[test]
+fn error_module_read_failure_renders_without_panic() {
+    // Path canonicalizes but read_to_string fails (a directory).
+    // The inner ModuleError carries an empty source_text plus the import-path
+    // span from the parent; NativeDslError rendering must not slice out of range.
+    let dir = tempfile::tempdir().unwrap();
+    let subdir = dir.path().join("not_a_file");
+    std::fs::create_dir(&subdir).unwrap();
+    let parent_path = dir.path().join("parent.tsg");
+    let parent_src = format!(
+        "let h = import(\"{}\")\ngrammar {{ language: \"test\" }}\nrule program {{ \"x\" }}",
+        dsl_path(&subdir)
+    );
+    std::fs::write(&parent_path, &parent_src).unwrap();
+    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
+    let wrapped = NativeDslError {
+        error: err,
+        src: parent_src,
+        path: parent_path,
+    };
+    let _rendered = format!("{wrapped}");
+}
+
 inherit_error_tests! { Resolve {
     error_inherit_child_error {
         "grammar { language: \"base\" }\nrule program { bogus_ref }\n",
