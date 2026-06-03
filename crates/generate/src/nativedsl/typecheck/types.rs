@@ -313,10 +313,6 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    /// Backwards-compat aliases for the previous `OneOf(&[...])` callers.
-    pub const RULE_LIKE: Self = Self::RuleLike;
-    pub const INT_OR_STR: Self = Self::IntOrStr;
-
     /// Set of types this constraint accepts. Returns a static slice so callers
     /// can iterate, print, or check compatibility without allocating.
     #[must_use]

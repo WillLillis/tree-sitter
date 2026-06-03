@@ -1,9 +1,11 @@
 use crate::nativedsl::{
-    ContainerKind, DataTy, InnerTy, ModuleTy, Ty, TypeError, TypeErrorKind,
+    ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
     ast::{
         ChildRange, ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, Param,
         PrecKind, SharedAst, Span,
     },
+    resolve::resolve_module_ref,
+    suggest::suggest_name,
     typecheck::{Constraint, TypeEnv, TypeResult},
 };
 
@@ -253,10 +255,22 @@ fn type_of(
         Node::GrammarConfig { module, field } => {
             let module_ty = type_of(shared, ctx, *module, env, Constraint::Exact(Ty::ANY_MODULE))?;
             if !matches!(module_ty, Ty::Module(ModuleTy::Grammar(_))) {
-                return Err(TypeError::new(
-                    TypeErrorKind::GrammarConfigRequiresInherit,
-                    shared.arena.span(*module),
-                ));
+                let kind = TypeErrorKind::GrammarConfigRequiresInherit;
+                let arg_span = shared.arena.span(*module);
+                if let Some(ref_id) = resolve_module_ref(&shared.arena, *module)
+                    && let Node::ModuleRef { path, .. } = shared.arena.get(ref_id)
+                {
+                    let path_text = ctx.text(*path).to_string();
+                    return Err(TypeError::with_note(
+                        kind,
+                        arg_span,
+                        ctx.note(
+                            NoteMessage::SwitchImportToInherit(path_text),
+                            shared.arena.span(ref_id),
+                        ),
+                    ));
+                }
+                return Err(TypeError::new(kind, arg_span));
             }
             use crate::nativedsl::ast::ConfigField as C;
             Ok(match field {
@@ -319,7 +333,7 @@ fn type_of(
         }
         Node::SeqOrChoice { range, .. } => {
             let leaf = |shared: &SharedAst, ctx: &ModuleContext, id: NodeId, env: &mut TypeEnv| {
-                type_of(shared, ctx, id, env, Constraint::RULE_LIKE)
+                type_of(shared, ctx, id, env, Constraint::RuleLike)
             };
             for &member in shared.pools.child_slice(*range) {
                 check_spread_item(shared, ctx, member, env, leaf)?;
@@ -335,7 +349,7 @@ fn type_of(
         }
         Node::Alias { content, target } => {
             expect_rule(shared, ctx, *content, env)?;
-            let target_ty = type_of(shared, ctx, *target, env, Constraint::RULE_LIKE)
+            let target_ty = type_of(shared, ctx, *target, env, Constraint::RuleLike)
                 .map_err(|e| translate_kind_mismatch(e, TypeErrorKind::InvalidAliasTarget))?;
             let is_valid = matches!(
                 shared.arena.get(*target),
@@ -345,8 +359,7 @@ fn type_of(
                     | Node::QualifiedAccess { .. }
                     | Node::FieldAccess { .. }
                     | Node::GrammarConfig { .. }
-            ) && target_ty.is_rule_like()
-                || target_ty == Ty::STR;
+            ) || target_ty == Ty::STR;
             if !is_valid {
                 return Err(TypeError::new(
                     TypeErrorKind::InvalidAliasTarget(target_ty),
@@ -363,7 +376,7 @@ fn type_of(
             let value_expected = if *kind == PrecKind::Dynamic {
                 Constraint::Exact(Ty::INT)
             } else {
-                Constraint::INT_OR_STR
+                Constraint::IntOrStr
             };
             type_of(shared, ctx, *value, env, value_expected)?;
             expect_rule(shared, ctx, *content, env)?;
@@ -618,10 +631,22 @@ fn type_of_call(
 ) -> TypeResult<Ty> {
     let macro_name = ctx.text(shared.arena.span(name));
     let Node::Ident(IdentKind::Macro(macro_id)) = shared.arena.get(name) else {
-        return Err(TypeError::new(
-            TypeErrorKind::UndefinedMacro(macro_name.to_string()),
-            span,
-        ));
+        let kind = TypeErrorKind::UndefinedMacro(macro_name.to_string());
+        let macros = ctx.root_items.iter().filter_map(|&id| {
+            if let Node::Macro(mid) = shared.arena.get(id) {
+                Some(ctx.text(shared.pools.get_macro(*mid).name))
+            } else {
+                None
+            }
+        });
+        if let Some(suggestion) = suggest_name(macro_name, macros) {
+            return Err(TypeError::with_note(
+                kind,
+                span,
+                ctx.note(NoteMessage::DidYouMean(suggestion), span),
+            ));
+        }
+        return Err(TypeError::new(kind, span));
     };
     let args = shared.pools.child_slice(args);
     check_macro_args(shared, ctx, *macro_id, macro_name, args, span, env)

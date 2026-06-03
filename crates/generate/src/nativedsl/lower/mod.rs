@@ -57,15 +57,22 @@ pub(super) struct CallFrame {
 /// call.
 ///
 /// `ir` and the caches make imported/inherited let bindings evaluate exactly
-/// once; scratch buffers persist to reuse allocated capacity.
+/// once; `scratch` persists across grammars to reuse allocated capacity but
+/// its contents are cleared between them.
 #[derive(Default)]
 pub struct LoweringState {
     pub(super) ir: IrPools,
     // Cross-grammar caches:
     loaded: LoadedModules,
     let_values: FxHashMap<NodeId, ValueId>,
-    // Scratch (cleared per grammar):
-    // TODO: Organize into own struct
+    scratch: Scratch,
+}
+
+/// Per-grammar scratch buffers. Cleared (capacity retained) at the start of
+/// each grammar lowering via [`Scratch::clear`].
+#[allow(clippy::struct_field_names)]
+#[derive(Default)]
+struct Scratch {
     call_stack: Vec<CallFrame>,
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
@@ -75,8 +82,8 @@ pub struct LoweringState {
     rule_scratch: Vec<RuleId>,
 }
 
-impl LoweringState {
-    fn reset_per_grammar(&mut self) {
+impl Scratch {
+    fn clear(&mut self) {
         self.call_stack.clear();
         self.macro_args.clear();
         self.macro_arg_bases.clear();
@@ -84,6 +91,12 @@ impl LoweringState {
         self.for_binding_frames.clear();
         self.val_scratch.clear();
         self.rule_scratch.clear();
+    }
+}
+
+impl LoweringState {
+    fn reset_per_grammar(&mut self) {
+        self.scratch.clear();
     }
 }
 
@@ -121,9 +134,9 @@ pub fn lower_with_base(
     build_grammar(result, base_grammar, helper_rules)
 }
 
-/// Collect rules from all transitively-reachable imported helpers, in BFS
-/// order. Cloned because helpers may be referenced from multiple parents
-/// (diamond imports).
+/// Collect rules from all transitively-reachable imported helpers, in
+/// depth-first order. Cloned because helpers may be referenced from
+/// multiple parents (diamond imports).
 fn collect_helper_rules(
     shared: &SharedAst,
     current: &ModuleContext,

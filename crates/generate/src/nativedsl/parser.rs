@@ -197,17 +197,18 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         )
     }
 
-    fn check_duplicate_names<T>(&self, items: &[T], name_of: fn(&T) -> Span) -> ParseResult<()> {
+    fn check_duplicate_names<T>(
+        &self,
+        items: &[T],
+        name_of: fn(&T) -> Span,
+        kind_ctor: fn(String) -> ParseErrorKind,
+    ) -> ParseResult<()> {
         for i in 1..items.len() {
             let span = name_of(&items[i]);
             let name = self.ctx.text(span);
             for item in items.iter().take(i) {
                 if self.ctx.text(name_of(item)) == name {
-                    return Err(self.dup_err(
-                        ParseErrorKind::DuplicateParameter(name.to_string()),
-                        span,
-                        name_of(item),
-                    ));
+                    return Err(self.dup_err(kind_ctor(name.to_string()), span, name_of(item)));
                 }
             }
         }
@@ -486,7 +487,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        self.check_duplicate_names(&params, |p| p.name)?;
+        self.check_duplicate_names(&params, |p| p.name, ParseErrorKind::DuplicateParameter)?;
         if params.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
@@ -645,6 +646,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// operand parser for the `+`/`-` chain in `parse_expr` so RHS doesn't
     /// recurse into more arithmetic.
     fn parse_postfix(&mut self) -> ParseResult<NodeId> {
+        self.depth += 1;
+        if self.depth > MAX_PARSE_DEPTH {
+            return Err(self.error(ParseErrorKind::NestingTooDeep));
+        }
         let mut result = self.parse_primary()?;
         // Post-primary `.field` chaining, e.g. `grammar_config(base).extras`.
         while self.at(TokenKind::Dot) {
@@ -656,6 +661,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 .arena
                 .push(Node::FieldAccess { obj: result, field }, start.merge(field));
         }
+        self.depth -= 1;
         Ok(result)
     }
 
@@ -974,10 +980,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .push(Node::Append { left, right }, start.merge(end)))
     }
 
-    /// Parse the `for (bindings) in <iterable>` header (consumes through the
-    /// iterable; does NOT consume the opening `{`). Caller continues with a
-    /// body parser appropriate to its context.
-    fn parse_for_header(&mut self) -> ParseResult<ForId> {
+    fn parse_for(&mut self, start: Span) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
@@ -989,7 +992,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        self.check_duplicate_names(&bindings, |p| p.name)?;
+        self.check_duplicate_names(&bindings, |p| p.name, ParseErrorKind::DuplicateBinding)?;
         if bindings.is_empty() {
             return Err(self.error(ParseErrorKind::EmptyForBindings));
         }
@@ -998,11 +1001,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
-        Ok(self.shared.pools.push_for(ForConfig { bindings, iterable }))
-    }
-
-    fn parse_for(&mut self, start: Span) -> ParseResult<NodeId> {
-        let for_id = self.parse_for_header()?;
+        let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
             let config = self.shared.pools.get_for(for_id);
@@ -1208,7 +1207,7 @@ pub enum ParseErrorKind {
     ExpectedExpression,
     #[error("expected type")]
     ExpectedType,
-    #[error("expected 'grammar', 'rule', 'let', or 'macro'")]
+    #[error("expected a top-level item (grammar, rule, override, let, macro, rules, external)")]
     ExpectedItem,
     #[error("unknown type '{0}'")]
     UnknownType(String),
@@ -1226,6 +1225,8 @@ pub enum ParseErrorKind {
     ExpectedMacroName,
     #[error("duplicate parameter name '{0}'")]
     DuplicateParameter(String),
+    #[error("duplicate binding name '{0}'")]
+    DuplicateBinding(String),
     #[error("only one grammar block is allowed")]
     DuplicateGrammarBlock,
     #[error("grammar block must have a 'language' field")]

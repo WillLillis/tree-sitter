@@ -12,7 +12,7 @@ use super::ast::Span;
 
 /// Interned string id. Indexes into [`StringPool::entries`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Str(pub NonZeroU32);
+pub struct Str(NonZeroU32);
 
 pub enum StrEntry {
     Unreachable,

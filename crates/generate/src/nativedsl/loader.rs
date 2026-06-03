@@ -38,7 +38,7 @@ pub struct Loader<'a> {
 pub enum ModuleKind {
     /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
-    /// Helper file (imported). Only let/macro/import allowed.
+    /// Helper file (imported). Anything except a grammar block or override rule.
     Helper,
 }
 
@@ -212,14 +212,11 @@ impl Loader<'_> {
         }
 
         let content = std::fs::read_to_string(module_path).map_err(|e| {
-            let kind = LowerErrorKind::ModuleReadFailed {
-                path: module_path.to_path_buf(),
-                error: e.to_string(),
-            };
-            ModuleError::new(
-                LowerError::new(kind, span).into(),
-                String::new(),
-                module_path,
+            LowerError::new(
+                LowerErrorKind::ModuleReadFailed {
+                    path: module_path.to_path_buf(),
+                    error: e.to_string(),
+                },
                 span,
             )
         })?;
