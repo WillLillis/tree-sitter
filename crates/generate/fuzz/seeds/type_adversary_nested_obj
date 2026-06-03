@@ -1,1 +1,0 @@
-grammar { language: "test" } let o = { a: { b: { c: 1 } } } rule program { prec(o.a.b.c, "x") }

@@ -1,2 +1,0 @@
-grammar { language: "test", extras: [regexp("\\s"), " ", "\n"] }
-rule program { "x" }

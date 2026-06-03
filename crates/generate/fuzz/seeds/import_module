@@ -1,4 +1,0 @@
-let h = import("helpers.tsg")
-grammar { language: "test" }
-rule program { h::comma_sep(identifier) }
-rule identifier { regexp("[a-z]+") }

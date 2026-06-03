@@ -1,2 +1,0 @@
-grammar { language: "test" }
-rule program { alias("x", 42) }
