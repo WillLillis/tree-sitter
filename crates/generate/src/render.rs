@@ -31,7 +31,8 @@ const ABI_VERSION_WITH_COMPRESSED_TABLES: usize = 16;
 const SMALL_STATE_THRESHOLD: usize = 64;
 
 use crate::picker::{
-    canonical_small_hash, compute_standalone_costs, decide_state_representations, Repr,
+    canonical_small_hash, compute_standalone_costs, decide_state_representations, PickerConfig,
+    Repr,
 };
 
 pub type RenderResult<T> = Result<T, RenderError>;
@@ -111,6 +112,7 @@ struct Generator {
     state_repr: Vec<Repr>,
     csr_state_count: usize,
     metadata: Option<Metadata>,
+    picker_config: PickerConfig,
 }
 
 struct LargeCharacterSetInfo {
@@ -352,8 +354,12 @@ impl Generator {
         // runtime there has no notion of a CSR tier.
         if self.abi_version >= ABI_VERSION_WITH_COMPRESSED_TABLES {
             let costs = compute_standalone_costs(&self.parse_table);
-            self.state_repr =
-                decide_state_representations(&self.parse_table, &costs, self.large_state_count);
+            self.state_repr = decide_state_representations(
+                &self.parse_table,
+                &costs,
+                self.large_state_count,
+                &self.picker_config,
+            );
         } else {
             let n = self.parse_table.states.len();
             let mut v = vec![Repr::Dense; self.large_state_count.min(n)];
@@ -2311,6 +2317,7 @@ pub fn render_c_code(
     abi_version: usize,
     semantic_version: Option<(u8, u8, u8)>,
     supertype_symbol_map: BTreeMap<Symbol, Vec<ChildType>>,
+    picker_config: PickerConfig,
 ) -> RenderResult<String> {
     if !(ABI_VERSION_MIN..=ABI_VERSION_MAX).contains(&abi_version) {
         Err(RenderError::ABI(abi_version))?;
@@ -2333,6 +2340,7 @@ pub fn render_c_code(
             patch,
         }),
         supertype_symbol_map,
+        picker_config,
         ..Default::default()
     }
     .generate()

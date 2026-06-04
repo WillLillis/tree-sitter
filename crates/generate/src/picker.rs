@@ -1,27 +1,49 @@
 //! Plan B picker: per-state representation choice between Dense, CSR, and
 //! Small tiers for the generated parse table.
 //!
-//! The Dense decision is deferred to master's existing heuristic via the
-//! `large_state_count` input - the picker does not promote states out of
-//! Dense or move Dense states elsewhere. For non-Dense states, it picks
-//! between CSR and Small per state by minimum byte cost, then runs a
+//! ## Safe mode (default)
+//!
+//! [`PickerConfig::Safe`] defers the Dense decision to master's existing
+//! `large_state_count` heuristic - the picker does not promote states
+//! out of Dense or move Dense states elsewhere. For non-Dense states,
+//! it picks between CSR and Small per state by minimum byte cost. This
+//! mode has been validated across 126 grammars to match or beat master
+//! on every one with no per-grammar regressions.
+//!
+//! ## Decoupled mode (opt-in)
+//!
+//! [`PickerConfig::Decoupled`] ignores `large_state_count` and
+//! evaluates each non-runtime-reserved state (i.e. i > 1) against three
+//! independent thresholds:
+//!
+//!   - `dense_csr_bias`:   CSR wins over Dense only if
+//!                         `csr_bytes <= dense_csr_bias * dense_bytes`.
+//!   - `dense_small_bias`: Small wins over Dense only if
+//!                         `small_bytes <= dense_small_bias * dense_bytes`.
+//!   - internal `SMALL_VS_CSR_BIAS = 0.6`: Small wins over CSR only if
+//!                         `small_bytes <= 0.6 * csr_bytes`.
+//!
+//! This mode is exposed via `tree-sitter.json` and the `tree-sitter
+//! generate` CLI flags for grammar authors who want to trade per-grammar
+//! consistency for aggregate .so savings. A 4x5 static sweep across
+//! `(dense_csr_bias, dense_small_bias)` on the 126-grammar corpus showed
+//! the best aggregate point at `(0.5, 0.5)`: ~14% aggregate savings, but
+//! with up to ~13% per-grammar growth on grammars where the safe picker
+//! was already optimal (cuda, arduino, gn, org-mode). Those values are
+//! also the [`DEFAULT_DENSE_CSR_BIAS`] / [`DEFAULT_DENSE_SMALL_BIAS`]
+//! fill-ins used when a config layer requests decoupled mode but
+//! doesn't specify both biases.
+//!
+//! After the per-state tier decision, both modes run the same
 //! dedup-promotion pass that moves CSR rows back to Small when many
 //! states share a canonical body and one shared body + N map entries
 //! beats N independent CSR rows.
-//!
-//! Earlier picker iterations added cost-model tunables (PICKER_LAMBDA /
-//! DEDUP_LAMBDA) that weighted estimated lookup cycles against bytes.
-//! A static corpus sweep confirmed that any non-zero value either
-//! changed picks for ~90% of grammars (PICKER_LAMBDA) or ~25% of
-//! grammars (DEDUP_LAMBDA) but with no aggregate size benefit and no
-//! empirical evidence that the resulting tier shifts actually improved
-//! parse-time. The simpler bytes-only picker matches or beats master on
-//! all 126 validated grammars; the knobs were removed to keep the
-//! shipped surface small.
 
 use std::hash::{Hash, Hasher};
 
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use serde::Serialize;
+use thiserror::Error;
 
 use crate::tables::{GotoAction, ParseTable, ParseTableEntry};
 
@@ -51,6 +73,155 @@ pub struct StateCosts {
     pub dense_bytes: usize,
     pub csr_bytes: usize,
     pub small_bytes: usize,
+}
+
+/// Empirical-best biases from the 4x5 static sweep across the 126-grammar
+/// corpus. Used to fill in `Decoupled` biases that no config layer set.
+pub const DEFAULT_DENSE_CSR_BIAS: f64 = 0.5;
+pub const DEFAULT_DENSE_SMALL_BIAS: f64 = 0.5;
+
+/// Identity of a picker bias axis. Owns the kebab-case string used in
+/// JSON keys, CLI flags, and error messages so the spelling lives in
+/// exactly one place.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Bias {
+    DenseCsr,
+    DenseSmall,
+}
+
+impl Bias {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::DenseCsr => "dense-csr-bias",
+            Self::DenseSmall => "dense-small-bias",
+        }
+    }
+}
+
+impl std::fmt::Display for Bias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl Serialize for Bias {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.name())
+    }
+}
+
+/// Validated picker configuration handed to the picker. Splitting this
+/// from [`RawPickerConfig`] makes "partial config reaches the picker" a
+/// compile error: the picker code matches the enum directly and gets
+/// concrete bias values in the `Decoupled` arm.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum PickerConfig {
+    /// Defer Dense to master's `large_state_count` heuristic; argmin
+    /// for non-Dense. Validated against the 126-grammar corpus.
+    #[default]
+    Safe,
+    /// 3-way bias-based picker. Both biases are present and validated
+    /// to `(0.0, 1.0]` by the time we reach this variant.
+    Decoupled {
+        dense_csr_bias: f64,
+        dense_small_bias: f64,
+    },
+}
+
+/// Layerable, unvalidated picker config. One of these is produced per
+/// source layer (file top-level, file per-grammar, CLI). Layers compose
+/// via [`Self::merge`] and the final result is validated via
+/// [`Self::build`] into a [`PickerConfig`].
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum RawPickerConfig {
+    /// This layer explicitly requests the safe picker. Resets any
+    /// `Decoupled` state from earlier layers.
+    Safe,
+    /// This layer specifies decoupled-mode biases. `None` fields are
+    /// inherited from earlier layers; if no layer sets them, they fall
+    /// back to [`DEFAULT_DENSE_CSR_BIAS`] / [`DEFAULT_DENSE_SMALL_BIAS`].
+    Decoupled {
+        dense_csr_bias: Option<f64>,
+        dense_small_bias: Option<f64>,
+    },
+}
+
+impl RawPickerConfig {
+    /// Compose a layer over the prior accumulated state.
+    /// `None` for either input means "this layer is silent".
+    pub fn merge(prior: Option<Self>, layer: Option<Self>) -> Option<Self> {
+        match (prior, layer) {
+            (p, None) => p,
+            (_, Some(Self::Safe)) => Some(Self::Safe),
+            (
+                Some(Self::Decoupled {
+                    dense_csr_bias: pdc,
+                    dense_small_bias: pds,
+                }),
+                Some(Self::Decoupled {
+                    dense_csr_bias: ldc,
+                    dense_small_bias: lds,
+                }),
+            ) => Some(Self::Decoupled {
+                dense_csr_bias: ldc.or(pdc),
+                dense_small_bias: lds.or(pds),
+            }),
+            (_, Some(layer @ Self::Decoupled { .. })) => Some(layer),
+        }
+    }
+
+    /// Validate and lower into a [`PickerConfig`]. Decoupled biases that
+    /// no layer set fall back to the module-level empirical defaults.
+    pub fn build(self) -> Result<PickerConfig, PickerConfigError> {
+        match self {
+            Self::Safe => Ok(PickerConfig::Safe),
+            Self::Decoupled {
+                dense_csr_bias,
+                dense_small_bias,
+            } => {
+                let dc = dense_csr_bias.unwrap_or(DEFAULT_DENSE_CSR_BIAS);
+                let ds = dense_small_bias.unwrap_or(DEFAULT_DENSE_SMALL_BIAS);
+                check_range(Bias::DenseCsr, dc)?;
+                check_range(Bias::DenseSmall, ds)?;
+                Ok(PickerConfig::Decoupled {
+                    dense_csr_bias: dc,
+                    dense_small_bias: ds,
+                })
+            }
+        }
+    }
+}
+
+impl PickerConfig {
+    /// Compose all layers in source order and validate. Layers with
+    /// `None` are silent. Final result is `Safe` if no layer spoke.
+    pub fn from_layers(
+        layers: impl IntoIterator<Item = Option<RawPickerConfig>>,
+    ) -> Result<Self, PickerConfigError> {
+        let mut state: Option<RawPickerConfig> = None;
+        for layer in layers {
+            state = RawPickerConfig::merge(state, layer);
+        }
+        match state {
+            None => Ok(Self::Safe),
+            Some(raw) => raw.build(),
+        }
+    }
+}
+
+fn check_range(bias: Bias, value: f64) -> Result<(), PickerConfigError> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(PickerConfigError::OutOfRange { bias, value })
+    }
+}
+
+/// Error returned when a [`RawPickerConfig`] fails validation.
+#[derive(Debug, Error, Serialize)]
+pub enum PickerConfigError {
+    #[error("picker `{bias}` must be in [0.0, 1.0], got {value}")]
+    OutOfRange { bias: Bias, value: f64 },
 }
 
 /// Compute byte-cost estimates for each tier per state.
@@ -85,35 +256,23 @@ pub fn compute_standalone_costs(parse_table: &ParseTable) -> Vec<StateCosts> {
     out
 }
 
-/// Decide a tier per state.
+/// Decide a tier per state, then run the shared dedup-promotion pass.
 ///
-/// State ids `0..large_state_count` are forced to Dense (this is master's
-/// per-state heuristic - pinning to it guarantees no parse-time
-/// regression on the hot path). For state ids >= `large_state_count`,
-/// the picker chooses between CSR and Small by argmin of byte cost.
-///
-/// A dedup-promotion pass then groups non-Dense states by their canonical
-/// small-body hash and demotes a whole group to Small when one shared
-/// body plus N map entries beats N independent CSR rows. Dense states
-/// never participate; they keep their O(1) lookup guarantee.
+/// Behavior depends on `config`: see module docs for the two modes.
 pub fn decide_state_representations(
     parse_table: &ParseTable,
     standalone_costs: &[StateCosts],
     large_state_count: usize,
+    config: &PickerConfig,
 ) -> Vec<Repr> {
     let n = parse_table.states.len();
-    let mut picks = Vec::with_capacity(n);
-
-    for (i, c) in standalone_costs.iter().enumerate() {
-        let pick = if i < large_state_count {
-            Repr::Dense
-        } else if c.csr_bytes <= c.small_bytes {
-            Repr::Csr
-        } else {
-            Repr::Small
-        };
-        picks.push(pick);
-    }
+    let mut picks = match *config {
+        PickerConfig::Safe => safe_picks(standalone_costs, large_state_count),
+        PickerConfig::Decoupled {
+            dense_csr_bias,
+            dense_small_bias,
+        } => decoupled_picks(standalone_costs, dense_csr_bias, dense_small_bias),
+    };
 
     // Group non-Dense states by canonical-small hash. FxHasher 64-bit
     // collisions across O(10K) states are negligible; a false dedup
@@ -154,6 +313,63 @@ pub fn decide_state_representations(
     }
 
     picks
+}
+
+/// Safe per-state tier choice. States below `large_state_count` go to
+/// Dense (master's heuristic); the rest pick CSR vs Small by argmin
+/// bytes.
+fn safe_picks(standalone_costs: &[StateCosts], large_state_count: usize) -> Vec<Repr> {
+    standalone_costs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if i < large_state_count {
+                Repr::Dense
+            } else if c.csr_bytes <= c.small_bytes {
+                Repr::Csr
+            } else {
+                Repr::Small
+            }
+        })
+        .collect()
+}
+
+/// Decoupled per-state tier choice. States 0 and 1 are pinned to Dense
+/// (runtime convention); the rest evaluate against the two configured
+/// biases plus the internal small/CSR threshold.
+fn decoupled_picks(
+    standalone_costs: &[StateCosts],
+    dense_csr_bias: f64,
+    dense_small_bias: f64,
+) -> Vec<Repr> {
+    const SMALL_VS_CSR_BIAS: f64 = 0.6;
+    standalone_costs
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if i <= 1 {
+                return Repr::Dense;
+            }
+            let dense = c.dense_bytes as f64;
+            let csr = c.csr_bytes as f64;
+            let small = c.small_bytes as f64;
+            let csr_beats_dense = csr <= dense_csr_bias * dense;
+            let small_beats_csr = small <= SMALL_VS_CSR_BIAS * csr;
+            let small_beats_dense = small <= dense_small_bias * dense;
+            match (csr_beats_dense, small_beats_csr, small_beats_dense) {
+                (false, _, false) => Repr::Dense,
+                (false, _, true) => Repr::Small,
+                (true, false, _) => Repr::Csr,
+                (true, true, _) => {
+                    if c.csr_bytes <= c.small_bytes {
+                        Repr::Csr
+                    } else {
+                        Repr::Small
+                    }
+                }
+            }
+        })
+        .collect()
 }
 
 /// Hash the canonical small-table representation of a state. Two states

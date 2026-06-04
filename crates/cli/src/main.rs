@@ -167,6 +167,22 @@ struct Generate {
     /// the merging of compatible parse states.
     #[arg(long)]
     pub disable_optimizations: bool,
+    /// Force the safe per-state picker, overriding any decoupled config from
+    /// `tree-sitter.json`. Mutually exclusive with the bias flags.
+    #[arg(
+        long,
+        conflicts_with = "picker_dense_csr_bias",
+        conflicts_with = "picker_dense_small_bias"
+    )]
+    pub picker_safe: bool,
+    /// CSR-vs-Dense bias for the decoupled picker. CSR wins if
+    /// `csr_bytes <= bias * dense_bytes`. Must be in [0.0, 1.0].
+    #[arg(long, value_name = "FLOAT")]
+    pub picker_dense_csr_bias: Option<f64>,
+    /// Small-vs-Dense bias for the decoupled picker. Small wins if
+    /// `small_bytes <= bias * dense_bytes`. Must be in [0.0, 1.0].
+    #[arg(long, value_name = "FLOAT")]
+    pub picker_dense_small_bias: Option<f64>,
 }
 
 #[derive(Args)]
@@ -953,6 +969,17 @@ impl Generate {
             OptLevel::default()
         };
 
+        let cli_picker_config = if self.picker_safe {
+            Some(tree_sitter_generate::RawPickerConfig::Safe)
+        } else if self.picker_dense_csr_bias.is_some() || self.picker_dense_small_bias.is_some() {
+            Some(tree_sitter_generate::RawPickerConfig::Decoupled {
+                dense_csr_bias: self.picker_dense_csr_bias,
+                dense_small_bias: self.picker_dense_small_bias,
+            })
+        } else {
+            None
+        };
+
         if let Err(err) = tree_sitter_generate::generate_parser_in_directory(
             current_dir,
             self.output.as_deref(),
@@ -962,6 +989,7 @@ impl Generate {
             self.js_runtime.as_deref(),
             !self.no_parser,
             optimizations,
+            cli_picker_config,
         ) {
             if json_summary {
                 eprintln!("{}", serde_json::to_string_pretty(&err)?);

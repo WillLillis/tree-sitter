@@ -375,8 +375,12 @@ fn test_feature_corpus_files() {
                 )
             })
             .unwrap();
-        let generate_result =
-            tree_sitter_generate::generate_parser_for_grammar(&grammar_json, Some((0, 0, 0)), None);
+        let generate_result = tree_sitter_generate::generate_parser_for_grammar(
+            &grammar_json,
+            Some((0, 0, 0)),
+            None,
+            tree_sitter_generate::PickerConfig::Safe,
+        );
 
         if error_message_path.exists() {
             if EXAMPLE_INCLUDE.is_some() || EXAMPLE_EXCLUDE.is_some() {

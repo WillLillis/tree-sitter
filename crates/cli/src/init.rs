@@ -175,6 +175,7 @@ impl JsonConfigOpts {
                 first_line_regex: None,
                 content_regex: None,
                 class_name: Some(class_name),
+                picker: None,
             }],
             metadata: Metadata {
                 version: self.version,
@@ -192,6 +193,7 @@ impl JsonConfigOpts {
                 namespace: self.namespace,
             },
             bindings: self.bindings,
+            picker: None,
         }
     }
 }

@@ -388,6 +388,8 @@ pub struct TreeSitterJSON {
     pub metadata: Metadata,
     #[serde(default)]
     pub bindings: Bindings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<PickerJSON>,
 }
 
 impl TreeSitterJSON {
@@ -434,6 +436,35 @@ pub struct Grammar {
     pub content_regex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub class_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picker: Option<PickerJSON>,
+}
+
+/// Per-grammar or top-level picker configuration. Mirrors the form
+/// understood by [`tree_sitter_generate::RawPickerConfig`].
+///   - Bare string `"safe"` selects the safe picker explicitly.
+///   - Object form opts into the decoupled picker; missing bias fields
+///     fall back to the generator's empirical defaults.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub enum PickerJSON {
+    Mode(PickerModeJSON),
+    Biases(PickerBiasesJSON),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum PickerModeJSON {
+    Safe,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct PickerBiasesJSON {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dense_csr_bias: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dense_small_bias: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize)]

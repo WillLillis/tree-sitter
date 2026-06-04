@@ -38,6 +38,10 @@ use grammars::{InlinedProductionMap, InputGrammar, LexicalGrammar, SyntaxGrammar
 pub use node_types::{SuperTypeCycleError, VariableInfoError};
 pub use parse_grammar::ParseGrammarError;
 use parse_grammar::parse_grammar;
+pub use picker::{
+    Bias, DEFAULT_DENSE_CSR_BIAS, DEFAULT_DENSE_SMALL_BIAS, PickerConfig, PickerConfigError,
+    RawPickerConfig,
+};
 pub use prepare_grammar::PrepareGrammarError;
 use prepare_grammar::prepare_grammar;
 use render::render_c_code;
@@ -93,6 +97,20 @@ pub enum GenerateError {
     ParseVersion(#[from] ParseVersionError),
     #[error(transparent)]
     SuperTypeCycle(#[from] SuperTypeCycleError),
+    #[cfg(feature = "load")]
+    #[error(transparent)]
+    ReadPickerConfig(#[from] ReadPickerConfigError),
+    #[error("invalid picker configuration -- {0}")]
+    PickerConfig(#[from] PickerConfigError),
+}
+
+#[cfg(feature = "load")]
+#[derive(Debug, Error, Serialize)]
+pub enum ReadPickerConfigError {
+    #[error("failed to read tree-sitter.json for picker config -- {0}")]
+    IO(IoError),
+    #[error("failed to parse picker config in `{path}` -- {error}")]
+    JSON { path: String, error: String },
 }
 
 #[derive(Debug, Error, Serialize)]
@@ -233,6 +251,7 @@ pub fn generate_parser_in_directory<T, U, V>(
     js_runtime: Option<&str>,
     generate_parser: bool,
     optimizations: OptLevel,
+    cli_picker_config: Option<RawPickerConfig>,
 ) -> GenerateResult<()>
 where
     T: Into<PathBuf>,
@@ -284,6 +303,11 @@ where
     }
 
     let semantic_version = read_grammar_version(&repo_path)?;
+    let picker_config = resolve_picker_config(
+        &repo_path,
+        &input_grammar.name,
+        cli_picker_config,
+    )?;
 
     // Generate the parser and related files.
     let GeneratedParser {
@@ -295,6 +319,7 @@ where
         semantic_version.map(|v| (v.major as u8, v.minor as u8, v.patch as u8)),
         report_symbol_name,
         optimizations,
+        picker_config,
     )?;
 
     write_file(&src_path.join("parser.c"), c_code)?;
@@ -312,6 +337,7 @@ pub fn generate_parser_for_grammar(
     grammar_json: &str,
     semantic_version: Option<(u8, u8, u8)>,
     optimizations: Option<OptLevel>,
+    picker_config: PickerConfig,
 ) -> GenerateResult<(String, String)> {
     let input_grammar = parse_grammar(grammar_json)?;
     let parser = generate_parser_for_grammar_with_opts(
@@ -320,6 +346,7 @@ pub fn generate_parser_for_grammar(
         semantic_version,
         None,
         optimizations.unwrap_or_default(),
+        picker_config,
     )?;
     Ok((input_grammar.name, parser.c_code))
 }
@@ -354,6 +381,7 @@ fn generate_parser_for_grammar_with_opts(
     semantic_version: Option<(u8, u8, u8)>,
     report_symbol_name: Option<&str>,
     optimizations: OptLevel,
+    picker_config: PickerConfig,
 ) -> GenerateResult<GeneratedParser> {
     let JSONOutput {
         syntax_grammar,
@@ -384,6 +412,7 @@ fn generate_parser_for_grammar_with_opts(
         abi_version,
         semantic_version,
         supertype_symbol_map,
+        picker_config,
     )?;
     Ok(GeneratedParser {
         c_code,
@@ -436,6 +465,108 @@ fn read_grammar_version(repo_path: &Path) -> Result<Option<Version>, ParseVersio
         path.pop(); // filename
         if !path.pop() {
             return Ok(None);
+        }
+        path.push(filename);
+    }
+}
+
+/// Resolve the picker config for a grammar by composing the file layers
+/// (top-level then per-grammar from `tree-sitter.json`) with the
+/// CLI-supplied override, then validating the result.
+#[cfg(feature = "load")]
+fn resolve_picker_config(
+    repo_path: &Path,
+    grammar_name: &str,
+    cli: Option<RawPickerConfig>,
+) -> Result<PickerConfig, GenerateError> {
+    let (top, per_grammar) = read_picker_layers(repo_path, grammar_name)?;
+    Ok(PickerConfig::from_layers([top, per_grammar, cli])?)
+}
+
+/// Walk up looking for `tree-sitter.json` and extract two raw picker
+/// layers: the top-level `picker` field and the per-grammar `picker`
+/// field for the entry matching `grammar_name`. Returns `(None, None)`
+/// if no file is found - that's a valid configuration (the caller
+/// falls back to safe mode).
+#[cfg(feature = "load")]
+fn read_picker_layers(
+    repo_path: &Path,
+    grammar_name: &str,
+) -> Result<(Option<RawPickerConfig>, Option<RawPickerConfig>), ReadPickerConfigError> {
+    #[derive(Deserialize)]
+    struct TreeSitterJson {
+        #[serde(default)]
+        grammars: Vec<GrammarEntry>,
+        #[serde(default)]
+        picker: Option<RawPickerJson>,
+    }
+
+    #[derive(Deserialize)]
+    struct GrammarEntry {
+        name: String,
+        #[serde(default)]
+        picker: Option<RawPickerJson>,
+    }
+
+    // Untagged: the JSON value is either the string "safe" or an object
+    // containing biases. Unknown strings or extra fields error out.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawPickerJson {
+        Mode(PickerModeJson),
+        Biases(PickerBiasesJson),
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "lowercase", deny_unknown_fields)]
+    enum PickerModeJson {
+        Safe,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    struct PickerBiasesJson {
+        #[serde(default)]
+        dense_csr_bias: Option<f64>,
+        #[serde(default)]
+        dense_small_bias: Option<f64>,
+    }
+
+    impl From<RawPickerJson> for RawPickerConfig {
+        fn from(value: RawPickerJson) -> Self {
+            match value {
+                RawPickerJson::Mode(PickerModeJson::Safe) => Self::Safe,
+                RawPickerJson::Biases(b) => Self::Decoupled {
+                    dense_csr_bias: b.dense_csr_bias,
+                    dense_small_bias: b.dense_small_bias,
+                },
+            }
+        }
+    }
+
+    let filename = "tree-sitter.json";
+    let mut path = repo_path.join(filename);
+    loop {
+        if path.exists() {
+            let contents = fs::read_to_string(&path)
+                .map_err(|e| ReadPickerConfigError::IO(IoError::new(&e, Some(path.as_path()))))?;
+            let parsed: TreeSitterJson =
+                serde_json::from_str(&contents).map_err(|e| ReadPickerConfigError::JSON {
+                    path: path.display().to_string(),
+                    error: e.to_string(),
+                })?;
+            let top = parsed.picker.map(RawPickerConfig::from);
+            let per_grammar = parsed
+                .grammars
+                .into_iter()
+                .find(|g| g.name == grammar_name)
+                .and_then(|g| g.picker)
+                .map(RawPickerConfig::from);
+            return Ok((top, per_grammar));
+        }
+        path.pop(); // filename
+        if !path.pop() {
+            return Ok((None, None));
         }
         path.push(filename);
     }
