@@ -235,6 +235,24 @@ pub enum IdentKind {
     Macro(MacroId),
 }
 
+/// Where a [`Node::ModuleRule`] reference points within another module's
+/// lowered output.
+///
+/// Each variant carries an index, so the lowerer dereferences directly instead
+/// of scanning by name. Cross-module names that resolve to an AST-level
+/// `let`/`macro` become [`IdentKind`] instead; see [`Export`](super::Export).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RuleTarget {
+    /// Index into the target grammar's `lowered.variables`.
+    GrammarRule(u32),
+    /// Index into the target grammar's `lowered.external_tokens`.
+    GrammarExternal(u32),
+    /// Index into the target helper's `lowered_rules`.
+    HelperRule(u32),
+    /// Index into the target module's `ctx.external_names`.
+    ExternalName(u32),
+}
+
 /// Byte offset range `[start, end)` in the source text.
 #[expect(clippy::unsafe_derive_deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,6 +600,14 @@ pub enum Node {
     QualifiedAccess {
         obj: NodeId,
         member: Span,
+    },
+    /// A `mod::name` reference resolved to a rule (or external symbol) in
+    /// another module's lowered output. Replaces a `QualifiedAccess` during
+    /// resolve once the target is found; the lowerer indexes directly.
+    /// (References to an AST-level `let`/`macro` become `Ident` instead.)
+    ModuleRule {
+        module: ModuleId,
+        target: RuleTarget,
     },
     /// `seq(a, b, ...)` or `choice(a, b, ...)`.
     /// Children: `[member0, member1, ...]` - each is a rule expression.
