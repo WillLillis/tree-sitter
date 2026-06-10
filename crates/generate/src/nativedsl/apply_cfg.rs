@@ -288,8 +288,11 @@ impl Walker<'_> {
             | Node::MacroParam { .. } | Node::ForBinding { .. } | Node::Unreachable
             // handled by walk(), unreachable here
             | Node::Cfg { .. } => {}
-            // Emitted by expand_macro_calls, which runs after apply_cfg.
-            Node::ExpandedRule { .. } | Node::SynthRef { .. } => unreachable!(),
+            // Emitted by expand_macro_calls / resolve, both of which run after
+            // apply_cfg.
+            Node::ExpandedRule { .. } | Node::SynthRef { .. } | Node::ModuleRule { .. } => {
+                unreachable!()
+            }
         }
         Ok(())
     }

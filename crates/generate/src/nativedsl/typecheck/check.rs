@@ -239,7 +239,12 @@ fn type_of(
     let ty = match shared.arena.get(id) {
         Node::IntLit(_) => Ok(Ty::INT),
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::STR),
-        Node::Ident(IdentKind::Rule) | Node::Blank | Node::SynthRef { .. } => Ok(Ty::RULE),
+        // `ModuleRule`: a cross-module reference resolve already validated as a
+        // rule / external / inherited rule, so it is rule-typed.
+        Node::Ident(IdentKind::Rule)
+        | Node::Blank
+        | Node::SynthRef { .. }
+        | Node::ModuleRule { .. } => Ok(Ty::RULE),
         &Node::SymRef { expr } => {
             type_of(shared, ctx, expr, env, Constraint::Exact(Ty::STR))?;
             Ok(Ty::RULE)

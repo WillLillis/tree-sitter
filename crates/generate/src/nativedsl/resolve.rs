@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::{
     grammars::InputGrammar,
     nativedsl::{
-        Module, NoteMessage, ResolveError,
+        Export, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
             AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
         },
@@ -398,7 +398,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let member_name = rcx.ctx.text(member);
-                resolve_qualified_member(arena, rcx.pools, &rcx.modules[idx], id, member_name, member)?;
+                resolve_qualified_member(arena, &rcx.modules[idx], idx as ModuleId, id, member_name, member)?;
             }
             Ok(())
         }
@@ -408,7 +408,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let macro_name = rcx.ctx.text(arena.span(name));
-                resolve_qualified_call_name(arena, rcx.pools, &rcx.modules[idx], name, macro_name);
+                resolve_qualified_call_name(arena, &rcx.modules[idx], name, macro_name);
             }
             for &arg in args {
                 resolve_expr(arena, rcx, arg)?;
@@ -420,88 +420,43 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
 }
 
 /// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
+/// Only a macro is valid here; anything else is left unresolved for the type
+/// checker to report.
 fn resolve_qualified_call_name(
     arena: &mut NodeArena,
-    pools: &AstPools,
     target: &Module,
     name_id: NodeId,
     macro_name: &str,
 ) {
-    let target_ctx = target.ctx();
-    for &item_id in &target_ctx.root_items {
-        if let Node::Macro(macro_id) = arena.get(item_id) {
-            let config = pools.get_macro(*macro_id);
-            if target_ctx.text(config.name) == macro_name {
-                arena.set(name_id, Node::Ident(IdentKind::Macro(*macro_id)));
-                return;
-            }
-        }
+    if let Some(Export::Local(kind @ IdentKind::Macro(_))) = target.export(macro_name) {
+        arena.set(name_id, Node::Ident(kind));
     }
-    // Not found - leave unresolved, type checker will report the error
 }
 
-/// Resolve a `QualifiedAccess { obj, member }` node by looking up `member_name`
-/// in the target module's root items.
-/// - Let -> replace node with `Ident(Var(item_id))`
-/// - Rule -> replace with `Ident(Rule)`
-/// - Macro -> error (macro used as value)
-/// - Not found -> leave as `QualifiedAccess` (inherited grammar rule for lowerer)
+/// Resolve a `QualifiedAccess { obj, member }` against the target module's
+/// export table:
+/// - `let` / `macro` -> `Ident(Var | Macro)`
+/// - lowered rule / external -> `ImportRef` (the lowerer indexes directly)
+/// - not found -> error
 fn resolve_qualified_member(
     arena: &mut NodeArena,
-    pools: &AstPools,
     target: &Module,
+    module: ModuleId,
     node_id: NodeId,
     member_name: &str,
     member_span: Span,
 ) -> ResolveResult<()> {
-    let target_ctx = target.ctx();
-    for &item_id in &target_ctx.root_items {
-        match arena.get(item_id) {
-            Node::Let { name, .. } if target_ctx.text(*name) == member_name => {
-                arena.set(node_id, Node::Ident(IdentKind::Var(item_id)));
-                return Ok(());
-            }
-            Node::Macro(macro_id) => {
-                let config = pools.get_macro(*macro_id);
-                if target_ctx.text(config.name) == member_name {
-                    arena.set(node_id, Node::Ident(IdentKind::Macro(*macro_id)));
-                    return Ok(());
-                }
-            }
-            _ => {}
+    match target.export(member_name) {
+        Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
+        Some(Export::Rule(target)) => arena.set(node_id, Node::ModuleRule { module, target }),
+        None => {
+            return Err(ResolveError::new(
+                ResolveErrorKind::ImportMemberNotFound(member_name.to_string()),
+                member_span,
+            ));
         }
     }
-    // Cached external decls (helper or grammar with top-level `external`).
-    // Leave as QualifiedAccess - the lowerer interns the name from the
-    // target's source.
-    if target_ctx
-        .external_names
-        .iter()
-        .any(|&s| target_ctx.text(s) == member_name)
-    {
-        return Ok(());
-    }
-    // Inherited grammar's lowered output: rules first, then external_tokens.
-    // Both leave the QualifiedAccess intact for the lowerer.
-    if let Some(g) = target.lowered()
-        && (g.variables.iter().any(|v| v.name == member_name)
-            || g.external_tokens
-                .iter()
-                .any(|r| matches!(r, crate::rules::Rule::NamedSymbol(n) if n == member_name)))
-    {
-        return Ok(());
-    }
-    // Helper rule lookup: helper modules carry their own lowered rules.
-    // Leave as QualifiedAccess; the lowerer inlines via `import_rule`.
-    if let Module::Helper { lowered_rules, .. } = target
-        && lowered_rules.iter().any(|(name, _)| name == member_name)
-    {
-        return Ok(());
-    }
-    Err(ResolveError::new(
-        ResolveErrorKind::ImportMemberNotFound(member_name.to_string()),
-        member_span,
-    ))
+    Ok(())
 }
 
 /// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
