@@ -112,7 +112,6 @@ struct TSLanguage {
   uint32_t external_token_count;
   uint32_t state_count;
   uint32_t large_state_count;
-  uint32_t csr_state_count;
   uint32_t production_id_count;
   uint32_t field_count;
   uint16_t max_alias_sequence_length;
@@ -150,6 +149,7 @@ struct TSLanguage {
   const TSMapSlice *supertype_map_slices;
   const TSSymbol *supertype_map_entries;
   TSLanguageMetadata metadata;
+  uint32_t csr_state_count;
   // 3-way per-state parse table layout (ABI version >= 16):
   // states are partitioned into [Dense | CSR | Small] tiers based on the
   // smallest representation per state. The Dense tier covers state ids

@@ -124,7 +124,6 @@ typedef struct {
   uint32_t external_token_count;
   uint32_t state_count;
   uint32_t large_state_count;
-  uint32_t csr_state_count;
   uint32_t production_id_count;
   uint32_t field_count;
   uint16_t max_alias_sequence_length;
@@ -162,6 +161,7 @@ typedef struct {
   int32_t supertype_map_slices;
   int32_t supertype_map_entries;
   TSLanguageMetadata metadata;
+  uint32_t csr_state_count;
   // CSR-compressed parse table (ABI version >= 16). `compressed_parse_table`
   // is a single flat array of interleaved (symbol, value) pairs;
   // `compressed_parse_table_map` holds uint16_t-indices of row starts.
