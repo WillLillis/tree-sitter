@@ -164,7 +164,11 @@ pub fn build_exports(
     lowered: LoweredRef,
 ) -> FxHashMap<Box<str>, Export> {
     let mut exports: FxHashMap<Box<str>, Export> = FxHashMap::default();
-    // AST-level `let` / `macro` bindings (highest precedence).
+    // First insertion wins, so this runs highest-precedence first.
+    let mut add = |name: &str, export| {
+        exports.entry(name.into()).or_insert(export);
+    };
+    // AST-level `let` / `macro` bindings.
     for &item_id in &ctx.root_items {
         let (name, kind) = match arena.get(item_id) {
             Node::Let { name, .. } => (ctx.text(*name), IdentKind::Var(item_id)),
@@ -174,39 +178,27 @@ pub fn build_exports(
             ),
             _ => continue,
         };
-        exports.entry(name.into()).or_insert(Export::Local(kind));
+        add(name, Export::Local(kind));
     }
     // Top-level `external X` declarations.
     for (i, &span) in ctx.external_names.iter().enumerate() {
-        let target = RuleTarget::ExternalName(i as u32);
-        exports
-            .entry(ctx.text(span).into())
-            .or_insert(Export::Rule(target));
+        add(ctx.text(span), Export::Rule(RuleTarget::ExternalName(i as u32)));
     }
     // Lowered output.
     match lowered {
         LoweredRef::Grammar(g) => {
             for (i, v) in g.variables.iter().enumerate() {
-                let target = RuleTarget::GrammarRule(i as u32);
-                exports
-                    .entry(v.name.as_str().into())
-                    .or_insert(Export::Rule(target));
+                add(&v.name, Export::Rule(RuleTarget::GrammarRule(i as u32)));
             }
             for (i, r) in g.external_tokens.iter().enumerate() {
                 if let Rule::NamedSymbol(n) = r {
-                    let target = RuleTarget::GrammarExternal(i as u32);
-                    exports
-                        .entry(n.as_str().into())
-                        .or_insert(Export::Rule(target));
+                    add(n, Export::Rule(RuleTarget::GrammarExternal(i as u32)));
                 }
             }
         }
         LoweredRef::Helper(rules) => {
             for (i, (name, _)) in rules.iter().enumerate() {
-                let target = RuleTarget::HelperRule(i as u32);
-                exports
-                    .entry(name.as_str().into())
-                    .or_insert(Export::Rule(target));
+                add(name, Export::Rule(RuleTarget::HelperRule(i as u32)));
             }
         }
     }
