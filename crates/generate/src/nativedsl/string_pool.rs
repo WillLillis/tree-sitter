@@ -14,6 +14,17 @@ use super::ast::Span;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Str(NonZeroU32);
 
+impl Str {
+    /// Raw index into [`StringPool::entries`]. Always nonzero (index 0 is
+    /// the `Unreachable` sentinel). Exposed so consumers that have
+    /// materialized the pool into their own `Vec<_>` can key off the same
+    /// offset.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0.get()
+    }
+}
+
 pub enum StrEntry {
     Unreachable,
     Source(Span, ModuleId),
