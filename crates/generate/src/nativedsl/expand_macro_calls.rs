@@ -443,6 +443,8 @@ fn clone_with_subst(
         | Node::Let { .. }
         | Node::ExpandedRule { .. }
         | Node::SynthRef { .. }
+        // Emitted by resolve, which runs after expand_macro_calls.
+        | Node::ModuleRule { .. }
         | Node::Cfg { .. }
         // Handled by early guards above.
         | Node::MacroParam { .. } | Node::SymRef { .. } => unreachable!(),

@@ -8,7 +8,7 @@ use super::{
         LowerError, Module, ModuleId,
         ast::{
             BinOp, ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId,
-            PrecKind, RepeatKind, SharedAst, Span,
+            PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
         string_pool::{Str, StrEntry, StringPool},
     },
@@ -697,50 +697,37 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     _ => unreachable!(), // guarded by typecheck
                 }
             }
-            // QualifiedAccess targets that survive resolve are one of:
-            //   - cached external decl (helper, or grammar with top-level externals)
-            //   - helper rule (inlined via import_rule)
-            //   - inherited grammar rule (via lowered.variables)
-            //   - inherited grammar external (via lowered.external_tokens)
-            // Resolver already verified the target exists.
-            &Node::QualifiedAccess { obj, member } => {
-                let obj_val = self.eval_expr(obj)?;
-                let member_name = self.ctx().text(member);
-                expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
-
-                let target_ctx = self.previous[usize::from(mod_idx)].ctx();
-                if let Some(name_span) = target_ctx
-                    .external_names
-                    .iter()
-                    .copied()
-                    .find(|&s| target_ctx.text(s) == member_name)
-                {
-                    let sid = self.strings.intern_span(name_span, mod_idx);
-                    let rid = self.alloc_rule(ARule::NamedSymbol(sid));
-                    return Ok(self.alloc_val(Value::Rule(rid)));
-                }
-
-                let target = &self.previous[usize::from(mod_idx)];
-                let rule = match target {
-                    Module::Helper { lowered_rules, .. } => lowered_rules
-                        .iter()
-                        .find(|(name, _)| name == member_name)
-                        .map(|(_, r)| r)
-                        .unwrap(),
-                    Module::Grammar { lowered, .. } => lowered
-                        .variables
-                        .iter()
-                        .find(|v| v.name == member_name)
-                        .map(|v| &v.rule)
-                        .or_else(|| {
-                            lowered
-                                .external_tokens
-                                .iter()
-                                .find(|r| matches!(r, Rule::NamedSymbol(n) if n == member_name))
-                        })
-                        .unwrap(),
+            // A `mod::name` reference that resolve recorded as a concrete
+            // target in another module's lowered output. Index directly; no
+            // name scan. `&self.previous[..]` is `&'a Module`, decoupled from
+            // the `&mut self` that `import_rule` needs.
+            &Node::ModuleRule { module, target } => {
+                let target_module = &self.previous[usize::from(module)];
+                let rid = match target {
+                    RuleTarget::ExternalName(i) => {
+                        let span = target_module.ctx().external_names[i as usize];
+                        let sid = self.strings.intern_span(span, module);
+                        self.alloc_rule(ARule::NamedSymbol(sid))
+                    }
+                    RuleTarget::HelperRule(i) => {
+                        let Module::Helper { lowered_rules, .. } = target_module else {
+                            unreachable!()
+                        };
+                        self.import_rule(&lowered_rules[i as usize].1)
+                    }
+                    RuleTarget::GrammarRule(i) => {
+                        let Module::Grammar { lowered, .. } = target_module else {
+                            unreachable!()
+                        };
+                        self.import_rule(&lowered.variables[i as usize].rule)
+                    }
+                    RuleTarget::GrammarExternal(i) => {
+                        let Module::Grammar { lowered, .. } = target_module else {
+                            unreachable!()
+                        };
+                        self.import_rule(&lowered.external_tokens[i as usize])
+                    }
                 };
-                let rid = self.import_rule(rule);
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             &Node::Object(range) => {

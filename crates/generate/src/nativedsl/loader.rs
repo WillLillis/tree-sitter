@@ -136,12 +136,32 @@ impl Loader<'_> {
                     self.modules,
                     &ctx,
                 )?);
-                Module::Grammar { ctx, lowered }
+                let exports = super::build_exports(
+                    &self.shared.arena,
+                    &self.shared.pools,
+                    &ctx,
+                    super::LoweredRef::Grammar(&lowered),
+                );
+                Module::Grammar {
+                    ctx,
+                    lowered,
+                    exports,
+                }
             }
             ModuleKind::Helper => {
                 let lowered_rules =
                     lower::lower_helper(self.state, self.strings, self.shared, self.modules, &ctx)?;
-                Module::Helper { ctx, lowered_rules }
+                let exports = super::build_exports(
+                    &self.shared.arena,
+                    &self.shared.pools,
+                    &ctx,
+                    super::LoweredRef::Helper(&lowered_rules),
+                );
+                Module::Helper {
+                    ctx,
+                    lowered_rules,
+                    exports,
+                }
             }
         };
         let global_id = u8::try_from(self.modules.len())
