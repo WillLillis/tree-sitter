@@ -70,12 +70,13 @@ pub use typecheck::{
 
 use std::path::{Path, PathBuf};
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::rules::Rule;
 
-use ast::{ModuleContext, SharedAst, Span};
+use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
 use loader::Loader;
 use typecheck::TypeEnv;
 
@@ -96,11 +97,24 @@ pub enum Module {
     Helper {
         ctx: ModuleContext,
         lowered_rules: Vec<(String, Rule)>,
+        exports: FxHashMap<Box<str>, Export>,
     },
     Grammar {
         ctx: ModuleContext,
         lowered: Box<InputGrammar>,
+        exports: FxHashMap<Box<str>, Export>,
     },
+}
+
+/// What a name exported by a module resolves to, so a `mod::name` reference
+/// becomes an ID-based lookup at resolve time instead of a name scan.
+#[derive(Clone, Copy, Debug)]
+pub enum Export {
+    /// An AST-level `let` or `macro` (resolves to `Ident(Var | Macro)`).
+    Local(IdentKind),
+    /// A rule / external in the module's lowered output (resolves to
+    /// `Node::ModuleRule`).
+    Rule(RuleTarget),
 }
 
 impl Module {
@@ -118,6 +132,85 @@ impl Module {
             Self::Helper { .. } => None,
         }
     }
+
+    /// Look up a name in this module's export table.
+    #[must_use]
+    pub fn export(&self, name: &str) -> Option<Export> {
+        let exports = match self {
+            Self::Helper { exports, .. } | Self::Grammar { exports, .. } => exports,
+        };
+        exports.get(name).copied()
+    }
+}
+
+/// The lowered output a module exposes, passed to [`build_exports`].
+#[derive(Clone, Copy)]
+pub enum LoweredRef<'a> {
+    Grammar(&'a InputGrammar),
+    Helper(&'a [(String, Rule)]),
+}
+
+/// Build a module's export table.
+///
+/// The table maps each name a module exposes to `mod::name` references onto an
+/// ID-based [`Export`], built once when the module is constructed. Insertion
+/// order encodes precedence (first wins): AST-level let/macro, then top-level
+/// externals, then lowered rules/externals.
+#[must_use]
+pub fn build_exports(
+    arena: &NodeArena,
+    pools: &AstPools,
+    ctx: &ModuleContext,
+    lowered: LoweredRef,
+) -> FxHashMap<Box<str>, Export> {
+    let mut exports: FxHashMap<Box<str>, Export> = FxHashMap::default();
+    // AST-level `let` / `macro` bindings (highest precedence).
+    for &item_id in &ctx.root_items {
+        let (name, kind) = match arena.get(item_id) {
+            Node::Let { name, .. } => (ctx.text(*name), IdentKind::Var(item_id)),
+            Node::Macro(macro_id) => (
+                ctx.text(pools.get_macro(*macro_id).name),
+                IdentKind::Macro(*macro_id),
+            ),
+            _ => continue,
+        };
+        exports.entry(name.into()).or_insert(Export::Local(kind));
+    }
+    // Top-level `external X` declarations.
+    for (i, &span) in ctx.external_names.iter().enumerate() {
+        let target = RuleTarget::ExternalName(i as u32);
+        exports
+            .entry(ctx.text(span).into())
+            .or_insert(Export::Rule(target));
+    }
+    // Lowered output.
+    match lowered {
+        LoweredRef::Grammar(g) => {
+            for (i, v) in g.variables.iter().enumerate() {
+                let target = RuleTarget::GrammarRule(i as u32);
+                exports
+                    .entry(v.name.as_str().into())
+                    .or_insert(Export::Rule(target));
+            }
+            for (i, r) in g.external_tokens.iter().enumerate() {
+                if let Rule::NamedSymbol(n) = r {
+                    let target = RuleTarget::GrammarExternal(i as u32);
+                    exports
+                        .entry(n.as_str().into())
+                        .or_insert(Export::Rule(target));
+                }
+            }
+        }
+        LoweredRef::Helper(rules) => {
+            for (i, (name, _)) in rules.iter().enumerate() {
+                let target = RuleTarget::HelperRule(i as u32);
+                exports
+                    .entry(name.as_str().into())
+                    .or_insert(Export::Rule(target));
+            }
+        }
+    }
+    exports
 }
 
 /// Walk the import graph depth-first from `initial_refs`, calling `f` for
