@@ -38,6 +38,16 @@ struct ExternalNameCtx<'src, 'a, 'b> {
     expanding_lets: FxHashSet<&'src str>,
 }
 
+/// Read-only context threaded through the pass-2 resolve walk
+/// ([`resolve_item`] / [`resolve_expr`] / [`resolve_children`]).
+struct ResolveCtx<'a> {
+    pools: &'a AstPools,
+    ctx: &'a ModuleContext,
+    strings: &'a StringPool,
+    decls: &'a Decls<'a>,
+    modules: &'a [Module],
+}
+
 /// Collects declarations, registers inherited names, and resolves `Node::Ident`
 /// nodes from `Unresolved` to `Rule` / `Var`.
 ///
@@ -54,15 +64,14 @@ pub fn resolve(
     let mut decls = collect_decls(shared, ctx, strings, &ctx.root_items, base, modules)?;
 
     for &item_id in &ctx.root_items {
-        resolve_item(
-            &mut shared.arena,
-            &shared.pools,
+        let rcx = ResolveCtx {
+            pools: &shared.pools,
             ctx,
             strings,
-            &decls,
+            decls: &decls,
             modules,
-            item_id,
-        )?;
+        };
+        resolve_item(&mut shared.arena, &rcx, item_id)?;
         // Register let bindings in order so forward references are caught
         if let Node::Let { name, .. } = shared.arena.get(item_id) {
             let name_text = ctx.text(*name);
@@ -232,46 +241,34 @@ fn register_helper_rules<'a>(
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
-fn resolve_item(
-    arena: &mut NodeArena,
-    pools: &AstPools,
-    ctx: &ModuleContext,
-    strings: &StringPool,
-    decls: &Decls,
-    modules: &[Module],
-    item_id: NodeId,
-) -> ResolveResult<()> {
+fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> ResolveResult<()> {
     match arena.get(item_id) {
         Node::Grammar => {
             // INVARIANT: set during grammar block parsing, always present here
-            let grammar_config = ctx.grammar_config.as_ref().unwrap();
+            let grammar_config = rcx.ctx.grammar_config.as_ref().unwrap();
             for (_, id) in grammar_config.node_fields() {
-                resolve_expr(arena, pools, ctx, strings, decls, modules, id)?;
+                resolve_expr(arena, rcx, id)?;
             }
             Ok(())
         }
         &Node::Rule { body: inner, .. }
         | &Node::ExpandedRule { body: inner, .. }
-        | &Node::Let { value: inner, .. } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, inner)
-        }
+        | &Node::Let { value: inner, .. } => resolve_expr(arena, rcx, inner),
         Node::Macro(macro_id) => {
-            let macro_cfg = pools.get_macro(*macro_id);
+            let macro_cfg = rcx.pools.get_macro(*macro_id);
             // Macro params must not shadow any top-level declaration
             for param in &macro_cfg.params {
-                let name = ctx.text(param.name);
-                if let Some(&(_, first_span)) = decls.get(name) {
+                let name = rcx.ctx.text(param.name);
+                if let Some(&(_, first_span)) = rcx.decls.get(name) {
                     return Err(ResolveError::with_note(
                         ResolveErrorKind::ShadowedBinding(name.to_string()),
                         param.name,
-                        ctx.note(NoteMessage::FirstDefinedHere, first_span),
+                        rcx.ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
                 }
             }
             match macro_cfg.kind {
-                MacroKind::Expression(_) => {
-                    resolve_expr(arena, pools, ctx, strings, decls, modules, macro_cfg.body)
-                }
+                MacroKind::Expression(_) => resolve_expr(arena, rcx, macro_cfg.body),
                 // Walk the RuleSet body so the original (template) decls'
                 // identifiers get resolved too. Typecheck reuses these to
                 // catch errors at definition time.
@@ -283,12 +280,12 @@ fn resolve_item(
                     let start = range.start as usize;
                     let end = start + range.len as usize;
                     for i in start..end {
-                        let decl_id = pools.children[i];
+                        let decl_id = rcx.pools.children[i];
                         let body = match arena.get(decl_id) {
                             Node::Rule { body, .. } | Node::ComputedRule { body, .. } => *body,
                             _ => unreachable!(),
                         };
-                        resolve_expr(arena, pools, ctx, strings, decls, modules, body)?;
+                        resolve_expr(arena, rcx, body)?;
                     }
                     Ok(())
                 }
@@ -299,32 +296,24 @@ fn resolve_item(
 }
 
 /// Resolve identifiers within a single expression.
-fn resolve_expr(
-    arena: &mut NodeArena,
-    pools: &AstPools,
-    ctx: &ModuleContext,
-    strings: &StringPool,
-    decls: &Decls,
-    modules: &[Module],
-    id: NodeId,
-) -> ResolveResult<()> {
+fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
     // Local bindings are emitted as MacroParam/ForBinding by the parser,
     // so any remaining Ident(Unresolved) is a top-level reference.
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
-        let name = ctx.text(span);
-        if let Some(&(kind, _)) = decls.get(name) {
+        let name = rcx.ctx.text(span);
+        if let Some(&(kind, _)) = rcx.decls.get(name) {
             arena.resolve_as(id, kind);
         } else {
-            return Err(unknown_ident_error(arena, ctx, decls, name, span));
+            return Err(unknown_ident_error(arena, rcx.ctx, rcx.decls, name, span));
         }
         return Ok(());
     }
 
     // SynthRef already carries the resolved name; just validate it exists.
     if let &Node::SynthRef { name } = arena.get(id) {
-        let text = strings.resolve_local(name, &ctx.source);
-        if decls.get(text).is_none() {
+        let text = rcx.strings.resolve_local(name, &rcx.ctx.source);
+        if rcx.decls.get(text).is_none() {
             return Err(ResolveError::new(
                 ResolveErrorKind::UnknownIdentifier(text.to_string()),
                 arena.span(id),
@@ -336,11 +325,11 @@ fn resolve_expr(
     // Alias target: a bare identifier becomes a named-alias rule reference,
     // even if undeclared (mirrors grammar.js `alias($.x, $.undeclared)`).
     if let &Node::Alias { content, target } = arena.get(id) {
-        resolve_expr(arena, pools, ctx, strings, decls, modules, content)?;
+        resolve_expr(arena, rcx, content)?;
         if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
             arena.resolve_as(target, IdentKind::Rule);
         } else {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, target)?;
+            resolve_expr(arena, rcx, target)?;
         }
         return Ok(());
     }
@@ -348,43 +337,35 @@ fn resolve_expr(
     // For-loop bindings are resolved by the parser (ForBinding nodes).
     // Just recurse into iterable and body.
     if let &Node::For { for_id, body } = arena.get(id) {
-        let iterable = pools.get_for(for_id).iterable;
-        resolve_expr(arena, pools, ctx, strings, decls, modules, iterable)?;
-        return resolve_expr(arena, pools, ctx, strings, decls, modules, body);
+        let iterable = rcx.pools.get_for(for_id).iterable;
+        resolve_expr(arena, rcx, iterable)?;
+        return resolve_expr(arena, rcx, body);
     }
 
-    resolve_children(arena, pools, ctx, strings, decls, modules, id)
+    resolve_children(arena, rcx, id)
 }
 
 /// Resolve identifiers in children of a node (mechanical traversal).
-fn resolve_children(
-    arena: &mut NodeArena,
-    pools: &AstPools,
-    ctx: &ModuleContext,
-    strings: &StringPool,
-    decls: &Decls,
-    modules: &[Module],
-    id: NodeId,
-) -> ResolveResult<()> {
+fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
-        for child in pools.child_slice(range) {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, *child)?;
+        for child in rcx.pools.child_slice(range) {
+            resolve_expr(arena, rcx, *child)?;
         }
         return Ok(());
     }
 
     match arena.get(id) {
         &Node::Call { name, args } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, name)?;
-            for arg in pools.child_slice(args) {
-                resolve_expr(arena, pools, ctx, strings, decls, modules, *arg)?;
+            resolve_expr(arena, rcx, name)?;
+            for arg in rcx.pools.child_slice(args) {
+                resolve_expr(arena, rcx, *arg)?;
             }
             Ok(())
         }
         Node::Object(range) => {
-            for field in pools.get_object(*range) {
-                resolve_expr(arena, pools, ctx, strings, decls, modules, field.1)?;
+            for field in rcx.pools.get_object(*range) {
+                resolve_expr(arena, rcx, field.1)?;
             }
             Ok(())
         }
@@ -393,9 +374,7 @@ fn resolve_children(
         | Node::Neg(c)
         | Node::GrammarConfig { module: c, .. }
         | Node::Field { content: c, .. }
-        | Node::Reserved { content: c, .. } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, *c)
-        }
+        | Node::Reserved { content: c, .. } => resolve_expr(arena, rcx, *c),
         &Node::Append { left: a, right: b }
         | &Node::BinOp { lhs: a, rhs: b, .. }
         | &Node::Prec {
@@ -403,38 +382,36 @@ fn resolve_children(
             content: b,
             ..
         } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, a)?;
-            resolve_expr(arena, pools, ctx, strings, decls, modules, b)
+            resolve_expr(arena, rcx, a)?;
+            resolve_expr(arena, rcx, b)
         }
         &Node::DynRegex { pattern, flags } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, pattern)?;
+            resolve_expr(arena, rcx, pattern)?;
             if let Some(flags) = flags {
-                resolve_expr(arena, pools, ctx, strings, decls, modules, flags)?;
+                resolve_expr(arena, rcx, flags)?;
             }
             Ok(())
         }
-        &Node::FieldAccess { obj, .. } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, obj)
-        }
+        &Node::FieldAccess { obj, .. } => resolve_expr(arena, rcx, obj),
         &Node::QualifiedAccess { obj, member } => {
-            resolve_expr(arena, pools, ctx, strings, decls, modules, obj)?;
+            resolve_expr(arena, rcx, obj)?;
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
-                let member_name = ctx.text(member);
-                resolve_qualified_member(arena, pools, &modules[idx], id, member_name, member)?;
+                let member_name = rcx.ctx.text(member);
+                resolve_qualified_member(arena, rcx.pools, &rcx.modules[idx], id, member_name, member)?;
             }
             Ok(())
         }
         Node::QualifiedCall(range) => {
-            let (obj, name, args) = pools.get_qualified_call(*range);
-            resolve_expr(arena, pools, ctx, strings, decls, modules, obj)?;
+            let (obj, name, args) = rcx.pools.get_qualified_call(*range);
+            resolve_expr(arena, rcx, obj)?;
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
-                let macro_name = ctx.text(arena.span(name));
-                resolve_qualified_call_name(arena, pools, &modules[idx], name, macro_name);
+                let macro_name = rcx.ctx.text(arena.span(name));
+                resolve_qualified_call_name(arena, rcx.pools, &rcx.modules[idx], name, macro_name);
             }
             for &arg in args {
-                resolve_expr(arena, pools, ctx, strings, decls, modules, arg)?;
+                resolve_expr(arena, rcx, arg)?;
             }
             Ok(())
         }
