@@ -313,17 +313,6 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    /// Set of types this constraint accepts. Returns a static slice so callers
-    /// can iterate, print, or check compatibility without allocating.
-    #[must_use]
-    pub const fn accepted_types(self) -> &'static [Ty] {
-        match self {
-            Self::RuleLike => &[Ty::STR, Ty::RULE],
-            Self::IntOrStr => &[Ty::INT, Ty::STR],
-            _ => &[],
-        }
-    }
-
     /// True if `ty` satisfies this constraint via [`Ty::is_compatible`]
     /// (or strict equality, for [`Self::Strict`]).
     #[must_use]
@@ -333,9 +322,8 @@ impl Constraint {
             Self::Exact(t) => ty.is_compatible(t),
             Self::Strict(t) => ty == t,
             Self::AnyObject => ty.is_object(),
-            Self::RuleLike | Self::IntOrStr => {
-                self.accepted_types().iter().any(|&t| ty.is_compatible(t))
-            }
+            Self::RuleLike => ty.is_rule_like(),
+            Self::IntOrStr => ty.is_compatible(Ty::INT) || ty.is_compatible(Ty::STR),
         }
     }
 
@@ -368,17 +356,8 @@ impl std::fmt::Display for Constraint {
             Self::None => f.write_str("any value"),
             Self::Exact(ty) | Self::Strict(ty) => ty.fmt(f),
             Self::AnyObject => f.write_str("an object"),
-            Self::RuleLike | Self::IntOrStr => {
-                let tys = self.accepted_types();
-                let last = tys.len().saturating_sub(1);
-                for (i, ty) in tys.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(if i == last { " or " } else { ", " })?;
-                    }
-                    ty.fmt(f)?;
-                }
-                Ok(())
-            }
+            Self::RuleLike => f.write_str("str_t or rule_t"),
+            Self::IntOrStr => f.write_str("int_t or str_t"),
         }
     }
 }
