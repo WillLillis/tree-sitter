@@ -13,7 +13,10 @@ use super::{
         MacroKind, ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
     },
     lexer::{Token, TokenKind},
-    typecheck::{DataTy, Ty},
+    typecheck::{
+        DataTy, ScalarTy, Ty,
+        types::{TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig},
+    },
 };
 
 const MAX_PARSE_DEPTH: u16 = 192;
@@ -590,6 +593,42 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     })?;
                     let gt = self.expect(TokenKind::Gt)?;
                     Ok((ty, id_span.merge(gt)))
+                }
+                "tuple_t" => {
+                    self.expect(TokenKind::Lt)?;
+                    // Comma-separated scalar element types. `list_t<tuple_t<...>>`
+                    // and `obj_t<tuple_t<...>>` fall out of the existing list/obj
+                    // recursion. Arity is bounded, so collect into a fixed
+                    // buffer; keep counting past it so an over-long tuple still
+                    // reports its real length.
+                    let mut scalars = [ScalarTy::Rule; TUPLE_MAX_ARITY];
+                    let mut n = 0usize;
+                    loop {
+                        let (inner_ty, inner_span) = self.parse_type()?;
+                        let Ty::Data(DataTy::Scalar(s)) = inner_ty else {
+                            return Err(ParseError::new(
+                                ParseErrorKind::TupleElementType(inner_ty),
+                                inner_span,
+                            ));
+                        };
+                        if let Some(slot) = scalars.get_mut(n) {
+                            *slot = s;
+                        }
+                        n += 1;
+                        if self.eat(TokenKind::Comma).is_none() {
+                            break;
+                        }
+                    }
+                    let gt = self.expect(TokenKind::Gt)?;
+                    let span = id_span.merge(gt);
+                    // `get(..n)` is None when `n` overran the buffer (too many
+                    // elements); `TupleSig::new` rejects too few. Either way the
+                    // real count `n` is reported.
+                    let sig = scalars
+                        .get(..n)
+                        .and_then(|elems| TupleSig::new(elems).ok())
+                        .ok_or_else(|| ParseError::new(ParseErrorKind::TupleArity(n), span))?;
+                    Ok((Ty::Data(DataTy::Tuple(sig)), span))
                 }
                 "obj_t" => {
                     self.expect(TokenKind::Lt)?;
@@ -1215,6 +1254,14 @@ pub enum ParseErrorKind {
     ListInnerType(Ty),
     #[error("{0} cannot be stored inside an object")]
     ObjectInnerType(Ty),
+    #[error("tuple elements must be rule_t, str_t, or int_t, got {0}")]
+    TupleElementType(Ty),
+    #[error(
+        "a tuple type needs {min} to {max} element types (there is no grouping operator), got {0}",
+        min = TUPLE_MIN_ARITY,
+        max = TUPLE_MAX_ARITY
+    )]
+    TupleArity(usize),
     #[error("unknown grammar field '{0}'")]
     UnknownGrammarField(String),
     #[error("duplicate grammar field '{0}'")]

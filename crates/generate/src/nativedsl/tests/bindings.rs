@@ -342,7 +342,7 @@ fn for_tuple_destructure() {
 #[test]
 fn for_named_list_of_tuples() {
     // Tier-1 tuples: a list of tuples bound to a let (type inferred as
-    // list_t<tuple<str_t, int_t>>), then destructured by a multi-binding
+    // list_t<tuple_t<str_t, int_t>>), then destructured by a multi-binding
     // for-loop. Before tier-1 the table had to be written inline in the loop.
     let g = dsl(r#"grammar { language: "test" }
         let ops = [("+", 1), ("*", 2)]
@@ -373,6 +373,52 @@ fn for_named_list_of_tuples() {
             ),
         ])
     );
+}
+
+#[test]
+fn tuple_annotations_check_against_values() {
+    // Explicit `tuple_t<...>` and `list_t<tuple_t<...>>` annotations parse and
+    // check against their values; the list mixes a tuple-typed variable with a
+    // literal tuple, then destructures in a for-loop.
+    let g = dsl(r#"grammar { language: "test" }
+        let plus: tuple_t<str_t, int_t> = ("+", 1)
+        let ops: list_t<tuple_t<str_t, int_t>> = [plus, ("*", 2)]
+        rule binary {
+            choice(for (op: str_t, p: int_t) in ops {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::prec_left(
+                Precedence::Integer(1),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("+".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+            Rule::prec_left(
+                Precedence::Integer(2),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("*".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+        ])
+    );
+}
+
+#[test]
+fn tuple_in_object_annotation_checks() {
+    // obj_t<tuple_t<...>> parses and checks: objects hold tuples, preserving the
+    // InnerTy == DataTy - Object invariant.
+    dsl(r#"grammar { language: "test" }
+        let m: obj_t<tuple_t<str_t, int_t>> = { plus: ("+", 1) }
+        rule program { "x" }"#);
 }
 
 #[test]
