@@ -398,7 +398,14 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let member_name = rcx.ctx.text(member);
-                resolve_qualified_member(arena, &rcx.modules[idx], idx as ModuleId, id, member_name, member)?;
+                resolve_qualified_member(
+                    arena,
+                    &rcx.modules[idx],
+                    idx as ModuleId,
+                    id,
+                    member_name,
+                    member,
+                )?;
             }
             Ok(())
         }
