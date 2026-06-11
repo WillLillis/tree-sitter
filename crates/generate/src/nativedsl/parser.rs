@@ -279,8 +279,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
         match &self.current().kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
-            TokenKind::KwRule => self.parse_rule_def(false),
-            TokenKind::KwOverride => self.parse_rule_def(true),
+            TokenKind::KwRule => self.parse_rule_def(false, false),
+            TokenKind::KwOverride => self.parse_rule_def(true, false),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwRules => self.parse_rule_set_def(),
@@ -411,7 +411,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
     }
 
-    fn parse_rule_def(&mut self, is_override: bool) -> ParseResult<NodeId> {
+    fn parse_rule_def(&mut self, is_override: bool, in_rule_set: bool) -> ParseResult<NodeId> {
         let start = if is_override {
             let s = self.expect(TokenKind::KwOverride)?;
             self.expect(TokenKind::KwRule)?;
@@ -421,6 +421,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         };
         // `rule @<expr> { ... }` - computed name; consumed by expand.
         if self.eat(TokenKind::At).is_some() {
+            if !in_rule_set {
+                Err(self.error(ParseErrorKind::ComputedRuleTopLevel))?;
+            }
             let name_expr = self.parse_postfix()?;
             self.expect(TokenKind::LBrace)?;
             let body = self.parse_expr()?;
@@ -556,8 +559,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 break;
             }
             let id = match self.current().kind {
-                TokenKind::KwRule => self.parse_rule_def(false)?,
-                TokenKind::KwOverride => self.parse_rule_def(true)?,
+                TokenKind::KwRule => self.parse_rule_def(false, true)?,
+                TokenKind::KwOverride => self.parse_rule_def(true, true)?,
                 _ => return Err(self.error(ParseErrorKind::RuleSetBodyRequiresRuleDecl)),
             };
             decls.push(id);
@@ -1300,6 +1303,8 @@ pub enum ParseErrorKind {
     CfgOnGrammarBlock,
     #[error("rule-set macro body may only contain rule declarations")]
     RuleSetBodyRequiresRuleDecl,
+    #[error("computed-rule names are only valid inside a `rules` macro body")]
+    ComputedRuleTopLevel,
     #[error("rule-set macro body must declare at least one rule")]
     EmptyRuleSetMacroBody,
     #[error("qualified calls to rule-set macros are not supported")]

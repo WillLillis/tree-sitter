@@ -119,7 +119,10 @@ impl TupleSig {
     #[must_use]
     pub fn widens_to(self, target: Self) -> bool {
         self.arity() == target.arity()
-            && self.elems().zip(target.elems()).all(|(a, b)| a.widens_to(b))
+            && self
+                .elems()
+                .zip(target.elems())
+                .all(|(a, b)| a.widens_to(b))
     }
 }
 
@@ -146,10 +149,7 @@ impl ScalarTy {
     /// `str_t` widens to `rule_t`; otherwise equality.
     #[must_use]
     const fn widens_to(self, target: Self) -> bool {
-        matches!(
-            (self, target),
-            (Self::Str, Self::Rule)
-        ) || (self as u8 == target as u8)
+        matches!((self, target), (Self::Str, Self::Rule)) || (self as u8 == target as u8)
     }
 }
 
@@ -205,8 +205,9 @@ impl Ty {
     pub const INT: Self = Self::Data(DataTy::Scalar(ScalarTy::Int));
     pub const LIST_RULE: Self = Self::Data(DataTy::List(ElemTy::Scalar(ScalarTy::Rule)));
     pub const LIST_LIST_RULE: Self = Self::Data(DataTy::ListList(ElemTy::Scalar(ScalarTy::Rule)));
-    pub const OBJ_LIST_RULE: Self =
-        Self::Data(DataTy::Object(InnerTy::List(ElemTy::Scalar(ScalarTy::Rule))));
+    pub const OBJ_LIST_RULE: Self = Self::Data(DataTy::Object(InnerTy::List(ElemTy::Scalar(
+        ScalarTy::Rule,
+    ))));
     pub const ANY_MODULE: Self = Self::Module(ModuleTy::Any);
 
     /// True for `rule_t` or `str_t` (str widens to rule).

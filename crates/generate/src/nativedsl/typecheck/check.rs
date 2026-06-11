@@ -1,3 +1,6 @@
+use crate::nativedsl::typecheck::types::{
+    ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError,
+};
 use crate::nativedsl::{
     ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
     ast::{
@@ -7,9 +10,6 @@ use crate::nativedsl::{
     resolve::resolve_module_ref,
     suggest::suggest_name,
     typecheck::{Constraint, TypeEnv, TypeResult},
-};
-use crate::nativedsl::typecheck::types::{
-    ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError,
 };
 
 /// Function pointer type for element checkers passed to `expect_list`.

@@ -119,11 +119,15 @@ error_tests! { Parse {
         },
         ParseErrorKind::NestingTooDeep
     }
+    error_computed_rule_at_top_level {
+        r#"grammar { language: "test" } rule @r { "x" }"#,
+        ParseErrorKind::ComputedRuleTopLevel
+    }
     error_nesting_too_deep_computed_rule_name {
         // `rule @<expr> { ... }` enters parse_postfix directly for the name.
         &{
             let deep = "-".repeat(300);
-            format!("grammar {{ language: \"test\" }} rule @{deep}name {{ \"x\" }}")
+            format!("grammar {{ language: \"test\" }} rules deep() {{ rule @{deep}name {{ \"x\" }} }}")
         },
         ParseErrorKind::NestingTooDeep
     }
