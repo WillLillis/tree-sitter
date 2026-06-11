@@ -37,6 +37,18 @@ error_tests! { Parse {
         r#"grammar { language: "test" } let x: list_t<list_t<list_t<rule_t>>> = [] rule program { "x" }"#,
         ParseErrorKind::ListInnerType(Ty::LIST_LIST_RULE)
     }
+    error_tuple_annotation_arity_too_small {
+        r#"grammar { language: "test" } let x: tuple_t<rule_t> = "y" rule program { "x" }"#,
+        ParseErrorKind::TupleArity(1)
+    }
+    error_tuple_annotation_arity_too_large {
+        r#"grammar { language: "test" } let x: tuple_t<rule_t, rule_t, rule_t, rule_t, rule_t> = "y" rule program { "x" }"#,
+        ParseErrorKind::TupleArity(5)
+    }
+    error_tuple_annotation_element_not_scalar {
+        r#"grammar { language: "test" } let x: tuple_t<list_t<rule_t>, rule_t> = "y" rule program { "x" }"#,
+        ParseErrorKind::TupleElementType(Ty::LIST_RULE)
+    }
     error_missing_return_type {
         r#"grammar { language: "test" } macro f(x: rule_t) = x rule program { "x" }"#,
         ParseErrorKind::ExpectedType
