@@ -98,6 +98,10 @@ pub enum TypeErrorKind {
     GrammarConfigRequiresInherit,
     #[error("{}", non_bindable_message(*.0))]
     NonBindableType(Ty),
+    #[error(
+        "a for-loop cannot be used here; for-loops are expanded inline and may only appear inside a sequence, choice, or list"
+    )]
+    BoundForLoop,
     #[error("imported module has no macro '{0}'")]
     ImportMacroNotFound(String),
     #[error("'{0}' is a macro, not a value; call it with {0}(...)")]
@@ -108,9 +112,6 @@ pub enum TypeErrorKind {
 
 const fn non_bindable_message(ty: Ty) -> &'static str {
     match ty {
-        Ty::Spread => {
-            "cannot bind a for-loop expansion to a variable: for-loops are expanded inline"
-        }
         Ty::Tuple => {
             "tuples can only appear as elements of a for-loop iterable, not as standalone values"
         }

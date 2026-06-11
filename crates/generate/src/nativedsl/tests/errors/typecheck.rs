@@ -121,7 +121,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let foo = for (k: str_t) in ["a", "b"] { k }
         rule program { seq(foo) }"#,
-        TypeErrorKind::NonBindableType(Ty::Spread)
+        TypeErrorKind::BoundForLoop
     }
     error_let_rhs_tuple_rejected {
         r#"grammar { language: "test" }

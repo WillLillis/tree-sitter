@@ -388,10 +388,14 @@ fn type_of(
             Ok(Ty::RULE)
         }
         Node::For { for_id, body } => {
+            // A for-loop in value position is invalid. Validate its internals
+            // first (so loop errors surface), then report the position error:
+            // for-loops are spliced inline and only appear in seq/choice/list,
+            // where `check_spread_item` intercepts them before this arm.
             check_for_expr(shared, ctx, *for_id, *body, env, |body, env| {
                 expect_rule(shared, ctx, body, env).map(|()| Ty::RULE)
             })?;
-            Ok(Ty::Spread)
+            Err(TypeError::new(TypeErrorKind::BoundForLoop, span))
         }
         Node::Call { name, args } => type_of_call(shared, ctx, *name, *args, span, env),
         Node::QualifiedCall(range) => type_of_qualified_call(shared, ctx, *range, span, env),
