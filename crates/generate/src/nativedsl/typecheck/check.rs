@@ -8,6 +8,9 @@ use crate::nativedsl::{
     suggest::suggest_name,
     typecheck::{Constraint, TypeEnv, TypeResult},
 };
+use crate::nativedsl::typecheck::types::{
+    ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError,
+};
 
 /// Function pointer type for element checkers passed to `expect_list`.
 type CheckFn = fn(&SharedAst, &ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
@@ -57,12 +60,6 @@ pub(super) fn check_item(
         Node::Let { ty, value, .. } => {
             let constraint = ty.map_or(Constraint::None, Constraint::Exact);
             let inferred = type_of(shared, ctx, *value, env, constraint)?;
-            if !inferred.is_bindable() {
-                return Err(TypeError::new(
-                    TypeErrorKind::NonBindableType(inferred),
-                    shared.arena.span(*value),
-                ));
-            }
             if let Node::Object(range) = shared.arena.get(*value) {
                 let fields: Vec<String> = shared
                     .pools
@@ -316,13 +313,7 @@ fn type_of(
         }
         Node::Object(range) => type_of_object(shared, ctx, *range, span, env, expected),
         Node::List(range) => type_of_list(shared, ctx, *range, span, env, expected),
-        // Tuples are only first-class as direct elements of a for-loop
-        // iterable's literal list (handled in check_for_expr without going
-        // through type_of). Anywhere else, returning Ty::Tuple lets the
-        // surrounding context surface the appropriate error: a let binding
-        // produces NonBindableType, a containing list produces InvalidListElement,
-        // a rule body produces TypeMismatch.
-        Node::Tuple(_) => Ok(Ty::Tuple),
+        Node::Tuple(range) => type_of_tuple(shared, ctx, *range, span, env),
         Node::Concat(range) => {
             for &part in shared.pools.child_slice(*range) {
                 type_of(shared, ctx, part, env, Constraint::Exact(Ty::STR))?;
@@ -687,6 +678,46 @@ where
     }
 }
 
+/// Type a tuple literal `(a, b, ...)`. Elements must be scalars and arity must
+/// fall in `TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY`. Arity is checked first so the
+/// common grouping mistake `(expr)` (a would-be 1-tuple) gets the teaching
+/// error rather than an element error.
+fn type_of_tuple(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    range: ChildRange,
+    span: Span,
+    env: &mut TypeEnv,
+) -> TypeResult<Ty> {
+    let items = shared.pools.child_slice(range);
+    let n = items.len();
+    if !(TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY).contains(&n) {
+        return Err(TypeError::new(TypeErrorKind::TupleArityInvalid(n), span));
+    }
+    // `n` is in range, so this fixed buffer holds every element and the build
+    // below cannot fail on arity.
+    let mut scalars = [ScalarTy::Rule; TUPLE_MAX_ARITY];
+    for (slot, &item_id) in scalars.iter_mut().zip(items) {
+        let ty = type_of(shared, ctx, item_id, env, Constraint::None)?;
+        let Ty::Data(DataTy::Scalar(s)) = ty else {
+            return Err(TypeError::new(
+                TypeErrorKind::TupleElementNotScalar(ty),
+                shared.arena.span(item_id),
+            ));
+        };
+        *slot = s;
+    }
+    let sig = TupleSig::new(&scalars[..n]).map_err(|e| match e {
+        TupleSigError::Arity(bad) => TypeError::new(TypeErrorKind::TupleArityInvalid(bad), span),
+    })?;
+    Ok(Ty::Data(DataTy::Tuple(sig)))
+}
+
+/// Type-check a for-loop's iterable against its bindings. Every iterable source
+/// - named list, `append`, macro arg, or non-empty literal - types to a
+/// concrete list whose element is matched against the bindings uniformly: a
+/// single binding takes the element directly; two or more destructure a tuple
+/// element-wise.
 fn check_for_expr<CheckBody>(
     shared: &SharedAst,
     ctx: &ModuleContext,
@@ -699,69 +730,69 @@ where
     CheckBody: FnOnce(NodeId, &mut TypeEnv) -> TypeResult<Ty>,
 {
     let config = shared.pools.get_for(for_idx);
+    let bindings = &config.bindings;
+    let iterable = config.iterable;
 
-    // Check if iterable is a literal list of tuples (for destructuring)
-    if let Node::List(range) = shared.arena.get(config.iterable) {
-        let items = shared.pools.child_slice(*range);
-        // Empty literal iterable: there's nothing to type against the bindings,
-        // and the surrounding list/seq/choice gets zero elements at lower
-        // time. The binding annotations make the element type explicit, so
-        // we don't need to infer anything from the iterable.
-        if items.is_empty() {
-            return check_body(body, env);
-        }
-        let has_tuples = items
-            .first()
-            .is_some_and(|&id| matches!(shared.arena.get(id), Node::Tuple(_)));
-        if has_tuples {
-            for &item_id in items {
-                let Node::Tuple(range) = shared.arena.get(item_id) else {
-                    return Err(TypeError::new(
-                        TypeErrorKind::ForRequiresTuples,
-                        shared.arena.span(item_id),
-                    ));
-                };
-                let elems = shared.pools.child_slice(*range);
-                if elems.len() != config.bindings.len() {
-                    return Err(TypeError::new(
-                        TypeErrorKind::ForBindingCountMismatch {
-                            bindings: config.bindings.len(),
-                            tuple_elements: elems.len(),
-                        },
-                        shared.arena.span(item_id),
-                    ));
-                }
-                for (index, param) in config.bindings.iter().enumerate() {
-                    type_of(shared, ctx, elems[index], env, Constraint::Exact(param.ty))?;
-                }
+    // Two-or-more bindings destructure a tuple, whose components are scalars.
+    // Validate the binding annotations up front so a non-scalar binding points
+    // at the binding itself, independent of the iterable (including empty ones).
+    if bindings.len() >= 2 {
+        for param in bindings {
+            if !matches!(param.ty, Ty::Data(DataTy::Scalar(_))) {
+                return Err(TypeError::new(
+                    TypeErrorKind::TupleElementNotScalar(param.ty),
+                    param.name,
+                ));
             }
-            return check_body(body, env);
         }
     }
 
-    // Single binding over a flat list
-    if config.bindings.len() != 1 {
-        return Err(TypeError::new(
-            TypeErrorKind::ForRequiresTuples,
-            shared.arena.span(config.iterable),
-        ));
+    // Empty literal iterable: no elements to match against the bindings. The
+    // binding annotations define the element type and lowering iterates zero
+    // times, so nothing more is checked here.
+    if let Node::List(range) = shared.arena.get(iterable)
+        && shared.pools.child_slice(*range).is_empty()
+    {
+        return check_body(body, env);
     }
-    let Param {
-        name,
-        ty: declared_ty,
-    } = config.bindings[0];
-    // Bespoke checks below distinguish "not a list" (ForRequiresList) from
-    // "wrong element type" (TypeMismatch); auto-enforcing a list constraint
-    // here would conflate them.
-    let iter_ty = type_of(shared, ctx, config.iterable, env, Constraint::None)?;
+
+    // Constraint::None (not an auto-enforced list constraint) so a non-list
+    // iterable surfaces as ForRequiresList rather than a generic mismatch.
+    let iter_ty = type_of(shared, ctx, iterable, env, Constraint::None)?;
     let Some(elem_ty) = iter_ty.list_elem() else {
         return Err(TypeError::new(
             TypeErrorKind::ForRequiresList(iter_ty),
-            shared.arena.span(config.iterable),
+            shared.arena.span(iterable),
         ));
     };
-    if !elem_ty.is_compatible(declared_ty) {
-        return Err(mismatch(declared_ty, elem_ty, name));
+
+    if bindings.len() == 1 {
+        let Param { name, ty: declared } = bindings[0];
+        if !elem_ty.is_compatible(declared) {
+            return Err(mismatch(declared, elem_ty, name));
+        }
+    } else {
+        let Ty::Data(DataTy::Tuple(sig)) = elem_ty else {
+            return Err(TypeError::new(
+                TypeErrorKind::ForRequiresTuples,
+                shared.arena.span(iterable),
+            ));
+        };
+        if sig.arity() != bindings.len() {
+            return Err(TypeError::new(
+                TypeErrorKind::ForBindingCountMismatch {
+                    bindings: bindings.len(),
+                    tuple_elements: sig.arity(),
+                },
+                shared.arena.span(iterable),
+            ));
+        }
+        for (i, param) in bindings.iter().enumerate() {
+            let elem_scalar = Ty::Data(DataTy::Scalar(sig.elem(i)));
+            if !elem_scalar.is_compatible(param.ty) {
+                return Err(mismatch(param.ty, elem_scalar, param.name));
+            }
+        }
     }
     check_body(body, env)
 }

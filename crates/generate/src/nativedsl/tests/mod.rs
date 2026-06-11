@@ -5,9 +5,9 @@ use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 
 use super::{
-    Constraint, ContainerKind, DataTy, DisallowedItemKind, DslError, ExpandErrorKind, InnerTy,
-    LexErrorKind, LowerErrorKind, NativeDslError, NoteMessage, ParseErrorKind, ResolveErrorKind,
-    ScalarTy, Span, Ty, TypeErrorKind, parse_native_dsl,
+    Constraint, ContainerKind, DataTy, DisallowedItemKind, DslError, ElemTy, ExpandErrorKind,
+    InnerTy, LexErrorKind, LowerErrorKind, NativeDslError, NoteMessage, ParseErrorKind,
+    ResolveErrorKind, ScalarTy, Span, TupleSig, Ty, TypeErrorKind, parse_native_dsl,
 };
 
 /// Generate tests that parse a grammar and assert on the first variable's rule.
