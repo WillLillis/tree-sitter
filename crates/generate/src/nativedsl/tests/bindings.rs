@@ -339,6 +339,23 @@ fn for_tuple_destructure() {
     );
 }
 
+/// The lowered `choice` of two `prec_left` binary rules for the `("+", 1)` /
+/// `("*", 2)` precedence table - the expected output shared by the tier-1
+/// tuple tests, which differ only in how that table reaches the for-loop.
+fn plus_times_choice() -> Rule {
+    let binop = |op: &str, p: i32| {
+        Rule::prec_left(
+            Precedence::Integer(p),
+            Rule::seq(vec![
+                Rule::NamedSymbol("expr".into()),
+                Rule::String(op.into()),
+                Rule::NamedSymbol("expr".into()),
+            ]),
+        )
+    };
+    Rule::choice(vec![binop("+", 1), binop("*", 2)])
+}
+
 #[test]
 fn for_named_list_of_tuples() {
     // Tier-1 tuples: a list of tuples bound to a let (type inferred as
@@ -352,27 +369,7 @@ fn for_named_list_of_tuples() {
             })
         }
         rule expr { "x" }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::prec_left(
-                Precedence::Integer(1),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-            Rule::prec_left(
-                Precedence::Integer(2),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("*".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-        ])
-    );
+    assert_eq!(g.variables[0].rule, plus_times_choice());
 }
 
 #[test]
@@ -389,27 +386,7 @@ fn tuple_annotations_check_against_values() {
             })
         }
         rule expr { "x" }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::prec_left(
-                Precedence::Integer(1),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-            Rule::prec_left(
-                Precedence::Integer(2),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("*".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-        ])
-    );
+    assert_eq!(g.variables[0].rule, plus_times_choice());
 }
 
 #[test]
@@ -435,26 +412,51 @@ fn tuple_value_bound_to_let() {
             })
         }
         rule expr { "x" }"#);
+    assert_eq!(g.variables[0].rule, plus_times_choice());
+}
+
+#[test]
+fn macro_with_tuple_table_param() {
+    // A macro whose parameter is a list-of-tuples, iterated and destructured in
+    // the body; the call passes a literal table.
+    let g = dsl(r#"grammar { language: "test" }
+        macro binops(ops: list_t<tuple_t<str_t, int_t>>) rule_t {
+            choice(for (op: str_t, p: int_t) in ops {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule binary { binops([("+", 1), ("*", 2)]) }
+        rule expr { "x" }"#);
+    assert_eq!(g.variables[0].rule, plus_times_choice());
+}
+
+#[test]
+fn for_over_appended_tuple_lists() {
+    // append() of two tuple lists is itself a list-of-tuples; the for-loop
+    // types and destructures the appended result with no special-casing.
+    let g = dsl(r#"grammar { language: "test" }
+        let a = [("+", 1)]
+        let b = [("*", 2)]
+        rule binary {
+            choice(for (op: str_t, p: int_t) in append(a, b) {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#);
+    assert_eq!(g.variables[0].rule, plus_times_choice());
+}
+
+#[test]
+fn for_multi_binding_empty_literal() {
+    // A multi-binding for over an empty literal contributes zero iterations;
+    // the binding annotations stand alone with no iterable type to infer.
+    let g = dsl(r#"grammar { language: "test" }
+        rule program {
+            choice("fallback", for (op: str_t, p: int_t) in [] { prec(p, op) })
+        }"#);
     assert_eq!(
         g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::prec_left(
-                Precedence::Integer(1),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-            Rule::prec_left(
-                Precedence::Integer(2),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("*".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-        ])
+        Rule::choice(vec![Rule::String("fallback".into())])
     );
 }
 

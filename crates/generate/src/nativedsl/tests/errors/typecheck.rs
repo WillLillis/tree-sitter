@@ -149,6 +149,22 @@ error_tests! { Type {
             got: Ty::Data(DataTy::Tuple(TupleSig::new(&[ScalarTy::Str, ScalarTy::Str]).unwrap())),
         }
     }
+    error_for_multi_binding_non_scalar {
+        r#"grammar { language: "test" }
+        rule bad { choice(for (a: list_t<rule_t>, b: rule_t) in [] { b }) }"#,
+        TypeErrorKind::TupleElementNotScalar(Ty::LIST_RULE)
+    }
+    error_tuple_rows_differing_arity {
+        r#"grammar { language: "test" }
+        let xs = [("a", 1), ("b", 2, 3)]
+        rule program { "x" }"#,
+        TypeErrorKind::ListElementTypeMismatch {
+            first: Ty::Data(DataTy::Tuple(TupleSig::new(&[ScalarTy::Str, ScalarTy::Int]).unwrap())),
+            got: Ty::Data(DataTy::Tuple(
+                TupleSig::new(&[ScalarTy::Str, ScalarTy::Int, ScalarTy::Int]).unwrap(),
+            )),
+        }
+    }
     error_conflicts_rejects_non_name {
         r#"grammar {
             language: "test",
