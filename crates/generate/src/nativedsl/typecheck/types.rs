@@ -6,13 +6,6 @@ use serde::{Deserialize, Serialize};
 pub enum Ty {
     Data(DataTy),
     Module(ModuleTy),
-    /// Result of a for-loop in expression position. The for-loop's iterations
-    /// are spliced into the surrounding seq/choice (which accepts Spread and
-    /// applies its own per-element check, currently `expect_rule`). Other
-    /// container paths (list literals, `expect_list`) bypass Spread by calling
-    /// `check_for_expr` directly and using the body's actual type. Not a
-    /// first-class value: can't be bound, returned, or stored.
-    Spread,
     /// Syntactic tuple. Only valid as a direct element of a for-loop
     /// iterable's literal list. Not a value, can't be bound or returned.
     Tuple,
@@ -407,7 +400,6 @@ impl std::fmt::Display for Ty {
         match self {
             Self::Data(d) => d.fmt(f),
             Self::Module(_) => f.write_str("module_t"),
-            Self::Spread => f.write_str("spread_t"),
             Self::Tuple => f.write_str("tuple"),
         }
     }
