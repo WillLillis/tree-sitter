@@ -18,26 +18,39 @@ pub enum Ty {
     Tuple,
 }
 
-/// First-class data values: things that can be bound to a let, returned from
-/// a macro, passed as an argument, or stored in a list/object.
+/// First-class data values: a leaf ([`ElemTy`]) nested in lists to depth <=2,
+/// optionally wrapped once in an object. Things that can be bound to a let,
+/// returned from a macro, passed as an argument, or stored in a list/object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataTy {
     Scalar(ScalarTy),
-    /// `list_t<X>` for `X` in `{Rule, Str, Int}`.
-    List(ScalarTy),
+    /// `tuple<a, b>`: a fixed-arity bundle of scalars. A leaf, like `Scalar`.
+    Tuple(TupleSig),
+    /// `list_t<X>` for leaf `X` (scalar or tuple).
+    List(ElemTy),
     /// `list_t<list_t<X>>`. Triple nesting is rejected at parse time.
-    ListList(ScalarTy),
+    ListList(ElemTy),
     /// `obj_t<X>`. The inner type is structurally non-Object, so
     /// `obj_t<obj_t<X>>` is impossible.
     Object(InnerTy),
 }
 
-/// Atomic data types: `rule_t`, `str_t`, `int_t`.
+/// Atomic data types: `rule_t`, `str_t`, `int_t`. Discriminants are packed into
+/// [`TupleSig`], so the values are fixed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
 pub enum ScalarTy {
-    Rule,
-    Str,
-    Int,
+    Rule = 0,
+    Str = 1,
+    Int = 2,
+}
+
+/// A list element / leaf: a scalar or a tuple of scalars. Lists nest this to
+/// depth <=2 (`list_t<X>`, `list_t<list_t<X>>`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ElemTy {
+    Scalar(ScalarTy),
+    Tuple(TupleSig),
 }
 
 /// Element types allowed inside `obj_t<...>`. Mirrors [`DataTy`] minus the
@@ -45,8 +58,138 @@ pub enum ScalarTy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InnerTy {
     Scalar(ScalarTy),
-    List(ScalarTy),
-    ListList(ScalarTy),
+    Tuple(TupleSig),
+    List(ElemTy),
+    ListList(ElemTy),
+}
+
+/// Smallest and largest tuple arity. `(a)`/`()` are not tuples (no grouping
+/// operator exists). The upper bound is forced by the packed signature being a
+/// single byte: `Ty` is embedded in `Node` (`ForBinding`/`MacroParam` stamp the
+/// type), and `Node` is pinned at 16 bytes, so `TupleSig` must stay tiny. Four
+/// is ample - the largest real table is `(op, prec, assoc)`.
+pub const TUPLE_MIN_ARITY: usize = 2;
+pub const TUPLE_MAX_ARITY: usize = 4;
+
+/// Packed tuple signature in one byte: four 2-bit slots, element `i` at bits
+/// `2*i`. Each slot is a [`ScalarTy`] discriminant (0/1/2) or `0b11` = absent.
+/// Present elements occupy a contiguous prefix, so arity is the first absent
+/// slot. Self-contained and `Copy` so equality and `Display` need no side table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TupleSig(u8);
+
+const TUPLE_SLOT_ABSENT: u8 = 0b11;
+
+/// Why a sequence of element types can't form a tuple signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TupleSigError {
+    /// Arity outside `TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY`.
+    Arity(usize),
+}
+
+impl TupleSig {
+    /// Build from element scalars. `Err` if the arity is outside 2..=4.
+    pub fn new(elems: &[ScalarTy]) -> Result<Self, TupleSigError> {
+        let n = elems.len();
+        if !(TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY).contains(&n) {
+            return Err(TupleSigError::Arity(n));
+        }
+        // All slots absent, then fill the present prefix.
+        let mut bits = u8::MAX;
+        for (i, &s) in elems.iter().enumerate() {
+            bits &= !(0b11 << (2 * i));
+            bits |= (s as u8) << (2 * i);
+        }
+        Ok(Self(bits))
+    }
+
+    #[must_use]
+    pub fn arity(self) -> usize {
+        (0..TUPLE_MAX_ARITY)
+            .position(|i| (self.0 >> (2 * i)) & 0b11 == TUPLE_SLOT_ABSENT)
+            .unwrap_or(TUPLE_MAX_ARITY)
+    }
+
+    #[must_use]
+    pub const fn elem(self, i: usize) -> ScalarTy {
+        match (self.0 >> (2 * i)) & 0b11 {
+            0 => ScalarTy::Rule,
+            1 => ScalarTy::Str,
+            _ => ScalarTy::Int,
+        }
+    }
+
+    pub fn elems(self) -> impl Iterator<Item = ScalarTy> {
+        (0..self.arity()).map(move |i| self.elem(i))
+    }
+
+    /// Element-wise assignability: same arity and each element widens
+    /// (`str_t` -> `rule_t`) to the target's.
+    #[must_use]
+    pub fn widens_to(self, target: Self) -> bool {
+        self.arity() == target.arity()
+            && self.elems().zip(target.elems()).all(|(a, b)| a.widens_to(b))
+    }
+}
+
+impl std::fmt::Debug for TupleSig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl std::fmt::Display for TupleSig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("tuple<")?;
+        for (i, s) in self.elems().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            s.fmt(f)?;
+        }
+        f.write_str(">")
+    }
+}
+
+impl ScalarTy {
+    /// `str_t` widens to `rule_t`; otherwise equality.
+    #[must_use]
+    const fn widens_to(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Str, Self::Rule)
+        ) || (self as u8 == target as u8)
+    }
+}
+
+impl ElemTy {
+    /// Element-wise assignability for list leaves.
+    #[must_use]
+    fn widens_to(self, target: Self) -> bool {
+        match (self, target) {
+            (Self::Scalar(a), Self::Scalar(b)) => a.widens_to(b),
+            (Self::Tuple(a), Self::Tuple(b)) => a.widens_to(b),
+            _ => false,
+        }
+    }
+
+    /// The depth-0 [`DataTy`] for this leaf.
+    #[must_use]
+    const fn to_data(self) -> DataTy {
+        match self {
+            Self::Scalar(s) => DataTy::Scalar(s),
+            Self::Tuple(t) => DataTy::Tuple(t),
+        }
+    }
+}
+
+impl std::fmt::Display for ElemTy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Scalar(s) => s.fmt(f),
+            Self::Tuple(t) => t.fmt(f),
+        }
+    }
 }
 
 /// Module types: results of `import(...)` / `inherit(...)` and the user-facing
@@ -69,9 +212,10 @@ impl Ty {
     pub const RULE: Self = Self::Data(DataTy::Scalar(ScalarTy::Rule));
     pub const STR: Self = Self::Data(DataTy::Scalar(ScalarTy::Str));
     pub const INT: Self = Self::Data(DataTy::Scalar(ScalarTy::Int));
-    pub const LIST_RULE: Self = Self::Data(DataTy::List(ScalarTy::Rule));
-    pub const LIST_LIST_RULE: Self = Self::Data(DataTy::ListList(ScalarTy::Rule));
-    pub const OBJ_LIST_RULE: Self = Self::Data(DataTy::Object(InnerTy::List(ScalarTy::Rule)));
+    pub const LIST_RULE: Self = Self::Data(DataTy::List(ElemTy::Scalar(ScalarTy::Rule)));
+    pub const LIST_LIST_RULE: Self = Self::Data(DataTy::ListList(ElemTy::Scalar(ScalarTy::Rule)));
+    pub const OBJ_LIST_RULE: Self =
+        Self::Data(DataTy::Object(InnerTy::List(ElemTy::Scalar(ScalarTy::Rule))));
     pub const ANY_MODULE: Self = Self::Module(ModuleTy::Any);
 
     /// True for `rule_t` or `str_t` (str widens to rule).
@@ -171,18 +315,20 @@ impl DataTy {
             )
     }
 
-    /// Whether `self` is assignable to `target` via equality or Str->Rule widening.
+    /// Whether `self` is assignable to `target` via equality or element-wise
+    /// `str_t`->`rule_t` widening (at any nesting depth, and per tuple element).
     fn widens_to(self, target: Self) -> bool {
-        self == target
-            || matches!(
-                (self, target),
-                (Self::Scalar(ScalarTy::Str), Self::Scalar(ScalarTy::Rule))
-                    | (Self::List(ScalarTy::Str), Self::List(ScalarTy::Rule))
-                    | (
-                        Self::ListList(ScalarTy::Str),
-                        Self::ListList(ScalarTy::Rule)
-                    )
-            )
+        if self == target {
+            return true;
+        }
+        match (self, target) {
+            (Self::Scalar(a), Self::Scalar(b)) => a.widens_to(b),
+            (Self::Tuple(a), Self::Tuple(b)) => a.widens_to(b),
+            (Self::List(a), Self::List(b)) | (Self::ListList(a), Self::ListList(b)) => {
+                a.widens_to(b)
+            }
+            _ => false,
+        }
     }
 
     /// Widen `self` to accommodate `other`. Returns the wider type, or `None`
@@ -203,8 +349,9 @@ impl DataTy {
     /// list-of-list which would be triple-nested).
     const fn to_list(self) -> Option<Self> {
         Some(match self {
-            Self::Scalar(s) => Self::List(s),
-            Self::List(s) => Self::ListList(s),
+            Self::Scalar(s) => Self::List(ElemTy::Scalar(s)),
+            Self::Tuple(t) => Self::List(ElemTy::Tuple(t)),
+            Self::List(e) => Self::ListList(e),
             Self::ListList(_) | Self::Object(_) => return None,
         })
     }
@@ -212,9 +359,9 @@ impl DataTy {
     /// Unwrap a list type to its element type. Returns `None` for non-list types.
     const fn list_elem(self) -> Option<Self> {
         Some(match self {
-            Self::List(s) => Self::Scalar(s),
-            Self::ListList(s) => Self::List(s),
-            Self::Scalar(_) | Self::Object(_) => return None,
+            Self::List(e) => e.to_data(),
+            Self::ListList(e) => Self::List(e),
+            Self::Scalar(_) | Self::Tuple(_) | Self::Object(_) => return None,
         })
     }
 }
@@ -223,8 +370,9 @@ impl From<InnerTy> for DataTy {
     fn from(i: InnerTy) -> Self {
         match i {
             InnerTy::Scalar(s) => Self::Scalar(s),
-            InnerTy::List(s) => Self::List(s),
-            InnerTy::ListList(s) => Self::ListList(s),
+            InnerTy::Tuple(t) => Self::Tuple(t),
+            InnerTy::List(e) => Self::List(e),
+            InnerTy::ListList(e) => Self::ListList(e),
         }
     }
 }
@@ -234,8 +382,9 @@ impl TryFrom<DataTy> for InnerTy {
     fn try_from(d: DataTy) -> Result<Self, ()> {
         Ok(match d {
             DataTy::Scalar(s) => Self::Scalar(s),
-            DataTy::List(s) => Self::List(s),
-            DataTy::ListList(s) => Self::ListList(s),
+            DataTy::Tuple(t) => Self::Tuple(t),
+            DataTy::List(e) => Self::List(e),
+            DataTy::ListList(e) => Self::ListList(e),
             DataTy::Object(_) => return Err(()),
         })
     }
@@ -268,8 +417,9 @@ impl std::fmt::Display for DataTy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Scalar(s) => s.fmt(f),
-            Self::List(s) => write!(f, "list_t<{s}>"),
-            Self::ListList(s) => write!(f, "list_t<list_t<{s}>>"),
+            Self::Tuple(t) => t.fmt(f),
+            Self::List(e) => write!(f, "list_t<{e}>"),
+            Self::ListList(e) => write!(f, "list_t<list_t<{e}>>"),
             Self::Object(i) => write!(f, "obj_t<{i}>"),
         }
     }
@@ -359,5 +509,99 @@ impl std::fmt::Display for Constraint {
             Self::RuleLike => f.write_str("str_t or rule_t"),
             Self::IntOrStr => f.write_str("int_t or str_t"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ScalarTy::{Int, Rule, Str};
+
+    fn sig(elems: &[ScalarTy]) -> TupleSig {
+        TupleSig::new(elems).unwrap()
+    }
+
+    #[test]
+    fn tuple_sig_arity_bounds() {
+        assert_eq!(TupleSig::new(&[]), Err(TupleSigError::Arity(0)));
+        assert_eq!(TupleSig::new(&[Rule]), Err(TupleSigError::Arity(1)));
+        assert_eq!(
+            TupleSig::new(&[Rule, Str, Int, Rule, Str]),
+            Err(TupleSigError::Arity(5))
+        );
+        for n in TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY {
+            let elems = vec![Rule; n];
+            assert_eq!(sig(&elems).arity(), n);
+        }
+    }
+
+    #[test]
+    fn tuple_sig_roundtrips_elements() {
+        // Every arity-2..=4 combination of scalars packs and unpacks exactly.
+        let all = [Rule, Str, Int];
+        for &a in &all {
+            for &b in &all {
+                let s = sig(&[a, b]);
+                assert_eq!(s.arity(), 2);
+                assert_eq!(s.elems().collect::<Vec<_>>(), vec![a, b]);
+                for &c in &all {
+                    let s = sig(&[a, b, c]);
+                    assert_eq!(s.elems().collect::<Vec<_>>(), vec![a, b, c]);
+                    for &d in &all {
+                        let s = sig(&[a, b, c, d]);
+                        assert_eq!(s.elems().collect::<Vec<_>>(), vec![a, b, c, d]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tuple_sig_widening_is_elementwise() {
+        // str -> rule per element; arity must match.
+        assert!(sig(&[Str, Int]).widens_to(sig(&[Rule, Int])));
+        assert!(sig(&[Str, Str]).widens_to(sig(&[Rule, Rule])));
+        assert!(sig(&[Rule, Int]).widens_to(sig(&[Rule, Int]))); // exact
+        // rule does NOT widen to str; int does not widen.
+        assert!(!sig(&[Rule, Int]).widens_to(sig(&[Str, Int])));
+        assert!(!sig(&[Int, Int]).widens_to(sig(&[Rule, Int])));
+        // arity mismatch never widens.
+        assert!(!sig(&[Str, Str]).widens_to(sig(&[Rule, Rule, Rule])));
+    }
+
+    #[test]
+    fn tuple_nests_in_lists_to_depth_two() {
+        let t = sig(&[Rule, Int]);
+        let tuple = DataTy::Tuple(t);
+        let list = tuple.to_list().unwrap();
+        assert_eq!(list, DataTy::List(ElemTy::Tuple(t)));
+        let list_list = list.to_list().unwrap();
+        assert_eq!(list_list, DataTy::ListList(ElemTy::Tuple(t)));
+        // depth 3 is rejected.
+        assert_eq!(list_list.to_list(), None);
+        // list_elem is the inverse.
+        assert_eq!(list_list.list_elem(), Some(list));
+        assert_eq!(list.list_elem(), Some(tuple));
+        assert_eq!(tuple.list_elem(), None);
+    }
+
+    #[test]
+    fn list_of_tuples_widens_elementwise() {
+        let strs = DataTy::List(ElemTy::Tuple(sig(&[Str, Int])));
+        let rules = DataTy::List(ElemTy::Tuple(sig(&[Rule, Int])));
+        assert!(strs.widens_to(rules));
+        assert!(!rules.widens_to(strs));
+        assert_eq!(strs.widen(rules), Some(rules));
+    }
+
+    #[test]
+    fn objects_hold_tuples_and_invariant_holds() {
+        // InnerTy == DataTy minus Object: tuple round-trips, object is rejected.
+        let t = DataTy::Tuple(sig(&[Rule, Str]));
+        let inner = InnerTy::try_from(t).unwrap();
+        assert_eq!(DataTy::from(inner), t);
+        let tl = DataTy::List(ElemTy::Tuple(sig(&[Rule, Str])));
+        assert!(InnerTy::try_from(tl).is_ok());
+        assert!(InnerTy::try_from(DataTy::Object(InnerTy::Scalar(Rule))).is_err());
     }
 }
