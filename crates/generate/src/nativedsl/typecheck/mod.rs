@@ -4,7 +4,7 @@
 mod check;
 pub mod types;
 
-pub use types::{Constraint, DataTy, InnerTy, ModuleTy, ScalarTy, Ty};
+pub use types::{Constraint, DataTy, ElemTy, InnerTy, ModuleTy, ScalarTy, TupleSig, Ty};
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -96,8 +96,14 @@ pub enum TypeErrorKind {
     ExpectedRuleName,
     #[error("grammar_config() requires an inherited grammar, not an imported module")]
     GrammarConfigRequiresInherit,
-    #[error("{}", non_bindable_message(*.0))]
-    NonBindableType(Ty),
+    #[error(
+        "tuples must have {min} to {max} elements (there is no grouping operator, so `(x)` is not a value); got {0}",
+        min = types::TUPLE_MIN_ARITY,
+        max = types::TUPLE_MAX_ARITY
+    )]
+    TupleArityInvalid(usize),
+    #[error("tuple elements must be rule_t, str_t, or int_t, got {0}")]
+    TupleElementNotScalar(Ty),
     #[error(
         "a for-loop cannot be used here; for-loops are expanded inline and may only appear inside a sequence, choice, or list"
     )]
@@ -108,13 +114,4 @@ pub enum TypeErrorKind {
     MacroUsedAsValue(String),
     #[error("rule-set macro '{0}' can only be invoked at top level, not in expression context")]
     RuleSetMacroInExpressionContext(String),
-}
-
-const fn non_bindable_message(ty: Ty) -> &'static str {
-    match ty {
-        Ty::Tuple => {
-            "tuples can only appear as elements of a for-loop iterable, not as standalone values"
-        }
-        _ => "this expression cannot be bound to a variable",
-    }
 }

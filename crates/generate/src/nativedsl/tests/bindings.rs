@@ -107,13 +107,6 @@ rule_tests! {
             Rule::String("if".into()), Rule::String("else".into()), Rule::String("while".into()),
         ])
     }
-    for_single_element_tuple_destructure {
-        r#"grammar { language: "test" }
-        rule keywords { choice(for (kw: str_t) in [("if"), ("else"), ("while")] { kw }) }"#,
-        Rule::choice(vec![
-            Rule::String("if".into()), Rule::String("else".into()), Rule::String("while".into()),
-        ])
-    }
 }
 
 #[test]
@@ -319,6 +312,79 @@ fn for_tuple_destructure() {
     let g = dsl(r#"grammar { language: "test" }
         rule binary {
             choice(for (op: str_t, p: int_t) in [("+", 1), ("*", 2)] {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::prec_left(
+                Precedence::Integer(1),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("+".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+            Rule::prec_left(
+                Precedence::Integer(2),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("*".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+        ])
+    );
+}
+
+#[test]
+fn for_named_list_of_tuples() {
+    // Tier-1 tuples: a list of tuples bound to a let (type inferred as
+    // list_t<tuple<str_t, int_t>>), then destructured by a multi-binding
+    // for-loop. Before tier-1 the table had to be written inline in the loop.
+    let g = dsl(r#"grammar { language: "test" }
+        let ops = [("+", 1), ("*", 2)]
+        rule binary {
+            choice(for (op: str_t, p: int_t) in ops {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![
+            Rule::prec_left(
+                Precedence::Integer(1),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("+".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+            Rule::prec_left(
+                Precedence::Integer(2),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("*".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+        ])
+    );
+}
+
+#[test]
+fn tuple_value_bound_to_let() {
+    // Each tuple is a first-class value bound to its own let, then collected
+    // into a list literal and destructured - exercises tuples-as-values and
+    // tuple-typed variables flowing into a list.
+    let g = dsl(r#"grammar { language: "test" }
+        let plus = ("+", 1)
+        let times = ("*", 2)
+        rule binary {
+            choice(for (op: str_t, p: int_t) in [plus, times] {
                 prec_left(p, seq(expr, op, expr))
             })
         }

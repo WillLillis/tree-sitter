@@ -1,14 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// Top-level type of any DSL expression. Splits into three structural classes:
-/// first-class data values, module references, and non-bindable sentinels.
+/// Top-level type of any DSL expression. Splits into two structural classes:
+/// first-class data values and module references. Every `Ty` is a value that
+/// can be bound to a let, returned from a macro, or passed as an argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ty {
     Data(DataTy),
     Module(ModuleTy),
-    /// Syntactic tuple. Only valid as a direct element of a for-loop
-    /// iterable's literal list. Not a value, can't be bound or returned.
-    Tuple,
 }
 
 /// First-class data values: a leaf ([`ElemTy`]) nested in lists to depth <=2,
@@ -220,11 +218,6 @@ impl Ty {
         )
     }
 
-    #[must_use]
-    pub const fn is_bindable(self) -> bool {
-        matches!(self, Self::Data(_) | Self::Module(_))
-    }
-
     /// Check if `self` is assignable to `expected`.
     ///
     /// Any module satisfies any module-typed expectation. The surface
@@ -400,7 +393,6 @@ impl std::fmt::Display for Ty {
         match self {
             Self::Data(d) => d.fmt(f),
             Self::Module(_) => f.write_str("module_t"),
-            Self::Tuple => f.write_str("tuple"),
         }
     }
 }
