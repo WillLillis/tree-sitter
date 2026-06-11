@@ -183,7 +183,10 @@ pub fn build_exports(
     }
     // Top-level `external X` declarations.
     for (i, &span) in ctx.external_names.iter().enumerate() {
-        add(ctx.text(span), Export::Rule(RuleTarget::ExternalName(i as u32)));
+        add(
+            ctx.text(span),
+            Export::Rule(RuleTarget::ExternalName(i as u32)),
+        );
     }
     // Lowered output.
     match lowered {
