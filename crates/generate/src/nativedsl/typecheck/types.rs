@@ -15,7 +15,7 @@ pub enum Ty {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataTy {
     Scalar(ScalarTy),
-    /// `tuple<a, b>`: a fixed-arity bundle of scalars. A leaf, like `Scalar`.
+    /// `tuple_t<a, b>`: a fixed-arity bundle of scalars. A leaf, like `Scalar`.
     Tuple(TupleSig),
     /// `list_t<X>` for leaf `X` (scalar or tuple).
     List(ElemTy),
@@ -131,7 +131,7 @@ impl std::fmt::Debug for TupleSig {
 
 impl std::fmt::Display for TupleSig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("tuple<")?;
+        f.write_str("tuple_t<")?;
         for (i, s) in self.elems().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
