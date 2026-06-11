@@ -9,8 +9,8 @@ error_tests! { Type {
     }
     error_for_binding_count_mismatch {
         r#"grammar { language: "test" }
-        rule bad { choice(for (a: str_t, b: int_t) in [("x")] { a }) }"#,
-        TypeErrorKind::ForBindingCountMismatch { bindings: 2, tuple_elements: 1 }
+        rule bad { choice(for (a: str_t, b: str_t, c: str_t) in [("x", "y")] { a }) }"#,
+        TypeErrorKind::ForBindingCountMismatch { bindings: 3, tuple_elements: 2 }
     }
     error_append_non_list_arg {
         r#"grammar { language: "test" }
@@ -123,17 +123,31 @@ error_tests! { Type {
         rule program { seq(foo) }"#,
         TypeErrorKind::BoundForLoop
     }
-    error_let_rhs_tuple_rejected {
+    error_tuple_arity_too_small {
         r#"grammar { language: "test" }
-        let pair = ("a", 1)
+        let x = ("a")
         rule program { "x" }"#,
-        TypeErrorKind::NonBindableType(Ty::Tuple)
+        TypeErrorKind::TupleArityInvalid(1)
     }
-    error_list_of_tuples_rejected {
+    error_tuple_arity_too_large {
         r#"grammar { language: "test" }
-        let xs = [("a", 1), ("b", 2)]
+        let x = ("a", "b", "c", "d", "e")
         rule program { "x" }"#,
-        TypeErrorKind::InvalidListElement(Ty::Tuple)
+        TypeErrorKind::TupleArityInvalid(5)
+    }
+    error_tuple_element_not_scalar {
+        r#"grammar { language: "test" }
+        let x = (["a"], "b")
+        rule program { "x" }"#,
+        TypeErrorKind::TupleElementNotScalar(Ty::Data(DataTy::List(ElemTy::Scalar(ScalarTy::Str))))
+    }
+    error_tuple_used_as_rule {
+        r#"grammar { language: "test" }
+        rule program { ("a", "b") }"#,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::RULE,
+            got: Ty::Data(DataTy::Tuple(TupleSig::new(&[ScalarTy::Str, ScalarTy::Str]).unwrap())),
+        }
     }
     error_conflicts_rejects_non_name {
         r#"grammar {

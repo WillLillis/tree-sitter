@@ -65,7 +65,8 @@ pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
 pub use parser::{ParseErrorKind, ParseResult};
 pub use resolve::{ResolveErrorKind, ResolveResult};
 pub use typecheck::{
-    Constraint, ContainerKind, DataTy, InnerTy, ModuleTy, ScalarTy, Ty, TypeErrorKind, TypeResult,
+    Constraint, ContainerKind, DataTy, ElemTy, InnerTy, ModuleTy, ScalarTy, TupleSig, Ty,
+    TypeErrorKind, TypeResult,
 };
 
 use std::path::{Path, PathBuf};
