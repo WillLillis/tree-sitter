@@ -441,7 +441,7 @@ pub struct Grammar {
 }
 
 /// Per-grammar or top-level picker configuration. Mirrors the form
-/// understood by [`tree_sitter_generate::RawPickerConfig`].
+/// understood by [`tree_sitter_generate::PickerConfig`].
 ///   - Bare string `"safe"` selects the safe picker explicitly.
 ///   - Object form opts into the decoupled picker; missing bias fields
 ///     fall back to the generator's empirical defaults.
@@ -465,6 +465,8 @@ pub struct PickerBiasesJSON {
     pub dense_csr_bias: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dense_small_bias: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_csr_bias: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize)]

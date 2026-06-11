@@ -8,15 +8,23 @@ use std::{
 
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 
-use crate::LANGUAGE_VERSION;
+use crate::{
+    DEFAULT_DENSE_CSR_BIAS, DEFAULT_DENSE_SMALL_BIAS, DEFAULT_SMALL_CSR_BIAS, LANGUAGE_VERSION,
+    OptLevel,
+};
 use serde::Serialize;
 use thiserror::Error;
 
 use super::{
+    PINNED_DENSE_STATE_COUNT,
     build_tables::Tables,
     grammars::{ExternalToken, LexicalGrammar, SyntaxGrammar, VariableType},
     nfa::CharacterSet,
     node_types::ChildType,
+    picker::{
+        CanonicalSmallHashBuf, PickerConfig, Repr, SMALL_MAP_ENTRY_BYTES, canonical_small_hash,
+        compute_standalone_costs, decide_state_representations,
+    },
     rules::{Alias, AliasMap, Symbol, SymbolType, TokenSet},
     tables::{
         AdvanceAction, FieldLocation, GotoAction, LexState, LexTable, ParseAction, ParseState,
@@ -30,12 +38,122 @@ const ABI_VERSION_WITH_RESERVED_WORDS: usize = 15;
 const ABI_VERSION_WITH_COMPRESSED_TABLES: usize = 16;
 const SMALL_STATE_THRESHOLD: usize = 64;
 
-use crate::picker::{
-    canonical_small_hash, compute_standalone_costs, decide_state_representations, PickerConfig,
-    Repr,
-};
-
 pub type RenderResult<T> = Result<T, RenderError>;
+
+/// Snapshot of what a single `tree-sitter generate` run produced.
+#[derive(Debug, Clone)]
+pub struct GenerationStats {
+    pub grammar_name: String,
+    pub abi_version: usize,
+    pub optimizations: OptLevel,
+    pub state_count: usize,
+    pub symbol_count: usize,
+    pub terminal_count: usize,
+    pub nonterminal_count: usize,
+    pub picker_config: PickerConfig,
+    /// Per-tier state counts.
+    pub tier_dense: usize,
+    pub tier_csr: usize,
+    pub tier_small: usize,
+    /// Per-tier estimated byte cost of the emitted tier arrays. The
+    /// small figure is post-dedup (folded rows cost only their map
+    /// entry).
+    pub tier_dense_bytes: usize,
+    pub tier_csr_bytes: usize,
+    pub tier_small_bytes: usize,
+    /// `tier_dense_bytes + tier_csr_bytes + tier_small_bytes`.
+    pub total_bytes: usize,
+    /// Small rows that were byte-identical to an earlier row and folded
+    /// into it, the number of distinct rows they folded into, and the
+    /// bytes that folding saved.
+    pub dedup_rows_folded: usize,
+    pub dedup_shared_rows: usize,
+    pub dedup_bytes_saved: usize,
+}
+
+impl std::fmt::Display for GenerationStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pct = |n: usize, total: usize| -> f64 {
+            if total == 0 {
+                0.0
+            } else {
+                n as f64 / total as f64 * 100.0
+            }
+        };
+
+        writeln!(f, "tree-sitter generate stats: {}", self.grammar_name)?;
+        writeln!(f)?;
+
+        let abi_note = if self.abi_version >= ABI_VERSION_WITH_COMPRESSED_TABLES {
+            "compressed tables: dense + csr + small"
+        } else {
+            "no csr tier: dense + small"
+        };
+        writeln!(f, "abi:           {} ({abi_note})", self.abi_version)?;
+        writeln!(f, "optimizations: {}", self.optimizations)?;
+        writeln!(
+            f,
+            "grammar:       {} states, {} symbols ({} terminal, {} nonterminal)",
+            self.state_count, self.symbol_count, self.terminal_count, self.nonterminal_count,
+        )?;
+        match self.picker_config {
+            PickerConfig::Safe => writeln!(f, "picker:        safe")?,
+            PickerConfig::Decoupled(b) => writeln!(
+                f,
+                "picker:        decoupled (dense-csr {:.2}, dense-small {:.2}, small-csr {:.2})",
+                b.dense_csr.unwrap_or(DEFAULT_DENSE_CSR_BIAS),
+                b.dense_small.unwrap_or(DEFAULT_DENSE_SMALL_BIAS),
+                b.small_csr.unwrap_or(DEFAULT_SMALL_CSR_BIAS),
+            )?,
+        }
+        writeln!(f)?;
+
+        // Per-tier breakdown. Everything in this block is the picker's
+        // own cost-model estimate for the tier arrays, useful for
+        // comparing configs against each other but not an exact measurement.
+        writeln!(f, "parse-table tiers (picker cost-model estimates):")?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "  {:<7}{:>16}{:>18}   lookup",
+            "tier", "states", "est. bytes",
+        )?;
+        let cell = |n: usize, total: usize| format!("{n} ({:.1}%)", pct(n, total));
+        let mut row = |name: &str, count: usize, bytes: usize, lookup: &str| {
+            writeln!(
+                f,
+                "  {name:<7}{:>16}{:>18}   {lookup}",
+                cell(count, self.state_count),
+                cell(bytes, self.total_bytes),
+            )
+        };
+        row("dense", self.tier_dense, self.tier_dense_bytes, "O(1)")?;
+        row("csr", self.tier_csr, self.tier_csr_bytes, "O(log n)")?;
+        row(
+            "small",
+            self.tier_small,
+            self.tier_small_bytes,
+            "O(groups + entries)",
+        )?;
+        writeln!(
+            f,
+            "  {:<7}{:>16}{:>18}",
+            "total", self.state_count, self.total_bytes,
+        )?;
+        writeln!(f)?;
+
+        if self.dedup_rows_folded == 0 {
+            writeln!(f, "small-tier dedup: none")?;
+        } else {
+            writeln!(
+                f,
+                "small-tier dedup: {} rows folded into {} shared rows (~{} bytes by the estimate above)",
+                self.dedup_rows_folded, self.dedup_shared_rows, self.dedup_bytes_saved,
+            )?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Error, Serialize)]
 pub enum RenderError {
@@ -113,6 +231,8 @@ struct Generator {
     csr_state_count: usize,
     metadata: Option<Metadata>,
     picker_config: PickerConfig,
+    emit_stats: bool,
+    optimizations: OptLevel,
 }
 
 struct LargeCharacterSetInfo {
@@ -128,7 +248,7 @@ struct Metadata {
 }
 
 impl Generator {
-    fn generate(mut self) -> RenderResult<String> {
+    fn generate(mut self) -> RenderResult<(String, Option<GenerationStats>)> {
         self.init();
         self.add_header();
         self.add_includes();
@@ -195,7 +315,8 @@ impl Generator {
 
         self.add_parser_export();
 
-        Ok(self.buffer)
+        let stats = self.emit_stats.then_some(self.gather_stats());
+        Ok((self.buffer, stats))
     }
 
     fn init(&mut self) {
@@ -344,19 +465,17 @@ impl Generator {
             .iter()
             .enumerate()
             .take_while(|(i, s)| {
-                *i <= 1 || s.terminal_entries.len() + s.nonterminal_entries.len() > threshold
+                *i < PINNED_DENSE_STATE_COUNT
+                    || s.terminal_entries.len() + s.nonterminal_entries.len() > threshold
             })
             .count();
 
         // Choose a representation per state (ABI >= 16 only) and reorder the
         // state list into contiguous [Dense | CSR | Small] tiers. ABI < 16
-        // grammars keep the legacy 2-way layout (Dense + Small) since the
-        // runtime there has no notion of a CSR tier.
+        // grammars keep the 2-tier layout (Dense + Small).
         if self.abi_version >= ABI_VERSION_WITH_COMPRESSED_TABLES {
-            let costs = compute_standalone_costs(&self.parse_table);
             self.state_repr = decide_state_representations(
                 &self.parse_table,
-                &costs,
                 self.large_state_count,
                 &self.picker_config,
             );
@@ -365,13 +484,6 @@ impl Generator {
             let mut v = vec![Repr::Dense; self.large_state_count.min(n)];
             v.resize(n, Repr::Small);
             self.state_repr = v;
-        }
-        // The runtime hard-codes state 0 (error) and state 1 (start state)
-        // at those exact ids; pin them into the Dense tier so they remain
-        // at indices 0 and 1 after the tier-based sort. The cost is at
-        // most 2 * (SYMBOL_COUNT * 2 - small_or_csr_cost) bytes per grammar.
-        for s in self.state_repr.iter_mut().take(2) {
-            *s = Repr::Dense;
         }
         self.reorder_states_by_repr();
     }
@@ -392,7 +504,9 @@ impl Generator {
                 Repr::Csr => 1,
                 Repr::Small => 2,
             };
-            (i > 1, tier, i)
+            // Sort key: false-before-true puts the reserved states at
+            // the head, then everything else by tier and original id.
+            (i >= PINNED_DENSE_STATE_COUNT, tier, i)
         });
 
         let mut new_id_by_old = vec![0usize; n];
@@ -531,68 +645,98 @@ impl Generator {
             self.parse_table.production_infos.len()
         );
         add_line!(self, "#define SUPERTYPE_COUNT {}", self.supertype_map.len());
-
-        // Plan B (PR #5578 review): per-state representation cost analysis.
-        self.add_per_state_cost_stats();
-
         add_line!(self, "");
     }
 
-    // Emit per-state cost analytics for the corpus runner. Reflects the
-    // post-reorder state list, so picks here align with what the emitter
-    // actually wrote. Uses the picker module's cost estimates so the
-    // analytics stay in lockstep with the picker's actual decisions.
-    fn add_per_state_cost_stats(&mut self) {
+    /// Build the `GenerationStats` snapshot used by `--stats`. Walks the
+    /// picker output once to count tiers and dedup groups, runs the
+    /// canonical-hash dedup pass for the cost-metric total, and pulls
+    /// shape numbers out of `parse_table` and `syntax_grammar`.
+    fn gather_stats(&self) -> GenerationStats {
         let costs = compute_standalone_costs(&self.parse_table);
-        let mut sum_dense: usize = 0;
-        let mut sum_csr: usize = 0;
-        let mut sum_small: usize = 0;
-        let mut sum_opt_pre_dedup: usize = 0;
-        for c in &costs {
-            sum_dense += c.dense_bytes;
-            sum_csr += c.csr_bytes;
-            sum_small += c.small_bytes;
-            sum_opt_pre_dedup += c.dense_bytes.min(c.csr_bytes).min(c.small_bytes);
-        }
 
-        let mut pick_dense = 0;
-        let mut pick_csr = 0;
-        let mut pick_small = 0;
-        let mut sum_opt = 0;
-        let mut canonical_seen: FxHashMap<u64, usize> = FxHashMap::default();
+        let mut tier_dense: usize = 0;
+        let mut tier_csr: usize = 0;
+        let mut tier_small: usize = 0;
+        let mut tier_dense_bytes: usize = 0;
+        let mut tier_csr_bytes: usize = 0;
+        let mut tier_small_bytes: usize = 0;
+        let mut dedup_rows_folded: usize = 0;
+        let mut dedup_bytes_saved: usize = 0;
+        // First small row seen per canonical shape, and the shapes that
+        // ended up shared by more than one row.
+        let mut canonical_seen: FxHashSet<u64> = FxHashSet::default();
+        let mut canonical_shared: FxHashSet<u64> = FxHashSet::default();
+        let mut hash_buf: CanonicalSmallHashBuf = Vec::new();
         for (i, &repr) in self.state_repr.iter().enumerate() {
             match repr {
                 Repr::Dense => {
-                    pick_dense += 1;
-                    sum_opt += costs[i].dense_bytes;
+                    tier_dense += 1;
+                    tier_dense_bytes += costs[i].dense;
                 }
                 Repr::Csr => {
-                    pick_csr += 1;
-                    sum_opt += costs[i].csr_bytes;
+                    tier_csr += 1;
+                    tier_csr_bytes += costs[i].csr;
                 }
                 Repr::Small => {
-                    pick_small += 1;
-                    let h = canonical_small_hash(&self.parse_table, i);
-                    if canonical_seen.insert(h, i).is_some() {
-                        sum_opt += 4;
+                    tier_small += 1;
+                    let h = canonical_small_hash(&self.parse_table, i, &mut hash_buf);
+                    if canonical_seen.insert(h) {
+                        // First row with this shape pays for its full body.
+                        tier_small_bytes += costs[i].small;
                     } else {
-                        sum_opt += costs[i].small_bytes;
+                        // Folded into an earlier identical row: only the
+                        // map entry survives.
+                        tier_small_bytes += SMALL_MAP_ENTRY_BYTES;
+                        dedup_rows_folded += 1;
+                        dedup_bytes_saved += costs[i].small.saturating_sub(SMALL_MAP_ENTRY_BYTES);
+                        canonical_shared.insert(h);
                     }
                 }
             }
         }
+        let dedup_shared_rows = canonical_shared.len();
+        let total_bytes = tier_dense_bytes + tier_csr_bytes + tier_small_bytes;
 
-        add_line!(self, "#define PER_STATE_OPT_BYTES {sum_opt}");
-        add_line!(
-            self,
-            "#define PER_STATE_OPT_BYTES_PRE_DEDUP {sum_opt_pre_dedup}"
-        );
-        add_line!(self, "#define PER_STATE_DENSE_BYTES {sum_dense}");
-        add_line!(self, "#define PER_STATE_CSR_BYTES {sum_csr}");
-        add_line!(self, "#define PER_STATE_SMALL_BYTES {sum_small}");
-        add_line!(self, "#define PER_STATE_PICK_DENSE {pick_dense}");
-        add_line!(self, "#define PER_STATE_PICK_CSR {pick_csr}");
-        add_line!(self, "#define PER_STATE_PICK_SMALL {pick_small}");
+        let terminal_count = self
+            .parse_table
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                if symbol.is_terminal() || symbol.is_eof() {
+                    true
+                } else if symbol.is_external() {
+                    self.syntax_grammar.external_tokens[symbol.index]
+                        .corresponding_internal_token
+                        .is_none()
+                } else {
+                    false
+                }
+            })
+            .count();
+        let symbol_count = self.parse_table.symbols.len();
+        let nonterminal_count = symbol_count.saturating_sub(terminal_count);
+
+        GenerationStats {
+            grammar_name: self.language_name.clone(),
+            abi_version: self.abi_version,
+            optimizations: self.optimizations,
+            state_count: self.parse_table.states.len(),
+            symbol_count,
+            terminal_count,
+            nonterminal_count,
+            picker_config: self.picker_config,
+            tier_dense,
+            tier_csr,
+            tier_small,
+            tier_dense_bytes,
+            tier_csr_bytes,
+            tier_small_bytes,
+            total_bytes,
+            dedup_rows_folded,
+            dedup_shared_rows,
+            dedup_bytes_saved,
+        }
     }
 
     fn add_symbol_enum(&mut self) {
@@ -1485,12 +1629,12 @@ impl Generator {
     ///   * `[LARGE_STATE_COUNT, LARGE_STATE_COUNT + CSR_STATE_COUNT)` - CSR
     ///     `ts_compressed_parse_table_map[CSR_STATE_COUNT + 1]` and
     ///     `ts_compressed_parse_table[]` (interleaved symbol/value pairs,
-    ///     sorted by symbol within each row). Map entries are uint16_t
-    ///     indices into `ts_compressed_parse_table`. O(log n) binary search
+    ///     sorted by symbol within each row). Map entries are `uint32_t`
+    ///     indices into `ts_compressed_parse_table`. `O(log n)` binary search
     ///     by entry within each row.
     ///   * remainder                                                  - Small
     ///     grouped sparse `ts_small_parse_table[]` with
-    ///     `ts_small_parse_table_map[]` for offsets, O(group_count + nnz)
+    ///     `ts_small_parse_table_map[]` for offsets, `O(group_count + nnz)`
     ///     linear scan.
     fn add_three_way_parse_table(
         &mut self,
@@ -2318,7 +2462,9 @@ pub fn render_c_code(
     semantic_version: Option<(u8, u8, u8)>,
     supertype_symbol_map: BTreeMap<Symbol, Vec<ChildType>>,
     picker_config: PickerConfig,
-) -> RenderResult<String> {
+    optimizations: OptLevel,
+    emit_stats: bool,
+) -> RenderResult<(String, Option<GenerationStats>)> {
     if !(ABI_VERSION_MIN..=ABI_VERSION_MAX).contains(&abi_version) {
         Err(RenderError::ABI(abi_version))?;
     }
@@ -2341,6 +2487,8 @@ pub fn render_c_code(
         }),
         supertype_symbol_map,
         picker_config,
+        emit_stats,
+        optimizations,
         ..Default::default()
     }
     .generate()

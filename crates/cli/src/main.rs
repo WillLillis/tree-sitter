@@ -167,12 +167,19 @@ struct Generate {
     /// the merging of compatible parse states.
     #[arg(long)]
     pub disable_optimizations: bool,
+    /// Print per-grammar generation stats to stdout: ABI and optimization
+    /// settings, grammar shape, the effective picker config, and per-tier
+    /// state counts, byte estimates, and small-tier dedup. Useful for
+    /// benchmarking and per-grammar picker bias tuning.
+    #[arg(long)]
+    pub stats: bool,
     /// Force the safe per-state picker, overriding any decoupled config from
     /// `tree-sitter.json`. Mutually exclusive with the bias flags.
     #[arg(
         long,
         conflicts_with = "picker_dense_csr_bias",
-        conflicts_with = "picker_dense_small_bias"
+        conflicts_with = "picker_dense_small_bias",
+        conflicts_with = "picker_small_csr_bias"
     )]
     pub picker_safe: bool,
     /// CSR-vs-Dense bias for the decoupled picker. CSR wins if
@@ -183,6 +190,11 @@ struct Generate {
     /// `small_bytes <= bias * dense_bytes`. Must be in [0.0, 1.0].
     #[arg(long, value_name = "FLOAT")]
     pub picker_dense_small_bias: Option<f64>,
+    /// Small-vs-CSR bias for the decoupled picker. Small wins if
+    /// `small_bytes <= bias * csr_bytes`. Must be in [0.0, 1.0]. The
+    /// most subtle of the three biases; rarely needs tuning.
+    #[arg(long, value_name = "FLOAT")]
+    pub picker_small_csr_bias: Option<f64>,
 }
 
 #[derive(Args)]
@@ -970,12 +982,16 @@ impl Generate {
         };
 
         let cli_picker_config = if self.picker_safe {
-            Some(tree_sitter_generate::RawPickerConfig::Safe)
-        } else if self.picker_dense_csr_bias.is_some() || self.picker_dense_small_bias.is_some() {
-            Some(tree_sitter_generate::RawPickerConfig::Decoupled {
-                dense_csr_bias: self.picker_dense_csr_bias,
-                dense_small_bias: self.picker_dense_small_bias,
-            })
+            Some(tree_sitter_generate::PickerConfig::Safe)
+        } else if self.picker_dense_csr_bias.is_some()
+            || self.picker_dense_small_bias.is_some()
+            || self.picker_small_csr_bias.is_some()
+        {
+            Some(tree_sitter_generate::PickerConfig::decoupled(
+                self.picker_dense_csr_bias,
+                self.picker_dense_small_bias,
+                self.picker_small_csr_bias,
+            )?)
         } else {
             None
         };
@@ -990,6 +1006,7 @@ impl Generate {
             !self.no_parser,
             optimizations,
             cli_picker_config,
+            self.stats,
         ) {
             if json_summary {
                 eprintln!("{}", serde_json::to_string_pretty(&err)?);
