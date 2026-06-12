@@ -15,6 +15,15 @@ error_tests! { Resolve {
         rule program { "x" }"#,
         ResolveErrorKind::UnknownIdentifier("foo".into())
     }
+    error_computed_rule_name_resolved_in_rule_set_template {
+        // The computed name in `rule @<expr> { ... }` is resolved too, not just
+        // the body; an undefined bare-ident name is a normal unknown-identifier
+        // error rather than an unresolved-ident typecheck crash.
+        r#"grammar { language: "test" }
+        rules r() { rule @foo { "x" } }
+        rule program { "x" }"#,
+        ResolveErrorKind::UnknownIdentifier("foo".into())
+    }
     error_duplicate_rule {
         r#"grammar { language: "test" } rule program { "a" } rule program { "b" }"#,
         ResolveErrorKind::DuplicateDeclaration("program".into())
