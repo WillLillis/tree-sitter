@@ -7,6 +7,15 @@ error_tests! { Type {
         rule program { needs_int("not_an_int") }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
+    error_computed_rule_name_not_string {
+        // `rule @<expr>` computes the name from a value, which must be a string.
+        // A rule reference resolves fine but is the wrong type (the name is a
+        // referenced value, not a declaration).
+        r#"grammar { language: "test" }
+        rules r() { rule @program { "x" } }
+        rule program { "x" }"#,
+        TypeErrorKind::TypeMismatch { expected: Ty::STR, got: Ty::RULE }
+    }
     error_for_binding_count_mismatch {
         r#"grammar { language: "test" }
         rule bad { choice(for (a: str_t, b: str_t, c: str_t) in [("x", "y")] { a }) }"#,

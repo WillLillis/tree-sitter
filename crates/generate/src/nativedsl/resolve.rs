@@ -281,11 +281,19 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
                     let end = start + range.len as usize;
                     for i in start..end {
                         let decl_id = rcx.pools.children[i];
-                        let body = match arena.get(decl_id) {
-                            Node::Rule { body, .. } | Node::ComputedRule { body, .. } => *body,
+                        match *arena.get(decl_id) {
+                            Node::Rule { body, .. } => resolve_expr(arena, rcx, body)?,
+                            // Resolve the computed name too, not just the body -
+                            // otherwise a bare-ident name leaves Ident(Unresolved)
+                            // for definition-time typecheck to hit unreachable.
+                            Node::ComputedRule {
+                                name_expr, body, ..
+                            } => {
+                                resolve_expr(arena, rcx, name_expr)?;
+                                resolve_expr(arena, rcx, body)?;
+                            }
                             _ => unreachable!(),
-                        };
-                        resolve_expr(arena, rcx, body)?;
+                        }
                     }
                     Ok(())
                 }
