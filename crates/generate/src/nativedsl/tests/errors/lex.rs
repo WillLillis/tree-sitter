@@ -69,12 +69,22 @@ error_tests! { Lex {
         r#"grammar { language: "x\xZZ" } rule program { "x" }"#,
         LexErrorKind::InvalidHexEscape
     }
+    // A multibyte char where a hex digit is expected: must error cleanly, not
+    // slice mid-char (which was UB via from_utf8_unchecked + a panicking span).
+    error_hex_escape_multibyte {
+        "grammar { language: \"x\\x)\u{3a3}\" } rule program { \"x\" }",
+        LexErrorKind::InvalidHexEscape
+    }
     error_hex_escape_out_of_ascii_range {
         r#"grammar { language: "x\x80" } rule program { "x" }"#,
         LexErrorKind::InvalidHexEscape
     }
     error_unicode_escape_too_short {
         r#"grammar { language: "x\u123" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
+    error_unicode_escape_multibyte {
+        "grammar { language: \"x\\u00\u{3a3}\" } rule program { \"x\" }",
         LexErrorKind::InvalidUnicodeEscape
     }
     error_unicode_escape_braced_empty {
