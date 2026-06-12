@@ -38,6 +38,11 @@ pub struct Parser<'tok, 'shared> {
     /// truncated after.
     locals: Vec<(Span, LocalBinding)>,
     depth: u16,
+    /// True while parsing a `rules` macro body. The `@` computed-rule syntax
+    /// (both `rule @<expr>` definitions and `@<expr>` references) is only valid
+    /// there - `expand_macro_calls` rewrites it during macro expansion, so any
+    /// `@` outside a rule-set body would leak unresolved into later stages.
+    in_rule_set: bool,
 }
 
 impl<'tok, 'shared> Parser<'tok, 'shared> {
@@ -74,6 +79,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
             depth: 0,
+            in_rule_set: false,
         }
     }
 
@@ -279,8 +285,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
         match &self.current().kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
-            TokenKind::KwRule => self.parse_rule_def(false, false),
-            TokenKind::KwOverride => self.parse_rule_def(true, false),
+            TokenKind::KwRule => self.parse_rule_def(false),
+            TokenKind::KwOverride => self.parse_rule_def(true),
             TokenKind::KwLet => self.parse_let_def(),
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwRules => self.parse_rule_set_def(),
@@ -411,7 +417,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
     }
 
-    fn parse_rule_def(&mut self, is_override: bool, in_rule_set: bool) -> ParseResult<NodeId> {
+    fn parse_rule_def(&mut self, is_override: bool) -> ParseResult<NodeId> {
         let start = if is_override {
             let s = self.expect(TokenKind::KwOverride)?;
             self.expect(TokenKind::KwRule)?;
@@ -421,7 +427,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         };
         // `rule @<expr> { ... }` - computed name; consumed by expand.
         if self.eat(TokenKind::At).is_some() {
-            if !in_rule_set {
+            if !self.in_rule_set {
                 Err(self.error(ParseErrorKind::ComputedRuleTopLevel))?;
             }
             let name_expr = self.parse_postfix()?;
@@ -553,18 +559,22 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// Parse `rule` / `override rule` decls until `}`, wrap in `Node::RuleSet`.
     /// Caller consumes the closing brace.
     fn parse_rule_set_body(&mut self, brace_start: Span) -> ParseResult<NodeId> {
+        // Enables `@` computed-rule syntax for this body. Rule-set bodies never
+        // nest, so a plain flip back to false on exit is enough.
+        self.in_rule_set = true;
         let mut decls = Vec::new();
         loop {
             if self.at(TokenKind::RBrace) {
                 break;
             }
             let id = match self.current().kind {
-                TokenKind::KwRule => self.parse_rule_def(false, true)?,
-                TokenKind::KwOverride => self.parse_rule_def(true, true)?,
+                TokenKind::KwRule => self.parse_rule_def(false)?,
+                TokenKind::KwOverride => self.parse_rule_def(true)?,
                 _ => return Err(self.error(ParseErrorKind::RuleSetBodyRequiresRuleDecl)),
             };
             decls.push(id);
         }
+        self.in_rule_set = false;
         // expand_macro_calls relies on >=1 rule for in-place slot placement.
         if decls.is_empty() {
             return Err(self.error(ParseErrorKind::EmptyRuleSetMacroBody));
@@ -640,7 +650,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                         Ty::Data(d) => InnerTy::try_from(d).map_err(|()| {
                             ParseError::new(ParseErrorKind::ObjectInnerType(inner_ty), inner_span)
                         })?,
-                        _ => {
+                        Ty::Module(_) => {
                             return Err(ParseError::new(
                                 ParseErrorKind::ObjectInnerType(inner_ty),
                                 inner_span,
@@ -801,7 +811,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             }
             TokenKind::At => {
                 // `@<primary>` - computed-name rule ref; valid in rule-set
-                // macro bodies, resolved by expand_macro_calls.
+                // macro bodies, resolved by expand_macro_calls. Anywhere else
+                // it would leak unresolved into typecheck.
+                if !self.in_rule_set {
+                    return Err(self.error(ParseErrorKind::ComputedRuleTopLevel));
+                }
                 self.advance_pos();
                 let inner = self.parse_postfix()?;
                 Ok(self.shared.arena.push(
@@ -1303,7 +1317,7 @@ pub enum ParseErrorKind {
     CfgOnGrammarBlock,
     #[error("rule-set macro body may only contain rule declarations")]
     RuleSetBodyRequiresRuleDecl,
-    #[error("computed-rule names are only valid inside a `rules` macro body")]
+    #[error("`@` computed-rule syntax is only valid inside a `rules` macro body")]
     ComputedRuleTopLevel,
     #[error("rule-set macro body must declare at least one rule")]
     EmptyRuleSetMacroBody,

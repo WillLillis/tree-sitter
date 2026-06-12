@@ -112,15 +112,24 @@ error_tests! { Parse {
         ParseErrorKind::NestingTooDeep
     }
     error_nesting_too_deep_bare_at {
-        // Long `@` run; SymRef recurses via parse_postfix.
+        // Long `@` run inside a rule-set body (where `@` is allowed); SymRef
+        // recurses via parse_postfix and trips the depth guard.
         &{
             let deep = "@".repeat(300);
-            format!("grammar {{ language: \"test\" }} rule foo {{ {deep}x }}")
+            format!("grammar {{ language: \"test\" }} rules deep() {{ rule r {{ {deep}x }} }}")
         },
         ParseErrorKind::NestingTooDeep
     }
     error_computed_rule_at_top_level {
         r#"grammar { language: "test" } rule @r { "x" }"#,
+        ParseErrorKind::ComputedRuleTopLevel
+    }
+    error_computed_ref_in_let_value {
+        r#"grammar { language: "test" } let x = @r rule program { "x" }"#,
+        ParseErrorKind::ComputedRuleTopLevel
+    }
+    error_computed_ref_in_rule_body {
+        r#"grammar { language: "test" } rule program { @r }"#,
         ParseErrorKind::ComputedRuleTopLevel
     }
     error_nesting_too_deep_computed_rule_name {

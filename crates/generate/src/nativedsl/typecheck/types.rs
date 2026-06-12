@@ -1,17 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-/// Top-level type of any DSL expression. Splits into two structural classes:
-/// first-class data values and module references. Every `Ty` is a value that
-/// can be bound to a let, returned from a macro, or passed as an argument.
+/// Top-level type of any DSL expression. Every `Ty` is a value that can be
+/// bound to a let, returned from a macro, or passed as an argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ty {
     Data(DataTy),
     Module(ModuleTy),
 }
 
-/// First-class data values: a leaf ([`ElemTy`]) nested in lists to depth <=2,
-/// optionally wrapped once in an object. Things that can be bound to a let,
-/// returned from a macro, passed as an argument, or stored in a list/object.
+/// First-class data values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DataTy {
     Scalar(ScalarTy),
@@ -26,8 +23,7 @@ pub enum DataTy {
     Object(InnerTy),
 }
 
-/// Atomic data types: `rule_t`, `str_t`, `int_t`. Discriminants are packed into
-/// [`TupleSig`], so the values are fixed.
+/// Leaf data types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ScalarTy {
@@ -36,8 +32,7 @@ pub enum ScalarTy {
     Int = 2,
 }
 
-/// A list element / leaf: a scalar or a tuple of scalars. Lists nest this to
-/// depth <=2 (`list_t<X>`, `list_t<list_t<X>>`).
+/// A list element / leaf: a scalar or a tuple of scalars.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ElemTy {
     Scalar(ScalarTy),
@@ -55,17 +50,24 @@ pub enum InnerTy {
 }
 
 /// Smallest and largest tuple arity. `(a)`/`()` are not tuples (no grouping
-/// operator exists). The upper bound is forced by the packed signature being a
-/// single byte: `Ty` is embedded in `Node` (`ForBinding`/`MacroParam` stamp the
-/// type), and `Node` is pinned at 16 bytes, so `TupleSig` must stay tiny. Four
-/// is ample - the largest real table is `(op, prec, assoc)`.
+/// operator exists).
 pub const TUPLE_MIN_ARITY: usize = 2;
 pub const TUPLE_MAX_ARITY: usize = 4;
 
-/// Packed tuple signature in one byte: four 2-bit slots, element `i` at bits
-/// `2*i`. Each slot is a [`ScalarTy`] discriminant (0/1/2) or `0b11` = absent.
-/// Present elements occupy a contiguous prefix, so arity is the first absent
-/// slot. Self-contained and `Copy` so equality and `Display` need no side table.
+/// A tuple's element scalar types, made up of four 2-bit slots, with element `i`
+/// in bits `2*i..2*i+2`.
+///
+/// Each slot holds a [`ScalarTy`] discriminant - `00` rule, `01` str, `10` int,
+/// or `11` for an absent slot. Present elements fill a contiguous low prefix,
+/// so the arity is the index of the first absent slot.
+///
+/// ```text
+///          slot 3   slot 2   slot 1   slot 0
+/// bit:      7 6      5 4      3 2      1 0
+///
+/// tuple_t<str_t, int_t>  ->   1 1      1 1      1 0      0 1
+///                            absent   absent   int=10   str=01
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TupleSig(u8);
 
@@ -73,17 +75,14 @@ const TUPLE_SLOT_ABSENT: u8 = 0b11;
 
 /// Why a sequence of element types can't form a tuple signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TupleSigError {
-    /// Arity outside `TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY`.
-    Arity(usize),
-}
+pub struct TupleSigError(pub usize);
 
 impl TupleSig {
     /// Build from element scalars. `Err` if the arity is outside 2..=4.
     pub fn new(elems: &[ScalarTy]) -> Result<Self, TupleSigError> {
         let n = elems.len();
         if !(TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY).contains(&n) {
-            return Err(TupleSigError::Arity(n));
+            return Err(TupleSigError(n));
         }
         // All slots absent, then fill the present prefix.
         let mut bits = u8::MAX;
@@ -272,7 +271,7 @@ impl Ty {
     pub fn to_list(self) -> Option<Self> {
         match self {
             Self::Data(d) => d.to_list().map(Self::Data),
-            _ => None,
+            Self::Module(_) => None,
         }
     }
 
@@ -281,7 +280,7 @@ impl Ty {
     pub fn list_elem(self) -> Option<Self> {
         match self {
             Self::Data(d) => d.list_elem().map(Self::Data),
-            _ => None,
+            Self::Module(_) => None,
         }
     }
 }
@@ -508,11 +507,11 @@ mod tests {
 
     #[test]
     fn tuple_sig_arity_bounds() {
-        assert_eq!(TupleSig::new(&[]), Err(TupleSigError::Arity(0)));
-        assert_eq!(TupleSig::new(&[Rule]), Err(TupleSigError::Arity(1)));
+        assert_eq!(TupleSig::new(&[]), Err(TupleSigError(0)));
+        assert_eq!(TupleSig::new(&[Rule]), Err(TupleSigError(1)));
         assert_eq!(
             TupleSig::new(&[Rule, Str, Int, Rule, Str]),
-            Err(TupleSigError::Arity(5))
+            Err(TupleSigError(5))
         );
         for n in TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY {
             let elems = vec![Rule; n];
