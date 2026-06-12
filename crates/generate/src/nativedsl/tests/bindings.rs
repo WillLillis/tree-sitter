@@ -357,6 +357,22 @@ fn plus_times_choice() -> Rule {
 }
 
 #[test]
+fn tuple_elements_from_macro_calls() {
+    // A tuple element can be any scalar-typed expression, not just a literal -
+    // including a macro call that returns a scalar (`tag` returns its rule_t
+    // argument, so `tag("+")` lowers to the string rule "+").
+    let g = dsl(r#"grammar { language: "test" }
+        macro tag(r: rule_t) rule_t { r }
+        rule binary {
+            choice(for (op: rule_t, p: int_t) in [(tag("+"), 1), (tag("*"), 2)] {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#);
+    assert_eq!(g.variables[0].rule, plus_times_choice());
+}
+
+#[test]
 fn for_named_list_of_tuples() {
     // Tier-1 tuples: a list of tuples bound to a let (type inferred as
     // list_t<tuple_t<str_t, int_t>>), then destructured by a multi-binding
