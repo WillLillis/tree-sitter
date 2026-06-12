@@ -245,6 +245,26 @@ fn render_snippet(
     Ok(())
 }
 
+/// Largest char boundary `<= i` (clamped to the string length). Spans are byte
+/// offsets and an error span can land inside a multibyte char, so clamp before
+/// slicing `source_text` to avoid a panic while rendering the diagnostic.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest char boundary `>= i` (clamped to the string length).
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 struct SpanContext<'a> {
     line_num: usize,
     col: usize,
@@ -258,7 +278,7 @@ struct SpanContext<'a> {
 
 impl SpanContext<'_> {
     fn new(span: Span, source_text: &str) -> SpanContext<'_> {
-        let offset = span.start as usize;
+        let offset = floor_char_boundary(source_text, span.start as usize);
         let bytes = source_text.as_bytes();
         let prefix = &bytes[..offset];
         let line_num = memchr::memchr_iter(b'\n', prefix).count() + 1;
@@ -275,7 +295,8 @@ impl SpanContext<'_> {
         // displayed glyphs on lines containing multibyte UTF-8.
         let span_start_in_line = source_text[line_start..offset].chars().count();
         let col = span_start_in_line + 1;
-        let underline_end = (span.end as usize).min(line_end);
+        let underline_end =
+            ceil_char_boundary(source_text, (span.end as usize).min(line_end)).max(offset);
         let underline_len = source_text[offset..underline_end].chars().count().max(1);
 
         let prev_line_text =
