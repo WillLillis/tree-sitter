@@ -392,6 +392,11 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             }
             Ok(())
         }
+        // `@<expr>` computed-name ref: resolve the inner name expression.
+        // Only reached for rule-set macro templates (expand rewrites invoked
+        // instances to SynthRef before resolve runs); without this the inner
+        // ident would stay Unresolved and crash definition-time typecheck.
+        &Node::SymRef { expr } => resolve_expr(arena, rcx, expr),
         &Node::FieldAccess { obj, .. } => resolve_expr(arena, rcx, obj),
         &Node::QualifiedAccess { obj, member } => {
             resolve_expr(arena, rcx, obj)?;
