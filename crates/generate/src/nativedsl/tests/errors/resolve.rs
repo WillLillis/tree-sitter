@@ -5,6 +5,16 @@ error_tests! { Resolve {
         r#"grammar { language: "test" } rule program { nonexistent }"#,
         ResolveErrorKind::UnknownIdentifier("nonexistent".into())
     }
+    error_symref_inner_resolved_in_rule_set_template {
+        // `@<ident>` inside a rule-set template has its inner name resolved like
+        // any other ident; an undefined one is a normal unknown-identifier error.
+        // (Previously the inner stayed Unresolved and crashed definition-time
+        // typecheck at the type_of `_ => unreachable!()`.)
+        r#"grammar { language: "test" }
+        rules r() { rule x { @foo } }
+        rule program { "x" }"#,
+        ResolveErrorKind::UnknownIdentifier("foo".into())
+    }
     error_duplicate_rule {
         r#"grammar { language: "test" } rule program { "a" } rule program { "b" }"#,
         ResolveErrorKind::DuplicateDeclaration("program".into())
