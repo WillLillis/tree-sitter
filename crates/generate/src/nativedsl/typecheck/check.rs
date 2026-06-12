@@ -708,15 +708,14 @@ fn type_of_tuple(
         *slot = s;
     }
     let sig = TupleSig::new(&scalars[..n]).map_err(|e| match e {
-        TupleSigError::Arity(bad) => TypeError::new(TypeErrorKind::TupleArityInvalid(bad), span),
+        TupleSigError(bad) => TypeError::new(TypeErrorKind::TupleArityInvalid(bad), span),
     })?;
     Ok(Ty::Data(DataTy::Tuple(sig)))
 }
 
 /// Type-check a for-loop's iterable against its bindings. Every iterable source
-/// - named list, `append`, macro arg, or non-empty literal - types to a
-/// concrete list whose element is matched against the bindings uniformly: a
-/// single binding takes the element directly; two or more destructure a tuple
+/// types to a concrete list whose element is matched against the bindings uniformly.
+/// A single binding takes the element directly, and two or more destructure a tuple
 /// element-wise.
 fn check_for_expr<CheckBody>(
     shared: &SharedAst,
