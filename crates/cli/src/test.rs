@@ -10,9 +10,7 @@ use std::{
 };
 
 use anstyle::AnsiColor;
-use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
-use indoc::indoc;
 use log::warn;
 use regex::Regex;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
@@ -23,6 +21,7 @@ use walkdir::WalkDir;
 
 use super::util;
 use crate::{
+    error::{GrammarLookupError, IoError, TestCmdError, TestCmdResult, TestKind},
     paint::{color_enabled, paint},
     parse::{
         ParseDebugType, ParseFileOptions, ParseOutput, ParseStats, ParseTheme, Stats, render_cst,
@@ -642,8 +641,8 @@ pub fn run_tests_at_path(
     parser: &mut Parser,
     opts: &TestOptions,
     test_summary: &mut TestSummary,
-) -> Result<()> {
-    let test_entry = parse_tests(&opts.path)?;
+) -> TestCmdResult<()> {
+    let test_entry = parse_tests(&opts.path).map_err(IoError::at(&opts.path))?;
 
     let _log_session = if opts.debug_graph {
         Some(util::log_graphs(parser, "log.html", opts.open_log)?)
@@ -674,15 +673,15 @@ pub fn run_tests_at_path(
     if test_summary.parse_failures.is_empty() || (opts.update && !test_summary.has_parse_errors) {
         Ok(())
     } else if opts.update && test_summary.has_parse_errors {
-        Err(anyhow!(indoc! {"
-                Some tests failed to parse with unexpected `ERROR` or `MISSING` nodes, as shown above, and cannot be updated automatically.
-                Either fix the grammar or manually update the tests if this is expected."}))
+        Err(TestCmdError::ParseTestsHaveUnexpectedErrors)
     } else {
-        Err(anyhow!(""))
+        Err(TestCmdError::TestsFailed {
+            kind: TestKind::Parse,
+        })
     }
 }
 
-pub fn check_queries_at_path(language: &Language, path: &Path) -> Result<()> {
+pub fn check_queries_at_path(language: &Language, path: &Path) -> TestCmdResult<()> {
     if path.exists() {
         for entry in WalkDir::new(path)
             .into_iter()
@@ -693,11 +692,12 @@ pub fn check_queries_at_path(language: &Language, path: &Path) -> Result<()> {
                     && !e.path().starts_with(".")
             })
         {
-            let filepath = entry.file_name().to_str().unwrap_or("");
-            let content = fs::read_to_string(entry.path())
-                .with_context(|| format!("Error reading query file {filepath:?}"))?;
-            Query::new(language, &content)
-                .with_context(|| format!("Error in query file {filepath:?}"))?;
+            let entry_path = entry.path();
+            let content = fs::read_to_string(entry_path).map_err(IoError::at(entry_path))?;
+            Query::new(language, &content).map_err(|source| TestCmdError::InvalidQueryFile {
+                path: entry_path.to_path_buf(),
+                source,
+            })?;
         }
     }
     Ok(())
@@ -846,7 +846,7 @@ fn run_tests(
     test_summary: &mut TestSummary,
     corrected_entries: &mut Vec<TestCorrection>,
     is_root: bool,
-) -> Result<bool> {
+) -> TestCmdResult<bool> {
     match test_entry {
         TestEntry::Example {
             name,
@@ -887,10 +887,11 @@ fn run_tests(
 
             for (i, language_name) in attributes.languages.iter().enumerate() {
                 if !language_name.is_empty() {
-                    let language = opts
-                        .languages
-                        .get(language_name.as_ref())
-                        .ok_or_else(|| anyhow!("Language not found: {language_name}"))?;
+                    let language = opts.languages.get(language_name.as_ref()).ok_or_else(|| {
+                        GrammarLookupError::LanguageNotFoundByName {
+                            name: language_name.to_string(),
+                        }
+                    })?;
                     parser.set_language(language)?;
                 }
                 let start = std::time::Instant::now();
@@ -1168,7 +1169,7 @@ fn run_tests(
 }
 
 /// Convenience wrapper to render a CST for a test entry.
-fn render_test_cst(input: &[u8], tree: &Tree) -> Result<String> {
+fn render_test_cst(input: &[u8], tree: &Tree) -> TestCmdResult<String> {
     let mut rendered_cst: Vec<u8> = Vec::new();
     let mut cursor = tree.walk();
     let opts = ParseFileOptions {
@@ -1201,15 +1202,15 @@ pub fn adjusted_parse_rate(tree: &Tree, parse_time: Duration) -> f64 {
     )
 }
 
-fn write_tests(file_path: &Path, corrected_entries: &[TestCorrection]) -> Result<()> {
-    let mut buffer = fs::File::create(file_path)?;
-    write_tests_to_buffer(&mut buffer, corrected_entries)
+fn write_tests(file_path: &Path, corrected_entries: &[TestCorrection]) -> TestCmdResult<()> {
+    let mut buffer = fs::File::create(file_path).map_err(IoError::at(file_path))?;
+    Ok(write_tests_to_buffer(&mut buffer, corrected_entries).map_err(IoError::at(file_path))?)
 }
 
 fn write_tests_to_buffer(
     buffer: &mut impl Write,
     corrected_entries: &[TestCorrection],
-) -> Result<()> {
+) -> io::Result<()> {
     for (
         i,
         TestCorrection {

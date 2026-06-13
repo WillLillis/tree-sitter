@@ -3,38 +3,34 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow};
 use tree_sitter::wasm_stdlib_symbols;
 use tree_sitter_generate::{load_grammar_file, parse_grammar::GrammarJSON};
 use tree_sitter_loader::Loader;
 use wasmparser::Parser;
 
-pub fn load_language_wasm_file(language_dir: &Path) -> Result<(String, Vec<u8>)> {
-    let grammar_name = get_grammar_name(language_dir)
-        .with_context(|| "Failed to get Wasm filename")
-        .unwrap();
+use crate::error::{IoError, WasmCmdError, WasmCmdResult};
+
+pub fn load_language_wasm_file(language_dir: &Path) -> WasmCmdResult<(String, Vec<u8>)> {
+    let grammar_name = get_grammar_name(language_dir).expect("Failed to get Wasm filename");
     let wasm_filename = format!("tree-sitter-{grammar_name}.wasm");
-    let contents = fs::read(language_dir.join(&wasm_filename)).with_context(|| {
-        format!("Failed to read {wasm_filename}. Run `tree-sitter build --wasm` first.")
+    let path = language_dir.join(&wasm_filename);
+    let contents = fs::read(&path).map_err(|source| WasmCmdError::ReadWasmBinary {
+        path: path.clone(),
+        source,
     })?;
     Ok((grammar_name, contents))
 }
 
-pub fn get_grammar_name(language_dir: &Path) -> Result<String> {
+pub fn get_grammar_name(language_dir: &Path) -> WasmCmdResult<String> {
     let src_dir = language_dir.join("src");
     let grammar_json_path = src_dir.join("grammar.json");
-    let grammar_json = fs::read_to_string(&grammar_json_path).with_context(|| {
-        format!(
-            "Failed to read grammar file {}",
-            grammar_json_path.display()
-        )
-    })?;
-    let grammar: GrammarJSON = serde_json::from_str(&grammar_json).with_context(|| {
-        format!(
-            "Failed to parse grammar file {}",
-            grammar_json_path.display()
-        )
-    })?;
+    let grammar_json =
+        fs::read_to_string(&grammar_json_path).map_err(IoError::at(&grammar_json_path))?;
+    let grammar: GrammarJSON =
+        serde_json::from_str(&grammar_json).map_err(|source| WasmCmdError::ParseGrammarFile {
+            path: grammar_json_path,
+            source,
+        })?;
     Ok(grammar.name)
 }
 
@@ -43,9 +39,11 @@ pub fn compile_language_to_wasm(
     language_dir: &Path,
     output_dir: &Path,
     output_file: Option<PathBuf>,
-) -> Result<()> {
-    let grammar_name = get_grammar_name(language_dir)
-        .or_else(|_| load_grammar_file(&language_dir.join("grammar.js"), None))?;
+) -> WasmCmdResult<()> {
+    let grammar_name = match get_grammar_name(language_dir) {
+        Ok(name) => name,
+        Err(_) => load_grammar_file(&language_dir.join("grammar.js"), None)?,
+    };
     let output_filename =
         output_file.unwrap_or_else(|| output_dir.join(format!("tree-sitter-{grammar_name}.wasm")));
     let src_path = language_dir.join("src");
@@ -59,8 +57,6 @@ pub fn compile_language_to_wasm(
         &output_filename,
     )?;
 
-    // Exit with an error if the external scanner uses symbols from the
-    // C or C++ standard libraries that aren't available to Wasm parsers.
     let stdlib_symbols = wasm_stdlib_symbols().collect::<Vec<_>>();
     let dylink_symbols = [
         "__indirect_function_table",
@@ -80,7 +76,7 @@ pub fn compile_language_to_wasm(
     ];
 
     let mut missing_symbols = Vec::new();
-    let wasm_bytes = fs::read(&output_filename)?;
+    let wasm_bytes = fs::read(&output_filename).map_err(IoError::at(&output_filename))?;
     let parser = Parser::new(0);
     for payload in parser.parse_all(&wasm_bytes) {
         if let wasmparser::Payload::ImportSection(reader) = payload? {
@@ -100,19 +96,10 @@ pub fn compile_language_to_wasm(
     }
 
     if !missing_symbols.is_empty() {
-        Err(anyhow!(
-            concat!(
-                "This external scanner uses a symbol that isn't available to Wasm parsers.\n",
-                "\n",
-                "Missing symbols:\n",
-                "    {}\n",
-                "\n",
-                "Available symbols:\n",
-                "    {}",
-            ),
-            missing_symbols.join("\n    "),
-            stdlib_symbols.join("\n    ")
-        ))?;
+        return Err(WasmCmdError::DisallowedScannerSymbols {
+            missing: missing_symbols.iter().map(|s| (*s).to_string()).collect(),
+            available: stdlib_symbols.iter().map(|s| (*s).to_string()).collect(),
+        });
     }
 
     Ok(())

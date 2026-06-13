@@ -3,8 +3,9 @@ use tree_sitter_highlight::{Highlight, Highlighter};
 
 use super::helpers::fixtures::{get_highlight_config, get_language, test_loader};
 use crate::{
+    error::TestCmdError,
     query_testing::{Assertion, Utf8Point, parse_position_comments},
-    test_highlight::{Failure, get_highlight_positions, iterate_assertions},
+    test_highlight::{get_highlight_positions, iterate_assertions},
 };
 
 #[test]
@@ -80,7 +81,9 @@ fn test_assertion_with_non_matching_highlight_at_same_position() {
     let result = iterate_assertions(&assertions, &highlights, &highlight_names);
 
     assert!(result.is_err());
-    let err = result.unwrap_err().downcast::<Failure>().unwrap();
+    let TestCmdError::HighlightFailure(err) = result.unwrap_err() else {
+        panic!()
+    };
     assert_eq!(err.row, 1);
     assert_eq!(err.column, 0);
     assert_eq!(err.expected_highlight, "keyword");
@@ -132,7 +135,9 @@ fn test_assertion_with_no_highlights() {
     let result = iterate_assertions(&assertions, &highlights, &highlight_names);
 
     assert!(result.is_err());
-    let err = result.unwrap_err().downcast::<Failure>().unwrap();
+    let TestCmdError::HighlightFailure(err) = result.unwrap_err() else {
+        panic!()
+    };
     assert_eq!(err.row, 0);
     assert_eq!(err.column, 0);
     assert_eq!(err.expected_highlight, "keyword");
@@ -148,7 +153,9 @@ fn test_assertion_with_highlight_ending_before() {
     let result = iterate_assertions(&assertions, &highlights, &highlight_names);
 
     assert!(result.is_err());
-    let err = result.unwrap_err().downcast::<Failure>().unwrap();
+    let TestCmdError::HighlightFailure(err) = result.unwrap_err() else {
+        panic!()
+    };
     assert_eq!(err.row, 0);
     assert_eq!(err.column, 10);
     assert_eq!(err.expected_highlight, "keyword");
@@ -180,7 +187,9 @@ fn test_negative_assertion_with_matching_highlight() {
     let result = iterate_assertions(&assertions, &highlights, &highlight_names);
 
     assert!(result.is_err());
-    let err = result.unwrap_err().downcast::<Failure>().unwrap();
+    let TestCmdError::HighlightFailure(err) = result.unwrap_err() else {
+        panic!()
+    };
     assert_eq!(err.row, 0);
     assert_eq!(err.column, 0);
     assert_eq!(err.expected_highlight, "!keyword");

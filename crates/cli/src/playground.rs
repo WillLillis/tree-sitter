@@ -6,11 +6,11 @@ use std::{
     str::{self, FromStr as _},
 };
 
-use anyhow::{Context, Result, anyhow};
 use log::{error, info};
 use tiny_http::{Header, Response, Server};
 
 use super::wasm;
+use crate::error::{IoError, PlaygroundError, PlaygroundResult};
 
 macro_rules! optional_resource {
     ($name:tt, $path:tt) => {
@@ -47,15 +47,10 @@ fn get_main_html(tree_sitter_dir: Option<&Path>) -> Cow<'static, [u8]> {
     )
 }
 
-pub fn export(grammar_path: &Path, export_path: &Path) -> Result<()> {
+pub fn export(grammar_path: &Path, export_path: &Path) -> PlaygroundResult<()> {
     let (grammar_name, language_wasm) = wasm::load_language_wasm_file(grammar_path)?;
 
-    fs::create_dir_all(export_path).with_context(|| {
-        format!(
-            "Failed to create export directory: {}",
-            export_path.display()
-        )
-    })?;
+    fs::create_dir_all(export_path).map_err(IoError::at(export_path))?;
 
     let tree_sitter_dir = env::var("TREE_SITTER_BASE_DIR").map(PathBuf::from).ok();
 
@@ -84,36 +79,39 @@ pub fn export(grammar_path: &Path, export_path: &Path) -> Result<()> {
         );
     }
 
-    fs::write(export_path.join("index.html"), main_html.as_bytes())
-        .with_context(|| "Failed to write index.html")?;
+    let index_path = export_path.join("index.html");
+    fs::write(&index_path, main_html.as_bytes()).map_err(IoError::at(&index_path))?;
 
-    fs::write(export_path.join("tree-sitter-parser.wasm"), language_wasm)
-        .with_context(|| "Failed to write parser wasm file")?;
+    let parser_wasm_path = export_path.join("tree-sitter-parser.wasm");
+    fs::write(&parser_wasm_path, language_wasm).map_err(IoError::at(&parser_wasm_path))?;
 
     if has_local_playground_js {
-        fs::write(export_path.join("playground.js"), playground_js)
-            .with_context(|| "Failed to write playground.js")?;
+        let path = export_path.join("playground.js");
+        fs::write(&path, playground_js).map_err(IoError::at(&path))?;
     }
 
     if has_local_lib_js {
-        fs::write(export_path.join("web-tree-sitter.js"), lib_js)
-            .with_context(|| "Failed to write web-tree-sitter.js")?;
+        let path = export_path.join("web-tree-sitter.js");
+        fs::write(&path, lib_js).map_err(IoError::at(&path))?;
     }
 
     if has_local_lib_wasm {
-        fs::write(export_path.join("web-tree-sitter.wasm"), lib_wasm)
-            .with_context(|| "Failed to write web-tree-sitter.wasm")?;
+        let path = export_path.join("web-tree-sitter.wasm");
+        fs::write(&path, lib_wasm).map_err(IoError::at(&path))?;
     }
 
     println!(
         "Exported playground to {}",
-        export_path.canonicalize()?.display()
+        export_path
+            .canonicalize()
+            .map_err(IoError::at(export_path))?
+            .display()
     );
 
     Ok(())
 }
 
-pub fn serve(grammar_path: &Path, open_in_browser: bool) -> Result<()> {
+pub fn serve(grammar_path: &Path, open_in_browser: bool) -> PlaygroundResult<()> {
     let server = get_server()?;
     let (grammar_name, language_wasm) = wasm::load_language_wasm_file(grammar_path)?;
     let url = format!("http://{}", server.server_addr());
@@ -164,7 +162,7 @@ pub fn serve(grammar_path: &Path, open_in_browser: bool) -> Result<()> {
         };
         request
             .respond(res)
-            .with_context(|| "Failed to write HTTP response")?;
+            .map_err(PlaygroundError::WriteHttpResponse)?;
     }
 
     Ok(())
@@ -182,30 +180,37 @@ fn response<'a>(data: &'a [u8], header: &Header) -> Response<&'a [u8]> {
         .with_header(header.clone())
 }
 
-fn get_server() -> Result<Server> {
+fn get_server() -> PlaygroundResult<Server> {
     let addr = env::var("TREE_SITTER_PLAYGROUND_ADDR").unwrap_or_else(|_| "127.0.0.1".to_owned());
     let port = env::var("TREE_SITTER_PLAYGROUND_PORT")
-        .map(|v| {
-            v.parse::<u16>()
-                .with_context(|| "Invalid port specification")
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .map_err(|source| PlaygroundError::InvalidPort {
+                    value: value.clone(),
+                    source,
+                })
         })
         .ok();
     let listener = match port {
         Some(port) => {
-            bind_to(&addr, port?).with_context(|| "Failed to bind to the specified port")?
+            let port = port?;
+            bind_to(&addr, port).map_err(|source| PlaygroundError::BindPort {
+                addr: addr.clone(),
+                port,
+                source,
+            })?
         }
         None => get_listener_on_available_port(&addr)
-            .with_context(|| "Failed to find a free port to bind to it")?,
+            .ok_or_else(|| PlaygroundError::NoFreePort { addr: addr.clone() })?,
     };
-    let server =
-        Server::from_listener(listener, None).map_err(|_| anyhow!("Failed to start web server"))?;
-    Ok(server)
+    Server::from_listener(listener, None).map_err(PlaygroundError::ServerStart)
 }
 
 fn get_listener_on_available_port(addr: &str) -> Option<TcpListener> {
-    (8000..12000).find_map(|port| bind_to(addr, port))
+    (8000..12000).find_map(|port| bind_to(addr, port).ok())
 }
 
-fn bind_to(addr: &str, port: u16) -> Option<TcpListener> {
-    TcpListener::bind(format!("{addr}:{port}")).ok()
+fn bind_to(addr: &str, port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(format!("{addr}:{port}"))
 }

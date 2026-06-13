@@ -469,13 +469,13 @@ fn get_existing_tool(
             }
         }
 
-        Err(LoaderError::WasmTool(WasmToolError {
+        Err(LoaderError::WasmTool(Box::new(WasmToolError {
             exe: tool_name,
             toolchain,
             tool_dir: tool_dir.to_string_lossy().to_string(),
             possible_executables: possible_exes.to_vec(),
             download: false,
-        }))?;
+        })))?;
     }
 
     let cache_dir = etcetera::choose_base_strategy()?
@@ -569,13 +569,13 @@ fn download_tool(
         }
     }
 
-    Err(LoaderError::WasmTool(WasmToolError {
+    Err(LoaderError::WasmTool(Box::new(WasmToolError {
         exe: tool_name,
         toolchain,
         tool_dir: tool_dir.to_string_lossy().to_string(),
         possible_executables: possible_exes.to_vec(),
         download: true,
-    }))?
+    })))?
 }
 
 /// Extracts a tar.gz archive with `tar`, stripping the first path component.

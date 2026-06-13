@@ -37,7 +37,6 @@ wasm    = [ "tree-sitter/wasm", "tree-sitter-loader/wasm" ]
 [dependencies]
 ansi_colours.workspace          = true
 anstyle.workspace               = true
-anyhow.workspace                = true
 bstr.workspace                  = true
 clap.workspace                  = true
 clap_complete.workspace         = true
@@ -74,6 +73,7 @@ tree-sitter-loader.workspace    = true
 tree-sitter-tags.workspace      = true
 
 [dev-dependencies]
+anyhow.workspace       = true
 encoding_rs            = "0.8.35"
 tree_sitter_proc_macro = { package = "tree-sitter-tests-proc-macro", path = "src/tests/proc_macro" }
 widestring             = "1.2.1"

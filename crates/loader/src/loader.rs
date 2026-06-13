@@ -111,13 +111,13 @@ pub enum LoaderError {
     #[error("No language found")]
     NoLanguage,
     #[error(transparent)]
-    Query(LoaderQueryError),
+    Query(Box<LoaderQueryError>),
     #[error("Failed to load language for scope '{0}':\n{1}")]
     ScopeLoad(String, Box<Self>),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
     #[error(transparent)]
-    Symbol(SymbolError),
+    Symbol(Box<SymbolError>),
     #[error(transparent)]
     Tags(#[from] TagsError),
     #[error("Failed to execute tar for {0} -- {1}")]
@@ -127,7 +127,7 @@ pub enum LoaderError {
     #[error("Failed to download {tool} from {url}")]
     WasmToolDownload { tool: &'static str, url: String },
     #[error(transparent)]
-    WasmTool(#[from] WasmToolError),
+    WasmTool(Box<WasmToolError>),
     #[error("Unsupported platform for wasi-sdk")]
     WasiSDKPlatform,
     #[cfg(feature = "wasm")]
@@ -1227,11 +1227,11 @@ impl Loader {
             let language_fn = library
                 .get::<Symbol<unsafe extern "C" fn() -> Language>>(function_name.as_bytes())
                 .map_err(|e| {
-                    LoaderError::Symbol(SymbolError {
+                    LoaderError::Symbol(Box::new(SymbolError {
                         error: e,
                         symbol_name: function_name.to_string(),
                         path: path.to_string_lossy().to_string(),
-                    })
+                    }))
                 })?;
             language_fn()
         };
@@ -1630,13 +1630,13 @@ impl Loader {
                 }
             }
 
-            Err(LoaderError::WasmTool(WasmToolError {
+            Err(LoaderError::WasmTool(Box::new(WasmToolError {
                 exe: tool_name,
                 toolchain,
                 tool_dir: tool_dir.to_string_lossy().to_string(),
                 possible_executables: possible_exes.to_vec(),
                 download: false,
-            }))?;
+            })))?;
         }
 
         let cache_dir = etcetera::choose_base_strategy()?
@@ -1735,13 +1735,13 @@ impl Loader {
             }
         }
 
-        Err(LoaderError::WasmTool(WasmToolError {
+        Err(LoaderError::WasmTool(Box::new(WasmToolError {
             exe: tool_name,
             toolchain,
             tool_dir: tool_dir.to_string_lossy().to_string(),
             possible_executables: possible_exes.to_vec(),
             download: true,
-        }))?
+        })))?
     }
 
     #[must_use]
@@ -2127,7 +2127,7 @@ impl LanguageConfiguration<'_> {
                     )
                     .map_err(|error| match error.kind {
                         QueryErrorKind::Language => {
-                            LoaderError::Query(LoaderQueryError { error, file: None })
+                            LoaderError::Query(Box::new(LoaderQueryError { error, file: None }))
                         }
                         _ => {
                             if error.offset < injections_query.len() {
@@ -2227,10 +2227,10 @@ impl LanguageConfiguration<'_> {
         error.row = source[range.start..offset_within_section]
             .matches('\n')
             .count();
-        LoaderError::Query(LoaderQueryError {
+        LoaderError::Query(Box::new(LoaderQueryError {
             error,
             file: Some(path.to_string_lossy().to_string()),
-        })
+        }))
     }
 
     #[expect(

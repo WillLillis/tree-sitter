@@ -142,7 +142,7 @@ pub type ExpandRuleResult<T> = Result<T, ExpandRuleError>;
 #[derive(Debug, Error, Serialize, Deserialize)]
 pub enum ExpandRuleError {
     #[error("Grammar error: Unexpected rule {0:?}")]
-    UnexpectedRule(Rule),
+    UnexpectedRule(Box<Rule>),
     #[error("{0}")]
     Parse(String),
     #[error(transparent)]
@@ -248,7 +248,7 @@ impl NfaBuilder {
                 result
             }
             Rule::Blank => Ok(false),
-            _ => Err(ExpandRuleError::UnexpectedRule(rule.clone()))?,
+            _ => Err(ExpandRuleError::UnexpectedRule(Box::new(rule.clone())))?,
         }
     }
 

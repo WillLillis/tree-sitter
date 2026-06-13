@@ -8,7 +8,6 @@ use std::{
 };
 
 use anstyle::{AnsiColor, Color, RgbColor};
-use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
 use log::info;
 use schemars::JsonSchema;
@@ -18,7 +17,12 @@ use tree_sitter::{
     ffi,
 };
 
-use crate::{fuzz::edits::Edit, paint::paint, util};
+use crate::{
+    error::{IoError, ParseCmdError, ParseCmdResult},
+    fuzz::edits::Edit,
+    paint::paint,
+    util,
+};
 
 #[derive(Debug, Default, Serialize, JsonSchema)]
 pub struct Stats {
@@ -285,14 +289,14 @@ pub fn parse_file_at_path(
     name: &str,
     max_path_length: usize,
     opts: &mut ParseFileOptions,
-) -> Result<()> {
+) -> ParseCmdResult<()> {
     #[expect(
         clippy::collection_is_never_read,
         reason = "value is held for its Drop side effect"
     )]
     let mut _log_session = None;
     parser.set_language(language)?;
-    let mut source_code = fs::read(path).with_context(|| format!("Error reading {name:?}"))?;
+    let mut source_code = fs::read(path).map_err(IoError::at(path))?;
 
     // Render an HTML graph if `--debug-graph` was passed
     if opts.debug_graph {
@@ -770,7 +774,7 @@ pub fn render_cst<'a, 'b: 'a>(
     cursor: &mut TreeCursor<'a>,
     opts: &ParseFileOptions,
     out: &mut impl Write,
-) -> Result<()> {
+) -> io::Result<()> {
     let lossy_source_code = String::from_utf8_lossy(source_code);
     let total_width = lossy_source_code
         .lines()
@@ -846,7 +850,7 @@ fn write_node_text(
     source: &str,
     color: Option<impl Into<Color> + Copy>,
     text_info: (usize, usize),
-) -> Result<()> {
+) -> io::Result<()> {
     let (total_width, indent_level) = text_info;
     let (quote, quote_color) = if is_named {
         ('`', opts.parse_theme.backtick)
@@ -986,7 +990,7 @@ fn cst_render_node(
     total_width: usize,
     indent_level: usize,
     in_error: bool,
-) -> Result<()> {
+) -> io::Result<()> {
     let node = cursor.node();
     let is_named = node.is_named();
     if !opts.no_ranges {
@@ -1067,7 +1071,11 @@ fn cst_render_node(
     Ok(())
 }
 
-pub fn perform_edit(tree: &mut Tree, input: &mut Vec<u8>, edit: &Edit) -> Result<InputEdit> {
+pub fn perform_edit(
+    tree: &mut Tree,
+    input: &mut Vec<u8>,
+    edit: &Edit,
+) -> ParseCmdResult<InputEdit> {
     let start_byte = edit.position;
     let old_end_byte = edit.position + edit.deleted_length;
     let new_end_byte = edit.position + edit.inserted_text.len();
@@ -1087,15 +1095,9 @@ pub fn perform_edit(tree: &mut Tree, input: &mut Vec<u8>, edit: &Edit) -> Result
     Ok(edit)
 }
 
-fn parse_edit_flag(source_code: &[u8], flag: &str) -> Result<Edit> {
-    let error = || {
-        anyhow!(
-            concat!(
-                "Invalid edit string '{}'. ",
-                "Edit strings must match the pattern '<START_BYTE_OR_POSITION> <REMOVED_LENGTH> <NEW_TEXT>'"
-            ),
-            flag
-        )
+fn parse_edit_flag(source_code: &[u8], flag: &str) -> ParseCmdResult<Edit> {
+    let error = || ParseCmdError::InvalidEditFlag {
+        flag: flag.to_string(),
     };
 
     // Three whitespace-separated parts:
@@ -1131,7 +1133,7 @@ fn parse_edit_flag(source_code: &[u8], flag: &str) -> Result<Edit> {
     })
 }
 
-pub fn offset_for_position(input: &[u8], position: Point) -> Result<usize> {
+pub fn offset_for_position(input: &[u8], position: Point) -> ParseCmdResult<usize> {
     let mut row = 0;
     let mut offset = 0;
     let mut iter = memchr::memchr_iter(b'\n', input);
@@ -1147,21 +1149,23 @@ pub fn offset_for_position(input: &[u8], position: Point) -> Result<usize> {
         break;
     }
     if position.row - row > 0 {
-        return Err(anyhow!("Failed to address a row: {}", position.row));
+        return Err(ParseCmdError::PositionRowOutOfBounds { row: position.row });
     }
     if let Some(pos) = iter.next() {
         if (pos - offset < position.column) || (input[offset] == b'\n' && position.column > 0) {
-            return Err(anyhow!("Failed to address a column: {}", position.column));
+            return Err(ParseCmdError::PositionColumnOutOfBounds {
+                column: position.column,
+            });
         }
     } else if input.len() - offset < position.column {
-        return Err(anyhow!("Failed to address a column over the end"));
+        return Err(ParseCmdError::PositionPastEnd);
     }
     Ok(offset + position.column)
 }
 
-pub fn position_for_offset(input: &[u8], offset: usize) -> Result<Point> {
+pub fn position_for_offset(input: &[u8], offset: usize) -> ParseCmdResult<Point> {
     if offset > input.len() {
-        return Err(anyhow!("Failed to address an offset: {offset}"));
+        return Err(ParseCmdError::OffsetOutOfBounds { offset });
     }
     let mut result = Point { row: 0, column: 0 };
     let mut last = 0;

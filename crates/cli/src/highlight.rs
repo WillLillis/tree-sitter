@@ -11,8 +11,9 @@ use std::{
 
 use ansi_colours::{ansi256_from_rgb, rgb_from_ansi256};
 use anstyle::{Ansi256Color, AnsiColor, Color, Effects, RgbColor};
-use anyhow::Result;
 use log::{info, warn};
+
+use crate::error::{HighlightCmdResult, IoError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use tree_sitter::ffi::{self, TSInputEncoding};
@@ -327,10 +328,10 @@ pub fn highlight(
     config: &HighlightConfiguration,
     print_name: bool,
     opts: &HighlightOptions,
-) -> Result<()> {
+) -> HighlightCmdResult<()> {
     if opts.check {
         let names = if let Some(path) = opts.captures_path.as_deref() {
-            let file = fs::read_to_string(path)?;
+            let file = fs::read_to_string(path).map_err(IoError::at(path))?;
             let capture_names = file
                 .lines()
                 .filter_map(|line| {
@@ -359,7 +360,7 @@ pub fn highlight(
         }
     }
 
-    let source = fs::read(path)?;
+    let source = fs::read(path).map_err(IoError::at(path))?;
 
     fn is_utf16_le_bom(bom_bytes: &[u8]) -> bool {
         bom_bytes == [0xFF, 0xFE]

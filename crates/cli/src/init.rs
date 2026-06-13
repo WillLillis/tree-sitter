@@ -4,7 +4,7 @@ use std::{
     str::{self, FromStr},
 };
 
-use anyhow::{Context, Result, anyhow};
+use crate::error::{InitError, InitResult, IoError};
 use crc32fast::hash as crc32;
 use heck::{ToKebabCase, ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use indoc::{formatdoc, indoc};
@@ -250,7 +250,7 @@ pub fn generate_grammar_files(
     language_name: &str,
     allow_update: bool,
     opts: Option<&JsonConfigOpts>,
-) -> Result<()> {
+) -> InitResult<()> {
     let dashed_language_name = language_name.to_kebab_case();
 
     let tree_sitter_config = missing_path_else(
@@ -276,7 +276,7 @@ pub fn generate_grammar_files(
 
     let mut tree_sitter_config = serde_json::from_str::<TreeSitterJSON>(
         &fs::read_to_string(tree_sitter_config.as_path())
-            .with_context(|| "Failed to read tree-sitter.json")?,
+            .map_err(IoError::at(tree_sitter_config.as_path()))?,
     )?;
 
     let camel_name = tree_sitter_config.grammars[0]
@@ -380,7 +380,7 @@ pub fn generate_grammar_files(
     Ok(())
 }
 
-fn generate_common_files(ctx: &InitContext, opts: &GenerateOpts) -> Result<()> {
+fn generate_common_files(ctx: &InitContext, opts: &GenerateOpts) -> InitResult<()> {
     // Create package.json
     missing_path_else(
         ctx.repo_path.join("package.json"),
@@ -434,7 +434,7 @@ fn generate_rust_bindings(
     ctx: &InitContext,
     opts: &GenerateOpts,
     bindings_dir: &Path,
-) -> Result<()> {
+) -> InitResult<()> {
     missing_path(bindings_dir.join("rust"), create_dir)?.apply(|path| {
         missing_path_else(
             path.join("lib.rs"),
@@ -480,7 +480,7 @@ fn generate_node_bindings(
     ctx: &InitContext,
     opts: &GenerateOpts,
     bindings_dir: &Path,
-) -> Result<()> {
+) -> InitResult<()> {
     missing_path(bindings_dir.join("node"), create_dir)?.apply(|path| {
         missing_path_else(
             path.join("index.js"),
@@ -550,7 +550,11 @@ fn generate_node_bindings(
     Ok(())
 }
 
-fn generate_c_bindings(ctx: &InitContext, opts: &GenerateOpts, bindings_dir: &Path) -> Result<()> {
+fn generate_c_bindings(
+    ctx: &InitContext,
+    opts: &GenerateOpts,
+    bindings_dir: &Path,
+) -> InitResult<()> {
     let kebab_case_name = ctx.language_name.to_kebab_case();
     missing_path(bindings_dir.join("c"), create_dir)?.apply(|path| {
         let header_name = format!("tree-sitter-{kebab_case_name}.h");
@@ -590,7 +594,11 @@ fn generate_c_bindings(ctx: &InitContext, opts: &GenerateOpts, bindings_dir: &Pa
     Ok(())
 }
 
-fn generate_go_bindings(ctx: &InitContext, opts: &GenerateOpts, bindings_dir: &Path) -> Result<()> {
+fn generate_go_bindings(
+    ctx: &InitContext,
+    opts: &GenerateOpts,
+    bindings_dir: &Path,
+) -> InitResult<()> {
     missing_path(bindings_dir.join("go"), create_dir)?.apply(|path| {
         missing_path(path.join("binding.go"), |path| {
             generate_file(path, BINDING_GO_TEMPLATE, ctx.language_name, opts)
@@ -613,7 +621,7 @@ fn generate_python_bindings(
     ctx: &InitContext,
     opts: &GenerateOpts,
     bindings_dir: &Path,
-) -> Result<()> {
+) -> InitResult<()> {
     missing_path(bindings_dir.join("python"), create_dir)?.apply(|path| {
         let snake_case_grammar_name = format!("tree_sitter_{}", ctx.language_name.to_snake_case());
         let lang_path = path.join(&snake_case_grammar_name);
@@ -702,7 +710,7 @@ fn generate_swift_bindings(
     ctx: &InitContext,
     opts: &GenerateOpts,
     bindings_dir: &Path,
-) -> Result<()> {
+) -> InitResult<()> {
     missing_path(bindings_dir.join("swift"), create_dir)?.apply(|path| {
         let lang_path = path.join(opts.class_name);
         missing_path(&lang_path, create_dir)?;
@@ -738,7 +746,7 @@ fn generate_zig_bindings(
     ctx: &InitContext,
     opts: &GenerateOpts,
     bindings_dir: &Path,
-) -> Result<()> {
+) -> InitResult<()> {
     missing_path_else(
         ctx.repo_path.join("build.zig"),
         ctx.allow_update,
@@ -797,7 +805,7 @@ fn generate_java_bindings(
     ctx: &InitContext,
     opts: &GenerateOpts,
     bindings_dir: &Path,
-) -> Result<()> {
+) -> InitResult<()> {
     missing_path(ctx.repo_path.join("pom.xml"), |path| {
         generate_file(path, POM_XML_TEMPLATE, ctx.language_name, opts)
     })?;
@@ -836,7 +844,7 @@ fn generate_java_bindings(
     Ok(())
 }
 
-fn update_package_json(path: &Path) -> Result<()> {
+fn update_package_json(path: &Path) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?
         .replace(
             r#""node-addon-api": "^8.3.1""#,
@@ -864,7 +872,7 @@ fn update_package_json(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn update_grammar_js(path: &Path) -> Result<()> {
+fn update_grammar_js(path: &Path) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if contents.contains("module.exports") {
         info!("Migrating grammar.js to ESM");
@@ -874,7 +882,7 @@ fn update_grammar_js(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn update_gitignore(path: &Path) -> Result<()> {
+fn update_gitignore(path: &Path) -> InitResult<()> {
     // NOTE: this modifies `contents` but never calls `write_file` (pre-existing bug)
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("Zig artifacts") {
@@ -890,7 +898,7 @@ fn update_gitignore(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn update_gitattributes(path: &Path) -> Result<()> {
+fn update_gitattributes(path: &Path) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     let c_bindings_entry = "bindings/c/* ";
     if contents.contains(c_bindings_entry) {
@@ -910,7 +918,7 @@ fn update_gitattributes(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn update_rust_lib_rs(path: &Path, opts: &GenerateOpts) -> Result<()> {
+fn update_rust_lib_rs(path: &Path, opts: &GenerateOpts) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("#[cfg(with_highlights_query)]") {
         info!("Updating query constants in bindings/rust/lib.rs");
@@ -963,7 +971,7 @@ fn update_rust_lib_rs(path: &Path, opts: &GenerateOpts) -> Result<()> {
     Ok(())
 }
 
-fn update_rust_build_rs(path: &Path, language_name: &str, opts: &GenerateOpts) -> Result<()> {
+fn update_rust_build_rs(path: &Path, language_name: &str, opts: &GenerateOpts) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("wasm32-unknown-unknown") {
         info!("Adding wasm32-unknown-unknown target to bindings/rust/build.rs");
@@ -1037,7 +1045,7 @@ fn update_rust_build_rs(path: &Path, language_name: &str, opts: &GenerateOpts) -
     Ok(())
 }
 
-fn update_c_makefile(path: &Path, language_name: &str, opts: &GenerateOpts) -> Result<()> {
+fn update_c_makefile(path: &Path, language_name: &str, opts: &GenerateOpts) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("cd '$(DESTDIR)$(LIBDIR)' && ln -sf") {
         info!("Replacing Makefile");
@@ -1065,7 +1073,7 @@ fn update_c_makefile(path: &Path, language_name: &str, opts: &GenerateOpts) -> R
     Ok(())
 }
 
-fn update_c_cmakelists(path: &Path, language_name: &str) -> Result<()> {
+fn update_c_cmakelists(path: &Path, language_name: &str) -> InitResult<()> {
     let contents = fs::read_to_string(path)?;
     let replaced_contents = contents
         .replace("add_custom_target(test", "add_custom_target(ts-test")
@@ -1126,7 +1134,7 @@ fn update_c_cmakelists(path: &Path, language_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn update_python_binding_c(path: &Path, snake_case_grammar_name: &str) -> Result<()> {
+fn update_python_binding_c(path: &Path, snake_case_grammar_name: &str) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("PyModuleDef_Init") {
         info!("Updating bindings/python/{snake_case_grammar_name}/binding.c");
@@ -1161,7 +1169,7 @@ fn update_python_binding_c(path: &Path, snake_case_grammar_name: &str) -> Result
     Ok(())
 }
 
-fn update_python_init_pyi(path: &Path, language_name: &str, opts: &GenerateOpts) -> Result<()> {
+fn update_python_init_pyi(path: &Path, language_name: &str, opts: &GenerateOpts) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if contents.contains("uncomment these to include any queries") {
         info!("Replacing __init__.pyi");
@@ -1179,7 +1187,7 @@ fn update_python_init_pyi(path: &Path, language_name: &str, opts: &GenerateOpts)
     Ok(())
 }
 
-fn update_python_test_binding(path: &Path) -> Result<()> {
+fn update_python_test_binding(path: &Path) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("Parser(Language(") {
         info!("Updating Language function in bindings/python/tests/test_binding.py");
@@ -1195,7 +1203,7 @@ fn update_python_test_binding(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn update_python_setup_py(path: &Path, language_name: &str, opts: &GenerateOpts) -> Result<()> {
+fn update_python_setup_py(path: &Path, language_name: &str, opts: &GenerateOpts) -> InitResult<()> {
     let mut contents = fs::read_to_string(path)?;
     if !contents.contains("build_ext") {
         info!("Replacing setup.py");
@@ -1212,7 +1220,7 @@ fn update_python_setup_py(path: &Path, language_name: &str, opts: &GenerateOpts)
     Ok(())
 }
 
-fn update_swift_package(path: &Path) -> Result<()> {
+fn update_swift_package(path: &Path) -> InitResult<()> {
     let contents = fs::read_to_string(path)?;
     let replaced_contents = contents
         .replace(
@@ -1243,7 +1251,7 @@ fn regenerate_if_missing(
     template: &str,
     language_name: &str,
     opts: &GenerateOpts,
-) -> Result<()> {
+) -> InitResult<()> {
     let contents = fs::read_to_string(path)?;
     if !contents.contains(marker) {
         let filename = path.file_name().unwrap().to_str().unwrap();
@@ -1253,7 +1261,7 @@ fn regenerate_if_missing(
     Ok(())
 }
 
-pub fn get_root_path(path: &Path) -> Result<PathBuf> {
+pub fn get_root_path(path: &Path) -> InitResult<PathBuf> {
     let mut pathbuf = path.to_owned();
     let filename = path.file_name().unwrap().to_str().unwrap();
     let is_package_json = filename == "package.json";
@@ -1262,14 +1270,20 @@ pub fn get_root_path(path: &Path) -> Result<PathBuf> {
             .exists()
             .then(|| {
                 let contents = fs::read_to_string(pathbuf.as_path())
-                    .with_context(|| format!("Failed to read {filename}"))?;
+                    .map_err(IoError::at(pathbuf.as_path()))?;
                 if is_package_json {
                     serde_json::from_str::<Map<String, Value>>(&contents)
-                        .context(format!("Failed to parse {filename}"))
+                        .map_err(|source| InitError::ParseConfigFile {
+                            path: pathbuf.clone(),
+                            source,
+                        })
                         .map(|v| v.contains_key("tree-sitter"))
                 } else {
                     serde_json::from_str::<TreeSitterJSON>(&contents)
-                        .context(format!("Failed to parse {filename}"))
+                        .map_err(|source| InitError::ParseConfigFile {
+                            path: pathbuf.clone(),
+                            source,
+                        })
                         .map(|_| true)
                 }
             })
@@ -1279,13 +1293,10 @@ pub fn get_root_path(path: &Path) -> Result<PathBuf> {
         }
         pathbuf.pop(); // filename
         if !pathbuf.pop() {
-            return Err(anyhow!(format!(
-                concat!(
-                    "Failed to locate a {} file,",
-                    " please ensure you have one, and if you don't then consult the docs",
-                ),
-                filename
-            )));
+            return Err(InitError::ConfigFileNotFound {
+                filename: PathBuf::from(filename),
+                search_root: path.to_path_buf(),
+            });
         }
         pathbuf.push(filename);
     }
@@ -1296,7 +1307,7 @@ fn generate_file(
     template: &str,
     language_name: &str,
     generate_opts: &GenerateOpts,
-) -> Result<()> {
+) -> InitResult<()> {
     let filename = path.file_name().unwrap().to_str().unwrap();
 
     let lower_parser_name = if path
@@ -1565,9 +1576,8 @@ fn generate_file(
     Ok(())
 }
 
-fn create_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("Failed to create {:?}", path.to_string_lossy()))
+fn create_dir(path: &Path) -> InitResult<()> {
+    Ok(fs::create_dir_all(path).map_err(IoError::at(path))?)
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -1584,26 +1594,26 @@ impl<P> PathState<P>
 where
     P: AsRef<Path>,
 {
-    fn exists(&self, mut action: impl FnMut(&Path) -> Result<()>) -> Result<&Self> {
+    fn exists(&self, mut action: impl FnMut(&Path) -> InitResult<()>) -> InitResult<&Self> {
         if let Self::Exists(path) = self {
             action(path.as_ref())?;
         }
         Ok(self)
     }
 
-    fn missing(&self, mut action: impl FnMut(&Path) -> Result<()>) -> Result<&Self> {
+    fn missing(&self, mut action: impl FnMut(&Path) -> InitResult<()>) -> InitResult<&Self> {
         if let Self::Missing(path) = self {
             action(path.as_ref())?;
         }
         Ok(self)
     }
 
-    fn apply(&self, mut action: impl FnMut(&Path) -> Result<()>) -> Result<&Self> {
+    fn apply(&self, mut action: impl FnMut(&Path) -> InitResult<()>) -> InitResult<&Self> {
         action(self.as_path())?;
         Ok(self)
     }
 
-    fn apply_state(&self, mut action: impl FnMut(&Self) -> Result<()>) -> Result<&Self> {
+    fn apply_state(&self, mut action: impl FnMut(&Self) -> InitResult<()>) -> InitResult<&Self> {
         action(self)?;
         Ok(self)
     }
@@ -1615,10 +1625,10 @@ where
     }
 }
 
-fn missing_path<P, F>(path: P, mut action: F) -> Result<PathState<P>>
+fn missing_path<P, F>(path: P, mut action: F) -> InitResult<PathState<P>>
 where
     P: AsRef<Path>,
-    F: FnMut(&Path) -> Result<()>,
+    F: FnMut(&Path) -> InitResult<()>,
 {
     let path_ref = path.as_ref();
     if !path_ref.exists() {
@@ -1634,11 +1644,11 @@ fn missing_path_else<P, T, F>(
     allow_update: bool,
     mut action: T,
     mut else_action: F,
-) -> Result<PathState<P>>
+) -> InitResult<PathState<P>>
 where
     P: AsRef<Path>,
-    T: FnMut(&Path) -> Result<()>,
-    F: FnMut(&Path) -> Result<()>,
+    T: FnMut(&Path) -> InitResult<()>,
+    F: FnMut(&Path) -> InitResult<()>,
 {
     let path_ref = path.as_ref();
     if !path_ref.exists() {

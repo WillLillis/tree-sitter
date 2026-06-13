@@ -1,11 +1,11 @@
 use std::{fs, path::Path};
 
-use anyhow::{Result, anyhow};
 use tree_sitter::Point;
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 use tree_sitter_loader::{Config, Loader};
 
 use crate::{
+    error::{IoError, TestCmdError, TestCmdResult, TestKind},
     query_testing::{Assertion, Utf8Point, parse_position_comments, to_utf8_point},
     test::{TestInfo, TestOutcome, TestResult, TestSummary},
     util,
@@ -48,14 +48,20 @@ pub fn test_highlights(
     highlighter: &mut Highlighter,
     directory: &Path,
     test_summary: &mut TestSummary,
-) -> Result<()> {
+) -> TestCmdResult<()> {
     let mut failed = false;
 
-    for highlight_test_file in fs::read_dir(directory)? {
-        let highlight_test_file = highlight_test_file?;
+    for highlight_test_file in fs::read_dir(directory).map_err(IoError::at(directory))? {
+        let highlight_test_file = highlight_test_file.map_err(IoError::at(directory))?;
         let test_file_path = highlight_test_file.path();
         let test_file_name = highlight_test_file.file_name();
-        if test_file_path.is_dir() && test_file_path.read_dir()?.next().is_some() {
+        if test_file_path.is_dir()
+            && test_file_path
+                .read_dir()
+                .map_err(IoError::at(&test_file_path))?
+                .next()
+                .is_some()
+        {
             test_summary
                 .highlight_results
                 .add_group(test_file_name.to_string_lossy().as_ref());
@@ -75,24 +81,20 @@ pub fn test_highlights(
             let (language, language_config) = loader
                 .language_configuration_for_file_name(&test_file_path)?
                 .ok_or_else(|| {
-                    anyhow!(
-                        "{}",
-                        util::lang_not_found_for_path(test_file_path.as_path(), loader_config)
-                    )
+                    util::lang_not_found_for_path(test_file_path.as_path(), loader_config)
                 })?;
             let highlight_config = language_config
                 .highlight_config(language, None)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "No highlighting config found for {}",
-                        test_file_path.display()
-                    )
+                .ok_or_else(|| TestCmdError::NoHighlightConfig {
+                    path: test_file_path.clone(),
                 })?;
             match test_highlight(
                 loader,
                 highlighter,
                 highlight_config,
-                fs::read(&test_file_path)?.as_slice(),
+                fs::read(&test_file_path)
+                    .map_err(IoError::at(&test_file_path))?
+                    .as_slice(),
             ) {
                 Ok(assertion_count) => {
                     test_summary.highlight_results.add_case(TestResult {
@@ -120,14 +122,20 @@ pub fn test_highlights(
         }
     }
 
-    if failed { Err(anyhow!("")) } else { Ok(()) }
+    if failed {
+        Err(TestCmdError::TestsFailed {
+            kind: TestKind::Highlight,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 pub fn iterate_assertions(
     assertions: &[Assertion],
     highlights: &[(Utf8Point, Utf8Point, Highlight)],
     highlight_names: &[String],
-) -> Result<usize> {
+) -> TestCmdResult<usize> {
     // Iterate through all of the highlighting assertions, checking each one against the
     // actual highlights.
     let mut i = 0;
@@ -193,7 +201,7 @@ pub fn test_highlight(
     highlighter: &mut Highlighter,
     highlight_config: &HighlightConfiguration,
     source: &[u8],
-) -> Result<usize> {
+) -> TestCmdResult<usize> {
     // Highlight the file, and parse out all of the highlighting assertions.
     let highlight_names = loader.highlight_names();
     let highlights = get_highlight_positions(loader, highlighter, highlight_config, source)?;
@@ -208,7 +216,7 @@ pub fn get_highlight_positions(
     highlighter: &mut Highlighter,
     highlight_config: &HighlightConfiguration,
     source: &[u8],
-) -> Result<Vec<(Utf8Point, Utf8Point, Highlight)>> {
+) -> TestCmdResult<Vec<(Utf8Point, Utf8Point, Highlight)>> {
     let mut row = 0;
     let mut column = 0;
     let mut byte_offset = 0;

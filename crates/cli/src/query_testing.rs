@@ -1,9 +1,10 @@
 use std::{fs, path::Path, sync::LazyLock};
 
-use anyhow::{Result, anyhow};
 use bstr::{BStr, ByteSlice};
 use regex::Regex;
 use tree_sitter::{Language, Parser, Point};
+
+use crate::error::{IoError, QueryTestingError, QueryTestingResult};
 
 static CAPTURE_NAME_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new("[\\w_\\-.]+").unwrap());
 
@@ -89,7 +90,7 @@ pub fn parse_position_comments(
     parser: &mut Parser,
     language: &Language,
     source: &[u8],
-) -> Result<Vec<Assertion>> {
+) -> QueryTestingResult<Vec<Assertion>> {
     let mut result = Vec::new();
     let mut assertion_ranges = Vec::new();
 
@@ -197,10 +198,10 @@ pub fn parse_position_comments(
                 if assertion.position.row > 0 {
                     assertion.position.row -= 1;
                 } else {
-                    return Err(anyhow!(
-                        "Error: could not find a line that corresponds to the assertion `{}` located at {original_position}",
-                        assertion.expected_capture_name
-                    ));
+                    return Err(QueryTestingError::AssertionLineNotFound {
+                        capture: assertion.expected_capture_name.clone(),
+                        position: original_position,
+                    });
                 }
             } else {
                 while i < assertion_ranges.len()
@@ -224,8 +225,8 @@ pub fn assert_expected_captures(
     path: &Path,
     parser: &mut Parser,
     language: &Language,
-) -> Result<usize> {
-    let contents = fs::read_to_string(path)?;
+) -> QueryTestingResult<usize> {
+    let contents = fs::read_to_string(path).map_err(IoError::at(path))?;
     let pairs = parse_position_comments(parser, language, contents.as_bytes())?;
     for assertion in &pairs {
         if let Some(found) = &infos.iter().find(|p| {
@@ -234,20 +235,18 @@ pub fn assert_expected_captures(
                     || assertion.position.column + assertion.length - 1 < p.end.column)
         }) {
             if assertion.expected_capture_name != found.name && found.name != "name" {
-                return Err(anyhow!(
-                    "Assertion failed: at {}, found {}, expected {}",
-                    found.start,
-                    found.name,
-                    assertion.expected_capture_name,
-                ));
+                return Err(QueryTestingError::AssertionMismatch {
+                    position: found.start,
+                    found: found.name.clone(),
+                    expected: assertion.expected_capture_name.clone(),
+                });
             }
         } else {
-            return Err(anyhow!(
-                "Assertion failed: could not match {} at row {}, column {}",
-                assertion.expected_capture_name,
-                assertion.position.row,
-                assertion.position.column + assertion.length - 1,
-            ));
+            return Err(QueryTestingError::AssertionUnmatched {
+                capture: assertion.expected_capture_name.clone(),
+                row: assertion.position.row,
+                column: assertion.position.column + assertion.length - 1,
+            });
         }
     }
     Ok(pairs.len())

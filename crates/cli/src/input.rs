@@ -9,10 +9,12 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result, anyhow, bail};
 use glob::glob;
 
-use crate::test::{TestEntry, parse_tests};
+use crate::{
+    error::{InputSelectionError, InputSelectionResult, IoError},
+    test::{TestEntry, parse_tests},
+};
 
 pub enum CliInput {
     Paths(Vec<PathBuf>),
@@ -29,11 +31,11 @@ pub fn get_input(
     paths: Option<Vec<PathBuf>>,
     test_number: Option<u32>,
     cancellation_flag: &Arc<AtomicUsize>,
-) -> Result<CliInput> {
+) -> InputSelectionResult<CliInput> {
     if let Some(paths_file) = paths_file {
         return Ok(CliInput::Paths(
             fs::read_to_string(paths_file)
-                .with_context(|| format!("Failed to read paths file {}", paths_file.display()))?
+                .map_err(IoError::at(paths_file))?
                 .trim()
                 .lines()
                 .map(PathBuf::from)
@@ -46,17 +48,17 @@ pub fn get_input(
         let test_dir = current_dir.join("test").join("corpus");
 
         if !test_dir.exists() {
-            return Err(anyhow!(
-                "Test corpus directory not found in current directory, see https://tree-sitter.github.io/tree-sitter/creating-parsers/5-writing-tests"
-            ));
+            return Err(InputSelectionError::TestCorpusNotFound);
         }
 
-        let test_entry = parse_tests(&test_dir)?;
+        let test_entry = parse_tests(&test_dir).map_err(IoError::at(&test_dir))?;
         let mut test_num = 0;
         let Some((name, contents, languages)) =
             get_test_info(&test_entry, test_number.max(1) - 1, &mut test_num)
         else {
-            return Err(anyhow!("Failed to fetch contents of test #{test_number}"));
+            return Err(InputSelectionError::TestNumberNotFound {
+                number: test_number,
+            });
         };
 
         return Ok(CliInput::Test {
@@ -88,10 +90,12 @@ pub fn get_input(
                 incorporate_path(path, positive);
             } else {
                 let Some(path_str) = path.to_str() else {
-                    bail!("Invalid path: {}", path.display());
+                    return Err(InputSelectionError::InvalidPath { path });
                 };
-                let paths = glob(path_str)
-                    .with_context(|| format!("Invalid glob pattern {}", path.display()))?;
+                let paths = glob(path_str).map_err(|source| InputSelectionError::InvalidGlob {
+                    pattern: path_str.to_string(),
+                    source,
+                })?;
                 for path in paths {
                     incorporate_path(path?, positive);
                 }
@@ -99,9 +103,7 @@ pub fn get_input(
         }
 
         if result.is_empty() {
-            return Err(anyhow!(
-                "No files were found at or matched by the provided pathname/glob"
-            ));
+            return Err(InputSelectionError::NoFilesFound);
         }
 
         return Ok(CliInput::Paths(result));
@@ -135,7 +137,7 @@ pub fn get_input(
     loop {
         // If we've received a ctrl-c signal, exit
         if cancellation_flag.load(Ordering::Relaxed) == 1 {
-            bail!("\n");
+            return Err(InputSelectionError::Interrupted);
         }
 
         // If we're done receiving input from stdin, return it
@@ -178,10 +180,12 @@ pub fn get_test_info(
 }
 
 /// Writes `contents` to a temporary file and returns the path to that file.
-pub fn get_tmp_source_file(contents: &[u8]) -> Result<PathBuf> {
+pub fn get_tmp_source_file(contents: &[u8]) -> InputSelectionResult<PathBuf> {
     let parse_path = std::env::temp_dir().join(".tree-sitter-temp");
-    let mut parse_file = std::fs::File::create(&parse_path)?;
-    parse_file.write_all(contents)?;
+    let mut parse_file = std::fs::File::create(&parse_path).map_err(IoError::at(&parse_path))?;
+    parse_file
+        .write_all(contents)
+        .map_err(IoError::at(&parse_path))?;
 
     Ok(parse_path)
 }

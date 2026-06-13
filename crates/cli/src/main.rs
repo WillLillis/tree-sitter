@@ -5,7 +5,6 @@ use std::{
 };
 
 use anstyle::{AnsiColor, Color, Style};
-use anyhow::{Context, Result, anyhow};
 use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum, crate_authors};
 use clap_complete::generate;
 use dialoguer::{Confirm, FuzzySelect, Input, MultiSelect, theme::ColorfulTheme};
@@ -14,6 +13,14 @@ use log::{error, info, warn};
 use regex::Regex;
 use semver::Version as SemverVersion;
 use tree_sitter::{Parser, Point, ffi};
+#[cfg(not(feature = "wasm"))]
+use tree_sitter_cli::error::WasmFeatureDisabled;
+use tree_sitter_cli::error::{
+    BuildCmdError, BuildCmdResult, CliResult, DumpLanguagesResult, FuzzCmdResult, GenerateCmdError,
+    GenerateCmdResult, GrammarLookupError, HighlightCmdResult, InitConfigError, InitConfigResult,
+    InitResult, IoError, ParseCmdError, ParseCmdResult, ParseRangeError, ParseRangeResult,
+    PlaygroundResult, QueryCmdResult, TagsCmdResult, TestCmdResult,
+};
 use tree_sitter_cli::{
     fuzz::{
         DEFAULT_EDIT_COUNT, DEFAULT_ITERATION_COUNT, EDIT_COUNT, FuzzOptions, ITERATION_COUNT,
@@ -630,18 +637,15 @@ macro_rules! checked_wasm {
         }
         #[cfg(not(feature = "wasm"))]
         {
-            Err(anyhow!("--wasm flag specified, but this build of tree-sitter-cli does not include the wasm feature"))?;
+            Err(WasmFeatureDisabled)?;
         }
     };
 }
 
 impl InitConfig {
-    fn run() -> Result<()> {
+    fn run() -> InitConfigResult<()> {
         if let Ok(Some(config_path)) = Config::find_config_file() {
-            return Err(anyhow!(
-                "Remove your existing config file first: {}",
-                config_path.to_string_lossy()
-            ));
+            return Err(InitConfigError::ConfigExists { path: config_path });
         }
         let mut config = Config::initial()?;
         config.add(tree_sitter_loader::Config::initial())?;
@@ -656,7 +660,7 @@ impl InitConfig {
 }
 
 impl Init {
-    fn run(self, current_dir: &Path) -> Result<()> {
+    fn run(self, current_dir: &Path) -> InitResult<()> {
         let configure_json = !current_dir.join("tree-sitter.json").exists();
 
         let (language_name, json_config_opts) = if configure_json {
@@ -804,7 +808,7 @@ impl Init {
                     .interact()
             };
 
-            let bindings = || {
+            let bindings = || -> InitResult<Bindings> {
                 let languages = Bindings::default().languages();
 
                 let enabled = MultiSelect::new()
@@ -816,7 +820,7 @@ impl Init {
 
                 let out = Bindings::with_enabled_languages(enabled)
                     .expect("unexpected unsupported language");
-                anyhow::Ok(out)
+                Ok(out)
             };
 
             let choices = [
@@ -891,8 +895,8 @@ impl Init {
 
             (opts.name.clone(), Some(opts))
         } else {
-            let old_config = fs::read_to_string(current_dir.join("tree-sitter.json"))
-                .with_context(|| "Failed to read tree-sitter.json")?;
+            let config_path = current_dir.join("tree-sitter.json");
+            let old_config = fs::read_to_string(&config_path).map_err(IoError::at(&config_path))?;
 
             let mut json = serde_json::from_str::<TreeSitterJSON>(&old_config)?;
             if json.schema.is_none() {
@@ -904,11 +908,8 @@ impl Init {
             // will be included with explicit `false`s rather than implicit `null`s
             if self.update && !old_config.trim().eq(new_config.trim()) {
                 info!("Updating tree-sitter.json");
-                fs::write(
-                    current_dir.join("tree-sitter.json"),
-                    serde_json::to_string_pretty(&json)?,
-                )
-                .with_context(|| "Failed to write tree-sitter.json")?;
+                fs::write(&config_path, serde_json::to_string_pretty(&json)?)
+                    .map_err(IoError::at(&config_path))?;
             }
 
             (json.grammars.swap_remove(0).name, None)
@@ -926,7 +927,7 @@ impl Init {
 }
 
 impl Generate {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> GenerateCmdResult<()> {
         if self.log {
             logger::enable_debug();
         }
@@ -967,8 +968,7 @@ impl Generate {
                 // Exit early to prevent errors from being printed a second time in the caller
                 std::process::exit(1);
             } else {
-                // Removes extra context associated with the error
-                Err(anyhow!(err.to_string())).with_context(|| "Error when generating parser")?;
+                return Err(GenerateCmdError::Generate(err));
             }
         }
         if self.build {
@@ -984,7 +984,7 @@ impl Generate {
 }
 
 impl Build {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> BuildCmdResult<()> {
         let grammar_path = current_dir.join(self.path.unwrap_or_default());
 
         loader.debug_build(self.debug);
@@ -1001,14 +1001,22 @@ impl Build {
                 } else {
                     current_dir.join(path)
                 };
-                let parent_path = full_path
-                    .parent()
-                    .context("Output path must have a parent")?;
-                let name = full_path
-                    .file_name()
-                    .context("Output path must have a filename")?;
-                fs::create_dir_all(parent_path).context("Failed to create output path")?;
-                let mut canon_path = parent_path.canonicalize().context("Invalid output path")?;
+                let parent_path =
+                    full_path
+                        .parent()
+                        .ok_or_else(|| BuildCmdError::OutputPathNoParent {
+                            path: full_path.clone(),
+                        })?;
+                let name =
+                    full_path
+                        .file_name()
+                        .ok_or_else(|| BuildCmdError::OutputPathNoFilename {
+                            path: full_path.clone(),
+                        })?;
+                fs::create_dir_all(parent_path).map_err(IoError::at(parent_path))?;
+                let mut canon_path = parent_path
+                    .canonicalize()
+                    .map_err(IoError::at(parent_path))?;
                 canon_path.push(name);
                 canon_path
             } else {
@@ -1035,14 +1043,14 @@ impl Build {
 
             loader
                 .compile_parser_at_path(&grammar_path, output_path, flags)
-                .context("Failed to compile parser")?;
+                .map_err(BuildCmdError::Compile)?;
         }
         Ok(())
     }
 }
 
 impl Parse {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> ParseCmdResult<()> {
         let config = Config::load(self.config_path)?;
         let json_summary = if self.json {
             warn!("--json is deprecated, use --json-summary instead");
@@ -1065,7 +1073,12 @@ impl Parse {
         let parse_theme = if paint::color_enabled() {
             config
                 .get::<parse::Config>()
-                .with_context(|| "Failed to parse CST theme")?
+                .map_err(|e| match e {
+                    tree_sitter_config::ConfigError::Serialization(source) => {
+                        ParseCmdError::ParseCstTheme(source)
+                    }
+                    other => ParseCmdError::Config(other),
+                })?
                 .parse_theme
                 .unwrap_or_default()
                 .into()
@@ -1174,8 +1187,9 @@ impl Parse {
                             self.scope.as_deref(),
                             lib_info.as_ref(),
                         )
-                        .with_context(|| {
-                            anyhow!("Failed to load language for path \"{}\"", path.display())
+                        .map_err(|source| GrammarLookupError::LanguageLoadFailed {
+                            path: path.to_path_buf(),
+                            source,
                         })?;
 
                     parse::parse_file_at_path(
@@ -1206,11 +1220,9 @@ impl Parse {
                             self.scope.as_deref(),
                             lib_info.as_ref(),
                         )
-                        .with_context(|| {
-                            anyhow!(
-                                "Failed to load language for path \"{}\"",
-                                lib_path.display()
-                            )
+                        .map_err(|source| GrammarLookupError::LanguageLoadFailed {
+                            path: lib_path.clone(),
+                            source,
                         })?
                 } else {
                     &languages
@@ -1218,7 +1230,9 @@ impl Parse {
                         .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
                         .or_else(|| languages.first())
                         .map(|(l, _)| l.clone())
-                        .ok_or_else(|| anyhow!("No language found"))?
+                        .ok_or_else(|| GrammarLookupError::LanguageNotFound {
+                            path: current_dir.to_path_buf(),
+                        })?
                 };
 
                 parse::parse_file_at_path(
@@ -1267,7 +1281,7 @@ impl Parse {
         }
 
         if has_error {
-            return Err(anyhow!(""));
+            return Err(ParseCmdError::ParseHadErrors);
         }
 
         Ok(())
@@ -1276,11 +1290,11 @@ impl Parse {
 
 /// In case an error is encountered, prints out the contents of `test_summary` and
 /// propagates the error
-fn check_test(
-    test_result: Result<()>,
+fn check_test<E>(
+    test_result: Result<(), E>,
     test_summary: &TestSummary,
     json_summary: bool,
-) -> Result<()> {
+) -> Result<(), E> {
     if let Err(e) = test_result {
         if json_summary {
             let json_summary = serde_json::to_string_pretty(test_summary)
@@ -1290,14 +1304,14 @@ fn check_test(
             println!("{test_summary}");
         }
 
-        Err(e)?;
+        return Err(e);
     }
 
     Ok(())
 }
 
 impl Test {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> TestCmdResult<()> {
         let config = Config::load(self.config_path)?;
         let stat = self.stat.unwrap_or_default();
 
@@ -1325,16 +1339,16 @@ impl Test {
                 get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref(), current_dir);
             &loader
                 .select_language(None, current_dir, None, lib_info.as_ref())
-                .with_context(|| {
-                    anyhow!(
-                        "Failed to load language for path \"{}\"",
-                        lib_path.display()
-                    )
+                .map_err(|source| GrammarLookupError::LanguageLoadFailed {
+                    path: lib_path.clone(),
+                    source,
                 })?
         } else {
             &languages
                 .first()
-                .ok_or_else(|| anyhow!("No language found"))?
+                .ok_or_else(|| GrammarLookupError::LanguageNotFound {
+                    path: current_dir.to_path_buf(),
+                })?
                 .0
         };
         parser.set_language(language)?;
@@ -1479,13 +1493,13 @@ impl Test {
 }
 
 impl Version {
-    fn run(self, current_dir: PathBuf) -> Result<()> {
-        Ok(version::Version::new(self.version, current_dir, self.bump).run()?)
+    fn run(self, current_dir: PathBuf) -> Result<(), version::VersionError> {
+        version::Version::new(self.version, current_dir, self.bump).run()
     }
 }
 
 impl Fuzz {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> FuzzCmdResult<()> {
         loader.sanitize_build(true);
         loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
 
@@ -1495,23 +1509,25 @@ impl Fuzz {
         let languages = loader.languages_at_path(current_dir)?;
         let (language, language_name) = if let Some(ref lib_path) = self.lib_path {
             let lib_info = get_lib_info(Some(lib_path), self.lang_name.as_ref(), current_dir)
-                .with_context(|| anyhow!("No language name found for {}", lib_path.display()))?;
+                .ok_or_else(|| GrammarLookupError::LanguageNameNotInferred {
+                    lib_path: lib_path.clone(),
+                })?;
             let lang_name = lib_info.1.to_string();
             &(
                 loader
                     .select_language(None, current_dir, None, Some(&lib_info))
-                    .with_context(|| {
-                        anyhow!(
-                            "Failed to load language for path \"{}\"",
-                            lib_path.display()
-                        )
+                    .map_err(|source| GrammarLookupError::LanguageLoadFailed {
+                        path: lib_path.clone(),
+                        source,
                     })?,
                 lang_name,
             )
         } else {
             languages
                 .first()
-                .ok_or_else(|| anyhow!("No language found"))?
+                .ok_or_else(|| GrammarLookupError::LanguageNotFound {
+                    path: current_dir.to_path_buf(),
+                })?
         };
 
         let mut fuzz_options = FuzzOptions {
@@ -1537,7 +1553,7 @@ impl Fuzz {
 }
 
 impl Query {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> QueryCmdResult<()> {
         let config = Config::load(self.config_path)?;
         let loader_config = config.get()?;
         loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
@@ -1605,11 +1621,9 @@ impl Query {
                 let language = if let Some(ref lib_path) = self.lib_path {
                     &loader
                         .select_language(None, current_dir, None, lib_info.as_ref())
-                        .with_context(|| {
-                            anyhow!(
-                                "Failed to load language for path \"{}\"",
-                                lib_path.display()
-                            )
+                        .map_err(|source| GrammarLookupError::LanguageLoadFailed {
+                            path: lib_path.clone(),
+                            source,
                         })?
                 } else {
                     &languages
@@ -1617,7 +1631,9 @@ impl Query {
                         .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
                         .or_else(|| languages.first())
                         .map(|(l, _)| l.clone())
-                        .ok_or_else(|| anyhow!("No language found"))?
+                        .ok_or_else(|| GrammarLookupError::LanguageNotFound {
+                            path: current_dir.to_path_buf(),
+                        })?
                 };
                 let opts = QueryFileOptions {
                     ordered_captures: self.captures,
@@ -1659,7 +1675,7 @@ impl Query {
 }
 
 impl Highlight {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> HighlightCmdResult<()> {
         let config = Config::load(self.config_path)?;
         let theme_config: tree_sitter_cli::highlight::ThemeConfig = config.get()?;
         loader.configure_highlights(&theme_config.theme.highlight_names);
@@ -1677,7 +1693,9 @@ impl Highlight {
                 language_configuration = Some(lang_config);
             }
             if language.is_none() {
-                return Err(anyhow!("Unknown scope '{scope}'"));
+                Err(GrammarLookupError::UnknownScope {
+                    scope: scope.to_string(),
+                })?;
             }
         }
 
@@ -1759,10 +1777,14 @@ impl Highlight {
                     .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
                     .or_else(|| languages.first())
                     .map(|(l, _)| l.clone())
-                    .ok_or_else(|| anyhow!("No language found in current path"))?;
+                    .ok_or_else(|| GrammarLookupError::LanguageNotFound {
+                        path: current_dir.to_path_buf(),
+                    })?;
                 let language_config = loader
                     .get_language_configuration_in_current_path()
-                    .ok_or_else(|| anyhow!("No language configuration found in current path"))?;
+                    .ok_or_else(|| GrammarLookupError::LanguageConfigNotFound {
+                        path: current_dir.to_path_buf(),
+                    })?;
 
                 if let Some(highlight_config) =
                     language_config.highlight_config(language, self.query_paths.as_deref())?
@@ -1780,21 +1802,23 @@ impl Highlight {
 
                 let path = get_tmp_source_file(&contents)?;
 
-                let (language, language_config) =
-                    if let (Some(l), Some(lc)) = (language, language_configuration) {
-                        (l, lc)
-                    } else {
-                        let language = languages
-                            .first()
-                            .map(|(l, _)| l.clone())
-                            .ok_or_else(|| anyhow!("No language found in current path"))?;
-                        let language_configuration = loader
-                            .get_language_configuration_in_current_path()
-                            .ok_or_else(|| {
-                                anyhow!("No language configuration found in current path")
-                            })?;
-                        (language, language_configuration)
-                    };
+                let (language, language_config) = if let (Some(l), Some(lc)) =
+                    (language, language_configuration)
+                {
+                    (l, lc)
+                } else {
+                    let language = languages.first().map(|(l, _)| l.clone()).ok_or_else(|| {
+                        GrammarLookupError::LanguageNotFound {
+                            path: current_dir.to_path_buf(),
+                        }
+                    })?;
+                    let language_configuration = loader
+                        .get_language_configuration_in_current_path()
+                        .ok_or_else(|| GrammarLookupError::LanguageConfigNotFound {
+                            path: current_dir.to_path_buf(),
+                        })?;
+                    (language, language_configuration)
+                };
 
                 if let Some(highlight_config) =
                     language_config.highlight_config(language, self.query_paths.as_deref())?
@@ -1822,7 +1846,7 @@ impl Highlight {
 }
 
 impl Tags {
-    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
+    fn run(self, mut loader: loader::Loader, current_dir: &Path) -> TagsCmdResult<()> {
         let config = Config::load(self.config_path)?;
         let loader_config = config.get()?;
         loader.find_all_languages(&loader_config)?;
@@ -1837,7 +1861,9 @@ impl Tags {
                 language_configuration = Some(lang_config);
             }
             if language.is_none() {
-                return Err(anyhow!("Unknown scope '{scope}'"));
+                Err(GrammarLookupError::UnknownScope {
+                    scope: scope.to_string(),
+                })?;
             }
         }
 
@@ -1903,10 +1929,14 @@ impl Tags {
                     .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
                     .or_else(|| languages.first())
                     .map(|(l, _)| l.clone())
-                    .ok_or_else(|| anyhow!("No language found in current path"))?;
+                    .ok_or_else(|| GrammarLookupError::LanguageNotFound {
+                        path: current_dir.to_path_buf(),
+                    })?;
                 let language_config = loader
                     .get_language_configuration_in_current_path()
-                    .ok_or_else(|| anyhow!("No language configuration found in current path"))?;
+                    .ok_or_else(|| GrammarLookupError::LanguageConfigNotFound {
+                        path: current_dir.to_path_buf(),
+                    })?;
 
                 if let Some(tags_config) = language_config.tags_config(language)? {
                     tags::generate_tags(&path, &name, tags_config, false, &options)?;
@@ -1922,22 +1952,24 @@ impl Tags {
 
                 let path = get_tmp_source_file(&contents)?;
 
-                let (language, language_config) =
-                    if let (Some(l), Some(lc)) = (language, language_configuration) {
-                        (l, lc)
-                    } else {
-                        let languages = loader.languages_at_path(current_dir)?;
-                        let language = languages
-                            .first()
-                            .map(|(l, _)| l.clone())
-                            .ok_or_else(|| anyhow!("No language found in current path"))?;
-                        let language_configuration = loader
-                            .get_language_configuration_in_current_path()
-                            .ok_or_else(|| {
-                                anyhow!("No language configuration found in current path")
-                            })?;
-                        (language, language_configuration)
-                    };
+                let (language, language_config) = if let (Some(l), Some(lc)) =
+                    (language, language_configuration)
+                {
+                    (l, lc)
+                } else {
+                    let languages = loader.languages_at_path(current_dir)?;
+                    let language = languages.first().map(|(l, _)| l.clone()).ok_or_else(|| {
+                        GrammarLookupError::LanguageNotFound {
+                            path: current_dir.to_path_buf(),
+                        }
+                    })?;
+                    let language_configuration = loader
+                        .get_language_configuration_in_current_path()
+                        .ok_or_else(|| GrammarLookupError::LanguageConfigNotFound {
+                            path: current_dir.to_path_buf(),
+                        })?;
+                    (language, language_configuration)
+                };
 
                 if let Some(tags_config) = language_config.tags_config(language)? {
                     tags::generate_tags(&path, "stdin", tags_config, false, &options)?;
@@ -1953,7 +1985,7 @@ impl Tags {
 }
 
 impl Playground {
-    fn run(self, current_dir: &Path) -> Result<()> {
+    fn run(self, current_dir: &Path) -> PlaygroundResult<()> {
         let grammar_path = self.grammar_path.as_deref().map_or(current_dir, Path::new);
 
         if let Some(export_path) = self.export {
@@ -1968,7 +2000,7 @@ impl Playground {
 }
 
 impl DumpLanguages {
-    fn run(self, mut loader: loader::Loader) -> Result<()> {
+    fn run(self, mut loader: loader::Loader) -> DumpLanguagesResult<()> {
         let config = Config::load(self.config_path)?;
         let loader_config = config.get()?;
         loader.find_all_languages(&loader_config)?;
@@ -2018,19 +2050,17 @@ fn main() {
     let result = run();
     if let Err(err) = &result {
         // Ignore BrokenPipe errors
-        if let Some(error) = err.downcast_ref::<std::io::Error>()
-            && error.kind() == std::io::ErrorKind::BrokenPipe
-        {
+        if err.is_broken_pipe() {
             return;
         }
         if !err.to_string().is_empty() {
-            error!("{err:?}");
+            error!("{err}");
         }
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> CliResult<()> {
     logger::init();
 
     let version = BUILD_SHA.map_or_else(
@@ -2161,23 +2191,30 @@ fn get_lib_info<'a>(
 fn parse_range<T>(
     range_str: Option<&str>,
     make: impl Fn(usize) -> T,
-) -> Result<Option<std::ops::Range<T>>> {
+) -> ParseRangeResult<Option<std::ops::Range<T>>> {
     if let Some(range) = range_str {
-        let err_msg = format!("Invalid range '{range}', expected 'start:end'");
         let mut parts = range.split(':');
 
         let Some(part) = parts.next() else {
-            Err(anyhow!(err_msg))?
+            return Err(ParseRangeError::MissingColon {
+                input: range.to_string(),
+            });
         };
         let Ok(start) = part.parse::<usize>() else {
-            Err(anyhow!(err_msg))?
+            return Err(ParseRangeError::BadStart {
+                input: range.to_string(),
+            });
         };
 
         let Some(part) = parts.next() else {
-            Err(anyhow!(err_msg))?
+            return Err(ParseRangeError::MissingEnd {
+                input: range.to_string(),
+            });
         };
         let Ok(end) = part.parse::<usize>() else {
-            Err(anyhow!(err_msg))?
+            return Err(ParseRangeError::BadEnd {
+                input: range.to_string(),
+            });
         };
 
         Ok(Some(make(start)..make(end)))

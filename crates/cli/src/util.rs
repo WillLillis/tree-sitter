@@ -7,12 +7,14 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result, anyhow};
-use indoc::indoc;
 use log::error;
 use tree_sitter::{Parser, Tree};
 use tree_sitter_config::Config;
 use tree_sitter_loader::Config as LoaderConfig;
+
+use crate::error::{
+    GrammarLookupError, IoError, LanguageConfigForFileNotFound, UtilError, UtilResult,
+};
 
 const HTML_HEADER: &[u8] = b"
 <!DOCTYPE html>
@@ -24,31 +26,12 @@ svg { width: 100%; }
 ";
 
 #[must_use]
-pub fn lang_not_found_for_path(path: &Path, loader_config: &LoaderConfig) -> String {
-    let path = path.display();
-    format!(
-        indoc! {"
-            No language found for path `{}`
-
-            If a language should be associated with this file extension, please ensure the path to `{}` is inside one of the following directories as specified by your 'config.json':\n\n{}\n
-            If the directory that contains the relevant grammar for `{}` is not listed above, please add the directory to the list of directories in your config file, {}
-        "},
-        path,
-        path,
-        loader_config
-            .parser_directories
-            .iter()
-            .enumerate()
-            .map(|(i, d)| format!("  {}. {}", i + 1, d.display()))
-            .collect::<Vec<_>>()
-            .join("  \n"),
-        path,
-        if let Ok(Some(config_path)) = Config::find_config_file() {
-            format!("located at {}", config_path.display())
-        } else {
-            String::from("which you need to create by running `tree-sitter init-config`")
-        }
-    )
+pub fn lang_not_found_for_path(path: &Path, loader_config: &LoaderConfig) -> GrammarLookupError {
+    GrammarLookupError::LanguageConfigForFileNotFound(LanguageConfigForFileNotFound {
+        file: path.to_path_buf(),
+        parser_directories: loader_config.parser_directories.clone(),
+        config_location: Config::find_config_file().ok().flatten(),
+    })
 }
 
 #[must_use]
@@ -71,38 +54,36 @@ pub struct LogSession {
     open_log: bool,
 }
 
-pub fn print_tree_graph(tree: &Tree, path: &str, quiet: bool) -> Result<()> {
+pub fn print_tree_graph(tree: &Tree, path: &str, quiet: bool) -> UtilResult<()> {
     let session = LogSession::new(path, quiet)?;
     tree.print_dot_graph(session.dot_process_stdin.as_ref().unwrap());
     Ok(())
 }
 
-pub fn log_graphs(parser: &mut Parser, path: &str, open_log: bool) -> Result<LogSession> {
+pub fn log_graphs(parser: &mut Parser, path: &str, open_log: bool) -> UtilResult<LogSession> {
     let session = LogSession::new(path, open_log)?;
     parser.print_dot_graphs(session.dot_process_stdin.as_ref().unwrap());
     Ok(session)
 }
 
 impl LogSession {
-    fn new(path: &str, open_log: bool) -> Result<Self> {
+    fn new(path: &str, open_log: bool) -> UtilResult<Self> {
         use std::io::Write;
 
-        let mut dot_file = std::fs::File::create(path)?;
-        dot_file.write_all(HTML_HEADER)?;
+        let path_buf = PathBuf::from(path);
+        let mut dot_file = std::fs::File::create(path).map_err(IoError::at(&path_buf))?;
+        dot_file
+            .write_all(HTML_HEADER)
+            .map_err(IoError::at(&path_buf))?;
         let mut dot_process = Command::new("dot")
             .arg("-Tsvg")
             .stdin(Stdio::piped())
             .stdout(dot_file)
             .spawn()
-            .with_context(
-                || "Failed to run the `dot` command. Check that graphviz is installed.",
-            )?;
-        let dot_stdin = dot_process
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("Failed to open stdin for `dot` process."))?;
+            .map_err(|source| UtilError::DotSpawn { source })?;
+        let dot_stdin = dot_process.stdin.take().ok_or(UtilError::DotStdin)?;
         Ok(Self {
-            path: PathBuf::from(path),
+            path: path_buf,
             dot_process: Some(dot_process),
             dot_process_stdin: Some(dot_stdin),
             open_log,

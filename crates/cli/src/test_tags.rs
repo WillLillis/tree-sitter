@@ -1,10 +1,10 @@
 use std::{fs, path::Path};
 
-use anyhow::{Result, anyhow};
 use tree_sitter_loader::{Config, Loader};
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
 use crate::{
+    error::{IoError, TestCmdError, TestCmdResult, TestKind},
     query_testing::{Assertion, Utf8Point, parse_position_comments, to_utf8_point},
     test::{TestInfo, TestOutcome, TestResult, TestSummary},
     util,
@@ -47,14 +47,20 @@ pub fn test_tags(
     tags_context: &mut TagsContext,
     directory: &Path,
     test_summary: &mut TestSummary,
-) -> Result<()> {
+) -> TestCmdResult<()> {
     let mut failed = false;
 
-    for tag_test_file in fs::read_dir(directory)? {
-        let tag_test_file = tag_test_file?;
+    for tag_test_file in fs::read_dir(directory).map_err(IoError::at(directory))? {
+        let tag_test_file = tag_test_file.map_err(IoError::at(directory))?;
         let test_file_path = tag_test_file.path();
         let test_file_name = tag_test_file.file_name();
-        if test_file_path.is_dir() && test_file_path.read_dir()?.next().is_some() {
+        if test_file_path.is_dir()
+            && test_file_path
+                .read_dir()
+                .map_err(IoError::at(&test_file_path))?
+                .next()
+                .is_some()
+        {
             test_summary
                 .tag_results
                 .add_group(test_file_name.to_string_lossy().as_ref());
@@ -74,18 +80,19 @@ pub fn test_tags(
             let (language, language_config) = loader
                 .language_configuration_for_file_name(&test_file_path)?
                 .ok_or_else(|| {
-                    anyhow!(
-                        "{}",
-                        util::lang_not_found_for_path(test_file_path.as_path(), loader_config)
-                    )
+                    util::lang_not_found_for_path(test_file_path.as_path(), loader_config)
                 })?;
-            let tags_config = language_config
-                .tags_config(language)?
-                .ok_or_else(|| anyhow!("No tags config found for {}", test_file_path.display()))?;
+            let tags_config = language_config.tags_config(language)?.ok_or_else(|| {
+                TestCmdError::NoTagsConfig {
+                    path: test_file_path.clone(),
+                }
+            })?;
             match test_tag(
                 tags_context,
                 tags_config,
-                fs::read(&test_file_path)?.as_slice(),
+                fs::read(&test_file_path)
+                    .map_err(IoError::at(&test_file_path))?
+                    .as_slice(),
             ) {
                 Ok(assertion_count) => {
                     test_summary.tag_results.add_case(TestResult {
@@ -113,14 +120,20 @@ pub fn test_tags(
         }
     }
 
-    if failed { Err(anyhow!("")) } else { Ok(()) }
+    if failed {
+        Err(TestCmdError::TestsFailed {
+            kind: TestKind::Tags,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 pub fn test_tag(
     tags_context: &mut TagsContext,
     tags_config: &TagsConfiguration,
     source: &[u8],
-) -> Result<usize> {
+) -> TestCmdResult<usize> {
     let tags = get_tag_positions(tags_context, tags_config, source)?;
     let assertions = parse_position_comments(tags_context.parser(), &tags_config.language, source)?;
 
@@ -185,7 +198,7 @@ pub fn get_tag_positions(
     tags_context: &mut TagsContext,
     tags_config: &TagsConfiguration,
     source: &[u8],
-) -> Result<Vec<(Utf8Point, Utf8Point, String)>> {
+) -> TestCmdResult<Vec<(Utf8Point, Utf8Point, String)>> {
     let (tags_iter, _has_error) = tags_context.generate_tags(tags_config, source, None)?;
     let tag_positions = tags_iter
         .filter_map(std::result::Result::ok)

@@ -7,8 +7,9 @@ use std::{
     time::Instant,
 };
 
-use anyhow::Result;
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
+
+use crate::error::{IoError, TagsCmdResult};
 
 pub struct TagsOptions {
     pub scope: Option<String>,
@@ -23,7 +24,7 @@ pub fn generate_tags(
     config: &TagsConfiguration,
     indent: bool,
     opts: &TagsOptions,
-) -> Result<()> {
+) -> TagsCmdResult<()> {
     let mut context = TagsContext::new();
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -37,7 +38,7 @@ pub fn generate_tags(
         ""
     };
 
-    let source = fs::read(path)?;
+    let source = fs::read(path).map_err(IoError::at(path))?;
     let start = Instant::now();
     for tag in context
         .generate_tags(config, &source, Some(&opts.cancellation_flag))?

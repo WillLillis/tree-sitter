@@ -6,12 +6,12 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Context, Result};
 use log::warn;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Point, Query, QueryCursor};
 
 use crate::{
+    error::{IoError, QueryCmdError, QueryCmdResult},
     query_testing::{self, to_utf8_point},
     test::{TestInfo, TestOutcome, TestResult, TestSummary},
 };
@@ -35,13 +35,16 @@ pub fn query_file_at_path(
     query_path: &Path,
     opts: &QueryFileOptions,
     test_summary: Option<&mut TestSummary>,
-) -> Result<()> {
+) -> QueryCmdResult<()> {
     let stdout = io::stdout();
     let mut stdout = io::BufWriter::with_capacity(64 * 1024, stdout.lock());
 
-    let query_source = fs::read_to_string(query_path)
-        .with_context(|| format!("Error reading query file {}", query_path.display()))?;
-    let query = Query::new(language, &query_source).with_context(|| "Query compilation failed")?;
+    let query_source = fs::read_to_string(query_path).map_err(IoError::at(query_path))?;
+    let query =
+        Query::new(language, &query_source).map_err(|source| QueryCmdError::InvalidQueryFile {
+            path: query_path.to_path_buf(),
+            source,
+        })?;
 
     let mut query_cursor = QueryCursor::new();
     if let Some(ref range) = opts.byte_range {
@@ -64,11 +67,10 @@ pub fn query_file_at_path(
     let should_test = test_summary.is_some();
 
     if !should_test && !opts.stdin {
-        writeln!(&mut stdout, "{name}")?;
+        _ = writeln!(&mut stdout, "{name}");
     }
 
-    let source_code =
-        fs::read(path).with_context(|| format!("Error reading source file {}", path.display()))?;
+    let source_code = fs::read(path).map_err(IoError::at(path))?;
     let tree = parser.parse(&source_code, None).unwrap();
 
     let start = Instant::now();
@@ -78,7 +80,7 @@ pub fn query_file_at_path(
             let capture = mat.captures[*capture_index];
             let capture_name = &query.capture_names()[capture.index as usize];
             if !opts.quiet && !should_test {
-                writeln!(
+                _ = writeln!(
                     &mut stdout,
                     "    pattern: {:>2}, capture: {} - {capture_name}, start: {}, end: {}, text: `{}`",
                     mat.pattern_index,
@@ -86,7 +88,7 @@ pub fn query_file_at_path(
                     capture.node.start_position(),
                     capture.node.end_position(),
                     capture.node.utf8_text(&source_code).unwrap_or("")
-                )?;
+                );
             }
             if should_test {
                 results.push(query_testing::CaptureInfo {
@@ -100,7 +102,7 @@ pub fn query_file_at_path(
         let mut matches = query_cursor.matches(&query, tree.root_node(), source_code.as_slice());
         while let Some(m) = matches.next() {
             if !opts.quiet && !should_test {
-                writeln!(&mut stdout, "  pattern: {}", m.pattern_index)?;
+                _ = writeln!(&mut stdout, "  pattern: {}", m.pattern_index);
             }
             for capture in m.captures {
                 let start = capture.node.start_position();
@@ -108,17 +110,17 @@ pub fn query_file_at_path(
                 let capture_name = &query.capture_names()[capture.index as usize];
                 if !opts.quiet && !should_test {
                     if end.row == start.row {
-                        writeln!(
+                        _ = writeln!(
                             &mut stdout,
                             "    capture: {} - {capture_name}, start: {start}, end: {end}, text: `{}`",
                             capture.index,
                             capture.node.utf8_text(&source_code).unwrap_or("")
-                        )?;
+                        );
                     } else {
-                        writeln!(
+                        _ = writeln!(
                             &mut stdout,
                             "    capture: {capture_name}, start: {start}, end: {end}",
-                        )?;
+                        );
                     }
                 }
                 if should_test {
@@ -162,12 +164,12 @@ pub fn query_file_at_path(
                         test_num: test_summary.test_num,
                     },
                 });
-                return Err(e);
+                return Err(e.into());
             }
         }
     }
     if opts.print_time {
-        writeln!(&mut stdout, "{:?}", start.elapsed())?;
+        _ = writeln!(&mut stdout, "{:?}", start.elapsed());
     }
 
     Ok(())
