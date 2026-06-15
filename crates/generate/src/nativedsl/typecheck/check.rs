@@ -4,8 +4,8 @@ use crate::nativedsl::typecheck::types::{
 use crate::nativedsl::{
     ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
     ast::{
-        ChildRange, ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, Param,
-        PrecKind, SharedAst, Span,
+        ChildRange, ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, ObjectField,
+        Param, PrecKind, SharedAst, Span,
     },
     resolve::resolve_module_ref,
     suggest::suggest_name,
@@ -65,7 +65,7 @@ pub(super) fn check_item(
                     .pools
                     .get_object(*range)
                     .iter()
-                    .map(|(span, _)| ctx.text(*span).to_string())
+                    .map(|f| ctx.text(f.name).to_string())
                     .collect();
                 env.vars.insert(id, inferred);
                 env.object_fields.insert(id, fields);
@@ -84,8 +84,23 @@ pub(super) fn check_item(
             }
             Ok(())
         }
-        Node::Rule { body, .. } | Node::ExpandedRule { body, .. } => {
-            expect_rule(shared, ctx, *body, env)
+        Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
+        // The template body is checked once via the Macro item; per instance we
+        // only check the call args against the macro's params (the arg count was
+        // validated at expand, so params and args line up).
+        &Node::ExpandedRule(expand_id) => {
+            let exp = *shared.pools.get_expansion(expand_id);
+            let config = shared.pools.get_macro(exp.macro_id);
+            for (i, &arg) in shared.pools.child_slice(exp.args).iter().enumerate() {
+                type_of(
+                    shared,
+                    ctx,
+                    arg,
+                    env,
+                    Constraint::Exact(config.params[i].ty),
+                )?;
+            }
+            Ok(())
         }
         // External decls have no body to typecheck.
         Node::External { .. } => Ok(()),
@@ -161,7 +176,7 @@ fn expect_name_ref(
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
     match shared.arena.get(id) {
-        Node::Ident(IdentKind::Rule) | Node::SynthRef { .. } => Ok(()),
+        Node::Ident(IdentKind::Rule) => Ok(()),
         Node::Ident(IdentKind::Var(_))
         | Node::FieldAccess { .. }
         | Node::GrammarConfig { .. }
@@ -202,7 +217,7 @@ fn expect_reserved(
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
     if let Node::Object(range) = shared.arena.get(id) {
-        for &(_, val_id) in shared.pools.get_object(*range) {
+        for &ObjectField { value: val_id, .. } in shared.pools.get_object(*range) {
             expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
         }
         return Ok(());
@@ -238,10 +253,9 @@ fn type_of(
         Node::StringLit | Node::RawStringLit { .. } => Ok(Ty::STR),
         // `ModuleRule`: a cross-module reference resolve already validated as a
         // rule / external / inherited rule, so it is rule-typed.
-        Node::Ident(IdentKind::Rule)
-        | Node::Blank
-        | Node::SynthRef { .. }
-        | Node::ModuleRule { .. } => Ok(Ty::RULE),
+        Node::Ident(IdentKind::Rule) | Node::Blank | Node::ModuleRule { .. } => Ok(Ty::RULE),
+        // `@<str_expr>` computed-name rule reference: the name must be str_t;
+        // it resolves to a rule at lower time (validated there).
         &Node::SymRef { expr } => {
             type_of(shared, ctx, expr, env, Constraint::Exact(Ty::STR))?;
             Ok(Ty::RULE)
@@ -478,9 +492,7 @@ fn type_of_field_access(
         }
         Node::Object(range) => {
             let fields = shared.pools.get_object(*range);
-            fields
-                .iter()
-                .any(|(key_span, _)| ctx.text(*key_span) == field_name)
+            fields.iter().any(|f| ctx.text(f.name) == field_name)
         }
         _ => true, // can't validate dynamically-produced objects
     };
@@ -567,8 +579,8 @@ fn type_of_object(
     }
 
     let expected_inner = expected.object_value();
-    let mut widest = type_of(shared, ctx, fields[0].1, env, expected_inner)?;
-    for &(_, val_id) in &fields[1..] {
+    let mut widest = type_of(shared, ctx, fields[0].value, env, expected_inner)?;
+    for &ObjectField { value: val_id, .. } in &fields[1..] {
         let ty = type_of(shared, ctx, val_id, env, expected_inner)?;
         widest = widest
             .widen(ty)
@@ -577,7 +589,7 @@ fn type_of_object(
     let invalid = || {
         TypeError::new(
             TypeErrorKind::InvalidObjectValue(widest),
-            shared.arena.span(fields[0].1),
+            shared.arena.span(fields[0].value),
         )
     };
     let Ty::Data(d) = widest else {

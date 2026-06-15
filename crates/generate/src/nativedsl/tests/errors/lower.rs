@@ -3,13 +3,16 @@ use super::super::*;
 error_tests! { Lower {
     error_override_without_target {
         r#"grammar { language: "test" } override rule foo { "bar" }"#,
-        LowerErrorKind::OverrideRuleNotFound(vec![("foo".into(), Span::new(43, 46))])
+        LowerErrorKind::OverrideRuleNotFound(vec![Spanned::new("foo".into(), Span::new(43, 46))])
     }
     error_override_rule_not_found {
         r#"let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule nonexistent { "oops" }"#,
-        LowerErrorKind::OverrideRuleNotFound(vec![("nonexistent".into(), Span::new(125, 136))])
+        LowerErrorKind::OverrideRuleNotFound(vec![Spanned::new(
+            "nonexistent".into(),
+            Span::new(125, 136),
+        )])
     }
     error_missing_grammar_block {
         r#"rule program { "x" }"#,
@@ -85,7 +88,7 @@ fn error_multiple_override_rules_not_found() {
     let LowerErrorKind::OverrideRuleNotFound(entries) = e.kind else {
         panic!("expected OverrideRuleNotFound, got {:?}", e.kind);
     };
-    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    let names: Vec<&str> = entries.iter().map(|e| e.value.as_str()).collect();
     assert_eq!(names, vec!["aaa", "mmm", "zzz"]);
 }
 

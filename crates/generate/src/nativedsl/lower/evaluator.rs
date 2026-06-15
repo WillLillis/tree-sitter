@@ -7,8 +7,8 @@ use super::{
     super::{
         LowerError, Module, ModuleId,
         ast::{
-            BinOp, ChildRange, ConfigField, ForId, IdentKind, MacroId, ModuleContext, Node, NodeId,
-            PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
+            BinOp, ChildRange, ConfigField, ExpandId, ForId, IdentKind, MacroId, ModuleContext,
+            Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
         string_pool::{Str, StrEntry, StringPool},
     },
@@ -356,13 +356,18 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 .pools
                 .get_object(*range)
                 .iter()
-                .map(|&(name_span, val_id)| {
-                    let words = self.eval_rule_list(val_id)?;
-                    Ok(ReservedWordContext {
-                        name: ctx.text(name_span).to_string(),
-                        reserved_words: words,
-                    })
-                })
+                .map(
+                    |&ObjectField {
+                         name: name_span,
+                         value: val_id,
+                     }| {
+                        let words = self.eval_rule_list(val_id)?;
+                        Ok(ReservedWordContext {
+                            name: ctx.text(name_span).to_string(),
+                            reserved_words: words,
+                        })
+                    },
+                )
                 .collect();
         }
         // Sort by key for deterministic output (FxHashMap iteration is unordered).
@@ -627,9 +632,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let rid = self.alloc_rule(ARule::NamedSymbol(sid));
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
-            // Name already interned by expand; validated by resolve.
-            &Node::SynthRef { name } => {
-                let rid = self.alloc_rule(ARule::NamedSymbol(name));
+            // `@<expr>` computed-name ref: evaluate the name under the current
+            // args (existence validated by resolve), then emit the symbol.
+            &Node::SymRef { expr } => {
+                let rid = self.lower_sym_ref(expr)?;
                 Ok(self.alloc_val(Value::Rule(rid)))
             }
             Node::MacroParam { index, .. } => {
@@ -727,7 +733,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let fields = self.shared.pools.get_object(range);
                 let mut map =
                     FxHashMap::with_capacity_and_hasher(fields.len(), rustc_hash::FxBuildHasher);
-                for &(key_span, value_id) in fields {
+                for &ObjectField {
+                    name: key_span,
+                    value: value_id,
+                } in fields
+                {
                     map.insert(
                         self.ctx().text(key_span).to_string(),
                         self.eval_expr(value_id)?,
@@ -816,7 +826,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let sid = self.intern_span(span);
                 Ok(self.alloc_rule(ARule::NamedSymbol(sid)))
             }
-            &Node::SynthRef { name } => Ok(self.alloc_rule(ARule::NamedSymbol(name))),
+            &Node::SymRef { expr } => self.lower_sym_ref(expr),
             Node::StringLit => {
                 let sid = self.intern_string_lit(span);
                 Ok(self.alloc_rule(ARule::String(sid)))
@@ -993,6 +1003,40 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Evaluate a call to a macro defined in `def_module`.
+    /// Bind `args` (evaluated in the caller's context) on the macro-arg stack,
+    /// then run `body_eval` with `current_module` set to `def_module`. Shared by
+    /// expression-macro invocation (body -> value) and rule-set instantiation
+    /// (template body -> rule).
+    fn bind_args_and<R>(
+        &mut self,
+        name: Span,
+        def_module: ModuleId,
+        args: ChildRange,
+        span: Span,
+        body_eval: impl FnOnce(&mut Self) -> LowerResult<R>,
+    ) -> LowerResult<R> {
+        // Args evaluate in the caller's macro context, not the callee's, so
+        // arg eval happens before macro_arg_bases is pushed.
+        stack_scope!(
+            self.state.scratch.macro_args => args_base,
+            self.state.scratch.call_stack => _call_base,
+            self.state.scratch.macro_arg_bases => _bases_base;
+            {
+                self.push_call(name, def_module, span)?;
+                for &arg_id in self.shared.pools.child_slice(args) {
+                    let v = self.eval_expr(arg_id)?;
+                    self.state.scratch.macro_args.push(v);
+                }
+                self.state.scratch.macro_arg_bases.push(args_base);
+                let saved = self.current_module;
+                self.current_module = def_module;
+                let result = body_eval(self);
+                self.current_module = saved;
+                result
+            }
+        )
+    }
+
     fn invoke_macro(
         &mut self,
         macro_id: MacroId,
@@ -1001,26 +1045,32 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         def_module: ModuleId,
     ) -> LowerResult<ValueId> {
         let config = self.shared.pools.get_macro(macro_id);
-        // Args evaluate in the caller's macro context, not the callee's, so
-        // arg eval happens before macro_arg_bases is pushed.
-        stack_scope!(
-            self.state.scratch.macro_args => args_base,
-            self.state.scratch.call_stack => _call_base,
-            self.state.scratch.macro_arg_bases => _bases_base;
-            {
-                self.push_call(config.name, def_module, span)?;
-                for &arg_id in self.shared.pools.child_slice(args) {
-                    let v = self.eval_expr(arg_id)?;
-                    self.state.scratch.macro_args.push(v);
-                }
-                self.state.scratch.macro_arg_bases.push(args_base);
-                let saved = self.current_module;
-                self.current_module = def_module;
-                let result = self.eval_expr(config.body);
-                self.current_module = saved;
-                result
-            }
-        )
+        let (name, body) = (config.name, config.body);
+        self.bind_args_and(name, def_module, args, span, |e| e.eval_expr(body))
+    }
+
+    /// Lower one rule-set macro instance: bind the call's args, then lower the
+    /// *shared* template body as a rule (no clone). `current_module` stays put -
+    /// rule-set macros are local (qualified calls are rejected at parse time).
+    pub(super) fn lower_expansion(
+        &mut self,
+        expand_id: ExpandId,
+        span: Span,
+    ) -> LowerResult<RuleId> {
+        let exp = *self.shared.pools.get_expansion(expand_id);
+        let name = self.shared.pools.get_macro(exp.macro_id).name;
+        let def_module = self.current_module;
+        self.bind_args_and(name, def_module, exp.args, span, |e| {
+            e.lower_to_rule(exp.body)
+        })
+    }
+
+    /// Lower a `@<expr>` computed-name reference: evaluate its name under the
+    /// current args (resolve already validated it exists) and emit the symbol.
+    fn lower_sym_ref(&mut self, expr: NodeId) -> LowerResult<RuleId> {
+        let vid = self.eval_expr(expr)?;
+        let name = self.str_id(vid);
+        Ok(self.alloc_rule(ARule::NamedSymbol(name)))
     }
 
     /// Lazily evaluate an imported module's top-level let bindings.
