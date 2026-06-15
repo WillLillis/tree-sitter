@@ -57,7 +57,8 @@ pub(super) fn check_item(
             }
             Ok(())
         }
-        Node::Let { ty, value, .. } => {
+        Node::Let { value, .. } => {
+            let ty = ctx.let_types.get(&id).copied();
             let constraint = ty.map_or(Constraint::None, Constraint::Exact);
             let inferred = type_of(shared, ctx, *value, env, constraint)?;
             if let Node::Object(range) = shared.arena.get(*value) {
