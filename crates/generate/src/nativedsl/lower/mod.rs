@@ -24,7 +24,7 @@ use crate::{
 
 use super::{
     LowerError, ModuleId,
-    ast::{ForId, Node, NodeId, SharedAst, Span},
+    ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
     string_pool::{Str, StringPool},
 };
 
@@ -187,12 +187,9 @@ pub fn lower_helper(
                 let rule_id = eval.lower_to_rule(body)?;
                 rule_entries.push((NameSource::Span(name), rule_id));
             }
-            &Node::ExpandedRule {
-                name,
-                body,
-                is_override: false,
-            } => {
-                let rule_id = eval.lower_to_rule(body)?;
+            &Node::ExpandedRule(expand_id) => {
+                let name = shared.pools.get_expansion(expand_id).name;
+                let rule_id = eval.lower_expansion(expand_id, shared.arena.span(item_id))?;
                 rule_entries.push((NameSource::Str(name), rule_id));
             }
             // Validation rejects grammar blocks and override rules in helpers.
@@ -243,19 +240,16 @@ fn evaluate(
                     rule_entries.push((NameSource::Span(*name), rule_id));
                 }
             }
-            Node::ExpandedRule {
-                is_override,
-                name,
-                body,
-            } => {
-                let rule_id = eval.lower_to_rule(*body)?;
-                // Set by expand_macro_calls to the macro call's span; use
-                // for override attribution diagnostics.
+            &Node::ExpandedRule(expand_id) => {
+                let exp = *shared.pools.get_expansion(expand_id);
+                // Set by expand_macro_calls to the macro call's span; used for
+                // override attribution diagnostics.
                 let span = shared.arena.span(item_id);
-                if *is_override {
-                    override_entries.push((NameSource::Str(*name), rule_id, span));
+                let rule_id = eval.lower_expansion(expand_id, span)?;
+                if exp.is_override {
+                    override_entries.push((NameSource::Str(exp.name), rule_id, span));
                 } else {
-                    rule_entries.push((NameSource::Str(*name), rule_id));
+                    rule_entries.push((NameSource::Str(exp.name), rule_id));
                 }
             }
             _ => unreachable!(),
@@ -317,9 +311,9 @@ fn build_grammar(
     base: Option<&InputGrammar>,
     helper_rules: Vec<(String, Rule)>,
 ) -> LowerResult<InputGrammar> {
-    let mut overrides: FxHashMap<String, (Rule, Span)> = FxHashMap::default();
+    let mut overrides: FxHashMap<String, Spanned<Rule>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
-        overrides.insert(name, (rule, span));
+        overrides.insert(name, Spanned::new(rule, span));
     }
 
     let mut variables = Vec::new();
@@ -328,7 +322,7 @@ fn build_grammar(
     if let Some(base) = base {
         variables.reserve(base.variables.len());
         for v in &base.variables {
-            if let Some((rule, _)) = overrides.remove(v.name.as_str()) {
+            if let Some(Spanned { value: rule, .. }) = overrides.remove(v.name.as_str()) {
                 variables.push(Variable {
                     name: v.name.clone(),
                     kind: v.kind,
@@ -350,7 +344,7 @@ fn build_grammar(
 
     // Helper rules can also be override targets.
     for (name, rule) in helper_rules {
-        let final_rule = overrides.remove(&name).map_or(rule, |(r, _)| r);
+        let final_rule = overrides.remove(&name).map_or(rule, |s| s.value);
         variables.push(Variable {
             name,
             kind: VariableType::Named,
@@ -359,11 +353,11 @@ fn build_grammar(
     }
 
     if !overrides.is_empty() {
-        let mut entries: Vec<(String, Span)> = overrides
+        let mut entries: Vec<Spanned<String>> = overrides
             .into_iter()
-            .map(|(name, (_, span))| (name, span))
+            .map(|(name, s)| Spanned::new(name, s.span))
             .collect();
-        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_unstable_by(|a, b| a.value.cmp(&b.value));
         return Err(LowerError::without_span(
             LowerErrorKind::OverrideRuleNotFound(entries),
         ));
@@ -423,7 +417,7 @@ pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
     #[error("override rule(s) not found in base grammar or imported helpers: {}", format_override_names(.0))]
-    OverrideRuleNotFound(Vec<(String, Span)>),
+    OverrideRuleNotFound(Vec<Spanned<String>>),
     #[error("failed to resolve '{}': {error}", path.display())]
     ModuleResolveFailed { path: PathBuf, error: String },
     #[error("failed to read '{}': {error}", path.display())]
@@ -452,10 +446,10 @@ pub enum LowerErrorKind {
     IntegerOverflow(i64),
 }
 
-fn format_override_names(entries: &[(String, Span)]) -> String {
+fn format_override_names(entries: &[Spanned<String>]) -> String {
     entries
         .iter()
-        .map(|(n, _)| n.as_str())
+        .map(|e| e.value.as_str())
         .collect::<Vec<_>>()
         .join(", ")
 }

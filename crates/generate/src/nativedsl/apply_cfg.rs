@@ -8,7 +8,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
     Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
-    ast::{ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, SharedAst, Span},
+    ast::{
+        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField,
+        SharedAst, Span,
+    },
     loader::ModuleKind,
 };
 
@@ -39,7 +42,11 @@ impl CfgState {
                 shared.arena.span(flags_id),
             ));
         };
-        for &(key_span, value_id) in shared.pools.get_object(range) {
+        for &ObjectField {
+            name: key_span,
+            value: value_id,
+        } in shared.pools.get_object(range)
+        {
             let enable = match ctx.text(key_span) {
                 "enabled" => true,
                 "disabled" => false,
@@ -233,7 +240,7 @@ impl Walker<'_> {
             }
             Node::Object(range) => {
                 for i in range.as_range() {
-                    let v = self.shared.pools.object_fields[i].1;
+                    let v = self.shared.pools.object_fields[i].value;
                     self.walk(v)?;
                 }
             }
@@ -290,7 +297,7 @@ impl Walker<'_> {
             | Node::Cfg { .. } => {}
             // Emitted by expand_macro_calls / resolve, both of which run after
             // apply_cfg.
-            Node::ExpandedRule { .. } | Node::SynthRef { .. } | Node::ModuleRule { .. } => {
+            Node::ExpandedRule(_) | Node::ModuleRule { .. } => {
                 unreachable!()
             }
         }

@@ -17,7 +17,8 @@ use crate::{
     nativedsl::{
         Export, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
+            AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
+            Span, Spanned,
         },
         string_pool::StringPool,
     },
@@ -28,7 +29,7 @@ use crate::{
 /// (for duplicate checking / "first defined here" notes). The kind never
 /// stores [`IdentKind::Unresolved`] - by the time a name reaches the table
 /// we know what it resolves to.
-type Decls<'src> = FxHashMap<&'src str, (IdentKind, Span)>;
+type Decls<'src> = FxHashMap<&'src str, Spanned<IdentKind>>;
 
 /// Context for [`collect_external_names`].
 struct ExternalNameCtx<'src, 'a, 'b> {
@@ -43,7 +44,6 @@ struct ExternalNameCtx<'src, 'a, 'b> {
 struct ResolveCtx<'a> {
     pools: &'a AstPools,
     ctx: &'a ModuleContext,
-    strings: &'a StringPool,
     decls: &'a Decls<'a>,
     modules: &'a [Module],
 }
@@ -63,11 +63,23 @@ pub fn resolve(
 ) -> ResolveResult<()> {
     let mut decls = collect_decls(shared, ctx, strings, &ctx.root_items, base, modules)?;
 
+    // Validate computed-name references (`@<expr>`), evaluated under each call's
+    // args at expand, against the complete name table (which includes generated
+    // and inherited rules).
+    for &Spanned { value: name, span } in &ctx.computed_refs {
+        let text = strings.resolve_local(name, &ctx.source);
+        if !decls.contains_key(text) {
+            return Err(ResolveError::new(
+                ResolveErrorKind::UnknownIdentifier(text.to_string()),
+                span,
+            ));
+        }
+    }
+
     for &item_id in &ctx.root_items {
         let rcx = ResolveCtx {
             pools: &shared.pools,
             ctx,
-            strings,
             decls: &decls,
             modules,
         };
@@ -90,14 +102,17 @@ fn insert_decl<'src>(
     span: Span,
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
-    if let Some(&(_, first_span)) = decls.get(name) {
+    if let Some(&Spanned {
+        span: first_span, ..
+    }) = decls.get(name)
+    {
         return Err(ResolveError::with_note(
             ResolveErrorKind::DuplicateDeclaration(name.to_string()),
             span,
             ctx.note(NoteMessage::FirstDefinedHere, first_span),
         ));
     }
-    decls.insert(name, (kind, span));
+    decls.insert(name, Spanned::new(kind, span));
     Ok(())
 }
 
@@ -135,13 +150,13 @@ fn collect_decls<'a>(
                     override_names.insert(name_text);
                 }
             }
-            Node::ExpandedRule {
-                name, is_override, ..
-            } => {
+            Node::ExpandedRule(expand_id) => {
+                let exp = shared.pools.get_expansion(*expand_id);
+                let (name, is_override) = (exp.name, exp.is_override);
                 // Source entries from expand always reference ctx.source.
-                let name_text = strings.resolve_local(*name, &ctx.source);
+                let name_text = strings.resolve_local(name, &ctx.source);
                 insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
-                if *is_override {
+                if is_override {
                     override_names.insert(name_text);
                 }
             }
@@ -251,15 +266,27 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
             }
             Ok(())
         }
-        &Node::Rule { body: inner, .. }
-        | &Node::ExpandedRule { body: inner, .. }
-        | &Node::Let { value: inner, .. } => resolve_expr(arena, rcx, inner),
+        &Node::Rule { body: inner, .. } | &Node::Let { value: inner, .. } => {
+            resolve_expr(arena, rcx, inner)
+        }
+        // The template body is shared and resolved once via the Macro item;
+        // here we only resolve the call's args (module-scope expressions).
+        &Node::ExpandedRule(expand_id) => {
+            let args = rcx.pools.get_expansion(expand_id).args;
+            for &arg in rcx.pools.child_slice(args) {
+                resolve_expr(arena, rcx, arg)?;
+            }
+            Ok(())
+        }
         Node::Macro(macro_id) => {
             let macro_cfg = rcx.pools.get_macro(*macro_id);
             // Macro params must not shadow any top-level declaration
             for param in &macro_cfg.params {
                 let name = rcx.ctx.text(param.name);
-                if let Some(&(_, first_span)) = rcx.decls.get(name) {
+                if let Some(&Spanned {
+                    span: first_span, ..
+                }) = rcx.decls.get(name)
+                {
                     return Err(ResolveError::with_note(
                         ResolveErrorKind::ShadowedBinding(name.to_string()),
                         param.name,
@@ -310,22 +337,10 @@ fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveR
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = rcx.ctx.text(span);
-        if let Some(&(kind, _)) = rcx.decls.get(name) {
+        if let Some(&Spanned { value: kind, .. }) = rcx.decls.get(name) {
             arena.resolve_as(id, kind);
         } else {
             return Err(unknown_ident_error(arena, rcx.ctx, rcx.decls, name, span));
-        }
-        return Ok(());
-    }
-
-    // SynthRef already carries the resolved name; just validate it exists.
-    if let &Node::SynthRef { name } = arena.get(id) {
-        let text = rcx.strings.resolve_local(name, &rcx.ctx.source);
-        if rcx.decls.get(text).is_none() {
-            return Err(ResolveError::new(
-                ResolveErrorKind::UnknownIdentifier(text.to_string()),
-                arena.span(id),
-            ));
         }
         return Ok(());
     }
@@ -373,7 +388,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
         }
         Node::Object(range) => {
             for field in rcx.pools.get_object(*range) {
-                resolve_expr(arena, rcx, field.1)?;
+                resolve_expr(arena, rcx, field.value)?;
             }
             Ok(())
         }
