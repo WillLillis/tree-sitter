@@ -741,11 +741,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_primary(&mut self) -> ParseResult<NodeId> {
         let start = self.span();
+        let kw = self.current().kind;
         // Builtin keywords are contextual: they act as keywords only when
         // followed by `(`. Otherwise they are identifiers so grammars can
-        // use names like `import`, `field`, `for`, etc. as rules.
-        let next_lparen = self.next_is(TokenKind::LParen);
-        let kw = self.current().kind;
+        // use names like `import`, `field`, `for`, etc. as rules. Only the
+        // keyword arms consult `next_lparen`, so skip the lookahead (a
+        // comment-skipping token scan) for the common operands - plain
+        // identifiers and literals, which are the bulk of primaries.
+        let next_lparen = kw.is_keyword() && self.next_is(TokenKind::LParen);
         match kw {
             TokenKind::KwSeq | TokenKind::KwChoice if next_lparen => {
                 let seq = kw == TokenKind::KwSeq;
