@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
+use crate::nativedsl::ast::Spanned;
 use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
 

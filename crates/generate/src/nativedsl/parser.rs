@@ -10,7 +10,8 @@ use super::{
     InnerTy, NoteMessage, ParseError,
     ast::{
         BinOp, ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
-        MacroKind, ModuleContext, Node, NodeId, Param, PrecKind, RepeatKind, SharedAst, Span,
+        MacroKind, ModuleContext, Node, NodeId, ObjectField, Param, PrecKind, RepeatKind,
+        SharedAst, Span,
     },
     lexer::{Token, TokenKind},
     typecheck::{
@@ -43,6 +44,9 @@ pub struct Parser<'tok, 'shared> {
     /// there - `expand_macro_calls` rewrites it during macro expansion, so any
     /// `@` outside a rule-set body would leak unresolved into later stages.
     in_rule_set: bool,
+    /// `SymRef` node ids created while parsing the current rule-set body, drained
+    /// into the macro's `MacroConfig.sym_refs` when the body finishes.
+    pending_sym_refs: Vec<NodeId>,
 }
 
 impl<'tok, 'shared> Parser<'tok, 'shared> {
@@ -75,11 +79,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 has_cfg: false,
                 cfg_declared: FxHashMap::default(),
                 cfg_dropped: FxHashMap::default(),
+                computed_refs: Vec::new(),
+                macro_index: FxHashMap::default(),
             },
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
             depth: 0,
             in_rule_set: false,
+            pending_sym_refs: Vec::new(),
         }
     }
 
@@ -520,12 +527,22 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             }
         })?;
         let end = self.expect(TokenKind::RBrace)?;
+        // `@` refs are only created inside rule-set bodies (and don't nest), so
+        // pending_sym_refs holds exactly this body's refs (empty otherwise).
+        let sym_refs = std::mem::take(&mut self.pending_sym_refs);
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,
             body,
             kind,
+            sym_refs,
         });
+        // Record the name -> id so expand resolves call sites without scanning.
+        // A duplicate name is a malformed grammar that resolve rejects, so the
+        // overwritten entry never reaches a successful build.
+        self.ctx
+            .macro_index
+            .insert(self.ctx.text(name).to_string(), macro_idx);
         Ok(self
             .shared
             .arena
@@ -818,10 +835,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 }
                 self.advance_pos();
                 let inner = self.parse_postfix()?;
-                Ok(self.shared.arena.push(
+                let id = self.shared.arena.push(
                     Node::SymRef { expr: inner },
                     start.merge(self.shared.arena.span(inner)),
-                ))
+                );
+                // Record for the enclosing rule-set macro so expand can evaluate
+                // it (with call args) without re-walking the body.
+                self.pending_sym_refs.push(id);
+                Ok(id)
             }
             TokenKind::LBracket => self.parse_delimited(
                 start,
@@ -1177,10 +1198,13 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let fields = self.comma_sep(TokenKind::RBrace, |this| {
             let key = this.expect_ident()?;
             this.expect(TokenKind::Colon)?;
-            Ok((key, this.parse_expr()?))
+            Ok(ObjectField {
+                name: key,
+                value: this.parse_expr()?,
+            })
         })?;
         let mut seen = FxHashMap::with_capacity_and_hasher(fields.len(), FxBuildHasher);
-        for &(span, _) in &fields {
+        for &ObjectField { name: span, .. } in &fields {
             let key = self.ctx.text(span);
             if let Some(first_span) = seen.insert(key, span) {
                 return Err(self.dup_err(

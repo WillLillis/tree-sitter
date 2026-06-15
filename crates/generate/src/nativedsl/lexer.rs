@@ -545,7 +545,7 @@ pub enum LexErrorKind {
 
 /// First char boundary strictly after byte `i` (or `source.len()` if `i` is at
 /// or past the end).
-fn past_char(source: &[u8], i: usize) -> usize {
+const fn past_char(source: &[u8], i: usize) -> usize {
     if i >= source.len() {
         return source.len();
     }
@@ -570,7 +570,10 @@ fn past_char(source: &[u8], i: usize) -> usize {
 fn read_hex_digits(source: &[u8], start: usize, n: usize) -> Result<u32, usize> {
     let mut value = 0u32;
     for i in 0..n {
-        match source.get(start + i).and_then(|&b| char::from(b).to_digit(16)) {
+        match source
+            .get(start + i)
+            .and_then(|&b| char::from(b).to_digit(16))
+        {
             Some(d) => value = value * 16 + d,
             None => return Err(past_char(source, start + i)),
         }

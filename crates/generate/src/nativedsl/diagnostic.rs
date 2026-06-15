@@ -152,8 +152,8 @@ fn render_error(
             ..
         }) = error
         {
-            for (_, entry_span) in entries {
-                let span = *entry_span;
+            for entry in entries {
+                let span = entry.span;
                 render_snippet(f, Source { span, text, path }, SnippetKind::Error, false)?;
                 writeln!(f)?;
             }
