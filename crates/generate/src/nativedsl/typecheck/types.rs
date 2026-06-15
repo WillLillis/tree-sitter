@@ -52,43 +52,43 @@ pub enum InnerTy {
 /// Smallest and largest tuple arity. `(a)`/`()` are not tuples (no grouping
 /// operator exists).
 pub const TUPLE_MIN_ARITY: usize = 2;
-pub const TUPLE_MAX_ARITY: usize = 4;
+pub const TUPLE_MAX_ARITY: usize = 8;
 
-/// A tuple's element scalar types, made up of four 2-bit slots, with element `i`
-/// in bits `2*i..2*i+2`.
+/// A tuple's element scalar types, made up of eight 2-bit slots, with element
+/// `i` in bits `2*i..2*i+2`.
 ///
 /// Each slot holds a [`ScalarTy`] discriminant - `00` rule, `01` str, `10` int,
 /// or `11` for an absent slot. Present elements fill a contiguous low prefix,
 /// so the arity is the index of the first absent slot.
 ///
 /// ```text
-///          slot 3   slot 2   slot 1   slot 0
-/// bit:      7 6      5 4      3 2      1 0
+///        slot 7  slot 6  slot 5  slot 4  slot 3  slot 2  slot 1  slot 0
+/// bit:   15 14   13 12   11 10    9 8     7 6     5 4     3 2     1 0
 ///
-/// tuple_t<str_t, int_t>  ->   1 1      1 1      1 0      0 1
-///                            absent   absent   int=10   str=01
+/// tuple_t<str_t, int_t>  ->  ...all absent...      1 1     1 0     0 1
+///                                              absent  int=10  str=01
 /// ```
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TupleSig(u8);
+pub struct TupleSig(u16);
 
-const TUPLE_SLOT_ABSENT: u8 = 0b11;
+const TUPLE_SLOT_ABSENT: u16 = 0b11;
 
 /// Why a sequence of element types can't form a tuple signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TupleSigError(pub usize);
 
 impl TupleSig {
-    /// Build from element scalars. `Err` if the arity is outside 2..=4.
+    /// Build from element scalars. `Err` if the arity is outside 2..=8.
     pub fn new(elems: &[ScalarTy]) -> Result<Self, TupleSigError> {
         let n = elems.len();
         if !(TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY).contains(&n) {
             return Err(TupleSigError(n));
         }
         // All slots absent, then fill the present prefix.
-        let mut bits = u8::MAX;
+        let mut bits = u16::MAX;
         for (i, &s) in elems.iter().enumerate() {
-            bits &= !(0b11 << (2 * i));
-            bits |= (s as u8) << (2 * i);
+            bits &= !(0b11u16 << (2 * i));
+            bits |= u16::from(s as u8) << (2 * i);
         }
         Ok(Self(bits))
     }
@@ -509,10 +509,8 @@ mod tests {
     fn tuple_sig_arity_bounds() {
         assert_eq!(TupleSig::new(&[]), Err(TupleSigError(0)));
         assert_eq!(TupleSig::new(&[Rule]), Err(TupleSigError(1)));
-        assert_eq!(
-            TupleSig::new(&[Rule, Str, Int, Rule, Str]),
-            Err(TupleSigError(5))
-        );
+        // One past the max (9 elements) is rejected with its actual count.
+        assert_eq!(TupleSig::new(&[Rule; 9]), Err(TupleSigError(9)));
         for n in TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY {
             let elems = vec![Rule; n];
             assert_eq!(sig(&elems).arity(), n);
@@ -521,21 +519,17 @@ mod tests {
 
     #[test]
     fn tuple_sig_roundtrips_elements() {
-        // Every arity-2..=4 combination of scalars packs and unpacks exactly.
+        // Exhaustively pack/unpack every scalar combination at every arity,
+        // enumerating the 3^n combos as base-3 digits over [Rule, Str, Int].
         let all = [Rule, Str, Int];
-        for &a in &all {
-            for &b in &all {
-                let s = sig(&[a, b]);
-                assert_eq!(s.arity(), 2);
-                assert_eq!(s.elems().collect::<Vec<_>>(), vec![a, b]);
-                for &c in &all {
-                    let s = sig(&[a, b, c]);
-                    assert_eq!(s.elems().collect::<Vec<_>>(), vec![a, b, c]);
-                    for &d in &all {
-                        let s = sig(&[a, b, c, d]);
-                        assert_eq!(s.elems().collect::<Vec<_>>(), vec![a, b, c, d]);
-                    }
-                }
+        for n in TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY {
+            for combo in 0..3usize.pow(n as u32) {
+                let elems: Vec<ScalarTy> = (0..n)
+                    .map(|i| all[combo / 3usize.pow(i as u32) % 3])
+                    .collect();
+                let s = sig(&elems);
+                assert_eq!(s.arity(), n);
+                assert_eq!(s.elems().collect::<Vec<_>>(), elems);
             }
         }
     }

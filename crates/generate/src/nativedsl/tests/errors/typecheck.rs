@@ -140,9 +140,9 @@ error_tests! { Type {
     }
     error_tuple_arity_too_large {
         r#"grammar { language: "test" }
-        let x = ("a", "b", "c", "d", "e")
+        let x = ("a", "b", "c", "d", "e", "f", "g", "h", "i")
         rule program { "x" }"#,
-        TypeErrorKind::TupleArityInvalid(5)
+        TypeErrorKind::TupleArityInvalid(9)
     }
     error_tuple_element_not_scalar {
         r#"grammar { language: "test" }
