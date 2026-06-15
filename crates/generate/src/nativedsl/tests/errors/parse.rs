@@ -42,8 +42,8 @@ error_tests! { Parse {
         ParseErrorKind::TupleArity(1)
     }
     error_tuple_annotation_arity_too_large {
-        r#"grammar { language: "test" } let x: tuple_t<rule_t, rule_t, rule_t, rule_t, rule_t> = "y" rule program { "x" }"#,
-        ParseErrorKind::TupleArity(5)
+        r#"grammar { language: "test" } let x: tuple_t<rule_t, rule_t, rule_t, rule_t, rule_t, rule_t, rule_t, rule_t, rule_t> = "y" rule program { "x" }"#,
+        ParseErrorKind::TupleArity(9)
     }
     error_tuple_annotation_element_not_scalar {
         r#"grammar { language: "test" } let x: tuple_t<list_t<rule_t>, rule_t> = "y" rule program { "x" }"#,
