@@ -162,6 +162,7 @@ macro_rules! id_type {
 
 id_type!(MacroId);
 id_type!(ForId);
+id_type!(ExpandId);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrecKind {
@@ -309,6 +310,27 @@ impl Span {
     }
 }
 
+/// A value paired with the source span to blame for it in diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spanned<T> {
+    pub value: T,
+    pub span: Span,
+}
+
+impl<T> Spanned<T> {
+    pub const fn new(value: T, span: Span) -> Self {
+        Self { value, span }
+    }
+}
+
+/// One `name: value` entry of an object literal, stored in
+/// [`AstPools::object_fields`]. `name` is the span of the field key.
+#[derive(Clone, Copy, Debug)]
+pub struct ObjectField {
+    pub name: Span,
+    pub value: NodeId,
+}
+
 /// Shared AST data across all modules in a grammar. All `NodeId`, `MacroId`,
 /// `ForId`, and `ChildRange` values are globally valid within this structure.
 ///
@@ -326,7 +348,8 @@ pub struct AstPools {
     pub children: Vec<NodeId>,
     pub macro_configs: Vec<MacroConfig>,
     pub for_configs: Vec<ForConfig>,
-    pub object_fields: Vec<(Span, NodeId)>,
+    pub object_fields: Vec<ObjectField>,
+    pub expansions: Vec<Expansion>,
 }
 
 impl SharedAst {
@@ -339,6 +362,7 @@ impl SharedAst {
                 macro_configs: Vec::new(),
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
+                expansions: Vec::new(),
             },
         }
     }
@@ -357,7 +381,13 @@ impl AstPools {
         id
     }
 
-    pub fn push_object(&mut self, fields: Vec<(Span, NodeId)>) -> Option<ChildRange> {
+    pub fn push_expansion(&mut self, expansion: Expansion) -> ExpandId {
+        let id = ExpandId(self.expansions.len() as u32);
+        self.expansions.push(expansion);
+        id
+    }
+
+    pub fn push_object(&mut self, fields: Vec<ObjectField>) -> Option<ChildRange> {
         let start = self.object_fields.len() as u32;
         let len = u16::try_from(fields.len()).ok()?;
         self.object_fields.extend(fields);
@@ -382,7 +412,12 @@ impl AstPools {
     }
 
     #[must_use]
-    pub fn get_object(&self, range: ChildRange) -> &[(Span, NodeId)] {
+    pub fn get_expansion(&self, id: ExpandId) -> &Expansion {
+        &self.expansions[id.index()]
+    }
+
+    #[must_use]
+    pub fn get_object(&self, range: ChildRange) -> &[ObjectField] {
         &self.object_fields[range.as_range()]
     }
 
@@ -423,6 +458,10 @@ pub struct MacroConfig {
     pub params: Vec<Param>,
     pub body: NodeId,
     pub kind: MacroKind,
+    /// Computed-name references (`@<expr>` -> `SymRef`) in a r+ule-set macro's
+    /// body, recorded by the parser as it builds them. Expand evaluates each
+    /// under a call's args; resolve validates the result exists.
+    pub sym_refs: Vec<NodeId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -443,6 +482,16 @@ pub struct Param {
 pub struct ForConfig {
     pub bindings: Vec<Param>,
     pub iterable: NodeId,
+}
+
+/// One instantiation of a rule-set macro decl at a `@name(args)` call site.
+#[derive(Clone, Copy)]
+pub struct Expansion {
+    pub is_override: bool,
+    pub name: Str,
+    pub macro_id: MacroId,
+    pub body: NodeId,
+    pub args: ChildRange,
 }
 
 /// Per-module data produced by the parser.
@@ -476,6 +525,13 @@ pub struct ModuleContext {
     /// Top-level declarations dropped by cfg in this module: name -> Cfg
     /// node id. Drives `GatedByDisabledCfg` enrichment.
     pub cfg_dropped: FxHashMap<String, NodeId>,
+    /// Computed-name references (`@<expr>`) from rule-set macro instances,
+    /// evaluated under each call's args at expand time, paired with their span.
+    /// Resolve validates each against the rule-name table.
+    pub computed_refs: Vec<Spanned<Str>>,
+    /// Top-level macro names mapped to their `MacroId`, recorded by the parser
+    /// as it builds each decl.
+    pub macro_index: FxHashMap<String, MacroId>,
     /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously
     /// before any child loads, so this slice is well-defined and stable.
@@ -567,13 +623,10 @@ pub enum Node {
     },
     /// Body of a rule-set macro (sequence of `Rule` / `ComputedRule`).
     RuleSet(ChildRange),
-    /// Synthesized rule decl from `expand_macro_calls`. Same shape as
-    /// `Rule` but the name lives in the `StringPool`.
-    ExpandedRule {
-        is_override: bool,
-        name: Str,
-        body: NodeId,
-    },
+    /// One instantiation of a rule-set macro decl at a `@name(args)` call site.
+    /// The [`Expansion`] (side table) carries the computed name, the macro's
+    /// id, the *shared template* decl body, and the call's args.
+    ExpandedRule(ExpandId),
     Let {
         name: Span,
         ty: Option<Ty>,
@@ -674,14 +727,10 @@ pub enum Node {
         for_id: ForId,
         body: NodeId,
     },
-    /// `@<str_expr>` inside a rule-set macro body. `expr` is `str_t`;
-    /// `expand_macro_calls` evaluates and emits `SynthRef`.
+    /// `@<str_expr>` inside a rule-set macro body: a reference to a (possibly
+    /// computed-name) rule. `expr` is `str_t`.
     SymRef {
         expr: NodeId,
-    },
-    /// Post-expand rule reference. Carries the interned name directly.
-    SynthRef {
-        name: Str,
     },
     /// `name(arg0, arg1, ...)`. `args` children: `[arg0, arg1, ...]`.
     Call {
