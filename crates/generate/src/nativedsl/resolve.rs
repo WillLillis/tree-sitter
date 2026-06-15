@@ -8,7 +8,7 @@
 //!
 //! Let bindings register into the decl table after their RHS is resolved.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -133,7 +133,9 @@ fn collect_decls<'a>(
     base: Option<(&'a InputGrammar, Span)>,
     modules: &'a [Module],
 ) -> ResolveResult<Decls<'a>> {
-    let mut decls = Decls::default();
+    // Size to the item count up front: nearly every top-level item declares a
+    // name, so this avoids rehashing the table as decls are collected.
+    let mut decls = FxHashMap::with_capacity_and_hasher(root_items.len(), FxBuildHasher);
     let mut override_names: FxHashSet<&str> = FxHashSet::default();
 
     // Register rules and macros upfront (forward references allowed).
