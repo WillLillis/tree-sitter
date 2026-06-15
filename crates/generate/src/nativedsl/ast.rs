@@ -532,6 +532,10 @@ pub struct ModuleContext {
     /// Top-level macro names mapped to their `MacroId`, recorded by the parser
     /// as it builds each decl.
     pub macro_index: FxHashMap<String, MacroId>,
+    /// Optional `let name: ty` annotations, keyed by the `Node::Let` id. Stored
+    /// out-of-line (most lets have none) so the annotation doesn't widen `Node`.
+    /// Written by the parser, read by typecheck.
+    pub let_types: FxHashMap<NodeId, Ty>,
     /// Half-open `[start, end)` range of `NodeId`s this module owns in the
     /// shared arena. The parser pushes all of a module's nodes contiguously
     /// before any child loads, so this slice is well-defined and stable.
@@ -627,9 +631,11 @@ pub enum Node {
     /// The [`Expansion`] (side table) carries the computed name, the macro's
     /// id, the *shared template* decl body, and the call's args.
     ExpandedRule(ExpandId),
+    /// `let name = value` or `let name: ty = value`. An optional type
+    /// annotation lives out-of-line in [`ModuleContext::let_types`] (keyed by
+    /// this node's id) so it doesn't widen `Node` past its 16-byte budget.
     Let {
         name: Span,
-        ty: Option<Ty>,
         value: NodeId,
     },
     Macro(MacroId),

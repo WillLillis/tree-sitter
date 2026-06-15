@@ -81,6 +81,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 cfg_dropped: FxHashMap::default(),
                 computed_refs: Vec::new(),
                 macro_index: FxHashMap::default(),
+                let_types: FxHashMap::default(),
             },
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
@@ -474,10 +475,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         };
         self.expect(TokenKind::Eq)?;
         let value = self.parse_expr()?;
-        Ok(self.shared.arena.push(
-            Node::Let { name, ty, value },
+        let id = self.shared.arena.push(
+            Node::Let { name, value },
             start.merge(self.shared.arena.span(value)),
-        ))
+        );
+        if let Some(ty) = ty {
+            self.ctx.let_types.insert(id, ty);
+        }
+        Ok(id)
     }
 
     fn parse_macro_def(&mut self) -> ParseResult<NodeId> {
