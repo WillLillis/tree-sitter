@@ -55,7 +55,7 @@ pub enum Value {
 
 /// Pools holding the intermediate IR being built during lowering. Indices
 /// (`RuleId`, `ValueId`, `Str`, `ChildRange`) are stable for the lifetime
-/// of the parse call so cross-grammar caches like `LoweringState::let_values`
+/// of the parse call so the cross-grammar `LoweringState::let_values` cache
 /// can keep referencing earlier-grammar entries.
 #[derive(Default)]
 pub struct IrPools {
@@ -64,21 +64,4 @@ pub struct IrPools {
     pub value_children: Vec<ValueId>,
     pub rule_children: Vec<RuleId>,
     pub object_pool: Vec<FxHashMap<String, ValueId>>,
-}
-
-const LOADED_MODULES_WORDS: usize = (u8::MAX as usize + 1) / u64::BITS as usize;
-
-/// Tracks which modules have had their let bindings evaluated.
-#[derive(Default)]
-pub struct LoadedModules([u64; LOADED_MODULES_WORDS]);
-
-impl LoadedModules {
-    pub const fn is_loaded(&self, idx: ModuleId) -> bool {
-        let i = idx as usize;
-        self.0[i / 64] & (1 << (i % 64)) != 0
-    }
-    pub const fn set_loaded(&mut self, idx: ModuleId) {
-        let i = idx as usize;
-        self.0[i / 64] |= 1 << (i % 64);
-    }
 }
