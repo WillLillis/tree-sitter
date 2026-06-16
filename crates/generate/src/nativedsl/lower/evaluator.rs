@@ -1122,9 +1122,19 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 for i in 0..n_items {
                     let item_id = self.state.ir.value_children[iter_range.start as usize + i];
                     for j in 0..n_bindings {
-                        let val = match *self.get_val(item_id) {
-                            Value::Tuple(range) => self.state.ir.value_children[range.start as usize + j],
-                            _ => item_id,
+                        // A single binding takes the whole item (scalar or
+                        // tuple). Multiple bindings destructure a tuple item -
+                        // typecheck guarantees the item is a tuple of matching
+                        // arity, so the non-tuple case is unreachable.
+                        let val = if n_bindings == 1 {
+                            item_id
+                        } else {
+                            match *self.get_val(item_id) {
+                                Value::Tuple(range) => {
+                                    self.state.ir.value_children[range.start as usize + j]
+                                }
+                                _ => unreachable!(),
+                            }
                         };
                         if i == 0 {
                             self.state.scratch.for_binding_values.push(val);
