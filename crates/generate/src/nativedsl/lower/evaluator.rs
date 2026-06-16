@@ -21,6 +21,12 @@ use crate::{
     rules::{Associativity, Precedence, Rule},
 };
 
+/// Convert a child count to the `u16` a [`ChildRange`] holds, mapping overflow
+/// to the standard "too many children" error (carrying the offending count).
+fn checked_len(n: usize, span: Span) -> LowerResult<u16> {
+    u16::try_from(n).map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren(n), span))
+}
+
 /// Per-grammar evaluation wrapper around long-lived [`LoweringState`].
 pub(super) struct Evaluator<'a, 'ast> {
     pub state: &'a mut LoweringState,
@@ -106,15 +112,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn alloc_list(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
         let start = self.state.ir.value_children.len() as u32;
-        let len = u16::try_from(items.len())
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+        let len = checked_len(items.len(), span)?;
         self.state.ir.value_children.extend_from_slice(items);
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
     fn finish_list(&mut self, start: u32, len: usize, span: Span) -> LowerResult<ValueId> {
-        let len = u16::try_from(len)
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+        let len = checked_len(len, span)?;
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
@@ -169,10 +173,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn children_range(&self, start: u32, span: Span) -> LowerResult<ChildRange> {
-        let count = self.state.ir.rule_children.len() as u32 - start;
-        u16::try_from(count)
-            .map(|len| ChildRange::new(start, len))
-            .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))
+        let count = self.state.ir.rule_children.len() - start as usize;
+        Ok(ChildRange::new(start, checked_len(count, span)?))
     }
 
     /// Intern a span using the current module's source text.
@@ -640,7 +642,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             Node::MacroParam { index, .. } => {
                 let base = *self.state.scratch.macro_arg_bases.last().unwrap();
-                Ok(self.state.scratch.macro_args[base + *index as usize])
+                Ok(self.state.scratch.macro_args[base + usize::from(*index)])
             }
             Node::ForBinding { for_id, index, .. } => {
                 let base = self
@@ -652,7 +654,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .find(|(id, _)| *id == *for_id)
                     .unwrap()
                     .1;
-                Ok(self.state.scratch.for_binding_values[base + *index as usize])
+                Ok(self.state.scratch.for_binding_values[base + usize::from(*index)])
             }
             // Guarded by super::resolve - all variable names validated
             Node::Ident(IdentKind::Var(let_id)) => Ok(*self.state.let_values.get(let_id).unwrap()),
@@ -673,9 +675,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let lr = self.list_range(lv);
                 let rr = self.list_range(rv);
                 let start = self.state.ir.value_children.len() as u32;
-                let total = lr.len as usize + rr.len as usize;
-                let len = u16::try_from(total)
-                    .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+                let total = usize::from(lr.len) + usize::from(rr.len);
+                let len = checked_len(total, span)?;
                 self.state
                     .ir
                     .value_children
@@ -758,8 +759,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         }
                     }
                     let start = self.state.ir.value_children.len() as u32;
-                    let len = u16::try_from(self.state.scratch.val_scratch.len() - base)
-                        .map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren, span))?;
+                    let len = checked_len(self.state.scratch.val_scratch.len() - base, span)?;
                     self.state
                         .ir
                         .value_children
@@ -976,7 +976,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             call_span,
             caller_mod: self.current_module,
         });
-        if self.state.scratch.call_stack.len() > MAX_CALL_DEPTH as usize {
+        if self.state.scratch.call_stack.len() > usize::from(MAX_CALL_DEPTH) {
             let trace = self
                 .state
                 .scratch
@@ -1145,7 +1145,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let n_bindings = for_config.bindings.len();
         let iter_vid = self.eval_expr(iterable)?;
         let iter_range = self.list_range(iter_vid);
-        let n_items = iter_range.len as usize;
+        let n_items = usize::from(iter_range.len);
         stack_scope!(
             self.state.scratch.for_binding_values => base,
             self.state.scratch.for_binding_frames => _frames_base;
