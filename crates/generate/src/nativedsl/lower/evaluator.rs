@@ -52,9 +52,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     ) -> Self {
         let root_id = previous.len() as ModuleId;
         state.reset_per_grammar();
-        // Mark the in-progress grammar as "loaded" so that subsequent imports
-        // of it from other grammars short-circuit in `eval_import_module`.
-        state.loaded.set_loaded(root_id);
         Self {
             state,
             strings,
@@ -665,7 +662,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             Node::ModuleRef { module, .. } => {
                 let global_id = module.expect("module index not set by loading pre-pass");
-                self.eval_import_module(global_id)?;
                 Ok(self.alloc_val(Value::Module(global_id)))
             }
             &Node::Append { left, right } => {
@@ -803,7 +799,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let (obj, name) = (children[0], children[1]);
                 let obj_val = self.eval_expr(obj)?;
                 expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val)); // guarded by typecheck
-                self.eval_import_module(mod_idx)?;
                 // guarded by resolver
                 expect_pat!(
                     Node::Ident(IdentKind::Macro(macro_id)),
@@ -1071,33 +1066,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let vid = self.eval_expr(expr)?;
         let name = self.str_id(vid);
         Ok(self.alloc_rule(ARule::NamedSymbol(name)))
-    }
-
-    /// Lazily evaluate an imported module's top-level let bindings.
-    fn eval_import_module(&mut self, mod_idx: ModuleId) -> LowerResult<()> {
-        if self.state.loaded.is_loaded(mod_idx) {
-            return Ok(());
-        }
-        let saved_module = self.current_module;
-        self.current_module = mod_idx;
-        let result = self.eval_let_bindings();
-        self.current_module = saved_module;
-        result?;
-        self.state.loaded.set_loaded(mod_idx);
-        Ok(())
-    }
-
-    fn eval_let_bindings(&mut self) -> LowerResult<()> {
-        let ctx = self.ctx();
-        let n = ctx.root_items.len();
-        for i in 0..n {
-            let item_id = ctx.root_items[i];
-            if let &Node::Let { value, .. } = self.shared.arena.get(item_id) {
-                let val = self.eval_expr(value)?;
-                self.state.let_values.insert(item_id, val);
-            }
-        }
-        Ok(())
     }
 
     /// Evaluate a for-loop, pushing each iteration's rule into `rule_scratch`.
