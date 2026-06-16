@@ -81,6 +81,10 @@ error_tests! { Parse {
         r#"grammar { : "test" } rule program { "x" }"#,
         ParseErrorKind::ExpectedName
     }
+    error_field_name_quoted {
+        r#"grammar { language: "test" } rule program { field("f", "x") }"#,
+        ParseErrorKind::QuotedName
+    }
     error_expected_type {
         r#"grammar { language: "test" }
         let x: = "y"
