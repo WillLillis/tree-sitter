@@ -60,6 +60,19 @@ rule_tests! {
         r#"grammar { language: "test" } rule program { prec({ P: 1 }.P, "x") }"#,
         Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
     }
+    // A single for-binding over a list of tuples binds the WHOLE tuple, then a
+    // later multi-binding loop destructures it. Exercises eval_for_each's
+    // single-vs-multi binding distinction (regression: single binding wrongly
+    // took tuple element 0 instead of the whole tuple).
+    for_single_tuple_binding_whole {
+        r#"grammar { language: "test" }
+        let copy = [for (p: tuple_t<str_t, int_t>) in [("kw_a", 1), ("kw_b", 2)] { p }]
+        rule program { choice(for (name: str_t, n: int_t) in copy { prec(n, name) }) }"#,
+        Rule::choice(vec![
+            Rule::prec(Precedence::Integer(1), Rule::String("kw_a".into())),
+            Rule::prec(Precedence::Integer(2), Rule::String("kw_b".into())),
+        ])
+    }
     object_field_access_list_value {
         r#"grammar { language: "test" }
         let GROUPS = { kw: ["if", "else"], ops: ["+", "-"] }
