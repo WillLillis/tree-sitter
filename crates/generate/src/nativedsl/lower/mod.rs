@@ -38,7 +38,7 @@ enum NameSource {
 }
 
 use evaluator::Evaluator;
-use repr::{IrPools, LoadedModules, RuleId, ValueId};
+use repr::{IrPools, RuleId, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
 
@@ -56,14 +56,15 @@ pub(super) struct CallFrame {
 /// Long-lived state shared across grammar lowerings in one `parse_native_dsl`
 /// call.
 ///
-/// `ir` and the caches make imported/inherited let bindings evaluate exactly
-/// once; `scratch` persists across grammars to reuse allocated capacity but
-/// its contents are cleared between them.
+/// Each module's let bindings are evaluated eagerly when it is lowered; the
+/// `let_values` cache (keyed by `Let` node id) then serves cross-module reads
+/// without re-evaluating. `scratch` persists across grammars to reuse allocated
+/// capacity but its contents are cleared between them.
 #[derive(Default)]
 pub struct LoweringState {
     pub(super) ir: IrPools,
-    // Cross-grammar caches:
-    loaded: LoadedModules,
+    // Cross-grammar cache: let values keyed by their Let node id, shared across
+    // every module's evaluation in one run.
     let_values: FxHashMap<NodeId, ValueId>,
     scratch: Scratch,
 }
