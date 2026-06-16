@@ -54,6 +54,12 @@ rule_tests! {
             ])
         )
     }
+    // `.field` directly on an object literal (not a let-bound ident) - exercises
+    // the parse_postfix `.field` loop, distinct from parse_ident_expr's path.
+    object_literal_field_access {
+        r#"grammar { language: "test" } rule program { prec({ P: 1 }.P, "x") }"#,
+        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+    }
     object_field_access_list_value {
         r#"grammar { language: "test" }
         let GROUPS = { kw: ["if", "else"], ops: ["+", "-"] }

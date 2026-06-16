@@ -730,7 +730,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             return Err(self.error(ParseErrorKind::NestingTooDeep));
         }
         let mut result = self.parse_primary()?;
-        // Post-primary `.field` chaining, e.g. `grammar_config(base).extras`.
+        // `.field` chaining on a non-ident primary, e.g. an object literal
+        // `{ k: v }.k`. (`ident.field` is consumed by `parse_ident_expr`.)
         while self.at(TokenKind::Dot) {
             let start = self.shared.arena.span(result);
             self.advance_pos();
