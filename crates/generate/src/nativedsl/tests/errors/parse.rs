@@ -145,7 +145,7 @@ error_tests! { Parse {
             let args = vec!["\"x\""; 65_536].join(",");
             format!("grammar {{ language: \"test\" }} rule foo {{ seq({args}) }}")
         },
-        ParseErrorKind::TooManyChildren
+        ParseErrorKind::TooManyChildren(65_536)
     }
     error_too_many_macro_params {
         &{
