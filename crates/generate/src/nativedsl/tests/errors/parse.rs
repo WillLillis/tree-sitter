@@ -85,6 +85,10 @@ error_tests! { Parse {
         r#"grammar { language: "test" } rule program { field("f", "x") }"#,
         ParseErrorKind::QuotedName
     }
+    error_cfg_unknown_attribute {
+        r#"grammar { language: "test" } #[notcfg(X)] rule program { "x" }"#,
+        ParseErrorKind::ExpectedCfgKeyword("notcfg".to_string())
+    }
     error_expected_type {
         r#"grammar { language: "test" }
         let x: = "y"
