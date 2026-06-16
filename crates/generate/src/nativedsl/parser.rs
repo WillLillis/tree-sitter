@@ -197,6 +197,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             let span = self.span();
             self.advance_pos();
             Ok(span)
+        } else if matches!(kind, TokenKind::StringLit | TokenKind::RawStringLit { .. }) {
+            // Names here (field names, object/config keys) are bare identifiers.
+            // A quoted string is the common mistake (it's how grammar.js writes
+            // field names), so point at the quotes rather than a generic error.
+            Err(self.error(ParseErrorKind::QuotedName))
         } else {
             Err(self.error(err))
         }
@@ -1294,6 +1299,8 @@ pub enum ParseErrorKind {
     ExpectedString,
     #[error("expected name")]
     ExpectedName,
+    #[error("expected an identifier, not a quoted string")]
+    QuotedName,
     #[error("expected expression")]
     ExpectedExpression,
     #[error("expected type")]

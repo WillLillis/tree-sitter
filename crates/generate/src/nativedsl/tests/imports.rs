@@ -997,3 +997,21 @@ fn import_call_depth_shared_across_modules() {
         assert_eq!(*frame, ("recurse".into(), recursive_path.clone(), 4, 5));
     }
 }
+
+#[test]
+fn import_rule_preserves_metadata_and_reserved() {
+    // Referencing a helper rule (`h::decorated`) inlines its full lowered tree
+    // via `import_rule`. Lowering the same expression directly must produce an
+    // identical Rule, proving import_rule reconstructs prec/field/alias/token
+    // (the Metadata arm) and reserved (the Reserved arm) faithfully.
+    let g = dsl(r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule direct { prec_left(1, field(f, alias(token("kw"), Kw))) }
+        rule via_import { h::decorated }
+        rule res_direct { reserved("ctx", "rw") }
+        rule res_via_import { h::reserved_rule }
+    "#);
+    assert_eq!(find_rule(&g, "via_import"), find_rule(&g, "direct"));
+    assert_eq!(find_rule(&g, "res_via_import"), find_rule(&g, "res_direct"));
+}
