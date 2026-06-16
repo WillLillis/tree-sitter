@@ -605,7 +605,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .shared
             .pools
             .push_children(&decls)
-            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren(decls.len())))?;
         let end = self.span();
         Ok(self
             .shared
@@ -1223,11 +1223,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             }
         }
         let end = self.expect(TokenKind::RBrace)?;
+        let fields_len = fields.len();
         let range = self
             .shared
             .pools
             .push_object(fields)
-            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))?;
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren(fields_len)))?;
         Ok(self
             .shared
             .arena
@@ -1259,7 +1260,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             self.shared
                 .pools
                 .push_children(&self.scratch[saved..])
-                .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren))
+                .ok_or_else(|| {
+                    self.error(ParseErrorKind::TooManyChildren(self.scratch.len() - saved))
+                })
         })
     }
 
@@ -1331,8 +1334,8 @@ pub enum ParseErrorKind {
     MultipleInherits,
     #[error("expression nesting too deep (maximum {MAX_PARSE_DEPTH})")]
     NestingTooDeep,
-    #[error("too many elements (maximum 65535)")]
-    TooManyChildren,
+    #[error("too many elements ({0}, maximum {max})", max = u16::MAX)]
+    TooManyChildren(usize),
     #[error("too many bindings (maximum 255)")]
     TooManyBindings,
     #[error("for-loop requires at least one binding")]
