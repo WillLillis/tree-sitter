@@ -438,8 +438,8 @@ pub enum LowerErrorKind {
     InheritWithoutConfig,
     #[error("'inherits' must reference a variable bound to inherit()")]
     InheritsWithoutInherit,
-    #[error("too many elements (maximum 65535)")]
-    TooManyChildren,
+    #[error("too many elements ({0}, maximum {max})", max = u16::MAX)]
+    TooManyChildren(usize),
     #[error("maximum macro call depth ({MAX_CALL_DEPTH}) exceeded")]
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]

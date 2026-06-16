@@ -39,8 +39,6 @@ pub enum ExpandErrorKind {
     NonStringInName,
     #[error("computed rule name '{0}' is not a valid identifier")]
     InvalidRuleName(String),
-    #[error("too many elements (maximum {})", u16::MAX)]
-    TooManyChildren,
 }
 
 pub fn expand_macro_calls(
