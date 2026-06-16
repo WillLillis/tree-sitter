@@ -15,3 +15,9 @@ macro sep_by(separator: str_t, item: rule_t) rule_t {
 let PREC = { ADD: 1, MUL: 2 }
 
 let GREETING = "hello"
+
+// Rules carrying metadata, referenced by import tests to exercise import_rule's
+// Metadata/Reserved arms (importing a rule with prec/field/alias/token/reserved).
+rule decorated { prec_left(1, field(f, alias(token("kw"), Kw))) }
+
+rule reserved_rule { reserved("ctx", "rw") }
