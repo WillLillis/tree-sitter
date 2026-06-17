@@ -422,6 +422,9 @@ pub enum NoteMessage {
     /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the
     /// imported path string so the note can show the exact transformation.
     SwitchImportToInherit(String),
+    /// Points at a let value's reference back to itself (only reachable through
+    /// a macro); attached to a `CircularLet` lower error.
+    SelfReferenceHere,
 }
 
 impl std::fmt::Display for NoteMessage {
@@ -442,6 +445,7 @@ impl std::fmt::Display for NoteMessage {
             Self::SwitchImportToInherit(path) => {
                 write!(f, "switch `import(\"{path}\")` to `inherit(\"{path}\")`")
             }
+            Self::SelfReferenceHere => write!(f, "self-reference here"),
         }
     }
 }
@@ -464,7 +468,7 @@ impl DslError {
     pub fn call_trace(&self) -> Option<&[(String, PathBuf, usize, usize)]> {
         if let Self::Lower(e) = self
             && let lower::LowerErrorKind::CallDepthExceeded(trace)
-                | lower::LowerErrorKind::RecursionTooDeep(trace) = &e.kind
+            | lower::LowerErrorKind::RecursionTooDeep(trace) = &e.kind
         {
             Some(trace)
         } else {

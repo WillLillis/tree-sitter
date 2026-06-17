@@ -500,7 +500,11 @@ fn cfg_disabled_first_inherit_promotes_second() {
     // duplicate_inherit, so validate_grammar's `inherit_ref.expect(...)` panicked.
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("base.tsg");
-    std::fs::write(&base, "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n").unwrap();
+    std::fs::write(
+        &base,
+        "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n",
+    )
+    .unwrap();
     let input = format!(
         r#"
         #[cfg(X)] let skipped = inherit("missing.tsg")
@@ -511,7 +515,11 @@ fn cfg_disabled_first_inherit_promotes_second() {
         dsl_path(&base)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
-    assert!(rule_names(&g).contains(&"base_rule"), "got {:?}", rule_names(&g));
+    assert!(
+        rule_names(&g).contains(&"base_rule"),
+        "got {:?}",
+        rule_names(&g)
+    );
 }
 
 #[test]
@@ -521,7 +529,11 @@ fn cfg_disabled_second_inherit_is_not_multiple_inherits() {
     // rejected with MultipleInherits pointing at the disabled line.
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().join("base.tsg");
-    std::fs::write(&base, "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n").unwrap();
+    std::fs::write(
+        &base,
+        "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n",
+    )
+    .unwrap();
     let input = format!(
         r#"
         let chosen = inherit("{}")
@@ -532,7 +544,11 @@ fn cfg_disabled_second_inherit_is_not_multiple_inherits() {
         dsl_path(&base)
     );
     let g = parse_native_dsl(&input, Path::new(".")).unwrap();
-    assert!(rule_names(&g).contains(&"base_rule"), "got {:?}", rule_names(&g));
+    assert!(
+        rule_names(&g).contains(&"base_rule"),
+        "got {:?}",
+        rule_names(&g)
+    );
 }
 
 #[test]
