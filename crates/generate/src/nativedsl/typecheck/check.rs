@@ -319,12 +319,19 @@ fn type_of(
             type_of_append(shared, ctx, *left, *right, span, env, expected)
         }
         Node::FieldAccess { obj, field } => type_of_field_access(shared, ctx, *obj, *field, env),
-        // Only unresolved QualifiedAccess reaches type_of: inherited grammar
-        // rules that exist in base_grammar.variables but not in root_items.
-        // The resolver already resolved lets and caught macro-as-value errors.
+        // `::` member access is valid only on a module bound by
+        // import()/inherit(), which resolve rewrites to a direct reference
+        // before typecheck; and `module_t` can't reach here through a macro
+        // (rejected at parse). So any `QualifiedAccess` surviving to typecheck
+        // applies `::` to a non-module value (e.g. `r::x` where `r` is a rule)
+        // and is always an error. Type the object first to surface any error
+        // inside it and to name its type, then report the misuse.
         Node::QualifiedAccess { obj, .. } => {
-            type_of(shared, ctx, *obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
-            Ok(Ty::RULE)
+            let obj_ty = type_of(shared, ctx, *obj, env, Constraint::None)?;
+            Err(TypeError::new(
+                TypeErrorKind::MemberAccessRequiresModule(obj_ty),
+                span,
+            ))
         }
         Node::Object(range) => type_of_object(shared, ctx, *range, span, env, expected),
         Node::List(range) => type_of_list(shared, ctx, *range, span, env, expected),
