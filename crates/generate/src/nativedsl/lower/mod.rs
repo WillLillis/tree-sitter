@@ -437,6 +437,11 @@ pub enum LowerErrorKind {
     ModuleCycle,
     #[error("expected a rule name reference")]
     ExpectedRuleName,
+    #[error("object has no field '{field}'; available: {}", available.join(", "))]
+    FieldNotFound {
+        field: String,
+        available: Vec<String>,
+    },
     #[error("config field is not set in the base grammar")]
     ConfigFieldUnset,
     #[error("inherit() requires 'inherits' to be set in the grammar config")]
