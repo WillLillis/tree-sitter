@@ -59,14 +59,13 @@ error_tests! { Type {
         rule program { one_arg("a", "b") }"#,
         TypeErrorKind::ArgCountMismatch { macro_name: "one_arg".into(), expected: 1, got: 2 }
     }
-    error_rule_inline_on_non_grammar {
+    error_member_access_requires_module {
         r#"grammar { language: "test" }
         let obj = { x: 1 }
         rule program { obj::x }"#,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))),
-        }
+        TypeErrorKind::MemberAccessRequiresModule(Ty::Data(DataTy::Object(InnerTy::Scalar(
+            ScalarTy::Int,
+        ))))
     }
     error_field_access_on_non_object {
         r#"grammar { language: "test" }
