@@ -211,10 +211,15 @@ fn collect_decls<'a>(
         }
         // Inherited external tokens are referenceable by bare name too, just
         // like inherited rules (and like grammar.js's `$.name`). Anonymous
-        // externals (string/pattern) have no name to bring into scope.
+        // externals (string/pattern) have no name to bring into scope. A base
+        // may list one of its own rules in `externals` (an external-scanner
+        // token with a grammar-rule fallback), putting the name in both lists;
+        // it's one symbol, already registered by the rule loop, so skip it
+        // rather than colliding with ourselves.
         for ext in &base_grammar.external_tokens {
             if let Rule::NamedSymbol(name) = ext
                 && !override_names.contains(name.as_str())
+                && !base_grammar.variables.iter().any(|v| v.name == *name)
             {
                 insert_decl(&mut decls, name, IdentKind::Rule, inherit_span, ctx)?;
             }
