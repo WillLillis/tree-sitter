@@ -7,7 +7,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
+    Diagnostic, NoteMessage, ResolveError, ResolveErrorKind, Ty,
     ast::{
         ChildRange, ConfigField, GrammarConfig, MacroId, ModuleContext, Node, NodeId, ObjectField,
         SharedAst, Span,
@@ -106,6 +106,7 @@ pub fn apply_cfg(
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
         macro_index: &mut ctx.macro_index,
+        let_types: &mut ctx.let_types,
     };
     // Walk grammar config fields first - cfg attrs may appear on members of
     // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
@@ -149,6 +150,9 @@ struct Walker<'a> {
     /// Pruned alongside a dropped macro item so a cfg-disabled rule-set macro
     /// stops being callable via `@name()` (expand looks the name up here).
     macro_index: &'a mut FxHashMap<String, MacroId>,
+    /// Re-keyed when an active cfg wrapping an annotated `let` is unwrapped: the
+    /// annotation is keyed by the Let's node id, which the unwrap relocates.
+    let_types: &'a mut FxHashMap<NodeId, Ty>,
 }
 
 impl Walker<'_> {
@@ -227,6 +231,13 @@ impl Walker<'_> {
         let child_span = self.shared.arena.span(child);
         self.shared.arena.set(id, child_node);
         self.shared.arena.set_span(id, child_span);
+        // A top-level `let name: ty` keeps its annotation in let_types keyed by
+        // the Let's node id; the unwrap moved the Let into this slot, so move the
+        // annotation with it (chaining through nested cfg) or typecheck reads
+        // None here and silently drops the annotation.
+        if let Some(ty) = self.let_types.remove(&child) {
+            self.let_types.insert(id, ty);
+        }
         Ok(true)
     }
 
