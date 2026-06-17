@@ -14,6 +14,12 @@ error_tests! { Lower {
         r#"grammar { extras: [] } rule program { "x" }"#,
         LowerErrorKind::MissingLanguageField
     }
+    // A grammar that emits grammar.json must have at least one rule (matches
+    // grammar.js). Config-only *bases* are allowed (checked only on the root).
+    error_grammar_has_no_rules {
+        r#"grammar { language: "test" }"#,
+        LowerErrorKind::GrammarHasNoRules
+    }
     // An external resolves rule-like but lives in external_tokens, not
     // variables, so it can't be variables[0] (the start symbol).
     error_external_as_start_rule {

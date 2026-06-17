@@ -563,6 +563,34 @@ fn inherited_external_qualified_access() {
 }
 
 #[test]
+fn config_only_base_is_allowed() {
+    // A base with no rules (config only) is a native-DSL extension over
+    // grammar.js: it can't compile standalone, but it contributes config to a
+    // child that supplies the rules. The root's rule count is what's enforced.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(
+        &base,
+        r#"grammar { language: "base", externals: [_eof] }
+        external _eof
+        "#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.tsg");
+    let src = format!(
+        r#"let base = inherit("{}")
+        grammar {{ language: "child", inherits: base }}
+        rule program {{ "x" }}"#,
+        dsl_path(&base)
+    );
+    std::fs::write(&child, &src).unwrap();
+    let g = parse_native_dsl(&src, &child).unwrap();
+    // Child supplies the only rule; base contributes its externals as config.
+    assert_eq!(rule_names(&g), vec!["program"]);
+    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("_eof".into())]);
+}
+
+#[test]
 fn start_rotates_inherited_rule_to_front() {
     // Mirrors the ocaml_type case: the start rule lives mid-grammar in the
     // base, and we want it as the start in the inheriting grammar without
