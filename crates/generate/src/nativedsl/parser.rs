@@ -72,8 +72,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 path: grammar_path,
                 grammar_config: None,
                 root_items: Vec::with_capacity(root_cap),
-                inherit_ref: None,
-                duplicate_inherit: None,
                 module_refs: Vec::new(),
                 external_names: Vec::new(),
                 node_range: 0..0,
@@ -1030,18 +1028,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             },
             start.merge(end),
         );
+        // The loader/validate_grammar derive the inherit set from `module_refs`
+        // (filtered to non-import), so the parser only records the ref here.
         self.ctx.module_refs.push(id);
-        if !is_import {
-            // Keep the first inherit for downstream use and record a second one
-            // (detected here in O(1)) so validate_grammar can report
-            // MultipleInherits later without re-scanning - deferring the error
-            // keeps a well-formed AST for tooling.
-            if self.ctx.inherit_ref.is_none() {
-                self.ctx.inherit_ref = Some(id);
-            } else if self.ctx.duplicate_inherit.is_none() {
-                self.ctx.duplicate_inherit = Some(id);
-            }
-        }
         Ok(id)
     }
 

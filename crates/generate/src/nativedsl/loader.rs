@@ -97,7 +97,10 @@ impl Loader<'_> {
         ctx.node_range.end = self.shared.arena.next_id().into();
 
         // Load inherited grammar (Grammar kind only, must happen before typecheck).
-        if let Some(inherit_id) = ctx.inherit_ref
+        // The active base is the first inherit() in source order (a second is
+        // rejected by validate_grammar above).
+        let inherit_id = ctx.inherits(&self.shared.arena).next();
+        if let Some(inherit_id) = inherit_id
             && let Node::ModuleRef {
                 import: false,
                 path: ref_path,
@@ -307,9 +310,8 @@ impl Loader<'_> {
             return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
         };
         // A grammar block without `language` and more than one inherit() are
-        // both detected during parse but reported here, so a well-formed AST is
-        // still produced for tooling (the parser keeps the first inherit and
-        // records a second in `duplicate_inherit`).
+        // both reported here rather than at parse, so a well-formed AST is still
+        // produced for tooling. The inherit set is derived from `module_refs`.
         if config.language.is_none() {
             // The grammar block always exists here (config is Some); find it for
             // the span. Only runs on this error path, so the scan is fine.
@@ -324,21 +326,28 @@ impl Loader<'_> {
             )
             .into());
         }
-        if let Some(second) = ctx.duplicate_inherit {
-            let first = ctx
-                .inherit_ref
-                .expect("duplicate_inherit implies inherit_ref");
-            return Err(LowerError::with_note(
+        // Derived from module_refs (post-cfg-gating), so no cached field can go
+        // stale: the first inherit is the active base, any others are errors.
+        let inherits = ctx.inherits(&self.shared.arena).collect::<Vec<_>>();
+        if let [first, second, rest @ ..] = inherits.as_slice() {
+            // Point at the first redundant inherit, note the base, then note
+            // every further redundant inherit so the user sees all of them.
+            let mut err = LowerError::with_note(
                 LowerErrorKind::MultipleInherits,
-                self.shared.arena.span(second),
-                ctx.note(NoteMessage::FirstDefinedHere, self.shared.arena.span(first)),
-            )
-            .into());
+                self.shared.arena.span(*second),
+                ctx.note(NoteMessage::FirstDefinedHere, self.shared.arena.span(*first)),
+            );
+            for &extra in rest {
+                err.add_note(
+                    ctx.note(NoteMessage::AlsoInheritedHere, self.shared.arena.span(extra)),
+                );
+            }
+            return Err(err.into());
         }
         let config_inherits = config.inherits;
 
         // inherit() exists but no `inherits` in grammar config
-        if let Some(inherit_ref) = ctx.inherit_ref
+        if let Some(&inherit_ref) = inherits.first()
             && config_inherits.is_none()
         {
             Err(LowerError::new(
@@ -349,7 +358,7 @@ impl Loader<'_> {
 
         // `inherits` in config but doesn't resolve to an inherit() call
         if let Some(id) = config_inherits
-            && ctx.inherit_ref.is_none()
+            && inherits.is_empty()
         {
             Err(LowerError::new(
                 LowerErrorKind::InheritsWithoutInherit,

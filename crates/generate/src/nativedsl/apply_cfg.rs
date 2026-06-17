@@ -105,7 +105,6 @@ pub fn apply_cfg(
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
-        inherit_ref: &mut ctx.inherit_ref,
     };
     // Walk grammar config fields first - cfg attrs may appear on members of
     // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
@@ -140,12 +139,12 @@ struct Walker<'a> {
     /// Disjoint borrows of `ctx`. `cfg_declared` is the local declared set
     /// for the grammar visibility check; `cfg_dropped` records cfg-dropped
     /// top-level decls for `enrich_resolve_error` to use later. `module_refs`
-    /// / `inherit_ref` get pruned when a cfg-gated `let h = import(...)` is
-    /// dropped, so the loader doesn't load the file.
+    /// gets pruned when a cfg-gated `let h = import/inherit(...)` is dropped, so
+    /// the loader doesn't load the file (the inherit set derives from
+    /// `module_refs`, so the markers follow automatically).
     cfg_declared: &'a FxHashMap<String, Span>,
     cfg_dropped: &'a mut FxHashMap<String, NodeId>,
     module_refs: &'a mut Vec<NodeId>,
-    inherit_ref: &'a mut Option<NodeId>,
 }
 
 impl Walker<'_> {
@@ -193,14 +192,13 @@ impl Walker<'_> {
                 self.cfg_dropped.entry(key).or_insert(id);
             }
             // `let h = import/inherit(...)` is the only shape that puts a
-            // `ModuleRef` at item level. Pull it out of the loader's worklist.
+            // `ModuleRef` at item level. Pull it out of the loader's worklist;
+            // the inherit markers derive from module_refs, so dropping it here
+            // is enough - there is no separate inherit_ref to fix up.
             if let &Node::Let { value, .. } = self.shared.arena.get(item)
                 && matches!(self.shared.arena.get(value), Node::ModuleRef { .. })
             {
                 self.module_refs.retain(|x| *x != value);
-                if *self.inherit_ref == Some(value) {
-                    *self.inherit_ref = None;
-                }
             }
             return Ok(false);
         }

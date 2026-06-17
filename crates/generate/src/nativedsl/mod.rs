@@ -411,6 +411,9 @@ pub enum NoteMessage {
     /// An unmatched `override rule` declaration's location, one per extra
     /// override in an `OverrideRuleNotFound` error.
     OverrideDeclaredHere,
+    /// One per redundant `inherit()` beyond the first in a `MultipleInherits`
+    /// error; the note's span points at the extra inherit call.
+    AlsoInheritedHere,
     /// Carries the cfg flag name; the note's span points at the gated decl.
     GatedByDisabledCfg(String),
     /// Carries the suggested name; emitted when an unknown identifier or
@@ -427,6 +430,7 @@ impl std::fmt::Display for NoteMessage {
             Self::FirstDefinedHere => write!(f, "first defined here"),
             Self::ReferencedFromHere => write!(f, "referenced from here"),
             Self::OverrideDeclaredHere => write!(f, "override declared here"),
+            Self::AlsoInheritedHere => write!(f, "also inherited here"),
             Self::DefinedLater => write!(f, "let binding defined here (move it before the usage)"),
             Self::GatedByDisabledCfg(flag) => {
                 write!(
