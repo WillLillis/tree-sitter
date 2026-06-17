@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::{
     grammars::InputGrammar,
+    rules::Rule,
     nativedsl::{
         Export, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
@@ -207,6 +208,16 @@ fn collect_decls<'a>(
                 continue;
             }
             insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
+        }
+        // Inherited external tokens are referenceable by bare name too, just
+        // like inherited rules (and like grammar.js's `$.name`). Anonymous
+        // externals (string/pattern) have no name to bring into scope.
+        for ext in &base_grammar.external_tokens {
+            if let Rule::NamedSymbol(name) = ext
+                && !override_names.contains(name.as_str())
+            {
+                insert_decl(&mut decls, name, IdentKind::Rule, inherit_span, ctx)?;
+            }
         }
     }
 
