@@ -363,12 +363,20 @@ fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveR
         return Ok(());
     }
 
-    // Alias target: a bare identifier becomes a named-alias rule reference,
-    // even if undeclared (mirrors grammar.js `alias($.x, $.undeclared)`).
+    // Alias target: resolve a bare identifier against `decls` like any other
+    // (a `let` resolves to its value, a rule to a named-symbol reference). Only
+    // an UNDECLARED bare identifier becomes a named-alias rule reference,
+    // mirroring grammar.js `alias($.x, $.undeclared)`. Forcing every bare ident
+    // to a rule would shadow a same-named `let` (wrong value + named flag).
     if let &Node::Alias { content, target } = arena.get(id) {
         resolve_expr(arena, rcx, content)?;
-        if matches!(*arena.get(target), Node::Ident(IdentKind::Unresolved)) {
-            arena.resolve_as(target, IdentKind::Rule);
+        if matches!(arena.get(target), Node::Ident(IdentKind::Unresolved)) {
+            let span = arena.span(target);
+            let kind = rcx
+                .decls
+                .get(rcx.ctx.text(span))
+                .map_or(IdentKind::Rule, |s| s.value);
+            arena.resolve_as(target, kind);
         } else {
             resolve_expr(arena, rcx, target)?;
         }
