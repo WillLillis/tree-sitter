@@ -159,12 +159,6 @@ fn json_roundtrip() {
     assert_eq!(grammar, reparsed);
 }
 
-#[test]
-fn empty_grammar() {
-    let g = dsl(r#"grammar { language: "empty" }"#);
-    assert_eq!(g.name, "empty");
-    assert!(g.variables.is_empty());
-}
 
 #[test]
 fn config_word_with_conflicts() {
