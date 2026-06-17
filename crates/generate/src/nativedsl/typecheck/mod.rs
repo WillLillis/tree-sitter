@@ -128,4 +128,9 @@ pub enum TypeErrorKind {
     MacroUsedAsValue(String),
     #[error("rule-set macro '{0}' can only be invoked at top level, not in expression context")]
     RuleSetMacroInExpressionContext(String),
+    #[error(
+        "reserved must be an object literal `{{ name: [...] }}`; its first set is the default \
+         applied to every token, so the set order must be explicit (not a computed value)"
+    )]
+    ReservedMustBeLiteral,
 }

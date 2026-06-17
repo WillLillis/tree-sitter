@@ -282,7 +282,15 @@ error_tests! { Type {
     error_expected_reserved_config {
         r#"grammar { language: "test", reserved: "not_an_object" }
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::OBJ_LIST_RULE, got: Ty::STR }
+        TypeErrorKind::ReservedMustBeLiteral
+    }
+    error_reserved_computed_rejected {
+        // A let-bound (computed) reserved is rejected: the first set is the
+        // default, so set order must be explicit, not from an unordered value.
+        r#"let r: obj_t<list_t<rule_t>> = { global: ["if"] }
+        grammar { language: "test", reserved: r }
+        rule program { "x" }"#,
+        TypeErrorKind::ReservedMustBeLiteral
     }
     error_empty_object_needs_annotation {
         r#"grammar { language: "test" }
