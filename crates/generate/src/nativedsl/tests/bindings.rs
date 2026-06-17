@@ -546,3 +546,47 @@ fn recursive_fn_depth_limit() {
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
 }
+
+#[test]
+fn macro_reads_let_defined_after_call_site() {
+    // A macro body is resolved at its (late) definition site, but lower expands
+    // it at the (earlier) call site. The expanded body still reads a let defined
+    // after that call site, so lower must evaluate the let on demand instead of
+    // assuming the source-order loop reached it first. Cluster L (was a panic).
+    let g = dsl(r#"grammar { language: "test" }
+        rule prog { m() }
+        let b = "x"
+        macro m() str_t { b }"#);
+    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+}
+
+#[test]
+fn macro_for_loop_iterates_let_defined_after_call_site() {
+    // Same forward reference, but the macro body iterates the later let rather
+    // than reading it as a scalar - exercises the for-loop iterable path.
+    let g = dsl(r#"grammar { language: "test" }
+        rule prog { m() }
+        let items: list_t<str_t> = ["a", "b"]
+        macro m() rule_t { choice(for (x: str_t) in items { x }) }"#);
+    assert_eq!(
+        g.variables[0].rule,
+        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())]),
+    );
+}
+
+#[test]
+fn macro_let_cycle_reported_as_circular() {
+    // `b` is bound to m(), whose body reads `b`: a cycle resolve does not catch
+    // (the macro body resolves at its def site, after `let b`). On-demand let
+    // evaluation detects the reentry and reports it as a circular binding with a
+    // note at the self-reference - without it the recursion overflows the stack.
+    let err = dsl_err(
+        r#"grammar { language: "test" }
+        let b = m()
+        macro m() str_t { b }
+        rule prog { b }"#,
+    );
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::CircularLet("b".into()));
+    assert_eq!(e.notes.len(), 1);
+}

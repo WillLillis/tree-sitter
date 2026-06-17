@@ -12,7 +12,7 @@ mod repr;
 
 use std::path::PathBuf;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -86,6 +86,8 @@ struct Scratch {
     call_stack: Vec<CallFrame>,
     /// Current evaluator recursion depth, guarded against `MAX_EVAL_DEPTH`.
     eval_depth: u16,
+    /// Let bindings whose value is mid-evaluation; reentry signals a cycle.
+    lets_in_progress: FxHashSet<NodeId>,
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
     for_binding_values: Vec<ValueId>,
@@ -98,6 +100,7 @@ impl Scratch {
     fn clear(&mut self) {
         self.call_stack.clear();
         self.eval_depth = 0;
+        self.lets_in_progress.clear();
         self.macro_args.clear();
         self.macro_arg_bases.clear();
         self.for_binding_values.clear();
@@ -189,8 +192,8 @@ pub fn lower_helper(
     for &item_id in &current.root_items {
         match shared.arena.get(item_id) {
             Node::Macro(_) | Node::External { .. } => {}
-            Node::Let { value, .. } => {
-                eval.eval_let(item_id, *value)?;
+            Node::Let { .. } => {
+                eval.eval_let(item_id)?;
             }
             &Node::Rule {
                 name,
@@ -238,8 +241,8 @@ fn evaluate(
         match shared.arena.get(item_id) {
             // External decls register a symbol name; nothing to lower.
             Node::Grammar | Node::Macro(_) | Node::External { .. } => {}
-            Node::Let { value, .. } => {
-                eval.eval_let(item_id, *value)?;
+            Node::Let { .. } => {
+                eval.eval_let(item_id)?;
             }
             Node::Rule {
                 is_override,
@@ -405,8 +408,10 @@ fn build_grammar(
         // located snippet - the first (in source order) as the primary span,
         // the rest as `override declared here` notes. This gets all locations
         // through the generic note machinery, no renderer special-casing.
-        let mut entries: Vec<(String, Span)> =
-            overrides.into_iter().map(|(name, s)| (name, s.span)).collect();
+        let mut entries: Vec<(String, Span)> = overrides
+            .into_iter()
+            .map(|(name, s)| (name, s.span))
+            .collect();
         entries.sort_unstable_by_key(|(_, span)| span.start);
         let mut names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
         names.sort_unstable();
@@ -491,7 +496,9 @@ pub enum LowerErrorKind {
     ModuleCycle,
     #[error("expected a rule name reference")]
     ExpectedRuleName,
-    #[error("external token '{0}' cannot be the start rule; the start symbol must be a grammar rule")]
+    #[error(
+        "external token '{0}' cannot be the start rule; the start symbol must be a grammar rule"
+    )]
     ExternalCannotBeStart(String),
     #[error("object has no field '{field}'; available: {}", available.join(", "))]
     FieldNotFound {
@@ -512,6 +519,8 @@ pub enum LowerErrorKind {
     RecursionTooDeep(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]
     IntegerOverflow(i64),
+    #[error("let '{0}' is defined in terms of itself")]
+    CircularLet(String),
 }
 
 const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {

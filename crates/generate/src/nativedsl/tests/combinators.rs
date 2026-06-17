@@ -320,7 +320,10 @@ fn reserved_child_merges_with_base() {
     assert_eq!(g.reserved_words.len(), 3);
     // Base "global" stays first (default), with the child's overriding words.
     assert_eq!(g.reserved_words[0].name, "global");
-    assert_eq!(g.reserved_words[0].reserved_words, vec![Rule::String("if".into())]);
+    assert_eq!(
+        g.reserved_words[0].reserved_words,
+        vec![Rule::String("if".into())]
+    );
     // Base "properties" kept (not redefined by the child).
     assert_eq!(g.reserved_words[1].name, "properties");
     // Child's new set appended.
