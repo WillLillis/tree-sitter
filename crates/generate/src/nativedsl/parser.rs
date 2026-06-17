@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -73,6 +73,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 grammar_config: None,
                 root_items: Vec::with_capacity(root_cap),
                 inherit_ref: None,
+                duplicate_inherit: None,
                 module_refs: Vec::new(),
                 external_names: Vec::new(),
                 node_range: 0..0,
@@ -217,24 +218,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             span,
             self.ctx.note(NoteMessage::FirstDefinedHere, first_span),
         )
-    }
-
-    fn check_duplicate_names<T>(
-        &self,
-        items: &[T],
-        name_of: fn(&T) -> Span,
-        kind_ctor: fn(String) -> ParseErrorKind,
-    ) -> ParseResult<()> {
-        for i in 1..items.len() {
-            let span = name_of(&items[i]);
-            let name = self.ctx.text(span);
-            for item in items.iter().take(i) {
-                if self.ctx.text(name_of(item)) == name {
-                    return Err(self.dup_err(kind_ctor(name.to_string()), span, name_of(item)));
-                }
-            }
-        }
-        Ok(())
     }
 
     fn err_arg_count(&self, name: TokenKind, expected: u8, got: usize, start: Span) -> ParseError {
@@ -382,12 +365,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let mut seen = [None::<Span>; ConfigField::COUNT];
         loop {
             if let Some(end) = self.eat(TokenKind::RBrace) {
-                if config.language.is_none() {
-                    return Err(ParseError::new(
-                        ParseErrorKind::MissingLanguageField,
-                        start.merge(end),
-                    ));
-                }
+                // A missing `language` field is checked in validate_grammar
+                // (well-formed AST, semantic check).
                 self.ctx.grammar_config = Some(config);
                 return Ok(self.shared.arena.push(Node::Grammar, start.merge(end)));
             }
@@ -512,18 +491,20 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             this.expect(TokenKind::Colon)?;
             Ok(Param {
                 name: pname,
-                ty: this.parse_non_module_type()?,
+                ty: this.parse_type()?.0,
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        self.check_duplicate_names(&params, |p| p.name, ParseErrorKind::DuplicateParameter)?;
+        // Duplicate names and module_t param/return types are rejected in
+        // typecheck (the AST is well-formed; these are semantic checks). The u8
+        // bound stays here - it's a representation limit on the param index.
         if params.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
         let kind = if rule_set {
             MacroKind::RuleSet
         } else {
-            MacroKind::Expression(self.parse_non_module_type()?)
+            MacroKind::Expression(self.parse_type()?.0)
         };
         let brace_start = self.expect(TokenKind::LBrace)?;
         let body = stack_scope!(self.locals, |_saved| {
@@ -616,20 +597,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .shared
             .arena
             .push(Node::RuleSet(range), brace_start.merge(end)))
-    }
-
-    /// Parse a type that must not be `module_t`. Used for macro parameter and
-    /// return types: a module value is only usable where it is bound by
-    /// `import`/`inherit` (resolve rewrites `mod::member` there). Passed through
-    /// a macro it has no usable operation - `m::member`, `m::macro(...)`, and
-    /// `grammar_config(m, ...)` all need a concrete module the signature can't
-    /// carry - so it is rejected at the signature rather than at each use.
-    fn parse_non_module_type(&mut self) -> ParseResult<Ty> {
-        let (ty, span) = self.parse_type()?;
-        if matches!(ty, Ty::Module(_)) {
-            return Err(ParseError::new(ParseErrorKind::ModuleTypeNotAllowed, span));
-        }
-        Ok(ty)
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -1065,14 +1032,15 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         );
         self.ctx.module_refs.push(id);
         if !is_import {
-            if let Some(first) = self.ctx.inherit_ref {
-                return Err(self.dup_err(
-                    ParseErrorKind::MultipleInherits,
-                    start.merge(end),
-                    self.shared.arena.span(first),
-                ));
+            // Keep the first inherit for downstream use and record a second one
+            // (detected here in O(1)) so validate_grammar can report
+            // MultipleInherits later without re-scanning - deferring the error
+            // keeps a well-formed AST for tooling.
+            if self.ctx.inherit_ref.is_none() {
+                self.ctx.inherit_ref = Some(id);
+            } else if self.ctx.duplicate_inherit.is_none() {
+                self.ctx.duplicate_inherit = Some(id);
             }
-            self.ctx.inherit_ref = Some(id);
         }
         Ok(id)
     }
@@ -1097,10 +1065,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        self.check_duplicate_names(&bindings, |p| p.name, ParseErrorKind::DuplicateBinding)?;
-        if bindings.is_empty() {
-            return Err(self.error(ParseErrorKind::EmptyForBindings));
-        }
+        // Duplicate names and the empty-bindings case are rejected in typecheck
+        // (well-formed AST, semantic checks). The u8 bound stays - it's a
+        // representation limit on the binding index.
         if bindings.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
@@ -1231,17 +1198,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 value: this.parse_expr()?,
             })
         })?;
-        let mut seen = FxHashMap::with_capacity_and_hasher(fields.len(), FxBuildHasher);
-        for &ObjectField { name: span, .. } in &fields {
-            let key = self.ctx.text(span);
-            if let Some(first_span) = seen.insert(key, span) {
-                return Err(self.dup_err(
-                    ParseErrorKind::DuplicateObjectKey(key.to_string()),
-                    span,
-                    first_span,
-                ));
-            }
-        }
+        // Duplicate keys are rejected in typecheck (well-formed AST, semantic
+        // check), which keeps all fields so the duplicate is detectable.
         let end = self.expect(TokenKind::RBrace)?;
         let fields_len = fields.len();
         let range = self
@@ -1331,10 +1289,6 @@ pub enum ParseErrorKind {
     #[error("tuple elements must be rule_t, str_t, or int_t, got {0}")]
     TupleElementType(Ty),
     #[error(
-        "module_t cannot be a macro parameter or return type; a module can only be used where it is bound by import() or inherit()"
-    )]
-    ModuleTypeNotAllowed,
-    #[error(
         "a tuple type needs {min} to {max} element types (there is no grouping operator), got {0}",
         min = TUPLE_MIN_ARITY,
         max = TUPLE_MAX_ARITY
@@ -1344,28 +1298,16 @@ pub enum ParseErrorKind {
     UnknownGrammarField(String),
     #[error("duplicate grammar field '{0}'")]
     DuplicateGrammarField(String),
-    #[error("duplicate object key '{0}'")]
-    DuplicateObjectKey(String),
     #[error("only identifiers can be used as macro names")]
     ExpectedMacroName,
-    #[error("duplicate parameter name '{0}'")]
-    DuplicateParameter(String),
-    #[error("duplicate binding name '{0}'")]
-    DuplicateBinding(String),
     #[error("only one grammar block is allowed")]
     DuplicateGrammarBlock,
-    #[error("grammar block must have a 'language' field")]
-    MissingLanguageField,
-    #[error("only one inherit() call is allowed per grammar")]
-    MultipleInherits,
     #[error("expression nesting too deep (maximum {MAX_PARSE_DEPTH})")]
     NestingTooDeep,
     #[error("too many elements ({0}, maximum {max})", max = u16::MAX)]
     TooManyChildren(usize),
     #[error("too many bindings (maximum 255)")]
     TooManyBindings,
-    #[error("for-loop requires at least one binding")]
-    EmptyForBindings,
     #[error("{}", format_arg_count(*.expected, .name, *.got))]
     WrongArgumentCount {
         name: TokenKind,

@@ -417,6 +417,10 @@ pub enum DisallowedItemKind {
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
+    #[error("grammar block must have a 'language' field")]
+    MissingLanguageField,
+    #[error("only one inherit() call is allowed per grammar")]
+    MultipleInherits,
     #[error("override rule(s) not found in base grammar or imported helpers: {}", format_override_names(.0))]
     OverrideRuleNotFound(Vec<Spanned<String>>),
     #[error("failed to resolve '{}': {error}", path.display())]

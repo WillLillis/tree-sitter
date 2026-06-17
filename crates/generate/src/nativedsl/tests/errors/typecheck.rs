@@ -1,6 +1,34 @@
 use super::super::*;
 
 error_tests! { Type {
+    error_module_macro_param_rejected {
+        r#"grammar { language: "test" } macro f(m: module_t) rule_t { "x" } rule program { "x" }"#,
+        TypeErrorKind::ModuleTypeNotAllowed
+    }
+    error_module_macro_return_rejected {
+        r#"grammar { language: "test" } macro g() module_t { "x" } rule program { "x" }"#,
+        TypeErrorKind::ModuleTypeNotAllowed
+    }
+    error_duplicate_fn_param {
+        r#"grammar { language: "test" }
+        macro f(x: rule_t, x: str_t) rule_t { x }
+        rule program { f("a") }"#,
+        TypeErrorKind::DuplicateParameter("x".into())
+    }
+    error_duplicate_for_binding {
+        r#"grammar { language: "test" }
+        rule program { choice(for (x: str_t, x: int_t) in [("a", 1)] { x }) }"#,
+        TypeErrorKind::DuplicateBinding("x".into())
+    }
+    error_duplicate_object_key {
+        r#"grammar { language: "test" } let x = { a: 1, b: 2, a: 3 } rule foo { "x" }"#,
+        TypeErrorKind::DuplicateObjectKey("a".into())
+    }
+    error_empty_for_bindings {
+        r#"grammar { language: "test" }
+        rule program { choice(for () in [program] { "x" }) }"#,
+        TypeErrorKind::EmptyForBindings
+    }
     error_type_mismatch_fn_args {
         r#"grammar { language: "test" }
         macro needs_int(x: int_t) rule_t { prec(x, "a") }
@@ -308,6 +336,16 @@ inherit_error_tests! { Type {
         TypeErrorKind::TypeMismatch { expected: Ty::RULE, got: Ty::INT }
     }
 }}
+
+#[test]
+fn error_duplicate_object_key_has_note() {
+    let e = assert_err!(
+        dsl_err(r#"grammar { language: "test" } let x = { a: 1, b: 2, a: 3 } rule foo { "x" }"#),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::DuplicateObjectKey("a".into()));
+    assert!(!e.notes.is_empty());
+}
 
 #[test]
 fn error_grammar_config_on_import_module() {

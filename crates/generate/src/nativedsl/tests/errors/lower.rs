@@ -1,6 +1,23 @@
 use super::super::*;
 
 error_tests! { Lower {
+    error_missing_language_field {
+        r#"grammar { extras: [] } rule program { "x" }"#,
+        LowerErrorKind::MissingLanguageField
+    }
+    error_multiple_inherits {
+        r#"let a = inherit("inherit_base/grammar.tsg")
+        let b = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: a }
+        rule extra { "x" }"#,
+        LowerErrorKind::MultipleInherits
+    }
+    error_multiple_inherits_let_and_config {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: inherit("inherit_base/grammar.tsg") }
+        rule extra { "x" }"#,
+        LowerErrorKind::MultipleInherits
+    }
     error_override_without_target {
         r#"grammar { language: "test" } override rule foo { "bar" }"#,
         LowerErrorKind::OverrideRuleNotFound(vec![Spanned::new("foo".into(), Span::new(43, 46))])
@@ -131,6 +148,13 @@ inherit_error_tests! { Resolve {
     error_inherit_child_error {
         "grammar { language: \"base\" }\nrule program { bogus_ref }\n",
         ResolveErrorKind::UnknownIdentifier("bogus_ref".into())
+    }
+}}
+
+inherit_error_tests! { Lower {
+    error_inherited_missing_language {
+        "grammar { extras: [] }\nrule program { \"x\" }\n",
+        LowerErrorKind::MissingLanguageField
     }
 }}
 

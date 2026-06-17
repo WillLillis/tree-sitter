@@ -33,14 +33,6 @@ error_tests! { Parse {
         r#"grammar { language: "test" } let x: obj_t<module_t> = { a: 1 } rule program { "x" }"#,
         ParseErrorKind::ObjectInnerType(Ty::ANY_MODULE)
     }
-    error_module_macro_param_rejected {
-        r#"grammar { language: "test" } macro f(m: module_t) rule_t { "x" } rule program { "x" }"#,
-        ParseErrorKind::ModuleTypeNotAllowed
-    }
-    error_module_macro_return_rejected {
-        r#"grammar { language: "test" } macro g() module_t { "x" } rule program { "x" }"#,
-        ParseErrorKind::ModuleTypeNotAllowed
-    }
     error_list_triple_nesting_rejected {
         r#"grammar { language: "test" } let x: list_t<list_t<list_t<rule_t>>> = [] rule program { "x" }"#,
         ParseErrorKind::ListInnerType(Ty::LIST_LIST_RULE)
@@ -60,10 +52,6 @@ error_tests! { Parse {
     error_missing_return_type {
         r#"grammar { language: "test" } macro f(x: rule_t) = x rule program { "x" }"#,
         ParseErrorKind::ExpectedType
-    }
-    error_missing_language_field {
-        r#"grammar { extras: [] } rule program { "x" }"#,
-        ParseErrorKind::MissingLanguageField
     }
     error_multiple_grammar_blocks {
         r#"grammar { language: "first" }
@@ -182,11 +170,6 @@ error_tests! { Parse {
         grammar { language: "derived", inherits: base, extras: grammar_config(base, bogus) }"#,
         ParseErrorKind::UnknownGrammarField("bogus".into())
     }
-    error_empty_for_bindings {
-        r#"grammar { language: "test" }
-        rule program { choice(for () in [program] { "x" }) }"#,
-        ParseErrorKind::EmptyForBindings
-    }
     error_qualified_rule_set_call {
         r#"let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
@@ -197,21 +180,15 @@ error_tests! { Parse {
 }}
 
 #[test]
-fn error_duplicates_have_notes() {
-    for (src, expected) in [
-        (
+fn error_duplicate_grammar_field_has_note() {
+    let e = assert_err!(
+        dsl_err(
             r#"grammar { language: "test", word: foo, word: bar } rule foo { "x" } rule bar { "y" }"#,
-            ParseErrorKind::DuplicateGrammarField("word".into()),
         ),
-        (
-            r#"grammar { language: "test" } let x = { a: 1, b: 2, a: 3 } rule foo { "x" }"#,
-            ParseErrorKind::DuplicateObjectKey("a".into()),
-        ),
-    ] {
-        let e = assert_err!(dsl_err(src), Parse);
-        assert_eq!(e.kind, expected);
-        assert!(!e.notes.is_empty());
-    }
+        Parse
+    );
+    assert_eq!(e.kind, ParseErrorKind::DuplicateGrammarField("word".into()));
+    assert!(!e.notes.is_empty());
 }
 
 #[test]
@@ -314,51 +291,9 @@ fn keywords_as_identifiers() {
     assert_eq!(g.variables[0].name, "foo");
 }
 
-#[test]
-fn error_duplicate_fn_param() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            macro f(x: rule_t, x: str_t) rule_t { x }
-            rule program { f("a") }"#,
-        ),
-        Parse
-    );
-    assert_eq!(e.kind, ParseErrorKind::DuplicateParameter("x".into()));
-}
-
-#[test]
-fn error_duplicate_for_binding() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            rule program { choice(for (x: str_t, x: int_t) in [("a", 1)] { x }) }"#,
-        ),
-        Parse
-    );
-    assert_eq!(e.kind, ParseErrorKind::DuplicateBinding("x".into()));
-}
-
 inherit_error_tests! { Parse {
     error_inherited_parse_error {
         "grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n",
         ParseErrorKind::ExpectedToken { expected: TokenKind::RParen, got: TokenKind::StringLit }
-    }
-    error_inherited_missing_language {
-        "grammar { extras: [] }\nrule program { \"x\" }\n",
-        ParseErrorKind::MissingLanguageField
-    }
-    multiple_inherit_bindings_rejected {
-        r#"let a = inherit("inherit_base/grammar.tsg")
-        let b = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: a }
-        rule extra { "x" }"#,
-        ParseErrorKind::MultipleInherits
-    }
-    inherit_in_let_and_config_rejected {
-        r#"let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: inherit("inherit_base/grammar.tsg") }
-        rule extra { "x" }"#,
-        ParseErrorKind::MultipleInherits
     }
 }}
