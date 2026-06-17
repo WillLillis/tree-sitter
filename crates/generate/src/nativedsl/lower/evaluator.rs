@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 
 use super::{
     super::{
-        LowerError, Module, ModuleId,
+        LowerError, Module, ModuleId, NoteMessage,
         ast::{
             BinOp, ChildRange, ConfigField, ExpandId, ForId, IdentKind, MacroId, ModuleContext,
             Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
@@ -65,10 +65,22 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    pub fn eval_let(&mut self, let_id: NodeId, value: NodeId) -> LowerResult<()> {
+    /// Evaluate a let binding's value and memoize it under `let_id`. Idempotent:
+    /// the source-order loop and an on-demand read (`Var` below, reached when a
+    /// macro expanded at an earlier call site references a later let) both route
+    /// here, so whichever runs first wins and the other returns the cached value.
+    /// The in-progress mark lets the `Var` read detect a self-reference cycle
+    /// instead of recursing until the stack overflows.
+    pub fn eval_let(&mut self, let_id: NodeId) -> LowerResult<ValueId> {
+        if let Some(&val) = self.state.let_values.get(&let_id) {
+            return Ok(val);
+        }
+        self.state.scratch.lets_in_progress.insert(let_id);
+        expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(let_id));
         let val = self.eval_expr(value)?;
+        self.state.scratch.lets_in_progress.remove(&let_id);
         self.state.let_values.insert(let_id, val);
-        Ok(())
+        Ok(val)
     }
 
     fn ctx(&self) -> &'a ModuleContext {
@@ -645,8 +657,23 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .1;
                 Ok(self.state.scratch.for_binding_values[base + usize::from(*index)])
             }
-            // Guarded by super::resolve - all variable names validated
-            Node::Ident(IdentKind::Var(let_id)) => Ok(*self.state.let_values.get(let_id).unwrap()),
+            // On demand: a macro expanded at an earlier call site can reach a let
+            // defined later in source order (resolve validated the name exists). A
+            // read while the let is still mid-evaluation is a self-reference cycle,
+            // reachable only through a macro since resolve rejects direct ones.
+            &Node::Ident(IdentKind::Var(let_id)) => {
+                if self.state.scratch.lets_in_progress.contains(&let_id) {
+                    expect_pat!(Node::Let { name, .. }, *self.shared.arena.get(let_id));
+                    let mut err = LowerError::new(
+                        LowerErrorKind::CircularLet(self.ctx().text(name).to_owned()),
+                        self.shared.arena.span(let_id),
+                    );
+                    err.add_note(self.ctx().note(NoteMessage::SelfReferenceHere, span));
+                    Err(err)
+                } else {
+                    self.eval_let(let_id)
+                }
+            }
             &Node::GrammarConfig { module, field } => {
                 let mod_val = self.eval_expr(module)?;
                 expect_pat!(Value::Module(mod_idx), *self.get_val(mod_val));

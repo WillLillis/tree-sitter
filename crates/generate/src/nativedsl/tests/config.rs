@@ -159,7 +159,6 @@ fn json_roundtrip() {
     assert_eq!(grammar, reparsed);
 }
 
-
 #[test]
 fn config_word_with_conflicts() {
     let g = dsl(r#"
