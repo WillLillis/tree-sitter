@@ -335,12 +335,16 @@ impl Loader<'_> {
             let mut err = LowerError::with_note(
                 LowerErrorKind::MultipleInherits,
                 self.shared.arena.span(*second),
-                ctx.note(NoteMessage::FirstDefinedHere, self.shared.arena.span(*first)),
+                ctx.note(
+                    NoteMessage::FirstDefinedHere,
+                    self.shared.arena.span(*first),
+                ),
             );
             for &extra in rest {
-                err.add_note(
-                    ctx.note(NoteMessage::AlsoInheritedHere, self.shared.arena.span(extra)),
-                );
+                err.add_note(ctx.note(
+                    NoteMessage::AlsoInheritedHere,
+                    self.shared.arena.span(extra),
+                ));
             }
             return Err(err.into());
         }

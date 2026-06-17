@@ -14,7 +14,6 @@ use thiserror::Error;
 
 use crate::{
     grammars::InputGrammar,
-    rules::Rule,
     nativedsl::{
         Export, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
@@ -23,6 +22,7 @@ use crate::{
         },
         string_pool::StringPool,
     },
+    rules::Rule,
 };
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
