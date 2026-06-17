@@ -102,8 +102,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn get_val(&self, id: ValueId) -> &Value {
-        // Safety: id was produced by alloc_val which returns sequential indices
-        // into self.state.ir.values. No ValueId can outlive the Evaluator.
+        // Safety: id came from alloc_val, which hands out sequential indices into
+        // self.state.ir.values. That pool is append-only and never reset for the
+        // life of the LoweringState (reset_per_grammar clears only `scratch`), so
+        // every ValueId stays in bounds - including ones cached cross-grammar in
+        // `let_values`. See IrPools docs.
         unsafe { self.state.ir.values.get_unchecked(id.0 as usize) }
     }
 
@@ -161,7 +164,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn get_rule(&self, id: RuleId) -> &ARule {
-        // Safety: id was produced by alloc_rule which returns sequential indices.
+        // Safety: id came from alloc_rule, which hands out sequential indices into
+        // the append-only, never-reset self.state.ir.rules pool (see get_val).
         unsafe { self.state.ir.rules.get_unchecked(id.0 as usize) }
     }
 
@@ -706,21 +710,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         self.alloc_rule(ARule::NamedSymbol(sid))
                     }
                     RuleTarget::HelperRule(i) => {
-                        let Module::Helper { lowered_rules, .. } = target_module else {
-                            unreachable!()
-                        };
+                        expect_pat!(Module::Helper { lowered_rules, .. }, target_module);
                         self.import_rule(&lowered_rules[i as usize].1)
                     }
                     RuleTarget::GrammarRule(i) => {
-                        let Module::Grammar { lowered, .. } = target_module else {
-                            unreachable!()
-                        };
+                        expect_pat!(Module::Grammar { lowered, .. }, target_module);
                         self.import_rule(&lowered.variables[i as usize].rule)
                     }
                     RuleTarget::GrammarExternal(i) => {
-                        let Module::Grammar { lowered, .. } = target_module else {
-                            unreachable!()
-                        };
+                        expect_pat!(Module::Grammar { lowered, .. }, target_module);
                         self.import_rule(&lowered.external_tokens[i as usize])
                     }
                 };
