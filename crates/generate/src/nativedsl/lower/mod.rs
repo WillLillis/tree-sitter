@@ -425,6 +425,8 @@ pub enum DisallowedItemKind {
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
+    #[error("grammar must have at least one rule")]
+    GrammarHasNoRules,
     #[error("grammar block must have a 'language' field")]
     MissingLanguageField,
     #[error("only one inherit() call is allowed per grammar")]
