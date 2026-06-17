@@ -7,7 +7,7 @@ use anstyle::{AnsiColor, Color, Style};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{Diagnostic, DslError, NoteMessage, ast::Span, lower::LowerErrorKind};
+use super::{DslError, NoteMessage, ast::Span};
 
 struct Paint<T>(Style, T);
 
@@ -145,19 +145,9 @@ fn render_error(
 ) -> std::fmt::Result {
     writeln!(f, "{ERROR}: {error}")?;
 
+    // A span-less error (e.g. a file-level one like a missing grammar block)
+    // renders just its message; located errors fall through to the snippet.
     let Some(span) = error.span() else {
-        // Render per-entry spans for errors that carry their own locations
-        if let DslError::Lower(Diagnostic {
-            kind: LowerErrorKind::OverrideRuleNotFound(entries),
-            ..
-        }) = error
-        {
-            for entry in entries {
-                let span = entry.span;
-                render_snippet(f, Source { span, text, path }, SnippetKind::Error, false)?;
-                writeln!(f)?;
-            }
-        }
         return Ok(());
     };
 

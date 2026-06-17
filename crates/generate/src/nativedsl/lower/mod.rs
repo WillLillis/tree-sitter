@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    LowerError, ModuleId,
+    LowerError, ModuleId, NoteMessage,
     ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
     string_pool::{Str, StringPool},
 };
@@ -132,7 +132,7 @@ pub fn lower_with_base(
         .and_then(|(idx, _)| previous[idx as usize].lowered());
     let helper_rules = collect_helper_rules(shared, current, previous);
     let result = evaluate(state, strings, shared, previous, current)?;
-    build_grammar(result, base_grammar, helper_rules)
+    build_grammar(current, result, base_grammar, helper_rules)
 }
 
 /// Collect rules from all transitively-reachable imported helpers, in
@@ -311,6 +311,7 @@ fn evaluate(
 }
 
 fn build_grammar(
+    ctx: &ModuleContext,
     result: EvalResult,
     base: Option<&InputGrammar>,
     helper_rules: Vec<(String, Rule)>,
@@ -357,14 +358,21 @@ fn build_grammar(
     }
 
     if !overrides.is_empty() {
-        let mut entries: Vec<Spanned<String>> = overrides
-            .into_iter()
-            .map(|(name, s)| Spanned::new(name, s.span))
-            .collect();
-        entries.sort_unstable_by(|a, b| a.value.cmp(&b.value));
-        return Err(LowerError::without_span(
-            LowerErrorKind::OverrideRuleNotFound(entries),
-        ));
+        // Names (sorted) go in the message; each override's location becomes a
+        // located snippet - the first (in source order) as the primary span,
+        // the rest as `override declared here` notes. This gets all locations
+        // through the generic note machinery, no renderer special-casing.
+        let mut entries: Vec<(String, Span)> =
+            overrides.into_iter().map(|(name, s)| (name, s.span)).collect();
+        entries.sort_unstable_by_key(|(_, span)| span.start);
+        let mut names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+        names.sort_unstable();
+        let (_, primary) = entries[0];
+        let mut err = LowerError::new(LowerErrorKind::OverrideRuleNotFound(names), primary);
+        for (_, span) in &entries[1..] {
+            err.add_note(ctx.note(NoteMessage::OverrideDeclaredHere, *span));
+        }
+        return Err(err);
     }
 
     // Tree-sitter's start symbol is `variables[0]` (a non-terminal), so honor
@@ -431,8 +439,8 @@ pub enum LowerErrorKind {
     MissingLanguageField,
     #[error("only one inherit() call is allowed per grammar")]
     MultipleInherits,
-    #[error("override rule(s) not found in base grammar or imported helpers: {}", format_override_names(.0))]
-    OverrideRuleNotFound(Vec<Spanned<String>>),
+    #[error("override rule(s) not found in base grammar or imported helpers: {}", .0.join(", "))]
+    OverrideRuleNotFound(Vec<String>),
     #[error("failed to resolve '{}': {error}", path.display())]
     ModuleResolveFailed { path: PathBuf, error: String },
     #[error("failed to read '{}': {error}", path.display())]
@@ -466,14 +474,6 @@ pub enum LowerErrorKind {
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]
     IntegerOverflow(i64),
-}
-
-fn format_override_names(entries: &[Spanned<String>]) -> String {
-    entries
-        .iter()
-        .map(|e| e.value.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {
