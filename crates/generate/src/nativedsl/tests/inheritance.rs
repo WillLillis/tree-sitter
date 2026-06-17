@@ -589,6 +589,34 @@ fn inherited_external_bare_reference() {
 }
 
 #[test]
+fn inherited_rule_also_in_externals() {
+    // A base may list one of its own rules in `externals` (a real tree-sitter
+    // pattern: an external-scanner token with a grammar-rule fallback), so the
+    // name ends up in both variables and external_tokens. Inheriting it must not
+    // double-register the name into the child's scope; grammar.js accepts the
+    // equivalent (the symbol is the same whether backed by a rule or external).
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(
+        &base,
+        r#"grammar { language: "base", externals: [tok] }
+        rule tok { "x" }
+        "#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.tsg");
+    let src = format!(
+        r#"let base = inherit("{}")
+        grammar {{ language: "child", inherits: base }}
+        rule extra {{ tok }}"#,
+        dsl_path(&base)
+    );
+    std::fs::write(&child, &src).unwrap();
+    let g = parse_native_dsl(&src, &child).unwrap();
+    assert_eq!(*find_rule(&g, "extra"), Rule::NamedSymbol("tok".into()));
+}
+
+#[test]
 fn config_only_base_is_allowed() {
     // A base with no rules (config only) is a native-DSL extension over
     // grammar.js: it can't compile standalone, but it contributes config to a
