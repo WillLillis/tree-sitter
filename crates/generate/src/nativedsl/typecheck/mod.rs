@@ -110,6 +110,8 @@ pub enum TypeErrorKind {
     BoundForLoop,
     #[error("imported module has no macro '{0}'")]
     ImportMacroNotFound(String),
+    #[error("member access with `::` requires a module bound by import() or inherit(), got {0}")]
+    MemberAccessRequiresModule(Ty),
     #[error("'{0}' is a macro, not a value; call it with {0}(...)")]
     MacroUsedAsValue(String),
     #[error("rule-set macro '{0}' can only be invoked at top level, not in expression context")]
