@@ -16,6 +16,27 @@ error_tests! { Expand {
         r#"grammar { language: "test" } rule program { "x" } @not_defined()"#,
         ExpandErrorKind::UnknownMacro("not_defined".into())
     }
+    // A cfg-disabled rule-set macro must not stay callable. A surviving @foo()
+    // used to expand a never-resolved template body (panicking in lower for an
+    // ident body) or silently emit its rules (self-contained body). apply_cfg
+    // now prunes it from macro_index, so the call fails like a cfg-disabled
+    // expression-macro reference.
+    error_cfg_disabled_ruleset_macro_ident_body {
+        r#"#[cfg(X)]
+           rules foo() { rule a { b } }
+           grammar { language: "t", flags: { disabled: ["X"] } }
+           rule b { "b" }
+           @foo()"#,
+        ExpandErrorKind::UnknownMacro("foo".into())
+    }
+    error_cfg_disabled_ruleset_macro_self_contained_body {
+        r#"#[cfg(X)]
+           rules foo() { rule a { "x" } }
+           grammar { language: "t", flags: { disabled: ["X"] } }
+           rule program { "p" }
+           @foo()"#,
+        ExpandErrorKind::UnknownMacro("foo".into())
+    }
     error_expression_macro_called_at_top_level {
         r#"macro expr_only() rule_t { "x" }
            grammar { language: "test" }

@@ -291,6 +291,25 @@ fn cfg_dropped_macro_enriches_error() {
 }
 
 #[test]
+fn cfg_dropped_ruleset_macro_enriches_error() {
+    // A cfg-dropped rule-set macro invoked via `@name()` errors at expand with
+    // UnknownMacro, enriched with the same GatedByDisabledCfg note the
+    // expression-macro path gets at resolve.
+    let err = dsl_err(
+        r#"
+        #[cfg(X)] rules gated() { rule a { "x" } }
+        grammar { language: "t", flags: { disabled: ["X"] } }
+        rule program { "p" }
+        @gated()
+    "#,
+    );
+    let e = assert_err!(err, Expand);
+    assert!(matches!(e.kind, ExpandErrorKind::UnknownMacro(ref n) if n == "gated"));
+    let note = e.notes.first().expect("expected cfg note on error");
+    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "X"));
+}
+
+#[test]
 fn cfg_dropped_external_enriches_error() {
     let err = dsl_err(
         r#"
