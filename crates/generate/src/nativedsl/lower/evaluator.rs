@@ -690,12 +690,23 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::FieldAccess { obj, field } => {
                 let obj_val = self.eval_expr(obj)?;
                 let field_name = self.ctx().text(field);
-                match *self.get_val(obj_val) {
-                    Value::Object(idx) => Ok(*self.state.ir.object_pool[idx as usize]
-                        .get(field_name)
-                        .unwrap()),
-                    _ => unreachable!(), // guarded by typecheck
-                }
+                // typecheck guarantees an object here, and validates the field
+                // name for objects whose keys are statically known. For a
+                // computed object (e.g. a macro result) the keys aren't known
+                // until now, so a missing field is a lower-time error.
+                expect_pat!(Value::Object(idx), *self.get_val(obj_val));
+                let map = &self.state.ir.object_pool[idx as usize];
+                map.get(field_name).copied().ok_or_else(|| {
+                    let mut available: Vec<String> = map.keys().cloned().collect();
+                    available.sort_unstable();
+                    LowerError::new(
+                        LowerErrorKind::FieldNotFound {
+                            field: field_name.to_string(),
+                            available,
+                        },
+                        field,
+                    )
+                })
             }
             // A `mod::name` reference that resolve recorded as a concrete
             // target in another module's lowered output. Index directly; no
