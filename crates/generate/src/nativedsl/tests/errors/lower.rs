@@ -156,6 +156,24 @@ fn error_multiple_override_rules_not_found() {
 }
 
 #[test]
+fn error_recursive_macro_combinator_product() {
+    // A self-recursive expression macro whose body nests combinators deeply.
+    // Each macro level re-enters the deep nest, so the product of macro recursion
+    // x combinator depth used to overflow the native stack before MAX_CALL_DEPTH
+    // fired. The eval-depth guard now reports it cleanly, with the macro trace.
+    let body = format!("{}seq(x, m(x)){}", "seq(".repeat(90), ")".repeat(90));
+    let src = format!(
+        "grammar {{ language: \"test\" }}\nmacro m(x: rule_t) rule_t {{ {body} }}\nrule prog {{ m(\"a\") }}"
+    );
+    let e = assert_err!(dsl_err(&src), Lower);
+    assert!(
+        matches!(e.kind, LowerErrorKind::RecursionTooDeep(_)),
+        "expected RecursionTooDeep, got {:?}",
+        e.kind
+    );
+}
+
+#[test]
 fn error_inherit_bad_path() {
     let e = assert_err!(
         dsl_err(

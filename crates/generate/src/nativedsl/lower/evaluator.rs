@@ -1,6 +1,8 @@
 //!  Walks the typed AST into intermediate IR; [`super`] materializes it into
 //!  [`crate::grammars::InputGrammar`].
 
+use std::path::PathBuf;
+
 use rustc_hash::FxHashMap;
 
 use super::{
@@ -12,7 +14,7 @@ use super::{
         },
         string_pool::{Str, StrEntry, StringPool},
     },
-    CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
+    CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH, MAX_EVAL_DEPTH,
     repr::{APrec, ARule, RuleId, Value, ValueId},
 };
 
@@ -583,6 +585,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     pub fn eval_expr(&mut self, id: NodeId) -> LowerResult<ValueId> {
+        self.enter_eval(id)?;
+        let result = self.eval_expr_inner(id);
+        self.state.scratch.eval_depth -= 1;
+        result
+    }
+
+    fn eval_expr_inner(&mut self, id: NodeId) -> LowerResult<ValueId> {
         let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
             Node::IntLit(n) => {
@@ -826,6 +835,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     pub fn lower_to_rule(&mut self, id: NodeId) -> LowerResult<RuleId> {
+        self.enter_eval(id)?;
+        let result = self.lower_to_rule_inner(id);
+        self.state.scratch.eval_depth -= 1;
+        result
+    }
+
+    fn lower_to_rule_inner(&mut self, id: NodeId) -> LowerResult<RuleId> {
         let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
             Node::Ident(IdentKind::Rule) => {
@@ -983,28 +999,49 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             caller_mod: self.current_module,
         });
         if self.state.scratch.call_stack.len() > usize::from(MAX_CALL_DEPTH) {
-            let trace = self
-                .state
-                .scratch
-                .call_stack
-                .iter()
-                .map(|frame| {
-                    let name_ctx = self.module_ctx(frame.name_mod);
-                    let name = name_ctx.text(frame.name_span).to_string();
-                    let call_ctx = self.module_ctx(frame.caller_mod);
-                    let offset = frame.call_span.start as usize;
-                    let bytes = &call_ctx.source.as_bytes()[..offset];
-                    let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
-                    let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
-                    (name, call_ctx.path.clone(), line, col)
-                })
-                .collect();
             let root_span = self.state.scratch.call_stack[0].call_span;
             return Err(LowerError::new(
-                LowerErrorKind::CallDepthExceeded(trace),
+                LowerErrorKind::CallDepthExceeded(self.build_call_trace()),
                 root_span,
             ));
         }
+        Ok(())
+    }
+
+    /// Build the macro-call trace (name + call-site `file:line:col` per frame)
+    /// from the current `call_stack`, shared by the `CallDepthExceeded` and
+    /// `RecursionTooDeep` errors so both render the same chain.
+    fn build_call_trace(&self) -> Vec<(String, PathBuf, usize, usize)> {
+        self.state
+            .scratch
+            .call_stack
+            .iter()
+            .map(|frame| {
+                let name_ctx = self.module_ctx(frame.name_mod);
+                let name = name_ctx.text(frame.name_span).to_string();
+                let call_ctx = self.module_ctx(frame.caller_mod);
+                let offset = frame.call_span.start as usize;
+                let bytes = &call_ctx.source.as_bytes()[..offset];
+                let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
+                let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
+                (name, call_ctx.path.clone(), line, col)
+            })
+            .collect()
+    }
+
+    /// Enter one evaluator recursion frame, erroring if the depth cap is hit.
+    /// The caller decrements `eval_depth` once the guarded body returns. Bounds
+    /// the macro-recursion x combinator-nesting product that neither
+    /// `MAX_CALL_DEPTH` nor `MAX_PARSE_DEPTH` catches on its own; the error
+    /// carries the macro-call trace so the user can see the recursion chain.
+    fn enter_eval(&mut self, id: NodeId) -> LowerResult<()> {
+        if self.state.scratch.eval_depth >= MAX_EVAL_DEPTH {
+            return Err(LowerError::new(
+                LowerErrorKind::RecursionTooDeep(self.build_call_trace()),
+                self.shared.arena.span(id),
+            ));
+        }
+        self.state.scratch.eval_depth += 1;
         Ok(())
     }
 

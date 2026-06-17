@@ -41,6 +41,15 @@ use evaluator::Evaluator;
 use repr::{IrPools, RuleId, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
+/// Cap on the evaluator's own recursion depth (`eval_expr`/`lower_to_rule` frames).
+/// Macro recursion (`MAX_CALL_DEPTH`) and per-expression combinator nesting
+/// (`MAX_PARSE_DEPTH` = 192) are each bounded alone, but their product is not: a
+/// macro recursing N deep with an M-deep combinator body stacks N*M native eval
+/// frames. This bounds that product so deep expansion errors cleanly instead of
+/// overflowing the stack. Sized above any real grammar's eval depth (the 127-
+/// grammar corpus stays well under) and a single max-depth rule (<=192), yet low
+/// enough that the guard trips before a small (2 MB test-thread) stack overflows.
+const MAX_EVAL_DEPTH: u16 = 256;
 
 /// One stack frame for the macro-call trace.
 #[derive(Clone, Copy)]
@@ -75,6 +84,8 @@ pub struct LoweringState {
 #[derive(Default)]
 struct Scratch {
     call_stack: Vec<CallFrame>,
+    /// Current evaluator recursion depth, guarded against `MAX_EVAL_DEPTH`.
+    eval_depth: u16,
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
     for_binding_values: Vec<ValueId>,
@@ -86,6 +97,7 @@ struct Scratch {
 impl Scratch {
     fn clear(&mut self) {
         self.call_stack.clear();
+        self.eval_depth = 0;
         self.macro_args.clear();
         self.macro_arg_bases.clear();
         self.for_binding_values.clear();
@@ -472,6 +484,8 @@ pub enum LowerErrorKind {
     TooManyChildren(usize),
     #[error("maximum macro call depth ({MAX_CALL_DEPTH}) exceeded")]
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
+    #[error("expression nesting too deep while expanding macros (maximum depth {MAX_EVAL_DEPTH})")]
+    RecursionTooDeep(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]
     IntegerOverflow(i64),
 }
