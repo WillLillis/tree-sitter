@@ -145,9 +145,11 @@ fn render_error(
 ) -> std::fmt::Result {
     writeln!(f, "{ERROR}: {error}")?;
 
-    // A span-less error (e.g. a file-level one like a missing grammar block)
-    // renders just its message; located errors fall through to the snippet.
+    // A file-level error (e.g. a missing grammar block) has no location within
+    // the source, but still name the file so the user knows where; located
+    // errors fall through to the snippet below.
     let Some(span) = error.span() else {
+        writeln!(f, " {ARROW} {}", path.display())?;
         return Ok(());
     };
 
