@@ -563,6 +563,32 @@ fn inherited_external_qualified_access() {
 }
 
 #[test]
+fn inherited_external_bare_reference() {
+    // An inherited external is referenceable by bare name, like an inherited
+    // rule (and like grammar.js's `$.name`) - not only via `base::name`.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(
+        &base,
+        r#"grammar { language: "base", externals: [_token] }
+        external _token
+        rule program { _token }
+        "#,
+    )
+    .unwrap();
+    let child = dir.path().join("child.tsg");
+    let src = format!(
+        r#"let base = inherit("{}")
+        grammar {{ language: "child", inherits: base }}
+        rule extra {{ _token }}"#,
+        dsl_path(&base)
+    );
+    std::fs::write(&child, &src).unwrap();
+    let g = parse_native_dsl(&src, &child).unwrap();
+    assert_eq!(*find_rule(&g, "extra"), Rule::NamedSymbol("_token".into()));
+}
+
+#[test]
 fn config_only_base_is_allowed() {
     // A base with no rules (config only) is a native-DSL extension over
     // grammar.js: it can't compile standalone, but it contributes config to a
