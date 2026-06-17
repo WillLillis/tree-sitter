@@ -270,9 +270,12 @@ fn reserved_multiple_sets() {
 
 #[test]
 fn reserved_inherited() {
+    // A child with no `reserved` of its own inherits the base's reserved sets
+    // (in base order, so the first/default set is preserved). No explicit
+    // `grammar_config(base, reserved)` re-import needed - it merges by default.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
-        grammar { language: "derived", inherits: base, reserved: grammar_config(base, reserved) }
+        grammar { language: "derived", inherits: base }
     "#);
     assert_eq!(g.reserved_words.len(), 2);
     assert_eq!(g.reserved_words[0].name, "global");
@@ -292,10 +295,34 @@ fn reserved_inherited() {
 }
 
 #[test]
+fn reserved_child_merges_with_base() {
+    // The child adds a new set and overrides an existing one. Base order is
+    // preserved (global stays first = default), the overridden set keeps its
+    // base position with new words, and the new set is appended. Matches dsl.js.
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar_with_reserved.tsg")
+        grammar {
+            language: "derived",
+            inherits: base,
+            reserved: { global: ["if"], extra: ["new"] },
+        }
+    "#);
+    assert_eq!(g.reserved_words.len(), 3);
+    // Base "global" stays first (default), with the child's overriding words.
+    assert_eq!(g.reserved_words[0].name, "global");
+    assert_eq!(g.reserved_words[0].reserved_words, vec![Rule::String("if".into())]);
+    // Base "properties" kept (not redefined by the child).
+    assert_eq!(g.reserved_words[1].name, "properties");
+    // Child's new set appended.
+    assert_eq!(g.reserved_words[2].name, "extra");
+}
+
+#[test]
 fn reserved_empty_inherited() {
+    // A base with no reserved contributes none; the child inherits an empty set.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base, reserved: grammar_config(base, reserved) }
+        grammar { language: "derived", inherits: base }
     "#);
     assert!(g.reserved_words.is_empty());
 }

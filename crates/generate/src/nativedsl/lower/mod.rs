@@ -322,6 +322,37 @@ fn evaluate(
     })
 }
 
+/// Inherit a config field: the child's value replaces the base's entirely if
+/// present, else the base's is inherited. Generic over the field via `field`,
+/// which is more concise than threading a slice through all five call sites.
+fn inherit<T: Clone>(
+    overridden: Option<Vec<T>>,
+    base: Option<&InputGrammar>,
+    field: fn(&InputGrammar) -> &[T],
+) -> Vec<T> {
+    overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).to_vec()))
+}
+
+/// Merge the child's `reserved` onto the base's, unlike the replace-by-default
+/// of every other field: keep base sets in base order (so the first/default set
+/// is preserved), override an existing set by name in place, and append the
+/// child's new sets. Matches dsl.js, which assigns `reserved[name] = ...` over a
+/// copy of the base's reserved object.
+fn merge_reserved(
+    overridden: Option<Vec<ReservedWordContext<Rule>>>,
+    base: Option<&[ReservedWordContext<Rule>]>,
+) -> Vec<ReservedWordContext<Rule>> {
+    let mut merged = base.unwrap_or(&[]).to_vec();
+    for child in overridden.into_iter().flatten() {
+        if let Some(existing) = merged.iter_mut().find(|c| c.name == child.name) {
+            *existing = child;
+        } else {
+            merged.push(child);
+        }
+    }
+    merged
+}
+
 fn build_grammar(
     ctx: &ModuleContext,
     result: EvalResult,
@@ -403,13 +434,6 @@ fn build_grammar(
         }
     }
 
-    fn inherit<T: Clone>(
-        overridden: Option<Vec<T>>,
-        base: Option<&InputGrammar>,
-        field: fn(&InputGrammar) -> &[T],
-    ) -> Vec<T> {
-        overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).to_vec()))
-    }
     Ok(InputGrammar {
         name: result.language,
         variables,
@@ -429,7 +453,7 @@ fn build_grammar(
         word_token: result
             .word
             .or_else(|| base.and_then(|b| b.word_token.clone())),
-        reserved_words: inherit(result.reserved, base, |b| &b.reserved_words),
+        reserved_words: merge_reserved(result.reserved, base.map(|b| b.reserved_words.as_slice())),
     })
 }
 

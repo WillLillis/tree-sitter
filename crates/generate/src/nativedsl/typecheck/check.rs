@@ -221,21 +221,26 @@ fn expect_name_or_str(
     expect_name_ref(shared, ctx, id, env)
 }
 
-/// Check the `reserved` config field: an object literal `{name: [rules]}` or
-/// an inherited expression typing to `obj_t<list_t<rule_t>>`.
+/// Check the `reserved` config field. It must be an object literal
+/// `{name: [rules]}`: the first set is the default applied to every token, so
+/// the set order is significant and can't come from a computed/unordered value.
+/// Inheritance is handled by merging the base's reserved at lower, not by
+/// re-importing it as a computed value. The word lists themselves may compute.
 fn expect_reserved(
     shared: &SharedAst,
     ctx: &ModuleContext,
     id: NodeId,
     env: &mut TypeEnv,
 ) -> TypeResult<()> {
-    if let Node::Object(range) = shared.arena.get(id) {
-        for &ObjectField { value: val_id, .. } in shared.pools.get_object(*range) {
-            expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
-        }
-        return Ok(());
+    let Node::Object(range) = shared.arena.get(id) else {
+        return Err(TypeError::new(
+            TypeErrorKind::ReservedMustBeLiteral,
+            shared.arena.span(id),
+        ));
+    };
+    for &ObjectField { value: val_id, .. } in shared.pools.get_object(*range) {
+        expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
     }
-    type_of(shared, ctx, id, env, Constraint::Exact(Ty::OBJ_LIST_RULE))?;
     Ok(())
 }
 

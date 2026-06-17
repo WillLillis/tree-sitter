@@ -149,11 +149,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         n
     }
 
-    fn object_fields(&self, v: ValueId) -> &FxHashMap<String, ValueId> {
-        expect_pat!(Value::Object(idx), *self.get_val(v));
-        &self.state.ir.object_pool[idx as usize]
-    }
-
     fn alloc_rule(&mut self, rule: ARule) -> RuleId {
         let id = RuleId(self.state.ir.rules.len() as u32);
         self.state.ir.rules.push(rule);
@@ -356,44 +351,26 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
     pub fn eval_reserved(&mut self, id: NodeId) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
         let ctx = self.ctx();
-        if let Node::Object(range) = self.shared.arena.get(id) {
-            return self
-                .shared
-                .pools
-                .get_object(*range)
-                .iter()
-                .map(
-                    |&ObjectField {
-                         name: name_span,
-                         value: val_id,
-                     }| {
-                        let words = self.eval_rule_list(val_id)?;
-                        Ok(ReservedWordContext {
-                            name: ctx.text(name_span).to_string(),
-                            reserved_words: words,
-                        })
-                    },
-                )
-                .collect();
-        }
-        // Sort by key for deterministic output (FxHashMap iteration is unordered).
-        let vid = self.eval_expr(id)?;
-        let fields = self.object_fields(vid);
-        let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        keys.iter()
-            .map(|&name| {
-                let words_vid = fields[name];
-                let word_vals = self.list_items(words_vid);
-                let words = word_vals
-                    .iter()
-                    .map(|&wv| self.value_to_owned_rule(wv))
-                    .collect();
-                Ok(ReservedWordContext {
-                    name: name.to_string(),
-                    reserved_words: words,
-                })
-            })
+        // typecheck guarantees `reserved` is an object literal (its first set is
+        // the default, so order must be explicit), so the source-order AST node
+        // is here. Inheritance merges the base's reserved at build time.
+        expect_pat!(Node::Object(range), self.shared.arena.get(id));
+        self.shared
+            .pools
+            .get_object(*range)
+            .iter()
+            .map(
+                |&ObjectField {
+                     name: name_span,
+                     value: val_id,
+                 }| {
+                    let words = self.eval_rule_list(val_id)?;
+                    Ok(ReservedWordContext {
+                        name: ctx.text(name_span).to_string(),
+                        reserved_words: words,
+                    })
+                },
+            )
             .collect()
     }
 
