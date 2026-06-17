@@ -14,6 +14,13 @@ error_tests! { Lower {
         r#"grammar { extras: [] } rule program { "x" }"#,
         LowerErrorKind::MissingLanguageField
     }
+    // An external resolves rule-like but lives in external_tokens, not
+    // variables, so it can't be variables[0] (the start symbol).
+    error_external_as_start_rule {
+        r#"grammar { language: "test", externals: [tok], start: tok }
+        rule program { "x" }"#,
+        LowerErrorKind::ExternalCannotBeStart("tok".into())
+    }
     error_multiple_inherits {
         r#"let a = inherit("inherit_base/grammar.tsg")
         let b = inherit("inherit_base/grammar.tsg")
