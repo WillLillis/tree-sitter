@@ -505,16 +505,10 @@ pub struct ModuleContext {
     pub path: PathBuf,
     pub grammar_config: Option<GrammarConfig>,
     pub root_items: Vec<NodeId>,
-    /// The `inherit()` `ModuleRef` node, if this module has one.
-    /// Set by the parser when it encounters `inherit(...)`.
-    pub inherit_ref: Option<NodeId>,
-    /// A second `inherit()` `ModuleRef` node, if the module has more than one.
-    /// The parser detects this in O(1) during its pass but defers the error to
-    /// `validate_grammar` (so a well-formed AST is still produced); validate
-    /// reports `MultipleInherits` pointing here, with a note at `inherit_ref`.
-    pub duplicate_inherit: Option<NodeId>,
     /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
-    /// collected by the parser so the loader can iterate without scanning the arena.
+    /// collected by the parser so the loader can iterate without scanning the
+    /// arena. The inherit set (see [`ModuleContext::inherits`]) is derived from
+    /// this, so cfg gating only has to prune this one structure.
     pub module_refs: Vec<NodeId>,
     /// Spans of all top-level `external <name>` decls' names, in source order.
     /// Populated by the parser. Used by resolve and lower to look up
@@ -554,12 +548,24 @@ impl ModuleContext {
         span.resolve(&self.source)
     }
 
+    /// The `inherit()` `ModuleRef`s in source order, derived from `module_refs`
+    /// (which holds only import/inherit calls). Deriving avoids a cached field
+    /// that `apply_cfg` would have to keep in sync after gating; the scan is over
+    /// a handful of entries. The first is the active base; a second means
+    /// `MultipleInherits` (reported by `validate_grammar`).
+    pub fn inherits<'a>(&'a self, arena: &'a NodeArena) -> impl Iterator<Item = NodeId> + 'a {
+        self.module_refs
+            .iter()
+            .copied()
+            .filter(move |&r| matches!(arena.get(r), Node::ModuleRef { import: false, .. }))
+    }
+
     /// The resolved inherited-module index and its `inherit(...)` call span,
     /// once the loader has populated it. `None` for non-inheriting modules
     /// or before child loading completes.
     #[must_use]
     pub fn inherit_module(&self, arena: &NodeArena) -> Option<(ModuleId, Span)> {
-        let id = self.inherit_ref?;
+        let id = self.inherits(arena).next()?;
         let &Node::ModuleRef {
             module: Some(idx), ..
         } = arena.get(id)

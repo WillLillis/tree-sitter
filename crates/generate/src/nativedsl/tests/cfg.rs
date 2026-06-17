@@ -460,6 +460,48 @@ fn cfg_enabled_inherit_still_loads_parent() {
 }
 
 #[test]
+fn cfg_disabled_first_inherit_promotes_second() {
+    // The first inherit() is cfg-disabled, so the second must become the active
+    // inherit. apply_cfg used to clear inherit_ref but leave a stale
+    // duplicate_inherit, so validate_grammar's `inherit_ref.expect(...)` panicked.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(&base, "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n").unwrap();
+    let input = format!(
+        r#"
+        #[cfg(X)] let skipped = inherit("missing.tsg")
+        let chosen = inherit("{}")
+        grammar {{ language: "t", inherits: chosen, flags: {{ disabled: ["X"] }} }}
+        rule program {{ "x" }}
+        "#,
+        dsl_path(&base)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert!(rule_names(&g).contains(&"base_rule"), "got {:?}", rule_names(&g));
+}
+
+#[test]
+fn cfg_disabled_second_inherit_is_not_multiple_inherits() {
+    // The second inherit() is cfg-disabled, leaving a single active inherit.
+    // apply_cfg left duplicate_inherit set, so this valid grammar was wrongly
+    // rejected with MultipleInherits pointing at the disabled line.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.tsg");
+    std::fs::write(&base, "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n").unwrap();
+    let input = format!(
+        r#"
+        let chosen = inherit("{}")
+        #[cfg(X)] let skipped = inherit("missing.tsg")
+        grammar {{ language: "t", inherits: chosen, flags: {{ disabled: ["X"] }} }}
+        rule program {{ "x" }}
+        "#,
+        dsl_path(&base)
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    assert!(rule_names(&g).contains(&"base_rule"), "got {:?}", rule_names(&g));
+}
+
+#[test]
 fn cfg_dropped_attribution_uses_owning_module() {
     // Both grammars in the inherit chain drop a rule named `strikethrough`
     // under different cfg flags. Parent's resolve fires UnknownIdentifier
