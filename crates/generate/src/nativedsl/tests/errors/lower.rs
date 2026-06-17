@@ -10,6 +10,33 @@ error_tests! { Lower {
         rule program { seq(mk().b) }"#,
         LowerErrorKind::FieldNotFound { field: "b".into(), available: vec!["a".into()] }
     }
+    // A str_t value laundered past the str_t->rule_t widen (via a let, append,
+    // or a mixed list) into a name-only config field (inline/supertypes/conflicts)
+    // can't be rejected at typecheck - type_of_list widens elements to the widest
+    // type - so lower reports it gracefully instead of panicking in rule_id.
+    error_inline_str_list_via_let {
+        r#"let names = ["a"]
+        grammar { language: "test", inline: names }
+        rule program { "x" }"#,
+        LowerErrorKind::ExpectedRuleName
+    }
+    error_inline_str_list_via_append {
+        r#"grammar { language: "test", inline: append(["x"], ["y"]) }
+        rule program { "z" }"#,
+        LowerErrorKind::ExpectedRuleName
+    }
+    error_conflicts_str_list_via_let {
+        r#"let groups: list_t<list_t<rule_t>> = [["a", "b"], ["c"]]
+        grammar { language: "test", conflicts: groups }
+        rule program { "x" }"#,
+        LowerErrorKind::ExpectedRuleName
+    }
+    error_inline_mixed_name_and_str_via_let {
+        r#"let m = [program, "b"]
+        grammar { language: "test", inline: m }
+        rule program { "x" }"#,
+        LowerErrorKind::ExpectedRuleName
+    }
     error_missing_language_field {
         r#"grammar { extras: [] } rule program { "x" }"#,
         LowerErrorKind::MissingLanguageField
