@@ -1,6 +1,15 @@
 use super::super::*;
 
 error_tests! { Lower {
+    // Field access on a computed object (here a macro result) can't be validated
+    // at typecheck - obj_t<X> carries the value type, not the key set - so a
+    // missing field is reported at lower with the available keys.
+    error_field_not_found_on_computed_object {
+        r#"grammar { language: "test" }
+        macro mk() obj_t<rule_t> { { a: program } }
+        rule program { seq(mk().b) }"#,
+        LowerErrorKind::FieldNotFound { field: "b".into(), available: vec!["a".into()] }
+    }
     error_missing_language_field {
         r#"grammar { extras: [] } rule program { "x" }"#,
         LowerErrorKind::MissingLanguageField
