@@ -110,7 +110,7 @@ struct EvalResult {
     inline: Option<Vec<String>>,
     supertypes: Option<Vec<String>>,
     word: Option<String>,
-    start: Option<String>,
+    start: Option<(String, Span)>,
     conflicts: Option<Vec<Vec<String>>>,
     precedences: Option<Vec<Vec<PrecedenceEntry>>>,
     reserved: Option<Vec<ReservedWordContext<Rule>>>,
@@ -291,7 +291,10 @@ fn evaluate(
             .map(|id| eval.eval_name_list(id))
             .transpose()?,
         word: config.word.map(|id| eval.eval_rule_name(id)).transpose()?,
-        start: config.start.map(|id| eval.eval_rule_name(id)).transpose()?,
+        start: config
+            .start
+            .map(|id| Ok((eval.eval_rule_name(id)?, shared.arena.span(id))))
+            .transpose()?,
         conflicts: config
             .conflicts
             .map(|id| eval.eval_conflicts(id))
@@ -364,11 +367,16 @@ fn build_grammar(
         ));
     }
 
-    // Tree-sitter's start symbol is `variables[0]`, so honor `start: <rule>`
-    // by rotating the named rule into position 0. The resolver + typecheck
-    // guarantee the name exists somewhere in `variables`.
-    if let Some(name) = result.start {
-        let pos = variables.iter().position(|v| v.name == name).unwrap();
+    // Tree-sitter's start symbol is `variables[0]` (a non-terminal), so honor
+    // `start: <rule>` by rotating the named rule into position 0. Inherited,
+    // local, and helper rules are all in `variables`. An external token is a
+    // valid rule reference but lives in `external_tokens`, not `variables`, so
+    // it can't be the start symbol.
+    if let Some((name, span)) = result.start {
+        let pos = variables
+            .iter()
+            .position(|v| v.name == name)
+            .ok_or_else(|| LowerError::new(LowerErrorKind::ExternalCannotBeStart(name), span))?;
         if pos != 0 {
             let v = variables.remove(pos);
             variables.insert(0, v);
@@ -437,6 +445,8 @@ pub enum LowerErrorKind {
     ModuleCycle,
     #[error("expected a rule name reference")]
     ExpectedRuleName,
+    #[error("external token '{0}' cannot be the start rule; the start symbol must be a grammar rule")]
+    ExternalCannotBeStart(String),
     #[error("object has no field '{field}'; available: {}", available.join(", "))]
     FieldNotFound {
         field: String,
