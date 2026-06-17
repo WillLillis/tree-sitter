@@ -77,8 +77,20 @@ pub(super) fn check_item(
         }
         Node::Macro(macro_id) => {
             let config = shared.pools.get_macro(*macro_id);
+            check_duplicate_names(
+                ctx,
+                &config.params,
+                |p| p.name,
+                TypeErrorKind::DuplicateParameter,
+            )?;
+            for p in &config.params {
+                reject_module_type(p.ty, p.name)?;
+            }
             match config.kind {
                 MacroKind::Expression(return_ty) => {
+                    // No return-type span is kept on the AST, so point at the
+                    // macro name for a module_t return type.
+                    reject_module_type(return_ty, config.name)?;
                     type_of(shared, ctx, config.body, env, Constraint::Exact(return_ty))?;
                 }
                 MacroKind::RuleSet => check_rule_set_body(shared, ctx, config.body, env)?,
@@ -585,6 +597,7 @@ fn type_of_object(
     if fields.is_empty() {
         return empty_container_result(expected, ContainerKind::Object, span);
     }
+    check_duplicate_names(ctx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
 
     let expected_inner = expected.object_value();
     let mut widest = type_of(shared, ctx, fields[0].value, env, expected_inner)?;
@@ -752,6 +765,14 @@ where
     let bindings = &config.bindings;
     let iterable = config.iterable;
 
+    if bindings.is_empty() {
+        return Err(TypeError::new(
+            TypeErrorKind::EmptyForBindings,
+            shared.arena.span(body),
+        ));
+    }
+    check_duplicate_names(ctx, bindings, |p| p.name, TypeErrorKind::DuplicateBinding)?;
+
     // Two-or-more bindings destructure a tuple, whose components are scalars.
     // Validate the binding annotations up front so a non-scalar binding points
     // at the binding itself, independent of the iterable (including empty ones).
@@ -849,4 +870,39 @@ fn translate_kind_mismatch(err: TypeError, make: impl FnOnce(Ty) -> TypeErrorKin
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
+}
+
+/// Reject `module_t` in a position where a module value can't be used (macro
+/// parameter / return type). A module is only usable where it is bound by
+/// `import()`/`inherit()`, which resolve rewrites; see [`MemberAccessRequiresModule`].
+const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {
+    if matches!(ty, Ty::Module(_)) {
+        return Err(TypeError::new(TypeErrorKind::ModuleTypeNotAllowed, span));
+    }
+    Ok(())
+}
+
+/// Reject duplicate names among `items`, reporting the later one with a
+/// "first defined here" note. Used for macro parameters, for-loop bindings, and
+/// object keys, whose name spans are preserved on the AST.
+fn check_duplicate_names<T>(
+    ctx: &ModuleContext,
+    items: &[T],
+    name_of: impl Fn(&T) -> Span,
+    make_kind: impl Fn(String) -> TypeErrorKind,
+) -> TypeResult<()> {
+    for i in 1..items.len() {
+        let span = name_of(&items[i]);
+        let name = ctx.text(span);
+        for prev in &items[..i] {
+            if ctx.text(name_of(prev)) == name {
+                return Err(TypeError::with_note(
+                    make_kind(name.to_string()),
+                    span,
+                    ctx.note(NoteMessage::FirstDefinedHere, name_of(prev)),
+                ));
+            }
+        }
+    }
+    Ok(())
 }

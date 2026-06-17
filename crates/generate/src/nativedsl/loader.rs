@@ -303,10 +303,39 @@ impl Loader<'_> {
     /// Validate that grammar block exists, inherits field consistency.
     /// Multiple `inherit()` calls are caught by the parser.
     fn validate_grammar(&self, ctx: &ModuleContext) -> DslResult<()> {
-        if ctx.grammar_config.is_none() {
+        let Some(config) = ctx.grammar_config.as_ref() else {
             return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
+        };
+        // A grammar block without `language` and more than one inherit() are
+        // both detected during parse but reported here, so a well-formed AST is
+        // still produced for tooling (the parser keeps the first inherit and
+        // records a second in `duplicate_inherit`).
+        if config.language.is_none() {
+            // The grammar block always exists here (config is Some); find it for
+            // the span. Only runs on this error path, so the scan is fine.
+            let block = ctx
+                .root_items
+                .iter()
+                .find(|&&id| matches!(self.shared.arena.get(id), Node::Grammar))
+                .expect("grammar config implies a grammar block node");
+            return Err(LowerError::new(
+                LowerErrorKind::MissingLanguageField,
+                self.shared.arena.span(*block),
+            )
+            .into());
         }
-        let config_inherits = ctx.grammar_config.as_ref().and_then(|c| c.inherits);
+        if let Some(second) = ctx.duplicate_inherit {
+            let first = ctx
+                .inherit_ref
+                .expect("duplicate_inherit implies inherit_ref");
+            return Err(LowerError::with_note(
+                LowerErrorKind::MultipleInherits,
+                self.shared.arena.span(second),
+                ctx.note(NoteMessage::FirstDefinedHere, self.shared.arena.span(first)),
+            )
+            .into());
+        }
+        let config_inherits = config.inherits;
 
         // inherit() exists but no `inherits` in grammar config
         if let Some(inherit_ref) = ctx.inherit_ref
