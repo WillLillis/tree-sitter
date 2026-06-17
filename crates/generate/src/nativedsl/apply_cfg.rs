@@ -9,7 +9,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{
-        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField,
+        ChildRange, ConfigField, GrammarConfig, MacroId, ModuleContext, Node, NodeId, ObjectField,
         SharedAst, Span,
     },
     loader::ModuleKind,
@@ -105,6 +105,7 @@ pub fn apply_cfg(
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
+        macro_index: &mut ctx.macro_index,
     };
     // Walk grammar config fields first - cfg attrs may appear on members of
     // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
@@ -145,6 +146,9 @@ struct Walker<'a> {
     cfg_declared: &'a FxHashMap<String, Span>,
     cfg_dropped: &'a mut FxHashMap<String, NodeId>,
     module_refs: &'a mut Vec<NodeId>,
+    /// Pruned alongside a dropped macro item so a cfg-disabled rule-set macro
+    /// stops being callable via `@name()` (expand looks the name up here).
+    macro_index: &'a mut FxHashMap<String, MacroId>,
 }
 
 impl Walker<'_> {
@@ -189,6 +193,16 @@ impl Walker<'_> {
             };
             if let Some(decl_name) = dropped_name {
                 let key = decl_name.resolve(self.source).to_owned();
+                // A dropped macro must also leave macro_index so a surviving
+                // `@name()` fails with UnknownMacro instead of expanding a
+                // never-resolved template body. Guard on the id so a same-named
+                // macro that overwrote this entry (only reachable via the cfg
+                // hole, since resolve otherwise rejects duplicate names) keeps it.
+                if let Node::Macro(dropped) = *self.shared.arena.get(item)
+                    && self.macro_index.get(&key) == Some(&dropped)
+                {
+                    self.macro_index.remove(&key);
+                }
                 self.cfg_dropped.entry(key).or_insert(id);
             }
             // `let h = import/inherit(...)` is the only shape that puts a

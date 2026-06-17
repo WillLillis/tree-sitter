@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ExpandError,
+    ExpandError, NoteMessage,
     ast::{Expansion, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
     lexer::is_ident_str,
     string_pool::{Str, StringPool},
@@ -71,12 +71,24 @@ fn expand_one_call(
     };
     let name_span = shared.arena.span(name);
     let name_text = ctx.text(name_span);
-    let macro_id = ctx.macro_index.get(name_text).copied().ok_or_else(|| {
-        ExpandError::new(
+    let Some(macro_id) = ctx.macro_index.get(name_text).copied() else {
+        let mut err = ExpandError::new(
             ExpandErrorKind::UnknownMacro(name_text.to_string()),
             name_span,
-        )
-    })?;
+        );
+        // If the name was a cfg-dropped macro, say so - parity with the
+        // GatedByDisabledCfg enrichment a cfg-dropped expression-macro
+        // reference gets at resolve.
+        if let Some(&cfg_node) = ctx.cfg_dropped.get(name_text)
+            && let Node::Cfg { name: flag_span, .. } = *shared.arena.get(cfg_node)
+        {
+            err.add_note(ctx.note(
+                NoteMessage::GatedByDisabledCfg(ctx.text(flag_span).to_owned()),
+                shared.arena.span(cfg_node),
+            ));
+        }
+        return Err(err);
+    };
     // Snapshot before recursive calls reborrow shared mutably.
     let config = shared.pools.get_macro(macro_id);
     let kind = config.kind;
