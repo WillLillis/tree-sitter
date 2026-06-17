@@ -54,6 +54,16 @@ rule_tests! {
         rule some_rule { "y" }"#,
         Rule::alias(Rule::String("x".into()), "some_rule".to_string(), true)
     }
+    alias_with_let_string_target {
+        // A `let`-bound string as the alias target resolves to the let's value
+        // (unnamed alias "renamed"), not a force-resolved named rule reference
+        // "FOO". Matches grammar.js evaluating a const used as the alias name.
+        r#"grammar { language: "test" }
+        let FOO = "renamed"
+        rule program { alias(identifier, FOO) }
+        rule identifier { regexp("[a-z]+") }"#,
+        Rule::alias(Rule::NamedSymbol("identifier".into()), "renamed".to_string(), false)
+    }
     prec_default {
         r#"grammar { language: "test" } rule program { prec(1, "x") }"#,
         Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
