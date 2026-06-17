@@ -137,11 +137,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         range
     }
 
-    fn rule_id(&self, v: ValueId) -> RuleId {
-        expect_pat!(Value::Rule(rid), *self.get_val(v));
-        rid
-    }
-
     fn str_id(&self, v: ValueId) -> Str {
         expect_pat!(Value::Str(s), *self.get_val(v));
         s
@@ -273,7 +268,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn rule_name_string(&self, v: ValueId, span: Span) -> LowerResult<String> {
-        let rid = self.rule_id(v);
+        // A name position (inline/supertypes/conflicts, precedences symbol) needs a
+        // named-symbol reference. A Value::Str (a string literal laundered past the
+        // str_t->rule_t widen via a let/append/mixed list) or a non-name rule (e.g.
+        // seq(a, b)) is a user error here, not a panic.
+        let Value::Rule(rid) = *self.get_val(v) else {
+            return Err(LowerError::new(LowerErrorKind::ExpectedRuleName, span));
+        };
         let ARule::NamedSymbol(sid) = self.get_rule(rid) else {
             return Err(LowerError::new(LowerErrorKind::ExpectedRuleName, span));
         };
