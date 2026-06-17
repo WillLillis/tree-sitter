@@ -445,12 +445,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
                 }
             }
-            C::Start => {
-                // The start rule is always the first variable; this isn't
-                // ConfigFieldUnset because every grammar has one.
-                let name = &grammar.variables[0].name;
-                Ok(self.owned_symbol_val(name))
-            }
+            C::Start => match grammar.variables.first() {
+                // The start rule is the first variable.
+                Some(first) => Ok(self.owned_symbol_val(&first.name)),
+                // A config-only base (no rules) has no start rule; treat it like
+                // any other unset config field.
+                None => Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span)),
+            },
             C::Reserved => {
                 let n = grammar.reserved_words.len();
                 let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);

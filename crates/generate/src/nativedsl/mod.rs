@@ -282,7 +282,21 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     };
     dsl_loader.load_module(input, &canonical, loader::ModuleKind::Grammar)?;
     // Root is the last-pushed module by construction.
-    expect_pat!(Some(Module::Grammar { lowered, .. }), modules.pop());
+    expect_pat!(Some(Module::Grammar { ctx, lowered, .. }), modules.pop());
+    // The root grammar becomes the emitted grammar.json, which tree-sitter
+    // requires to have at least one rule (grammar.js enforces the same). An
+    // inherited base may be config-only - it contributes its rules (possibly
+    // none) plus config - but the root, after merging inherited/local/helper
+    // rules, must not be empty.
+    if lowered.variables.is_empty() {
+        let span = ctx
+            .root_items
+            .iter()
+            .find(|&&id| matches!(shared.arena.get(id), Node::Grammar))
+            .map(|&id| shared.arena.span(id))
+            .expect("grammar module has a grammar block");
+        Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, span))?;
+    }
     Ok(*lowered)
 }
 
