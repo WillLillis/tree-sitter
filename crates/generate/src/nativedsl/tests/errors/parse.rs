@@ -33,6 +33,14 @@ error_tests! { Parse {
         r#"grammar { language: "test" } let x: obj_t<module_t> = { a: 1 } rule program { "x" }"#,
         ParseErrorKind::ObjectInnerType(Ty::ANY_MODULE)
     }
+    error_module_macro_param_rejected {
+        r#"grammar { language: "test" } macro f(m: module_t) rule_t { "x" } rule program { "x" }"#,
+        ParseErrorKind::ModuleTypeNotAllowed
+    }
+    error_module_macro_return_rejected {
+        r#"grammar { language: "test" } macro g() module_t { "x" } rule program { "x" }"#,
+        ParseErrorKind::ModuleTypeNotAllowed
+    }
     error_list_triple_nesting_rejected {
         r#"grammar { language: "test" } let x: list_t<list_t<list_t<rule_t>>> = [] rule program { "x" }"#,
         ParseErrorKind::ListInnerType(Ty::LIST_LIST_RULE)

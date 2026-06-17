@@ -512,7 +512,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             this.expect(TokenKind::Colon)?;
             Ok(Param {
                 name: pname,
-                ty: this.parse_type()?.0,
+                ty: this.parse_non_module_type()?,
             })
         })?;
         self.expect(TokenKind::RParen)?;
@@ -523,7 +523,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let kind = if rule_set {
             MacroKind::RuleSet
         } else {
-            MacroKind::Expression(self.parse_type()?.0)
+            MacroKind::Expression(self.parse_non_module_type()?)
         };
         let brace_start = self.expect(TokenKind::LBrace)?;
         let body = stack_scope!(self.locals, |_saved| {
@@ -616,6 +616,20 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .shared
             .arena
             .push(Node::RuleSet(range), brace_start.merge(end)))
+    }
+
+    /// Parse a type that must not be `module_t`. Used for macro parameter and
+    /// return types: a module value is only usable where it is bound by
+    /// `import`/`inherit` (resolve rewrites `mod::member` there). Passed through
+    /// a macro it has no usable operation - `m::member`, `m::macro(...)`, and
+    /// `grammar_config(m, ...)` all need a concrete module the signature can't
+    /// carry - so it is rejected at the signature rather than at each use.
+    fn parse_non_module_type(&mut self) -> ParseResult<Ty> {
+        let (ty, span) = self.parse_type()?;
+        if matches!(ty, Ty::Module(_)) {
+            return Err(ParseError::new(ParseErrorKind::ModuleTypeNotAllowed, span));
+        }
+        Ok(ty)
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -1316,6 +1330,10 @@ pub enum ParseErrorKind {
     ObjectInnerType(Ty),
     #[error("tuple elements must be rule_t, str_t, or int_t, got {0}")]
     TupleElementType(Ty),
+    #[error(
+        "module_t cannot be a macro parameter or return type; a module can only be used where it is bound by import() or inherit()"
+    )]
+    ModuleTypeNotAllowed,
     #[error(
         "a tuple type needs {min} to {max} element types (there is no grouping operator), got {0}",
         min = TUPLE_MIN_ARITY,
