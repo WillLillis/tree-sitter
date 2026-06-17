@@ -112,6 +112,18 @@ pub enum TypeErrorKind {
     ImportMacroNotFound(String),
     #[error("member access with `::` requires a module bound by import() or inherit(), got {0}")]
     MemberAccessRequiresModule(Ty),
+    #[error(
+        "module_t cannot be a macro parameter or return type; a module can only be used where it is bound by import() or inherit()"
+    )]
+    ModuleTypeNotAllowed,
+    #[error("duplicate parameter name '{0}'")]
+    DuplicateParameter(String),
+    #[error("duplicate binding name '{0}'")]
+    DuplicateBinding(String),
+    #[error("duplicate object key '{0}'")]
+    DuplicateObjectKey(String),
+    #[error("for-loop requires at least one binding")]
+    EmptyForBindings,
     #[error("'{0}' is a macro, not a value; call it with {0}(...)")]
     MacroUsedAsValue(String),
     #[error("rule-set macro '{0}' can only be invoked at top level, not in expression context")]

@@ -508,6 +508,11 @@ pub struct ModuleContext {
     /// The `inherit()` `ModuleRef` node, if this module has one.
     /// Set by the parser when it encounters `inherit(...)`.
     pub inherit_ref: Option<NodeId>,
+    /// A second `inherit()` `ModuleRef` node, if the module has more than one.
+    /// The parser detects this in O(1) during its pass but defers the error to
+    /// `validate_grammar` (so a well-formed AST is still produced); validate
+    /// reports `MultipleInherits` pointing here, with a note at `inherit_ref`.
+    pub duplicate_inherit: Option<NodeId>,
     /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
     /// collected by the parser so the loader can iterate without scanning the arena.
     pub module_refs: Vec<NodeId>,
