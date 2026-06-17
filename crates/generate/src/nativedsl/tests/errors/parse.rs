@@ -124,6 +124,32 @@ error_tests! { Parse {
         },
         ParseErrorKind::NestingTooDeep
     }
+    error_nesting_too_deep_field_chain {
+        // Iterative `.field` chain in parse_ident_expr builds a left-nested
+        // FieldAccess tree the entry-only depth guard used to miss (the chain
+        // would parse fine, then overflow the stack in resolve/typecheck/lower).
+        &{
+            let deep = ".b".repeat(300);
+            format!("grammar {{ language: \"test\" }} rule foo {{ a{deep} }}")
+        },
+        ParseErrorKind::NestingTooDeep
+    }
+    error_nesting_too_deep_qualified_chain {
+        // Iterative `::member` chain in parse_ident_expr (same loop, `::` arm).
+        &{
+            let deep = "::b".repeat(300);
+            format!("grammar {{ language: \"test\" }} rule foo {{ a{deep} }}")
+        },
+        ParseErrorKind::NestingTooDeep
+    }
+    error_nesting_too_deep_binop_chain {
+        // Iterative `+`/`-` chain in parse_expr builds a left-nested BinOp tree.
+        &{
+            let deep = "+0".repeat(300);
+            format!("grammar {{ language: \"test\" }} rule foo {{ prec(0{deep}, \"x\") }}")
+        },
+        ParseErrorKind::NestingTooDeep
+    }
     error_computed_rule_at_top_level {
         r#"grammar { language: "test" } rule @r { "x" }"#,
         ParseErrorKind::ComputedRuleTopLevel

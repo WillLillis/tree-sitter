@@ -675,11 +675,23 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         Err(self.error(ParseErrorKind::ExpectedType))
     }
 
-    fn parse_expr(&mut self) -> ParseResult<NodeId> {
+    /// Count one more level of nesting toward `MAX_PARSE_DEPTH`. Called on
+    /// recursive entry and once per iteration of the iterative postfix/infix
+    /// loops below, whose left-nested chains the entry-only guard would
+    /// otherwise miss - a long `a.b.c` / `a::b::c` / `1+2+3` chain builds a deep
+    /// AST that later passes recurse over and would overflow the stack on. The
+    /// caller restores `self.depth` on the way out.
+    fn deepen(&mut self) -> ParseResult<()> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
             return Err(self.error(ParseErrorKind::NestingTooDeep));
         }
+        Ok(())
+    }
+
+    fn parse_expr(&mut self) -> ParseResult<NodeId> {
+        let start_depth = self.depth;
+        self.deepen()?;
         let mut lhs = self.parse_postfix()?;
         // Left-associative chain of `+` / `-` at int_t positions.
         while let Some(op) = match self.current().kind {
@@ -688,6 +700,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             _ => None,
         } {
             self.advance_pos();
+            self.deepen()?;
             let rhs = self.parse_postfix()?;
             let span = self
                 .shared
@@ -696,7 +709,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 .merge(self.shared.arena.span(rhs));
             lhs = self.shared.arena.push(Node::BinOp { op, lhs, rhs }, span);
         }
-        self.depth -= 1;
+        self.depth = start_depth;
         Ok(lhs)
     }
 
@@ -704,23 +717,22 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// operand parser for the `+`/`-` chain in `parse_expr` so RHS doesn't
     /// recurse into more arithmetic.
     fn parse_postfix(&mut self) -> ParseResult<NodeId> {
-        self.depth += 1;
-        if self.depth > MAX_PARSE_DEPTH {
-            return Err(self.error(ParseErrorKind::NestingTooDeep));
-        }
+        let start_depth = self.depth;
+        self.deepen()?;
         let mut result = self.parse_primary()?;
         // `.field` chaining on a non-ident primary, e.g. an object literal
         // `{ k: v }.k`. (`ident.field` is consumed by `parse_ident_expr`.)
         while self.at(TokenKind::Dot) {
             let start = self.shared.arena.span(result);
             self.advance_pos();
+            self.deepen()?;
             let field = self.expect_name()?;
             result = self
                 .shared
                 .arena
                 .push(Node::FieldAccess { obj: result, field }, start.merge(field));
         }
-        self.depth -= 1;
+        self.depth = start_depth;
         Ok(result)
     }
 
@@ -1102,9 +1114,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 .push(Node::Ident(IdentKind::Unresolved), span)
         };
         let mut id = name_id;
+        let start_depth = self.depth;
         loop {
             if self.at(TokenKind::Dot) {
                 self.advance_pos();
+                self.deepen()?;
                 let field = self.expect_name()?;
                 id = self
                     .shared
@@ -1112,6 +1126,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     .push(Node::FieldAccess { obj: id, field }, start.merge(field));
             } else if self.at(TokenKind::ColonColon) {
                 self.advance_pos();
+                self.deepen()?;
                 let member_span = self.expect_ident()?;
                 if self.at(TokenKind::LParen) {
                     // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
@@ -1161,6 +1176,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 break;
             }
         }
+        self.depth = start_depth;
         Ok(id)
     }
 
