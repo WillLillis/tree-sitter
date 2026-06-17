@@ -14,6 +14,21 @@ fn cfg_rule_def_enabled() {
 }
 
 #[test]
+fn cfg_active_let_keeps_type_annotation() {
+    // Unwrapping an ACTIVE #[cfg] on an annotated let must carry the let's type
+    // annotation (kept in let_types keyed by the Let's node id) to the unwrapped
+    // slot. Otherwise typecheck reads None there and an empty-container let fails
+    // with EmptyContainerNeedsAnnotation, even though the same grammar without
+    // the (enabled) cfg compiles.
+    let g = dsl(r#"
+        grammar { language: "test", flags: { enabled: ["X"] } }
+        #[cfg(X)] let x: list_t<str_t> = []
+        rule foo { "x" }
+    "#);
+    assert_eq!(rule_names(&g), vec!["foo"]);
+}
+
+#[test]
 fn cfg_rule_def_disabled() {
     let err = dsl_err(
         r#"
