@@ -325,6 +325,21 @@ fn cfg_dropped_ruleset_macro_enriches_error() {
 }
 
 #[test]
+fn cfg_dropped_macro_keeps_same_named_survivor() {
+    // Two cfg branches define the same rule-set macro; only the enabled one
+    // survives. macro_index is rebuilt from the post-cfg root_items, so `@dup()`
+    // stays bound to the survivor regardless of which branch is parsed last.
+    let g = dsl(r#"
+        #[cfg(Y)] rules dup() { rule program { "stable" } }
+        #[cfg(X)] rules dup() { rule program { "gated" } }
+        grammar { language: "test", flags: { enabled: ["Y"], disabled: ["X"] } }
+        @dup()
+    "#);
+    assert_eq!(g.variables[0].name, "program");
+    assert_eq!(g.variables[0].rule, Rule::String("stable".into()));
+}
+
+#[test]
 fn cfg_dropped_external_enriches_error() {
     let err = dsl_err(
         r#"
