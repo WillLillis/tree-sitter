@@ -7,9 +7,9 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{
-    Diagnostic, NoteMessage, ResolveError, ResolveErrorKind, Ty,
+    Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{
-        ChildRange, ConfigField, GrammarConfig, MacroId, ModuleContext, Node, NodeId, ObjectField,
+        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField,
         SharedAst, Span,
     },
     loader::ModuleKind,
@@ -97,39 +97,70 @@ pub fn apply_cfg(
     state: &CfgState,
     kind: ModuleKind,
 ) -> Result<(), ResolveError> {
-    let mut w = Walker {
-        shared,
-        state,
-        kind,
-        source: &ctx.source,
-        cfg_declared: &ctx.cfg_declared,
-        cfg_dropped: &mut ctx.cfg_dropped,
-        module_refs: &mut ctx.module_refs,
-        macro_index: &mut ctx.macro_index,
-        let_types: &mut ctx.let_types,
+    let dropped_top_level = {
+        let mut w = Walker {
+            shared: &mut *shared,
+            state,
+            kind,
+            source: &ctx.source,
+            cfg_declared: &ctx.cfg_declared,
+            cfg_dropped: &mut ctx.cfg_dropped,
+        };
+        // Walk grammar config fields first - cfg attrs may appear on members of
+        // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
+        // consumed by `merge_module_flags`.
+        for (_, id) in ctx
+            .grammar_config
+            .as_ref()
+            .into_iter()
+            .flat_map(GrammarConfig::node_fields)
+            .filter(|(field, _)| !matches!(field, ConfigField::Flags))
+        {
+            w.walk(id)?;
+        }
+        // Compact root_items, repointing each surviving entry at the id the walk
+        // surfaced (an active cfg resolves to its unwrapped child's id).
+        let original_len = ctx.root_items.len();
+        let mut write = 0;
+        for read in 0..original_len {
+            let id = ctx.root_items[read];
+            if let Some(kept) = w.walk(id)? {
+                ctx.root_items[write] = kept;
+                write += 1;
+            }
+        }
+        ctx.root_items.truncate(write);
+        write < original_len
     };
-    // Walk grammar config fields first - cfg attrs may appear on members of
-    // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
-    // consumed by `merge_module_flags`.
-    for (_, id) in ctx
-        .grammar_config
-        .as_ref()
-        .into_iter()
-        .flat_map(GrammarConfig::node_fields)
-        .filter(|(field, _)| !matches!(field, ConfigField::Flags))
-    {
-        w.walk(id)?;
-    }
-    // In-place compact root_items
-    let mut write = 0;
-    for read in 0..ctx.root_items.len() {
-        let id = ctx.root_items[read];
-        if w.walk(id)? {
-            ctx.root_items[write] = id;
-            write += 1;
+    // A dropped top-level decl is the only thing that can invalidate the
+    // macro/module working sets (an active unwrap keeps macro_index's name key
+    // and the never-relocated ModuleRef value module_refs holds). Rebuild both
+    // from the survivors then, rather than pruning in place - a dropped
+    // macro/import is simply absent, which sidesteps every id fixup.
+    if dropped_top_level {
+        ctx.macro_index.clear();
+        ctx.module_refs.clear();
+        for read in 0..ctx.root_items.len() {
+            let id = ctx.root_items[read];
+            match *shared.arena.get(id) {
+                Node::Macro(mid) => {
+                    let name = shared
+                        .pools
+                        .get_macro(mid)
+                        .name
+                        .resolve(&ctx.source)
+                        .to_owned();
+                    ctx.macro_index.insert(name, mid);
+                }
+                Node::Let { value, .. }
+                    if matches!(shared.arena.get(value), Node::ModuleRef { .. }) =>
+                {
+                    ctx.module_refs.push(value);
+                }
+                _ => {}
+            }
         }
     }
-    ctx.root_items.truncate(write);
     Ok(())
 }
 
@@ -138,35 +169,31 @@ struct Walker<'a> {
     state: &'a CfgState,
     kind: ModuleKind,
     source: &'a str,
-    /// Disjoint borrows of `ctx`. `cfg_declared` is the local declared set
-    /// for the grammar visibility check; `cfg_dropped` records cfg-dropped
-    /// top-level decls for `enrich_resolve_error` to use later. `module_refs`
-    /// gets pruned when a cfg-gated `let h = import/inherit(...)` is dropped, so
-    /// the loader doesn't load the file (the inherit set derives from
-    /// `module_refs`, so the markers follow automatically).
+    /// Disjoint borrows of `ctx`. `cfg_declared` is the local declared set for
+    /// the grammar visibility check; `cfg_dropped` records cfg-dropped top-level
+    /// decls for `enrich_resolve_error` to use later.
     cfg_declared: &'a FxHashMap<String, Span>,
     cfg_dropped: &'a mut FxHashMap<String, NodeId>,
-    module_refs: &'a mut Vec<NodeId>,
-    /// Pruned alongside a dropped macro item so a cfg-disabled rule-set macro
-    /// stops being callable via `@name()` (expand looks the name up here).
-    macro_index: &'a mut FxHashMap<String, MacroId>,
-    /// Re-keyed when an active cfg wrapping an annotated `let` is unwrapped: the
-    /// annotation is keyed by the Let's node id, which the unwrap relocates.
-    let_types: &'a mut FxHashMap<NodeId, Ty>,
 }
 
 impl Walker<'_> {
-    /// `Ok(true)` = keep, `Ok(false)` = drop from `root_items`. Mutates the arena to unwrap
-    /// active Cfg nodes and to rebuild filtered list ranges.
-    fn walk(&mut self, id: NodeId) -> Result<bool, ResolveError> {
+    /// `Ok(Some(id))` = keep and reference `id` (an active cfg resolves to its
+    /// unwrapped child's id); `Ok(None)` = drop. Shrinks filtered list ranges in
+    /// place but never relocates a node.
+    fn walk(&mut self, id: NodeId) -> Result<Option<NodeId>, ResolveError> {
         if let &Node::Cfg { name, child } = self.shared.arena.get(id) {
             return self.walk_cfg(id, name, child);
         }
         self.walk_children(id)?;
-        Ok(true)
+        Ok(Some(id))
     }
 
-    fn walk_cfg(&mut self, id: NodeId, name: Span, child: NodeId) -> Result<bool, ResolveError> {
+    fn walk_cfg(
+        &mut self,
+        id: NodeId,
+        name: Span,
+        child: NodeId,
+    ) -> Result<Option<NodeId>, ResolveError> {
         let name_text: &str = name.resolve(self.source);
         // Grammar modules require local declaration. Helper modules transparently
         // see the importing grammar's declared set.
@@ -187,7 +214,9 @@ impl Walker<'_> {
             while let &Node::Cfg { child: inner, .. } = self.shared.arena.get(item) {
                 item = inner;
             }
-            // If we're dropping a named top-level decl, record for diagnostic.
+            // Record a dropped named top-level decl for `enrich_resolve_error`.
+            // The macro/module working sets are rebuilt from the surviving
+            // root_items after the walk, so a dropped decl needs no fixup here.
             let dropped_name = match self.shared.arena.get(item) {
                 Node::Rule { name, .. } | Node::Let { name, .. } | Node::External { name } => {
                     Some(*name)
@@ -197,48 +226,14 @@ impl Walker<'_> {
             };
             if let Some(decl_name) = dropped_name {
                 let key = decl_name.resolve(self.source).to_owned();
-                // A dropped macro must also leave macro_index so a surviving
-                // `@name()` fails with UnknownMacro instead of expanding a
-                // never-resolved template body. Guard on the id so a same-named
-                // macro that overwrote this entry (only reachable via the cfg
-                // hole, since resolve otherwise rejects duplicate names) keeps it.
-                if let Node::Macro(dropped) = *self.shared.arena.get(item)
-                    && self.macro_index.get(&key) == Some(&dropped)
-                {
-                    self.macro_index.remove(&key);
-                }
                 self.cfg_dropped.entry(key).or_insert(id);
             }
-            // `let h = import/inherit(...)` is the only shape that puts a
-            // `ModuleRef` at item level. Pull it out of the loader's worklist;
-            // the inherit markers derive from module_refs, so dropping it here
-            // is enough - there is no separate inherit_ref to fix up.
-            if let &Node::Let { value, .. } = self.shared.arena.get(item)
-                && matches!(self.shared.arena.get(value), Node::ModuleRef { .. })
-            {
-                self.module_refs.retain(|x| *x != value);
-            }
-            return Ok(false);
+            return Ok(None);
         }
-        let kept = self.walk(child)?;
-        if !kept {
-            return Ok(false);
-        }
-        // Active and kept: unwrap by overwriting our slot with the child's
-        // data AND span (so downstream phases see the child's source range,
-        // not the cfg-attribute syntax around it).
-        let child_node = *self.shared.arena.get(child);
-        let child_span = self.shared.arena.span(child);
-        self.shared.arena.set(id, child_node);
-        self.shared.arena.set_span(id, child_span);
-        // A top-level `let name: ty` keeps its annotation in let_types keyed by
-        // the Let's node id; the unwrap moved the Let into this slot, so move the
-        // annotation with it (chaining through nested cfg) or typecheck reads
-        // None here and silently drops the annotation.
-        if let Some(ty) = self.let_types.remove(&child) {
-            self.let_types.insert(id, ty);
-        }
-        Ok(true)
+        // Active: surface the unwrapped child's id (it already carries the
+        // child's span) so the parent references it directly. No relocation
+        // means no node-id-keyed side table needs re-keying.
+        self.walk(child)
     }
 
     fn walk_children(&mut self, id: NodeId) -> Result<(), ResolveError> {
@@ -337,8 +332,8 @@ impl Walker<'_> {
         let mut write = start;
         for read in start..start + range.len as usize {
             let c = self.shared.pools.children[read];
-            if self.walk(c)? {
-                self.shared.pools.children[write] = c;
+            if let Some(kept) = self.walk(c)? {
+                self.shared.pools.children[write] = kept;
                 write += 1;
             }
         }
