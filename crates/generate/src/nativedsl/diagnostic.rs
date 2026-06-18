@@ -214,13 +214,13 @@ fn render_snippet(
     if show_prev_line && let Some(prev_text) = ctx.prev_line_text {
         writeln!(
             f,
-            " {} {PIPE} {prev_text}",
+            " {:>gutter$} {PIPE} {prev_text}",
             Paint(CYAN_STYLE, ctx.prev_line_num)
         )?;
     }
     writeln!(
         f,
-        " {} {PIPE} {}",
+        " {:>gutter$} {PIPE} {}",
         Paint(CYAN_STYLE, ctx.line_num),
         ctx.line_text,
     )?;
