@@ -442,6 +442,13 @@ pub enum NoteMessage {
     /// Points at a let value's reference back to itself (only reachable through
     /// a macro); attached to a `CircularLet` lower error.
     SelfReferenceHere,
+    /// Attached to the arg-count error when `prec_left`/`prec_right` is given a
+    /// single argument (the DSL requires the precedence explicitly, unlike
+    /// grammar.js). `is_left` picks the name; `arg` is the lone argument's text.
+    PrecNeedsExplicitPrecedence {
+        is_left: bool,
+        arg: String,
+    },
 }
 
 impl std::fmt::Display for NoteMessage {
@@ -463,6 +470,13 @@ impl std::fmt::Display for NoteMessage {
                 write!(f, "switch `import(\"{path}\")` to `inherit(\"{path}\")`")
             }
             Self::SelfReferenceHere => write!(f, "self-reference here"),
+            Self::PrecNeedsExplicitPrecedence { is_left, arg } => {
+                let name = if *is_left { "prec_left" } else { "prec_right" };
+                write!(
+                    f,
+                    "{name} requires an explicit precedence, did you mean `{name}(0, {arg})`?"
+                )
+            }
         }
     }
 }
