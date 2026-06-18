@@ -23,12 +23,6 @@ use crate::{
     rules::{Associativity, Precedence, Rule},
 };
 
-/// Convert a child count to the `u16` a [`ChildRange`] holds, mapping overflow
-/// to the standard "too many children" error (carrying the offending count).
-fn checked_len(n: usize, span: Span) -> LowerResult<u16> {
-    u16::try_from(n).map_err(|_| LowerError::new(LowerErrorKind::TooManyChildren(n), span))
-}
-
 /// Per-grammar evaluation wrapper around long-lived [`LoweringState`].
 pub(super) struct Evaluator<'a, 'ast> {
     pub state: &'a mut LoweringState,
@@ -97,6 +91,20 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
+    /// Build a lower error located in the current module's source, so a span in
+    /// an imported module's macro body renders against that file, not the root.
+    /// Born located, mirroring how [`ModuleContext::note`] stamps each note.
+    fn err(&self, kind: LowerErrorKind, span: Span) -> LowerError {
+        let ctx = self.module_ctx(self.current_module);
+        LowerError::new(kind, span).with_source(&ctx.source, &ctx.path)
+    }
+
+    /// Convert a child count to the `u16` a [`ChildRange`] holds, mapping
+    /// overflow to the standard "too many children" error.
+    fn checked_len(&self, n: usize, span: Span) -> LowerResult<u16> {
+        u16::try_from(n).map_err(|_| self.err(LowerErrorKind::TooManyChildren(n), span))
+    }
+
     fn resolve_str(&self, id: Str) -> &str {
         match self.strings.entry(id) {
             &StrEntry::Source(span, mod_id) => span.resolve(&self.module_ctx(mod_id).source),
@@ -126,13 +134,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn alloc_list(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
         let start = self.state.ir.value_children.len() as u32;
-        let len = checked_len(items.len(), span)?;
+        let len = self.checked_len(items.len(), span)?;
         self.state.ir.value_children.extend_from_slice(items);
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
     fn finish_list(&mut self, start: u32, len: usize, span: Span) -> LowerResult<ValueId> {
-        let len = checked_len(len, span)?;
+        let len = self.checked_len(len, span)?;
         Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
     }
 
@@ -179,7 +187,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn children_range(&self, start: u32, span: Span) -> LowerResult<ChildRange> {
         let count = self.state.ir.rule_children.len() - start as usize;
-        Ok(ChildRange::new(start, checked_len(count, span)?))
+        Ok(ChildRange::new(start, self.checked_len(count, span)?))
     }
 
     /// Intern a span using the current module's source text.
@@ -282,10 +290,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         // str_t->rule_t widen via a let/append/mixed list) or a non-name rule (e.g.
         // seq(a, b)) is a user error here, not a panic.
         let Value::Rule(rid) = *self.get_val(v) else {
-            return Err(LowerError::new(LowerErrorKind::ExpectedRuleName, span));
+            return Err(self.err(LowerErrorKind::ExpectedRuleName, span));
         };
         let ARule::NamedSymbol(sid) = self.get_rule(rid) else {
-            return Err(LowerError::new(LowerErrorKind::ExpectedRuleName, span));
+            return Err(self.err(LowerErrorKind::ExpectedRuleName, span));
         };
         Ok(self.str_to_string(*sid))
     }
@@ -347,14 +355,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let rid = self.lower_to_rule(id)?;
         match self.get_rule(rid) {
             ARule::NamedSymbol(sid) => Ok(self.str_to_string(*sid)),
-            ARule::Blank => Err(LowerError::new(
-                LowerErrorKind::ConfigFieldUnset,
-                self.shared.arena.span(id),
-            )),
-            _ => Err(LowerError::new(
-                LowerErrorKind::ExpectedRuleName,
-                self.shared.arena.span(id),
-            )),
+            ARule::Blank => {
+                Err(self.err(LowerErrorKind::ConfigFieldUnset, self.shared.arena.span(id)))
+            }
+            _ => Err(self.err(LowerErrorKind::ExpectedRuleName, self.shared.arena.span(id))),
         }
     }
 
@@ -434,7 +438,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 if let Some(name) = &grammar.word_token {
                     Ok(self.owned_symbol_val(name))
                 } else {
-                    Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span))
+                    Err(self.err(LowerErrorKind::ConfigFieldUnset, span))
                 }
             }
             C::Start => match grammar.variables.first() {
@@ -442,7 +446,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 Some(first) => Ok(self.owned_symbol_val(&first.name)),
                 // A config-only base (no rules) has no start rule; treat it like
                 // any other unset config field.
-                None => Err(LowerError::new(LowerErrorKind::ConfigFieldUnset, span)),
+                None => Err(self.err(LowerErrorKind::ConfigFieldUnset, span)),
             },
             C::Reserved => {
                 let n = grammar.reserved_words.len();
@@ -585,7 +589,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match self.shared.arena.get(id) {
             Node::IntLit(n) => {
                 let v = i32::try_from(*n)
-                    .map_err(|_| LowerError::new(LowerErrorKind::IntegerOverflow(*n), span))?;
+                    .map_err(|_| self.err(LowerErrorKind::IntegerOverflow(*n), span))?;
                 Ok(self.alloc_val(Value::Int(v)))
             }
             Node::StringLit => {
@@ -603,14 +607,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 if let Node::IntLit(m) = *self.shared.arena.get(*inner) {
                     let neg = -m;
                     let v = i32::try_from(neg)
-                        .map_err(|_| LowerError::new(LowerErrorKind::IntegerOverflow(neg), span))?;
+                        .map_err(|_| self.err(LowerErrorKind::IntegerOverflow(neg), span))?;
                     return Ok(self.alloc_val(Value::Int(v)));
                 }
                 let vid = self.eval_expr(*inner)?;
                 // Guarded by super::typecheck::type_of (Node::Neg) - ensures inner is int
                 let n = self.int_val(vid);
                 let neg = n.checked_neg().ok_or_else(|| {
-                    LowerError::new(LowerErrorKind::IntegerOverflow(-i64::from(n)), span)
+                    self.err(LowerErrorKind::IntegerOverflow(-i64::from(n)), span)
                 })?;
                 Ok(self.alloc_val(Value::Int(neg)))
             }
@@ -624,8 +628,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     BinOp::Add => (l.checked_add(r), i64::from(l) + i64::from(r)),
                     BinOp::Sub => (l.checked_sub(r), i64::from(l) - i64::from(r)),
                 };
-                let v = narrow
-                    .ok_or_else(|| LowerError::new(LowerErrorKind::IntegerOverflow(wide), span))?;
+                let v =
+                    narrow.ok_or_else(|| self.err(LowerErrorKind::IntegerOverflow(wide), span))?;
                 Ok(self.alloc_val(Value::Int(v)))
             }
             // Guarded by super::resolve + typecheck
@@ -664,8 +668,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::Ident(IdentKind::Var(let_id)) => {
                 if self.state.scratch.lets_in_progress.contains(&let_id) {
                     expect_pat!(Node::Let { name, .. }, *self.shared.arena.get(let_id));
-                    let mut err = LowerError::new(
-                        LowerErrorKind::CircularLet(self.ctx().text(name).to_owned()),
+                    let mut err = self.err(
+                        LowerErrorKind::CircularLet(
+                            self.module_ctx(self.current_module).text(name).to_owned(),
+                        ),
                         self.shared.arena.span(let_id),
                     );
                     err.add_note(self.ctx().note(NoteMessage::SelfReferenceHere, span));
@@ -691,7 +697,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let rr = self.list_range(rv);
                 let start = self.state.ir.value_children.len() as u32;
                 let total = usize::from(lr.len) + usize::from(rr.len);
-                let len = checked_len(total, span)?;
+                let len = self.checked_len(total, span)?;
                 self.state
                     .ir
                     .value_children
@@ -714,7 +720,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 map.get(field_name).copied().ok_or_else(|| {
                     let mut available: Vec<String> = map.keys().cloned().collect();
                     available.sort_unstable();
-                    LowerError::new(
+                    self.err(
                         LowerErrorKind::FieldNotFound {
                             field: field_name.to_string(),
                             available,
@@ -779,7 +785,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         }
                     }
                     let start = self.state.ir.value_children.len() as u32;
-                    let len = checked_len(self.state.scratch.val_scratch.len() - base, span)?;
+                    let len =
+                        self.checked_len(self.state.scratch.val_scratch.len() - base, span)?;
                     self.state
                         .ir
                         .value_children
@@ -936,7 +943,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         Value::Str(s) => Ok(self.alloc_rule(ARule::Alias(*s, false, inner))),
                         Value::Rule(rid) => {
                             let ARule::NamedSymbol(s) = self.get_rule(*rid) else {
-                                return Err(LowerError::new(
+                                return Err(self.err(
                                     LowerErrorKind::ExpectedRuleName,
                                     self.shared.arena.span(target),
                                 ));
@@ -1004,7 +1011,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         });
         if self.state.scratch.call_stack.len() > usize::from(MAX_CALL_DEPTH) {
             let root_span = self.state.scratch.call_stack[0].call_span;
-            return Err(LowerError::new(
+            return Err(self.err(
                 LowerErrorKind::CallDepthExceeded(self.build_call_trace()),
                 root_span,
             ));
@@ -1040,7 +1047,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// carries the macro-call trace so the user can see the recursion chain.
     fn enter_eval(&mut self, id: NodeId) -> LowerResult<()> {
         if self.state.scratch.eval_depth >= MAX_EVAL_DEPTH {
-            return Err(LowerError::new(
+            return Err(self.err(
                 LowerErrorKind::RecursionTooDeep(self.build_call_trace()),
                 self.shared.arena.span(id),
             ));
