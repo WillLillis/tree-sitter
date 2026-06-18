@@ -316,6 +316,12 @@ pub struct Diagnostic<K> {
     pub span: Option<Span>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<Note>,
+    /// Source + path the primary `span` indexes into, when that differs from the
+    /// module the error surfaces in (a lower error born evaluating an imported
+    /// module's macro body). `None` uses the caller-supplied source. Mirrors the
+    /// per-[`Note`] source. (Not `source`: that name is reserved by `thiserror`.)
+    #[serde(skip)]
+    pub src: Option<Box<(String, PathBuf)>>,
 }
 
 impl<K> Diagnostic<K> {
@@ -324,6 +330,7 @@ impl<K> Diagnostic<K> {
             kind,
             span: Some(span),
             notes: Vec::new(),
+            src: None,
         }
     }
 
@@ -332,6 +339,7 @@ impl<K> Diagnostic<K> {
             kind,
             span: None,
             notes: Vec::new(),
+            src: None,
         }
     }
 
@@ -340,7 +348,16 @@ impl<K> Diagnostic<K> {
             kind,
             span: Some(span),
             notes: vec![note],
+            src: None,
         }
+    }
+
+    /// Stamp the source + path the primary span belongs to, so a cross-module
+    /// error renders against the right file. See [`Diagnostic::src`].
+    #[must_use]
+    pub fn with_source(mut self, source: &str, path: &Path) -> Self {
+        self.src = Some(Box::new((source.to_owned(), path.to_owned())));
+        self
     }
 
     /// Append an additional note (e.g. enrichment running after the primary
@@ -487,5 +504,22 @@ impl DslError {
             Self::Lower(e) => &e.notes,
             Self::Module(e) => e.inner.notes(),
         }
+    }
+
+    /// Source + path the primary span belongs to, when the error carries one (a
+    /// lower error from an imported module's macro body). Lets the renderer put
+    /// the caret in that module's file instead of the root's.
+    #[must_use]
+    pub fn primary_source(&self) -> Option<(&str, &Path)> {
+        let src = match self {
+            Self::Lex(e) => &e.src,
+            Self::Parse(e) => &e.src,
+            Self::Expand(e) => &e.src,
+            Self::Resolve(e) => &e.src,
+            Self::Type(e) => &e.src,
+            Self::Lower(e) => &e.src,
+            Self::Module(e) => return e.inner.primary_source(),
+        };
+        src.as_deref().map(|(s, p)| (s.as_str(), p.as_path()))
     }
 }
