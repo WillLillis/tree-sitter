@@ -976,7 +976,28 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             PrecKind::Right => TokenKind::KwPrecRight,
             PrecKind::Dynamic => TokenKind::KwPrecDynamic,
         };
-        let (value, content, end) = self.parse_binary(start, kw, Self::parse_expr)?;
+        let parsed = self.parse_binary(start, kw, Self::parse_expr);
+        let (value, content, end) = match parsed {
+            Ok(parsed) => parsed,
+            Err(mut err) => {
+                // grammar.js lets prec.left/right omit the precedence (it
+                // defaults to 0); the DSL requires it, since its optional args
+                // are trailing (e.g. regexp(p, flags?)). Suggest the explicit
+                // form, quoting the lone arg parse_binary just parsed (last node).
+                if let PrecKind::Left | PrecKind::Right = kind
+                    && matches!(err.kind, ParseErrorKind::WrongArgumentCount { got: 1, .. })
+                {
+                    let arg_id = NodeId::from_index(self.shared.arena.next_id().index() - 1);
+                    let arg = self.ctx.text(self.shared.arena.span(arg_id)).to_owned();
+                    let is_left = matches!(kind, PrecKind::Left);
+                    err.add_note(self.ctx.note(
+                        NoteMessage::PrecNeedsExplicitPrecedence { is_left, arg },
+                        start,
+                    ));
+                }
+                return Err(err);
+            }
+        };
         Ok(self.shared.arena.push(
             Node::Prec {
                 kind,
