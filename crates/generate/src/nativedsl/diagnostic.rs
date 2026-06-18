@@ -145,6 +145,11 @@ fn render_error(
 ) -> std::fmt::Result {
     writeln!(f, "{ERROR}: {error}")?;
 
+    // A lower error born evaluating an imported module's macro body carries that
+    // module's source, so the caret lands in the right file; everything else
+    // falls back to the caller-supplied source.
+    let (text, path) = error.primary_source().unwrap_or((text, path));
+
     // A file-level error (e.g. a missing grammar block) has no location within
     // the source, but still name the file so the user knows where; located
     // errors fall through to the snippet below.
