@@ -334,6 +334,7 @@ fn error_import_disallowed_items() {
             "grammar { language: \"bad\" }\nmacro f(x: rule_t) rule_t { x }",
             DisallowedItemKind::GrammarBlock,
         ),
+        ("let b = inherit(\"base.tsg\")", DisallowedItemKind::Inherit),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let bad_helper = dir.path().join("bad.tsg");
