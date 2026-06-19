@@ -641,7 +641,9 @@ pub enum ResolveErrorKind {
     CfgFlagsUnknownKey(String),
     #[error("`flags.{{enabled,disabled}}` must be a list literal of string flag names")]
     CfgFlagsNotList,
-    #[error("`flags.{{enabled,disabled}}` entries must be string literals")]
+    #[error(
+        "`flags.{{enabled,disabled}}` entries must be plain string literals (not raw strings or expressions)"
+    )]
     CfgFlagsNonLiteral,
     #[error(
         "`#[cfg(...)]` is not allowed inside the `flags` field; flag declarations are read before cfg gating runs"
