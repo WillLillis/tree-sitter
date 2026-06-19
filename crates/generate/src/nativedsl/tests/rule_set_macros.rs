@@ -263,6 +263,39 @@ fn rule_set_macro_with_regular_rules_around() {
 }
 
 #[test]
+fn dup_macro_with_call_reports_duplicate_not_argcount() {
+    // A duplicated rule-set macro plus a top-level call must report the
+    // duplicate, not an arg-count mismatch against whichever definition the
+    // parser's macro_index happened to keep (here the later 1-param def).
+    let err = dsl_err(
+        r#"
+        rules m() { rule a { "x" } }
+        rules m(p: rule_t) { rule b { p } }
+        grammar { language: "test" }
+        @m()
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("m".into()));
+}
+
+#[test]
+fn dup_macro_with_call_reports_duplicate_reversed() {
+    // Same as above with the definitions swapped: the reported error must not
+    // depend on declaration order.
+    let err = dsl_err(
+        r#"
+        rules m(p: rule_t) { rule b { p } }
+        rules m() { rule a { "x" } }
+        grammar { language: "test" }
+        @m()
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(e.kind, ResolveErrorKind::DuplicateDeclaration("m".into()));
+}
+
+#[test]
 fn computed_ref_to_macro_name_rejected() {
     // `@"m"` computes the name "m", a macro - which `collect_decls` registers in
     // the decl table before the computed-ref check. Without the rule-ness check
