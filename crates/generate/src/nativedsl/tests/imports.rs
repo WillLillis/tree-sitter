@@ -893,6 +893,29 @@ fn helper_external_member_not_found() {
 }
 
 #[test]
+fn cfg_disabled_helper_external_not_exported() {
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("ext.tsg");
+    std::fs::write(&helper, "external _foo\n#[cfg(X)] external _gated\n").unwrap();
+
+    let input = format!(
+        r#"
+        let e = import("{}")
+        grammar {{ language: "test", flags: {{ disabled: ["X"] }}, externals: [e::_gated] }}
+        rule program {{ "x" }}
+    "#,
+        dsl_path(&helper)
+    );
+    // `_gated` is cfg-disabled in the helper, so `e::_gated` must not resolve.
+    let err = parse_native_dsl(&input, Path::new("."));
+    let e = assert_err!(err.unwrap_err(), Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::ImportMemberNotFound("_gated".into())
+    );
+}
+
+#[test]
 fn import_empty_module() {
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.tsg");

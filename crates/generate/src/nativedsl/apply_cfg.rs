@@ -133,13 +133,14 @@ pub fn apply_cfg(
         write < original_len
     };
     // A dropped top-level decl is the only thing that can invalidate the
-    // macro/module working sets (an active unwrap keeps macro_index's name key
-    // and the never-relocated ModuleRef value module_refs holds). Rebuild both
-    // from the survivors then, rather than pruning in place - a dropped
-    // macro/import is simply absent, which sidesteps every id fixup.
+    // macro/module/external working sets (an active unwrap leaves macro_index's
+    // name key, module_refs' never-relocated ModuleRef value, and an external's
+    // name span intact). Rebuild them from the survivors rather than pruning in
+    // place - a dropped macro/import/external is simply absent.
     if dropped_top_level {
         ctx.macro_index.clear();
         ctx.module_refs.clear();
+        ctx.external_names.clear();
         for read in 0..ctx.root_items.len() {
             let id = ctx.root_items[read];
             match *shared.arena.get(id) {
@@ -157,6 +158,7 @@ pub fn apply_cfg(
                 {
                     ctx.module_refs.push(value);
                 }
+                Node::External { name } => ctx.external_names.push(name),
                 _ => {}
             }
         }
