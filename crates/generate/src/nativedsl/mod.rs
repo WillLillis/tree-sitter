@@ -224,7 +224,9 @@ pub(super) fn for_each_imported_helper<'a, E>(
     let mut stack: Vec<(u8, Span)> = Vec::new();
 
     let seed = |stack: &mut Vec<(u8, Span)>, refs: &[ast::NodeId]| {
-        for &mref_id in refs {
+        // Reverse so the LIFO stack pops imports in source order (a pre-order
+        // DFS visits siblings left-to-right when pushed right-to-left).
+        for &mref_id in refs.iter().rev() {
             if let &ast::Node::ModuleRef {
                 import: true,
                 module: Some(idx),
