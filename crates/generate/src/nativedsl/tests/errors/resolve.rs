@@ -28,10 +28,6 @@ error_tests! { Resolve {
         r#"grammar { language: "test" } rule program { "a" } rule program { "b" }"#,
         ResolveErrorKind::DuplicateDeclaration("program".into())
     }
-    error_forward_reference_let {
-        r#"grammar { language: "test" } rule program { MY_VAR } let MY_VAR: str_t = "x""#,
-        ResolveErrorKind::UnknownIdentifier("MY_VAR".into())
-    }
     error_undefined_function {
         r#"grammar { language: "test" }
         rule program { nonexistent_fn(identifier) }
@@ -75,13 +71,7 @@ error_tests! { Resolve {
         r#"let C = C
         grammar { language: "test", externals: [C] }
         rule program { "x" }"#,
-        ResolveErrorKind::UnknownIdentifier("C".into())
-    }
-    error_self_referential_let {
-        r#"grammar { language: "test" }
-        let P = { a: P.a }
-        rule program { "x" }"#,
-        ResolveErrorKind::UnknownIdentifier("P".into())
+        ResolveErrorKind::InvalidExternalsExpression
     }
     error_config_access_unknown_field {
         r#"let base = inherit("inherit_base/grammar.tsg")
@@ -92,22 +82,24 @@ error_tests! { Resolve {
 }}
 
 #[test]
-fn error_self_ref_in_container_no_misleading_note() {
-    // `let X = [X]` (or any non-bare-Ident self-ref) should report an
-    // UnknownIdentifier without the misleading "defined later" note that
-    // would point back at the same let.
+fn error_self_ref_in_container_reports_cycle() {
+    // `let X = [X]` references itself. Lets resolve regardless of order, so the
+    // self-reference is caught as a cycle at typecheck, with a self-reference note.
     let e = assert_err!(
         dsl_err(
             r#"grammar { language: "test" }
             let X: list_t<rule_t> = [X]
             rule program { "x" }"#
         ),
-        Resolve
+        Type
     );
-    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("X".into()));
+    assert_eq!(e.kind, TypeErrorKind::CircularLet("X".into()));
     assert!(
-        e.notes.is_empty(),
-        "self-reference inside container should not attach DefinedLater note: {:?}",
+        matches!(
+            e.notes.first().map(|n| &n.message),
+            Some(NoteMessage::SelfReferenceHere)
+        ),
+        "expected a self-reference note: {:?}",
         e.notes
     );
 }

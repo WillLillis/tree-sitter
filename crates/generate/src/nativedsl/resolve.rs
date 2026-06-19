@@ -5,8 +5,6 @@
 //! - [`collect_decls`] gathers top-level names (rules, macros, lets, externals, inherited rules)
 //! - [`resolve`] rewrites `Ident(Unresolved)` nodes to `Ident(Rule | Var(_) | Macro(_))` and
 //!   resolves `mod::name` accesses against imported modules.
-//!
-//! Let bindings register into the decl table after their RHS is resolved.
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -62,15 +60,15 @@ pub fn resolve(
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
 ) -> ResolveResult<()> {
-    let mut decls = collect_decls(shared, ctx, strings, &ctx.root_items, base, modules)?;
+    let decls = collect_decls(shared, ctx, strings, &ctx.root_items, base, modules)?;
 
     // Validate computed-name references (`@<expr>`), evaluated under each call's
     // args at expand, against the complete name table (which includes generated
     // and inherited rules).
     for &Spanned { value: name, span } in &ctx.computed_refs {
         let text = strings.resolve_local(name, &ctx.source);
-        // Must resolve to a rule: decls already holds macros here (lets are added
-        // in pass 2), and lower emits a NamedSymbol for whatever name this is.
+        // Must resolve to a rule: decls already holds rules, macros, and lets
+        // here, and lower emits a NamedSymbol for whatever name this is.
         if !matches!(
             decls.get(text),
             Some(Spanned {
@@ -93,12 +91,6 @@ pub fn resolve(
             modules,
         };
         resolve_item(&mut shared.arena, &rcx, item_id)?;
-        // Register let bindings in order so forward references are caught
-        if let Node::Let { name, .. } = shared.arena.get(item_id) {
-            let name_text = ctx.text(*name);
-            let span = shared.arena.span(item_id);
-            insert_decl(&mut decls, name_text, IdentKind::Var(item_id), span, ctx)?;
-        }
     }
 
     Ok(())
@@ -147,8 +139,7 @@ fn collect_decls<'a>(
     let mut decls = FxHashMap::with_capacity_and_hasher(root_items.len(), FxBuildHasher);
     let mut override_names: FxHashSet<&str> = FxHashSet::default();
 
-    // Register rules and macros upfront (forward references allowed).
-    // Let bindings are registered during pass 2 in item order (no forward references).
+    // Register rules, macros, and lets upfront (forward references allowed).
     for &item_id in root_items {
         let span = shared.arena.span(item_id);
         match shared.arena.get(item_id) {
@@ -181,20 +172,17 @@ fn collect_decls<'a>(
                     ctx,
                 )?;
             }
-            Node::Let { name, value, .. } => {
-                // Catch `let X = X` here so externals referencing X surface
-                // UnknownIdentifier rather than the less-useful
-                // InvalidExternalsExpression from collect_external_names below.
-                let lhs = ctx.text(*name);
-                if matches!(shared.arena.get(*value), Node::Ident(IdentKind::Unresolved))
-                    && ctx.text(shared.arena.span(*value)) == lhs
-                    && !decls.contains_key(lhs)
-                {
-                    return Err(ResolveError::new(
-                        ResolveErrorKind::UnknownIdentifier(lhs.to_string()),
-                        shared.arena.span(*value),
-                    ));
-                }
+            Node::Let { name, .. } => {
+                // Registered up front (like rules/macros) so forward and
+                // mutually-referential lets resolve; a self-reference resolves
+                // to its own Var and is caught downstream as a cycle.
+                insert_decl(
+                    &mut decls,
+                    ctx.text(*name),
+                    IdentKind::Var(item_id),
+                    span,
+                    ctx,
+                )?;
             }
             Node::External { name } => {
                 // External decls register the symbol name as a rule-shaped
@@ -366,7 +354,7 @@ fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveR
         if let Some(&Spanned { value: kind, .. }) = rcx.decls.get(name) {
             arena.resolve_as(id, kind);
         } else {
-            return Err(unknown_ident_error(arena, rcx.ctx, rcx.decls, name, span));
+            return Err(unknown_ident_error(rcx.ctx, rcx.decls, name, span));
         }
         return Ok(());
     }
@@ -665,30 +653,10 @@ pub enum ResolveErrorKind {
     CfgFlagDeclaredTwice(String),
 }
 
-/// Build an `UnknownIdentifier` error, attaching a "defined later" note if the
-/// name matches a let binding that appears later in the same module, or a
-/// "did you mean" note if it's close to a known decl or keyword.
-fn unknown_ident_error(
-    arena: &NodeArena,
-    ctx: &ModuleContext,
-    decls: &Decls,
-    name: &str,
-    span: Span,
-) -> ResolveError {
-    let forward_span = ctx.root_items.iter().find_map(|&rid| {
-        let let_span = arena.span(rid);
-        if let Node::Let { name: let_name, .. } = arena.get(rid)
-            && let_span.start > span.start
-            && ctx.text(*let_name) == name
-        {
-            return Some(let_span);
-        }
-        None
-    });
+/// Build an `UnknownIdentifier` error, attaching a "did you mean" note if the
+/// name is close to a known decl or keyword.
+fn unknown_ident_error(ctx: &ModuleContext, decls: &Decls, name: &str, span: Span) -> ResolveError {
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
-    if let Some(let_span) = forward_span {
-        return ResolveError::with_note(kind, span, ctx.note(NoteMessage::DefinedLater, let_span));
-    }
     let candidates = decls.keys().copied().chain(
         super::lexer::TokenKind::COMBINATOR_KEYWORD_NAMES
             .iter()

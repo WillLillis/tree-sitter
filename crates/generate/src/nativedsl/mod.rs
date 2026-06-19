@@ -426,7 +426,6 @@ pub struct Note {
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,
-    DefinedLater,
     /// An unmatched `override rule` declaration's location, one per extra
     /// override in an `OverrideRuleNotFound` error.
     OverrideDeclaredHere,
@@ -460,7 +459,6 @@ impl std::fmt::Display for NoteMessage {
             Self::ReferencedFromHere => write!(f, "referenced from here"),
             Self::OverrideDeclaredHere => write!(f, "override declared here"),
             Self::AlsoInheritedHere => write!(f, "also inherited here"),
-            Self::DefinedLater => write!(f, "let binding defined here (move it before the usage)"),
             Self::GatedByDisabledCfg(flag) => {
                 write!(
                     f,

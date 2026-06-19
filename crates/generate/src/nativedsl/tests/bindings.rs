@@ -126,6 +126,14 @@ rule_tests! {
             Rule::String("if".into()), Rule::String("else".into()), Rule::String("while".into()),
         ])
     }
+    forward_reference_let {
+        // A `let` referenced before its definition resolves to its value; let
+        // bindings are visible regardless of source order.
+        r#"grammar { language: "test" }
+        rule program { MY_VAR }
+        let MY_VAR: str_t = "x""#,
+        Rule::String("x".into())
+    }
 }
 
 #[test]
@@ -588,5 +596,21 @@ fn macro_let_cycle_reported_as_circular() {
     );
     let e = assert_err!(err, Lower);
     assert_eq!(e.kind, LowerErrorKind::CircularLet("b".into()));
+    assert_eq!(e.notes.len(), 1);
+}
+
+#[test]
+fn mutual_let_cycle_reported_as_circular() {
+    // Two lets defined in terms of each other. Now that forward references
+    // resolve, the direct cycle is caught at typecheck (before lower), with a
+    // note at the back-reference.
+    let err = dsl_err(
+        r#"grammar { language: "test" }
+        let a = b
+        let b = a
+        rule program { "x" }"#,
+    );
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::CircularLet("a".into()));
     assert_eq!(e.notes.len(), 1);
 }
