@@ -377,10 +377,10 @@ where
         } else {
             // Given an _explicit_ path to an input file, derive the repo root from the
             // conventional locations:
-            //     - grammar.js sits inside <root>/
+            //     - grammar.js / grammar.tsg sit inside <root>/
             //     - grammar.json sits inside <root>/src/
             let repo_root = match path_buf.extension() {
-                Some(e) if e == "js" => path_buf.parent(),
+                Some(e) if e == "js" || e == "tsg" => path_buf.parent(),
                 Some(e) if e == "json" => path_buf.parent().and_then(Path::parent),
                 _ => None,
             };
