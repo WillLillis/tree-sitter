@@ -1041,6 +1041,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count(kw, 1, 0, start));
         }
+        // Path stays literal (no unescape): a backslash is a path char, not an escape.
         let path_span = self.expect_string()?;
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
