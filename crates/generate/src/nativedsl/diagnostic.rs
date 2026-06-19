@@ -21,6 +21,20 @@ impl<T: std::fmt::Display> std::fmt::Display for Paint<T> {
     }
 }
 
+/// Renders a span's leading-text as caret-line indent: tabs stay tabs (same tab
+/// stop as the source line), every other char becomes one space. Writes through
+/// the formatter so no indent string is allocated.
+struct CaretIndent<'a>(&'a str);
+
+impl std::fmt::Display for CaretIndent<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for c in self.0.chars() {
+            write!(f, "{}", if c == '\t' { '\t' } else { ' ' })?;
+        }
+        Ok(())
+    }
+}
+
 fn color_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     // Per https://no-color.org: any non-empty value of NO_COLOR disables color.
@@ -231,9 +245,9 @@ fn render_snippet(
     )?;
     write!(
         f,
-        " {pad:>gutter$} {PIPE} {pad:>width$}{underline}",
+        " {pad:>gutter$} {PIPE} {indent}{underline}",
         pad = "",
-        width = ctx.span_start_in_line
+        indent = CaretIndent(ctx.caret_prefix)
     )?;
     if let SnippetKind::Note(msg) = kind {
         write!(f, " {NOTE}: {}", Paint(marker.style, msg))?;
@@ -268,7 +282,7 @@ struct SpanContext<'a> {
     line_text: &'a str,
     prev_line_text: Option<&'a str>,
     prev_line_num: usize,
-    span_start_in_line: usize,
+    caret_prefix: &'a str,
     underline_len: usize,
     gutter_width: usize,
 }
@@ -288,10 +302,11 @@ impl SpanContext<'_> {
         let line_end =
             memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |pos| line_start + pos);
         let line_text = &source_text[line_start..line_end];
-        // Char-counted so the printed column and caret padding align with the
-        // displayed glyphs on lines containing multibyte UTF-8.
-        let span_start_in_line = source_text[line_start..offset].chars().count();
-        let col = span_start_in_line + 1;
+        // The line's leading text before the span. The caret line renders it via
+        // CaretIndent (tabs kept, other chars one space each) so the caret lands
+        // on the same tab stops as the source line under any terminal tab width.
+        let caret_prefix = &source_text[line_start..offset];
+        let col = caret_prefix.chars().count() + 1;
         let underline_end =
             ceil_char_boundary(source_text, (span.end as usize).min(line_end)).max(offset);
         let underline_len = source_text[offset..underline_end].chars().count().max(1);
@@ -305,7 +320,7 @@ impl SpanContext<'_> {
             line_text,
             prev_line_text,
             prev_line_num: line_num.saturating_sub(1),
-            span_start_in_line,
+            caret_prefix,
             underline_len,
             gutter_width: digit_count(line_num),
         }
