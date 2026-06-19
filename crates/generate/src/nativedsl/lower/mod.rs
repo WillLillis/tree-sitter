@@ -468,6 +468,7 @@ pub type LowerResult<T> = Result<T, super::LowerError>;
 pub enum DisallowedItemKind {
     OverrideRule,
     GrammarBlock,
+    Inherit,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -527,5 +528,6 @@ const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {
     match kind {
         DisallowedItemKind::OverrideRule => "override rule",
         DisallowedItemKind::GrammarBlock => "grammar block",
+        DisallowedItemKind::Inherit => "call to inherit()",
     }
 }

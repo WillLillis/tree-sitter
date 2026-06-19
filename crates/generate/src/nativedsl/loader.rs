@@ -374,10 +374,18 @@ impl Loader<'_> {
     }
 
     /// Validate that an imported file only contains allowed items.
-    /// Helpers may host rules, lets, macros, externals, and imports - but
-    /// not a grammar block (that's a root concept) or `override rule`
-    /// (overrides are a root-grammar privilege).
+    /// Helpers may host rules, lets, macros, externals, and imports - but not
+    /// a grammar block (that's a root concept), `override rule` (a root-grammar
+    /// privilege), or `inherit()` (a helper never materializes a base's rules).
     fn validate_import_items(&self, ctx: &ModuleContext) -> DslResult<()> {
+        // Reject inherit() before the inherit-load below would load the base
+        // file; lower ignores a helper's base, so the reference would dangle.
+        if let Some(inherit_id) = ctx.inherits(&self.shared.arena).next() {
+            Err(LowerError::new(
+                LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::Inherit),
+                self.shared.arena.span(inherit_id),
+            ))?;
+        }
         for &item_id in &ctx.root_items {
             let kind = match self.shared.arena.get(item_id) {
                 Node::Grammar => DisallowedItemKind::GrammarBlock,
