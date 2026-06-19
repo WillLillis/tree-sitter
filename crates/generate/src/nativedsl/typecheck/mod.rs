@@ -6,7 +6,7 @@ pub mod types;
 
 pub use types::{Constraint, DataTy, ElemTy, InnerTy, ModuleTy, ScalarTy, TupleSig, Ty};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,6 +20,8 @@ pub struct TypeEnv {
     pub vars: FxHashMap<NodeId, Ty>,
     /// Field names for Object variables, keyed by the Let node's `NodeId`.
     pub object_fields: FxHashMap<NodeId, Vec<String>>,
+    /// Lets currently being typed; reentry is a self-reference cycle.
+    lets_in_progress: FxHashSet<NodeId>,
 }
 
 /// Walks root items and type-checks the now-resolved AST.
@@ -133,4 +135,6 @@ pub enum TypeErrorKind {
          applied to every token, so the set order must be explicit (not a computed value)"
     )]
     ReservedMustBeLiteral,
+    #[error("let '{0}' is defined in terms of itself")]
+    CircularLet(String),
 }
