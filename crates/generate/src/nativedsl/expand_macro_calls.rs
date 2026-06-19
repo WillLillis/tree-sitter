@@ -10,6 +10,7 @@
 //! Only local macros are visible at item position; qualified calls aren't
 //! supported (the parser rejects `@mod::foo(...)`).
 
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,17 +47,41 @@ pub fn expand_macro_calls(
     strings: &mut StringPool,
     ctx: &mut ModuleContext,
 ) -> Result<(), ExpandError> {
+    // A name declared by more than one top-level macro is rejected by resolve
+    // as a duplicate. Skip expanding its calls so we don't surface an arbitrary
+    // arg-count or kind error against whichever definition the parser's
+    // macro_index kept - collect_decls rejects the dup before pass 2 runs.
+    let duplicates = duplicate_macro_names(shared, ctx);
     // Walk only the original indices. Each Call writes its first expanded
     // rule into its own slot; the rest are pushed to the end. Parser's
     // EmptyRuleSetMacroBody guarantees the slot is always filled.
     let original_len = ctx.root_items.len();
     for i in 0..original_len {
         let id = ctx.root_items[i];
-        if matches!(shared.arena.get(id), Node::Call { .. }) {
-            expand_one_call(shared, strings, ctx, id, i)?;
+        let Node::Call { name, .. } = *shared.arena.get(id) else {
+            continue;
+        };
+        if duplicates.contains(ctx.text(shared.arena.span(name))) {
+            continue;
         }
+        expand_one_call(shared, strings, ctx, id, i)?;
     }
     Ok(())
+}
+
+/// Names declared by more than one top-level `rules`/`macro`.
+fn duplicate_macro_names(shared: &SharedAst, ctx: &ModuleContext) -> FxHashSet<String> {
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
+    let mut dups = FxHashSet::default();
+    for &id in &ctx.root_items {
+        if let Node::Macro(macro_id) = *shared.arena.get(id) {
+            let name = ctx.text(shared.pools.get_macro(macro_id).name);
+            if !seen.insert(name) {
+                dups.insert(name.to_string());
+            }
+        }
+    }
+    dups
 }
 
 fn expand_one_call(
