@@ -69,7 +69,15 @@ pub fn resolve(
     // and inherited rules).
     for &Spanned { value: name, span } in &ctx.computed_refs {
         let text = strings.resolve_local(name, &ctx.source);
-        if !decls.contains_key(text) {
+        // Must resolve to a rule: decls already holds macros here (lets are added
+        // in pass 2), and lower emits a NamedSymbol for whatever name this is.
+        if !matches!(
+            decls.get(text),
+            Some(Spanned {
+                value: IdentKind::Rule,
+                ..
+            })
+        ) {
             return Err(ResolveError::new(
                 ResolveErrorKind::UnknownIdentifier(text.to_string()),
                 span,
