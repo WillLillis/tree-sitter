@@ -557,10 +557,23 @@ fn type_of_field_access(
         _ => true, // can't validate dynamically-produced objects
     };
     if !field_known {
+        // Collect the valid field names only now that we know the access fails.
+        let available = match shared.arena.get(obj) {
+            Node::Ident(IdentKind::Var(let_id)) => {
+                env.object_fields.get(let_id).cloned().unwrap_or_default()
+            }
+            Node::Object(range) => shared
+                .pools
+                .get_object(*range)
+                .iter()
+                .map(|f| ctx.text(f.name).to_string())
+                .collect(),
+            _ => Vec::new(),
+        };
         return Err(TypeError::new(
             TypeErrorKind::FieldNotFound {
                 field: field_name.to_string(),
-                on_type: obj_ty,
+                available,
             },
             field,
         ));
