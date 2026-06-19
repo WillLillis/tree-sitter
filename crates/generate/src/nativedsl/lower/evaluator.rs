@@ -59,12 +59,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    /// Evaluate a let binding's value and memoize it under `let_id`. Idempotent:
-    /// the source-order loop and an on-demand read (`Var` below, reached when a
-    /// macro expanded at an earlier call site references a later let) both route
-    /// here, so whichever runs first wins and the other returns the cached value.
-    /// The in-progress mark lets the `Var` read detect a self-reference cycle
-    /// instead of recursing until the stack overflows.
+    /// Evaluate a let binding's value and memoize it under `let_id`.
     pub fn eval_let(&mut self, let_id: NodeId) -> LowerResult<ValueId> {
         if let Some(&val) = self.state.let_values.get(&let_id) {
             return Ok(val);
@@ -77,12 +72,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(val)
     }
 
-    fn ctx(&self) -> &'a ModuleContext {
-        self.module_ctx(self.current_module)
-    }
-
-    /// `idx` is a global module id; `idx == self.root_id` is the in-progress
-    /// module (whose ctx isn't in `previous`).
     fn module_ctx(&self, idx: ModuleId) -> &'a ModuleContext {
         if idx == self.root_id {
             self.root_ctx
@@ -126,9 +115,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn get_val(&self, id: ValueId) -> &Value {
         // Safety: id came from alloc_val, which hands out sequential indices into
         // self.state.ir.values. That pool is append-only and never reset for the
-        // life of the LoweringState (reset_per_grammar clears only `scratch`), so
-        // every ValueId stays in bounds - including ones cached cross-grammar in
-        // `let_values`. See IrPools docs.
+        // life of the `LoweringState`.
         unsafe { self.state.ir.values.get_unchecked(id.0 as usize) }
     }
 
@@ -177,7 +164,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn get_rule(&self, id: RuleId) -> &ARule {
         // Safety: id came from alloc_rule, which hands out sequential indices into
-        // the append-only, never-reset self.state.ir.rules pool (see get_val).
+        // the append-only, never-reset `self.state.ir.rules pool`.
         unsafe { self.state.ir.rules.get_unchecked(id.0 as usize) }
     }
 
@@ -196,7 +183,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn intern_string_lit(&mut self, span: Span) -> Str {
-        let raw = self.ctx().text(span);
+        let raw = self.module_ctx(self.current_module).text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
             self.strings.intern_owned(&unescape_string(raw))
         } else {
@@ -286,9 +273,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn rule_name_string(&self, v: ValueId, span: Span) -> LowerResult<String> {
         // A name position (inline/supertypes/conflicts, precedences symbol) needs a
-        // named-symbol reference. A Value::Str (a string literal laundered past the
-        // str_t->rule_t widen via a let/append/mixed list) or a non-name rule (e.g.
-        // seq(a, b)) is a user error here, not a panic.
+        // named-symbol reference. typecheck's expect_name_ref rejects direct
+        // non-names; a string laundered through a computed rule_t list, or a
+        // non-name rule (e.g. seq(a, b)), reaches here - a user error, not a panic.
         let Value::Rule(rid) = *self.get_val(v) else {
             return Err(self.err(LowerErrorKind::ExpectedRuleName, span));
         };
@@ -355,9 +342,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         let rid = self.lower_to_rule(id)?;
         match self.get_rule(rid) {
             ARule::NamedSymbol(sid) => Ok(self.str_to_string(*sid)),
-            ARule::Blank => {
-                Err(self.err(LowerErrorKind::ConfigFieldUnset, self.shared.arena.span(id)))
-            }
             _ => Err(self.err(LowerErrorKind::ExpectedRuleName, self.shared.arena.span(id))),
         }
     }
@@ -366,7 +350,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// Accepts either an object literal `{ name: [words] }` or an expression
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
     pub fn eval_reserved(&mut self, id: NodeId) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
-        let ctx = self.ctx();
+        let ctx = self.module_ctx(self.current_module);
         // typecheck guarantees `reserved` is an object literal (its first set is
         // the default, so order must be explicit), so the source-order AST node
         // is here. Inheritance merges the base's reserved at build time.
@@ -674,7 +658,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         ),
                         self.shared.arena.span(let_id),
                     );
-                    err.add_note(self.ctx().note(NoteMessage::SelfReferenceHere, span));
+                    err.add_note(
+                        self.module_ctx(self.current_module)
+                            .note(NoteMessage::SelfReferenceHere, span),
+                    );
                     Err(err)
                 } else {
                     self.eval_let(let_id)
@@ -710,7 +697,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             &Node::FieldAccess { obj, field } => {
                 let obj_val = self.eval_expr(obj)?;
-                let field_name = self.ctx().text(field);
+                let field_name = self.module_ctx(self.current_module).text(field);
                 // typecheck guarantees an object here, and validates the field
                 // name for objects whose keys are statically known. For a
                 // computed object (e.g. a macro result) the keys aren't known
@@ -766,7 +753,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 } in fields
                 {
                     map.insert(
-                        self.ctx().text(key_span).to_string(),
+                        self.module_ctx(self.current_module)
+                            .text(key_span)
+                            .to_string(),
                         self.eval_expr(value_id)?,
                     );
                 }
@@ -1041,10 +1030,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     /// Enter one evaluator recursion frame, erroring if the depth cap is hit.
-    /// The caller decrements `eval_depth` once the guarded body returns. Bounds
-    /// the macro-recursion x combinator-nesting product that neither
-    /// `MAX_CALL_DEPTH` nor `MAX_PARSE_DEPTH` catches on its own; the error
-    /// carries the macro-call trace so the user can see the recursion chain.
+    /// The caller must decrement `eval_depth` once the guarded body returns.
     fn enter_eval(&mut self, id: NodeId) -> LowerResult<()> {
         if self.state.scratch.eval_depth >= MAX_EVAL_DEPTH {
             return Err(self.err(
