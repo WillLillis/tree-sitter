@@ -108,7 +108,7 @@ error_tests! { Type {
         r#"grammar { language: "test" }
         let x = { a: 1 }
         rule program { prec(x.b, "a") }"#,
-        TypeErrorKind::FieldNotFound { field: "b".into(), on_type: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))) }
+        TypeErrorKind::FieldNotFound { field: "b".into(), available: vec!["a".into()] }
     }
     error_word_non_rule_var {
         r#"let my_word = 42
