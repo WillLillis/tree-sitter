@@ -258,26 +258,28 @@ fn cfg_dropped_decl_enriches_undefined_symbol_error() {
 
 #[test]
 fn cfg_enrichment_preserves_existing_note() {
-    // Resolve attaches `DefinedLater` for forward let references. If a
-    // cfg-gated decl with the same name was also dropped, enrich should
-    // append the cfg note rather than clobbering the resolve note.
+    // An UnknownIdentifier can already carry a `did you mean` note. When the
+    // same name was also a cfg-dropped decl, enrich appends the cfg note rather
+    // than clobbering the existing one.
     let err = dsl_err(
         r#"
         grammar { language: "t", flags: { disabled: ["X"] } }
-        #[cfg(X)] let foo = "x"
-        rule program { foo }
-        let foo = "y"
+        #[cfg(X)] rule widget { "x" }
+        rule widgets { "y" }
+        rule program { widget }
     "#,
     );
     let e = assert_err!(err, Resolve);
     assert!(matches!(
         e.kind,
-        ResolveErrorKind::UnknownIdentifier(ref n) if n == "foo"
+        ResolveErrorKind::UnknownIdentifier(ref n) if n == "widget"
     ));
     let kinds: Vec<_> = e.notes.iter().map(|n| &n.message).collect();
     assert!(
-        kinds.iter().any(|m| matches!(m, NoteMessage::DefinedLater)),
-        "expected DefinedLater note, got {kinds:?}"
+        kinds
+            .iter()
+            .any(|m| matches!(m, NoteMessage::DidYouMean(s) if s == "widgets")),
+        "expected DidYouMean note, got {kinds:?}"
     );
     assert!(
         kinds
