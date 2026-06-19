@@ -192,6 +192,10 @@ fn eval_name(
     Ok(strings.intern_owned(&buf))
 }
 
+/// Build a computed rule name (`@<expr>`) at expand time, before resolve - so
+/// only the early-evaluable subset works: string literals, the macro's params,
+/// and `concat` of those. A `let` can't be read here (lets run at lower); pass
+/// it as a macro param instead.
 fn eval_name_into(
     shared: &SharedAst,
     ctx: &ModuleContext,
