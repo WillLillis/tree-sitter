@@ -261,3 +261,22 @@ fn rule_set_macro_with_regular_rules_around() {
     // start: program rotates program to position 0; remaining order preserved.
     assert_eq!(names, vec!["program", "helper_a", "helper_b"]);
 }
+
+#[test]
+fn computed_ref_to_macro_name_rejected() {
+    // `@"m"` computes the name "m", a macro - which `collect_decls` registers in
+    // the decl table before the computed-ref check. Without the rule-ness check
+    // it passes existence and lower emits a dangling NamedSymbol for it.
+    let err = dsl_err(
+        r#"
+        macro m() str_t { "x" }
+        rules r() {
+            rule program { @"m" }
+        }
+        grammar { language: "test" }
+        @r()
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("m".into()));
+}
