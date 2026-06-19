@@ -64,6 +64,16 @@ rule_tests! {
         rule identifier { regexp("[a-z]+") }"#,
         Rule::alias(Rule::NamedSymbol("identifier".into()), "renamed".to_string(), false)
     }
+    alias_with_forward_let_target {
+        // Same as above but the `let` is defined AFTER the alias use. Lets
+        // resolve regardless of order, so this stays an unnamed alias to the
+        // let's value - not a named alias to a nonexistent rule "FOO".
+        r#"grammar { language: "test" }
+        rule program { alias(identifier, FOO) }
+        rule identifier { regexp("[a-z]+") }
+        let FOO = "renamed""#,
+        Rule::alias(Rule::NamedSymbol("identifier".into()), "renamed".to_string(), false)
+    }
     prec_default {
         r#"grammar { language: "test" } rule program { prec(1, "x") }"#,
         Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
