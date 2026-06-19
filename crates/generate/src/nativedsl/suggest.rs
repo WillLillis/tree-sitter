@@ -13,7 +13,9 @@ pub(super) fn suggest_name<'a>(
     candidates
         .map(|c| (levenshtein(target, c), c))
         .filter(|&(d, _)| d > 0 && d <= threshold)
-        .min_by_key(|&(d, _)| d)
+        // Tie-break on the name so equal-distance candidates are deterministic
+        // even when callers iterate hash-ordered keys.
+        .min_by_key(|&(d, c)| (d, c))
         .map(|(_, c)| c.to_string())
 }
 
@@ -83,6 +85,20 @@ mod tests {
     #[test]
     fn suggest_empty_candidates() {
         assert_eq!(suggest_name("foo", std::iter::empty()), None);
+    }
+
+    #[test]
+    fn suggest_breaks_ties_lexicographically() {
+        // Equal-distance candidates must resolve deterministically: callers feed
+        // hash-ordered keys, so the smaller name must win regardless of order.
+        assert_eq!(
+            suggest_name("abc", ["abe", "abd"].iter().copied()).as_deref(),
+            Some("abd"),
+        );
+        assert_eq!(
+            suggest_name("abc", ["abd", "abe"].iter().copied()).as_deref(),
+            Some("abd"),
+        );
     }
 
     #[test]
