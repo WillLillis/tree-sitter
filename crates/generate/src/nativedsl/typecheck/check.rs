@@ -57,22 +57,8 @@ pub(super) fn check_item(
             }
             Ok(())
         }
-        Node::Let { value, .. } => {
-            let ty = ctx.let_types.get(&id).copied();
-            let constraint = ty.map_or(Constraint::None, Constraint::Exact);
-            let inferred = type_of(shared, ctx, *value, env, constraint)?;
-            if let Node::Object(range) = shared.arena.get(*value) {
-                let fields: Vec<String> = shared
-                    .pools
-                    .get_object(*range)
-                    .iter()
-                    .map(|f| ctx.text(f.name).to_string())
-                    .collect();
-                env.vars.insert(id, inferred);
-                env.object_fields.insert(id, fields);
-            } else {
-                env.vars.insert(id, inferred);
-            }
+        Node::Let { .. } => {
+            type_of_let(shared, ctx, id, env)?;
             Ok(())
         }
         Node::Macro(macro_id) => {
@@ -119,6 +105,42 @@ pub(super) fn check_item(
         Node::External { .. } => Ok(()),
         _ => unreachable!(),
     }
+}
+
+/// Type a `let` on demand and memoize it. Lets can reference one another, so
+/// types are computed lazily rather than strictly in source order; reentering
+/// a let that is still being typed is a self-reference cycle.
+fn type_of_let(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    let_id: NodeId,
+    env: &mut TypeEnv,
+) -> TypeResult<Ty> {
+    if let Some(&ty) = env.vars.get(&let_id) {
+        return Ok(ty);
+    }
+    let Node::Let { value, .. } = *shared.arena.get(let_id) else {
+        unreachable!()
+    };
+    env.lets_in_progress.insert(let_id);
+    let constraint = ctx
+        .let_types
+        .get(&let_id)
+        .copied()
+        .map_or(Constraint::None, Constraint::Exact);
+    let inferred = type_of(shared, ctx, value, env, constraint)?;
+    if let Node::Object(range) = *shared.arena.get(value) {
+        let fields: Vec<String> = shared
+            .pools
+            .get_object(range)
+            .iter()
+            .map(|f| ctx.text(f.name).to_string())
+            .collect();
+        env.object_fields.insert(let_id, fields);
+    }
+    env.lets_in_progress.remove(&let_id);
+    env.vars.insert(let_id, inferred);
+    Ok(inferred)
 }
 
 /// Typecheck rule decls inside a rule-set macro body at definition time.
@@ -320,9 +342,22 @@ fn type_of(
             TypeErrorKind::MacroUsedAsValue(ctx.text(span).to_string()),
             span,
         )),
-        // Resolver guarantees Var(let_id) points at a Let typechecked earlier
-        // in source order (cross-module: helpers checked before parent).
-        Node::Ident(IdentKind::Var(let_id)) => Ok(*env.vars.get(let_id).unwrap()),
+        // Type the referenced let on demand (it may be defined later or chain
+        // through other lets). Reentering an in-progress let is a cycle.
+        Node::Ident(IdentKind::Var(let_id)) => {
+            if env.lets_in_progress.contains(let_id) {
+                let Node::Let { name, .. } = *shared.arena.get(*let_id) else {
+                    unreachable!()
+                };
+                Err(TypeError::with_note(
+                    TypeErrorKind::CircularLet(ctx.text(name).to_string()),
+                    shared.arena.span(*let_id),
+                    ctx.note(NoteMessage::SelfReferenceHere, span),
+                ))
+            } else {
+                type_of_let(shared, ctx, *let_id, env)
+            }
+        }
         Node::Neg(inner) => {
             type_of(shared, ctx, *inner, env, Constraint::Exact(Ty::INT))?;
             Ok(Ty::INT)
