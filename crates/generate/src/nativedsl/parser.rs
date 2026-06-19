@@ -173,21 +173,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         })
     }
 
-    /// Accept an identifier or a keyword used as an identifier.
-    /// Keywords are contextual: `seq(...)` is a builtin call, but `seq` as a
-    /// bare name (e.g. a rule reference or binding name) is a valid identifier.
-    fn expect_ident(&mut self) -> ParseResult<Span> {
-        self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)
-    }
-
     fn expect_string(&mut self) -> ParseResult<Span> {
         self.eat(TokenKind::StringLit)
             .ok_or_else(|| self.error(ParseErrorKind::ExpectedString))
-    }
-
-    /// Accept a name token (for object keys, config keys, field access members).
-    fn expect_name(&mut self) -> ParseResult<Span> {
-        self.expect_ident_or_kw(ParseErrorKind::ExpectedName)
     }
 
     fn expect_ident_or_kw(&mut self, err: ParseErrorKind) -> ParseResult<Span> {
@@ -299,7 +287,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             return Ok(None);
         };
         self.expect(TokenKind::LBracket)?;
-        let kw = self.expect_ident()?;
+        let kw = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         let kw_text = self.ctx.text(kw);
         if kw_text != "cfg" {
             return Err(ParseError::new(
@@ -308,7 +296,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             ));
         }
         self.expect(TokenKind::LParen)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.expect(TokenKind::RParen)?;
         let end = self.expect(TokenKind::RBracket)?;
         self.ctx.has_cfg = true;
@@ -338,7 +326,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_external_decl(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwExternal)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.ctx.external_names.push(name);
         Ok(self
             .shared
@@ -368,7 +356,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 self.ctx.grammar_config = Some(config);
                 return Ok(self.shared.arena.push(Node::Grammar, start.merge(end)));
             }
-            let key_span = self.expect_name()?;
+            let key_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
             self.expect(TokenKind::Colon)?;
             let key = self.ctx.text(key_span);
             let field = ConfigField::try_from(key).map_err(|()| {
@@ -433,7 +421,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 start.merge(end),
             ));
         }
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
@@ -449,7 +437,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_let_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwLet)?;
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         let ty = if self.eat(TokenKind::Colon).is_some() {
             Some(self.parse_type()?.0)
         } else {
@@ -482,10 +470,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_macro_like(&mut self, start: Span, rule_set: bool) -> ParseResult<NodeId> {
-        let name = self.expect_ident()?;
+        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.expect(TokenKind::LParen)?;
         let params = self.comma_sep(TokenKind::RParen, |this| {
-            let pname = this.expect_ident()?;
+            let pname = this.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
             this.expect(TokenKind::Colon)?;
             Ok(Param {
                 name: pname,
@@ -542,7 +530,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// Caller is positioned at the leading `@`.
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
         let at_span = self.expect(TokenKind::At)?;
-        let name_span = self.expect_ident()?;
+        let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         if self.at(TokenKind::ColonColon) {
             return Err(self.error(ParseErrorKind::QualifiedRuleSetCall));
         }
@@ -726,7 +714,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             let start = self.shared.arena.span(result);
             self.advance_pos();
             self.deepen()?;
-            let field = self.expect_name()?;
+            let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
             result = self
                 .shared
                 .arena
@@ -904,7 +892,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             return Err(self.err_arg_count(TokenKind::KwGrammarConfig, 2, 1, start));
         }
         self.expect(TokenKind::Comma)?;
-        let field_span = self.expect_name()?;
+        let field_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
         let field_name = self.ctx.text(field_span);
         let field = ConfigField::try_from(field_name)
             .ok()
@@ -953,7 +941,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_field(&mut self, start: Span) -> ParseResult<NodeId> {
         let (name, content, end) =
-            self.parse_binary(start, TokenKind::KwField, Self::expect_name)?;
+            // Issue here
+            self.parse_binary(start, TokenKind::KwField, |this| {
+                this.expect_ident_or_kw(ParseErrorKind::ExpectedName)
+            })?;
         Ok(self
             .shared
             .arena
@@ -1079,7 +1070,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
-            let name = this.expect_ident()?;
+            let name = this.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
             this.expect(TokenKind::Colon)?;
             Ok(Param {
                 name,
@@ -1114,7 +1105,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_ident_expr(&mut self, start: Span) -> ParseResult<NodeId> {
-        let span = self.expect_ident()?;
+        let span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         let name = self.ctx.text(span);
         let name_id = if let Some(&(_, binding)) = self
             .locals
@@ -1140,7 +1131,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             if self.at(TokenKind::Dot) {
                 self.advance_pos();
                 self.deepen()?;
-                let field = self.expect_name()?;
+                let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
                 id = self
                     .shared
                     .arena
@@ -1148,7 +1139,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             } else if self.at(TokenKind::ColonColon) {
                 self.advance_pos();
                 self.deepen()?;
-                let member_span = self.expect_ident()?;
+                let member_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
                 if self.at(TokenKind::LParen) {
                     // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
                     let member_id = self
@@ -1217,7 +1208,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     fn parse_object(&mut self, start: Span) -> ParseResult<NodeId> {
         self.advance_pos();
         let fields = self.comma_sep(TokenKind::RBrace, |this| {
-            let key = this.expect_ident()?;
+            let key = this.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
             this.expect(TokenKind::Colon)?;
             Ok(ObjectField {
                 name: key,
