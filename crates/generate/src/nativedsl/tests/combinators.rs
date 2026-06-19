@@ -265,6 +265,18 @@ fn reserved_combinator() {
 }
 
 #[test]
+fn object_key_accepts_contextual_keyword() {
+    // An object-literal key is a name, so it accepts contextual keywords like
+    // `field`, the same as the field-access member position already does.
+    let g = dsl(r#"
+        let x = { field: "y" }
+        grammar { language: "test" }
+        rule program { x.field }
+    "#);
+    assert_eq!(g.variables[0].rule, Rule::String("y".into()));
+}
+
+#[test]
 fn reserved_multiple_sets() {
     let g = dsl(r#"grammar {
         language: "test",
