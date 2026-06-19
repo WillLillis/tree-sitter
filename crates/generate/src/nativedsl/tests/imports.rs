@@ -1038,3 +1038,26 @@ fn import_rule_preserves_metadata_and_reserved() {
     assert_eq!(find_rule(&g, "via_import"), find_rule(&g, "direct"));
     assert_eq!(find_rule(&g, "res_via_import"), find_rule(&g, "res_direct"));
 }
+
+#[test]
+fn helper_rules_materialize_in_import_source_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.tsg");
+    std::fs::write(&a, "rule a_rule { \"a\" }\n").unwrap();
+    let b = dir.path().join("b.tsg");
+    std::fs::write(&b, "rule b_rule { \"b\" }\n").unwrap();
+    let input = format!(
+        r#"
+        let ha = import("{}")
+        let hb = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ "p" }}
+    "#,
+        dsl_path(&a),
+        dsl_path(&b),
+    );
+    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    // ha imports before hb, so its rules materialize first.
+    assert_eq!(names, vec!["program", "a_rule", "b_rule"]);
+}
