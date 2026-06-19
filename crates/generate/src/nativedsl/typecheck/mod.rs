@@ -67,8 +67,11 @@ pub enum TypeErrorKind {
         expected: usize,
         got: usize,
     },
-    #[error("no field '{field}' on {on_type}")]
-    FieldNotFound { field: String, on_type: Ty },
+    #[error("object has no field '{field}'; available: {}", available.join(", "))]
+    FieldNotFound {
+        field: String,
+        available: Vec<String>,
+    },
     #[error("list elements have inconsistent types: {first} vs {got}")]
     ListElementTypeMismatch { first: Ty, got: Ty },
     #[error("object values must be rule_t, str_t, or int_t, got {0}")]
