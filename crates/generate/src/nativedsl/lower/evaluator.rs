@@ -12,6 +12,7 @@ use super::{
             BinOp, ChildRange, ConfigField, ExpandId, ForId, IdentKind, MacroId, ModuleContext,
             Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
+        lexer::unescape_string,
         string_pool::{Str, StrEntry, StringPool},
     },
     CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH, MAX_EVAL_DEPTH,
@@ -1197,66 +1198,4 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
         )
     }
-}
-
-fn unescape_string(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    // Guarded by lexer escape validation in lex_string: all unwraps below are
-    // safe because lex_string has already proven the escape is well-formed.
-    while let Some(off) = memchr::memchr(b'\\', &bytes[i..]) {
-        out.extend_from_slice(&bytes[i..i + off]);
-        let after = i + off + 1;
-        match bytes[after] {
-            c @ (b'"' | b'\\') => {
-                out.push(c);
-                i = after + 1;
-            }
-            b'n' => {
-                out.push(b'\n');
-                i = after + 1;
-            }
-            b't' => {
-                out.push(b'\t');
-                i = after + 1;
-            }
-            b'r' => {
-                out.push(b'\r');
-                i = after + 1;
-            }
-            b'0' => {
-                out.push(0);
-                i = after + 1;
-            }
-            b'x' => {
-                // \xHH - 2 hex digits, ASCII range, push as single byte.
-                let hex = unsafe { std::str::from_utf8_unchecked(&bytes[after + 1..after + 3]) };
-                out.push(u8::from_str_radix(hex, 16).unwrap());
-                i = after + 3;
-            }
-            b'u' => {
-                // \uHHHH (4 hex) or \u{H..H} (1-6 hex in braces), UTF-8 encoded.
-                let (hex, end) = if bytes[after + 1] == b'{' {
-                    let h = after + 2;
-                    let p = h + memchr::memchr(b'}', &bytes[h..]).unwrap();
-                    (&bytes[h..p], p + 1)
-                } else {
-                    (&bytes[after + 1..after + 5], after + 5)
-                };
-                let hex = unsafe { std::str::from_utf8_unchecked(hex) };
-                let cp = u32::from_str_radix(hex, 16).unwrap();
-                // SAFETY: lexer rejected surrogates and values > 0x10FFFF.
-                let ch = unsafe { char::from_u32_unchecked(cp) };
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                i = end;
-            }
-            _ => unreachable!(),
-        }
-    }
-    out.extend_from_slice(&bytes[i..]);
-    // SAFETY: input was UTF-8 and every escape resolves to valid UTF-8
-    // (ASCII for simple/\x, UTF-8-encoded codepoint for \u).
-    unsafe { String::from_utf8_unchecked(out) }
 }

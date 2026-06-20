@@ -17,7 +17,7 @@ use thiserror::Error;
 use super::{
     ExpandError, NoteMessage,
     ast::{Expansion, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
-    lexer::is_ident_str,
+    lexer::{is_ident_str, unescape_string},
     string_pool::{Str, StringPool},
 };
 
@@ -232,8 +232,15 @@ fn eval_name_into(
     let span = shared.arena.span(node_id);
     match node {
         Node::StringLit => {
-            // Span is quote-stripped by parse_primary.
-            out.push_str(ctx.text(span));
+            // Decode escapes like a rule-body string (quote-stripped by
+            // parse_primary), so `"a\u{41}"` contributes "aA"; is_ident_str then
+            // validates the decoded name.
+            let raw = ctx.text(span);
+            if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
+                out.push_str(&unescape_string(raw));
+            } else {
+                out.push_str(raw);
+            }
             Ok(())
         }
         Node::RawStringLit { hash_count } => {
