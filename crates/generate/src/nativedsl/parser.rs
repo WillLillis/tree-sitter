@@ -940,10 +940,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_field(&mut self, start: Span) -> ParseResult<NodeId> {
-        let (name, content, end) =
-            self.parse_binary(start, TokenKind::KwField, |this| {
-                this.expect_ident_or_kw(ParseErrorKind::ExpectedName)
-            })?;
+        let (name, content, end) = self.parse_binary(start, TokenKind::KwField, |this| {
+            this.expect_ident_or_kw(ParseErrorKind::ExpectedName)
+        })?;
         Ok(self
             .shared
             .arena
