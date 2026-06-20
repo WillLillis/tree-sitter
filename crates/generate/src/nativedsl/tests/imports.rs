@@ -277,10 +277,60 @@ fn error_import_function_not_found() {
         rule program { h::nonexistent("x") }
     "#,
     );
-    let e = assert_err!(err, Type);
+    let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
-        TypeErrorKind::ImportMacroNotFound("nonexistent".into())
+        ResolveErrorKind::ImportMemberNotFound("nonexistent".into())
+    );
+}
+
+#[test]
+fn import_member_not_found_suggests_close_name() {
+    // A misspelled member access gets a "did you mean" note, like in-module
+    // unknown-identifier errors.
+    let err = dsl_err(
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::GREETIN }
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::ImportMemberNotFound("GREETIN".into())
+    );
+    assert!(
+        e.notes
+            .iter()
+            .any(|n| matches!(&n.message, NoteMessage::DidYouMean(s) if s == "GREETING")),
+        "expected did-you-mean GREETING, got {:?}",
+        e.notes
+    );
+}
+
+#[test]
+fn import_call_member_not_found_suggests_close_name() {
+    // The call path resolves the missing member at resolve time too, so a
+    // misspelled `h::sep_byy(...)` suggests the macro `sep_by`.
+    let err = dsl_err(
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::sep_byy("x") }
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::ImportMemberNotFound("sep_byy".into())
+    );
+    assert!(
+        e.notes
+            .iter()
+            .any(|n| matches!(&n.message, NoteMessage::DidYouMean(s) if s == "sep_by")),
+        "expected did-you-mean sep_by, got {:?}",
+        e.notes
     );
 }
 

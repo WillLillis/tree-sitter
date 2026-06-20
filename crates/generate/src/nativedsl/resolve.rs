@@ -449,6 +449,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let member_name = rcx.ctx.text(member);
                 resolve_qualified_member(
+                    rcx.ctx,
                     arena,
                     &rcx.modules[idx],
                     idx as ModuleId,
@@ -465,7 +466,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             // None when obj isn't a module ref - type checker reports the error
             if let Some(idx) = resolve_module_index(arena, obj) {
                 let macro_name = rcx.ctx.text(arena.span(name));
-                resolve_qualified_call_name(arena, &rcx.modules[idx], name, macro_name);
+                resolve_qualified_call_name(rcx.ctx, arena, &rcx.modules[idx], name, macro_name)?;
             }
             for &arg in args {
                 resolve_expr(arena, rcx, arg)?;
@@ -476,18 +477,29 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
     }
 }
 
-/// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
-/// Only a macro is valid here; anything else is left unresolved for the type
-/// checker to report.
+/// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`. A
+/// missing member is reported here (with a suggestion); a member that exists but
+/// isn't a macro stays unresolved for the type checker to reject.
 fn resolve_qualified_call_name(
+    ctx: &ModuleContext,
     arena: &mut NodeArena,
     target: &Module,
     name_id: NodeId,
     macro_name: &str,
-) {
-    if let Some(Export::Local(kind @ IdentKind::Macro(_))) = target.export(macro_name) {
-        arena.set(name_id, Node::Ident(kind));
+) -> ResolveResult<()> {
+    match target.export(macro_name) {
+        Some(Export::Local(kind @ IdentKind::Macro(_))) => arena.set(name_id, Node::Ident(kind)),
+        None => {
+            return Err(import_member_not_found(
+                ctx,
+                target,
+                macro_name,
+                arena.span(name_id),
+            ));
+        }
+        Some(_) => {}
     }
+    Ok(())
 }
 
 /// Resolve a `QualifiedAccess { obj, member }` against the target module's
@@ -496,6 +508,7 @@ fn resolve_qualified_call_name(
 /// - lowered rule / external -> `ImportRef` (the lowerer indexes directly)
 /// - not found -> error
 fn resolve_qualified_member(
+    ctx: &ModuleContext,
     arena: &mut NodeArena,
     target: &Module,
     module: ModuleId,
@@ -507,13 +520,34 @@ fn resolve_qualified_member(
         Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
         Some(Export::Rule(target)) => arena.set(node_id, Node::ModuleRule { module, target }),
         None => {
-            return Err(ResolveError::new(
-                ResolveErrorKind::ImportMemberNotFound(member_name.to_string()),
+            return Err(import_member_not_found(
+                ctx,
+                target,
+                member_name,
                 member_span,
             ));
         }
     }
     Ok(())
+}
+
+/// Build an `ImportMemberNotFound` error, attaching a "did you mean" note when a
+/// close export name exists in `target`.
+fn import_member_not_found(
+    ctx: &ModuleContext,
+    target: &Module,
+    name: &str,
+    span: Span,
+) -> ResolveError {
+    let kind = ResolveErrorKind::ImportMemberNotFound(name.to_string());
+    if let Some(suggestion) = super::suggest::suggest_name(name, target.export_keys()) {
+        return ResolveError::with_note(
+            kind,
+            span,
+            ctx.note(NoteMessage::DidYouMean(suggestion), span),
+        );
+    }
+    ResolveError::new(kind, span)
 }
 
 /// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
