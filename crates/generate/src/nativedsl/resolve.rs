@@ -31,9 +31,8 @@ use crate::{
 type Decls<'src> = FxHashMap<&'src str, Spanned<IdentKind>>;
 
 /// Context for [`collect_external_names`].
-struct ExternalNameCtx<'src, 'a, 'b> {
+struct ExternalNameCtx<'src, 'a> {
     decls: &'a mut Decls<'src>,
-    root_items: &'b [NodeId],
     /// `let` names currently being expanded; reentry indicates a cycle.
     expanding_lets: FxHashSet<&'src str>,
 }
@@ -233,7 +232,6 @@ fn collect_decls<'a>(
     {
         let mut ec = ExternalNameCtx {
             decls: &mut decls,
-            root_items,
             expanding_lets: FxHashSet::default(),
         };
         collect_external_names(shared, ctx, ext_id, &mut ec)?;
@@ -585,25 +583,28 @@ fn collect_external_names<'src>(
     shared: &SharedAst,
     ctx: &'src ModuleContext,
     id: NodeId,
-    ec: &mut ExternalNameCtx<'src, '_, '_>,
+    ec: &mut ExternalNameCtx<'src, '_>,
 ) -> ResolveResult<()> {
     let arena = &shared.arena;
     match arena.get(id) {
-        // Bare identifier: either a let binding (follow it) or an external token name.
+        // Bare identifier: follow a let, ignore an already-declared name, or
+        // register an unknown name as a new external token.
         Node::Ident(IdentKind::Unresolved) => {
             let name = ctx.text(arena.span(id));
-            if let Some(value_id) = find_let_value(arena, ctx, ec.root_items, name) {
-                if !ec.expanding_lets.insert(name) {
-                    return Err(ResolveError::new(
-                        ResolveErrorKind::InvalidExternalsExpression,
-                        arena.span(id),
-                    ));
+            match ec.decls.get(name).map(|d| d.value) {
+                Some(IdentKind::Var(let_id)) => {
+                    if !ec.expanding_lets.insert(name) {
+                        return Err(ResolveError::new(
+                            ResolveErrorKind::InvalidExternalsExpression,
+                            arena.span(id),
+                        ));
+                    }
+                    expect_pat!(Node::Let { value, .. }, *arena.get(let_id));
+                    collect_external_names(shared, ctx, value, ec)?;
+                    ec.expanding_lets.remove(name);
                 }
-                collect_external_names(shared, ctx, value_id, ec)?;
-                ec.expanding_lets.remove(name);
-            } else if !ec.decls.contains_key(name) {
-                // Unknown bare identifier - register as external token.
-                insert_decl(ec.decls, name, IdentKind::Rule, arena.span(id), ctx)?;
+                None => insert_decl(ec.decls, name, IdentKind::Rule, arena.span(id), ctx)?,
+                Some(_) => {}
             }
         }
         Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
@@ -636,23 +637,6 @@ fn collect_external_names<'src>(
         }
     }
     Ok(())
-}
-
-/// Find the value node of a let binding by name.
-fn find_let_value(
-    arena: &NodeArena,
-    ctx: &ModuleContext,
-    root_items: &[NodeId],
-    name: &str,
-) -> Option<NodeId> {
-    root_items.iter().find_map(|&item_id| {
-        if let Node::Let { name: n, value, .. } = arena.get(item_id)
-            && ctx.text(*n) == name
-        {
-            return Some(*value);
-        }
-        None
-    })
 }
 
 pub type ResolveResult<T> = Result<T, ResolveError>;
