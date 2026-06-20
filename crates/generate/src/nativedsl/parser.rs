@@ -894,20 +894,20 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.expect(TokenKind::Comma)?;
         let field_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
         let field_name = self.ctx.text(field_span);
-        let field = ConfigField::try_from(field_name)
-            .ok()
-            .filter(|f| {
-                !matches!(
-                    f,
-                    ConfigField::Language | ConfigField::Inherits | ConfigField::Flags
-                )
-            })
-            .ok_or_else(|| {
-                ParseError::new(
-                    ParseErrorKind::UnknownGrammarField(field_name.to_string()),
-                    field_span,
-                )
-            })?;
+        let field = ConfigField::try_from(field_name).map_err(|()| {
+            ParseError::new(
+                ParseErrorKind::UnknownGrammarField(field_name.to_string()),
+                field_span,
+            )
+        })?;
+        // inherits/flags are real fields but not composable values, so
+        // grammar_config() doesn't expose them (language reads as the base's name).
+        if matches!(field, ConfigField::Inherits | ConfigField::Flags) {
+            Err(ParseError::new(
+                ParseErrorKind::GrammarFieldNotReadable(field_name.to_string()),
+                field_span,
+            ))?;
+        }
         self.expect_close_args(TokenKind::KwGrammarConfig, 2, start)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self
@@ -1314,6 +1314,8 @@ pub enum ParseErrorKind {
     TupleArity(usize),
     #[error("unknown grammar field '{0}'")]
     UnknownGrammarField(String),
+    #[error("grammar field '{0}' cannot be read via grammar_config()")]
+    GrammarFieldNotReadable(String),
     #[error("duplicate grammar field '{0}'")]
     DuplicateGrammarField(String),
     #[error("only identifiers can be used as macro names")]

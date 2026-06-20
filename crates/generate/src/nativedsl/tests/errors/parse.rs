@@ -196,6 +196,11 @@ error_tests! { Parse {
         grammar { language: "derived", inherits: base, extras: grammar_config(base, bogus) }"#,
         ParseErrorKind::UnknownGrammarField("bogus".into())
     }
+    error_grammar_config_unreadable_field {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base, extras: grammar_config(base, flags) }"#,
+        ParseErrorKind::GrammarFieldNotReadable("flags".into())
+    }
     error_qualified_rule_set_call {
         r#"let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
