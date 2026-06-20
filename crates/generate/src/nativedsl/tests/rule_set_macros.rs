@@ -247,6 +247,20 @@ fn rule_set_macro_literal_name_via_at_string() {
 }
 
 #[test]
+fn rule_set_macro_at_string_name_unescapes() {
+    // `@"..."` decodes escapes like any string literal: \u{41} is 'A', so the
+    // rule is named "aA" - consistent with rule-body string decoding.
+    let g = dsl(r#"
+        rules emit() {
+            rule @"a\u{41}" { "x" }
+        }
+        grammar { language: "test", start: aA }
+        @emit()
+    "#);
+    assert_eq!(g.variables[0].name, "aA");
+}
+
+#[test]
 fn rule_set_macro_with_regular_rules_around() {
     let g = dsl(r#"
         rules extras() {
