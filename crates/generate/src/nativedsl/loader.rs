@@ -70,7 +70,8 @@ impl Loader<'_> {
                 .parse()?;
 
         // Register this module's flag declarations into the global state.
-        // First-write-wins, so descendants (loaded earlier) override ancestors.
+        // Runs before children load and the active map is first-write-wins,
+        // so this module's flag values win over the modules it imports.
         self.cfg.merge_module_flags(self.shared, &mut ctx)?;
 
         // Apply cfg gating *before* loading children so cfg-disabled

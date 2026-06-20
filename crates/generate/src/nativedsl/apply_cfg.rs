@@ -1,8 +1,9 @@
 //! Cfg attribute evaluation. Runs between parse and resolve. Drops disabled
 //! `#[cfg(X)]` subtrees in place; unwraps active ones.
 //!
-//! Active flag set is built in load order with first-write-wins, so the
-//! deepest descendant (parses first) overrides ancestors.
+//! Active flag set is built in load order with first-write-wins. Each module
+//! merges its own flags before loading the modules it imports or inherits, so
+//! an importing module overrides the flag values of the modules it pulls in.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -21,7 +22,8 @@ pub struct CfgState {
     /// anywhere in the load chain. Cached for the helper-module visibility
     /// check (which sees the global declared set, not per-module).
     pub declared_any: FxHashSet<String>,
-    /// `name -> enabled?`. Descendants (loaded earlier) win via `or_insert`.
+    /// `name -> enabled?`. First write wins via `or_insert`; a module merges
+    /// before loading its imports, so importers override imported modules.
     pub active: FxHashMap<String, bool>,
 }
 
