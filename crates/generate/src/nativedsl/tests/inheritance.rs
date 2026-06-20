@@ -676,3 +676,14 @@ fn start_picks_derived_rule_under_inheritance() {
     assert!(names.contains(&"program"));
     assert!(names.contains(&"identifier"));
 }
+
+#[test]
+fn grammar_config_reads_base_language() {
+    // grammar_config(base, language) reads the base grammar's name as a str_t.
+    let g = dsl(r#"
+        let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        rule lang_name { grammar_config(base, language) }
+    "#);
+    assert_eq!(*find_rule(&g, "lang_name"), Rule::String("base".into()));
+}
