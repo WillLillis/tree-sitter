@@ -74,6 +74,8 @@ pub enum TypeErrorKind {
     },
     #[error("list elements have inconsistent types: {first} vs {got}")]
     ListElementTypeMismatch { first: Ty, got: Ty },
+    #[error("object field values have inconsistent types: {first} vs {got}")]
+    ObjectFieldTypeMismatch { first: Ty, got: Ty },
     #[error("object values must be rule_t, str_t, or int_t, got {0}")]
     InvalidObjectValue(Ty),
     #[error(
