@@ -24,6 +24,12 @@ error_tests! { Type {
         r#"grammar { language: "test" } let x = { a: 1, b: 2, a: 3 } rule foo { "x" }"#,
         TypeErrorKind::DuplicateObjectKey("a".into())
     }
+    error_object_field_type_mismatch {
+        r#"grammar { language: "test" }
+        let x = { a: program, b: 1 }
+        rule program { "p" }"#,
+        TypeErrorKind::ObjectFieldTypeMismatch { first: Ty::RULE, got: Ty::INT }
+    }
     error_empty_for_bindings {
         r#"grammar { language: "test" }
         rule program { choice(for () in [program] { "x" }) }"#,

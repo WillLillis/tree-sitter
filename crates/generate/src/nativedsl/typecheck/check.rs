@@ -657,9 +657,15 @@ fn type_of_object(
     let mut widest = type_of(shared, ctx, fields[0].value, env, expected_inner)?;
     for &ObjectField { value: val_id, .. } in &fields[1..] {
         let ty = type_of(shared, ctx, val_id, env, expected_inner)?;
-        widest = widest
-            .widen(ty)
-            .ok_or_else(|| mismatch(widest, ty, shared.arena.span(val_id)))?;
+        widest = widest.widen(ty).ok_or_else(|| {
+            TypeError::new(
+                TypeErrorKind::ObjectFieldTypeMismatch {
+                    first: widest,
+                    got: ty,
+                },
+                shared.arena.span(val_id),
+            )
+        })?;
     }
     let invalid = || {
         TypeError::new(
