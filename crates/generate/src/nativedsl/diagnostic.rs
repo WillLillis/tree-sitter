@@ -119,18 +119,17 @@ impl std::fmt::Display for NativeDslError {
             render_error(f, current, &innermost.source_text, &innermost.path)?;
 
             // Each module is referenced *from* its parent's source: modules[0]
-            // from the root, modules[i] from modules[i-1]. Pair each module
-            // with its parent's (text, path) and render innermost-out.
-            let parents: Vec<(&str, &Path)> =
-                std::iter::once((self.src.as_str(), self.path.as_path()))
-                    .chain(
-                        modules[..modules.len() - 1]
-                            .iter()
-                            .map(|m| (m.source_text.as_str(), m.path.as_path())),
+            // from the root, modules[i] from modules[i-1]. Render innermost-out,
+            // deriving each module's parent context by index.
+            for (i, m) in modules.iter().enumerate().rev() {
+                let (text, path) = if i == 0 {
+                    (self.src.as_str(), self.path.as_path())
+                } else {
+                    (
+                        modules[i - 1].source_text.as_str(),
+                        modules[i - 1].path.as_path(),
                     )
-                    .collect();
-
-            for (m, (text, path)) in modules.iter().zip(parents).rev() {
+                };
                 writeln!(f)?;
                 render_snippet(
                     f,
