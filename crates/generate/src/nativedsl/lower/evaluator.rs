@@ -385,6 +385,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         // i.e. in `previous` with a lowered grammar set.
         let grammar = self.previous[usize::from(mod_idx)].lowered().unwrap();
         match field {
+            C::Language => {
+                let sid = self.strings.intern_owned(&grammar.name);
+                Ok(self.alloc_val(Value::Str(sid)))
+            }
             C::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
             C::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
             C::Inline => self.import_names_as_list(&grammar.variables_to_inline, span),
@@ -441,7 +445,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 }
                 Ok(self.alloc_object(map))
             }
-            C::Language | C::Inherits | C::Flags => unreachable!(),
+            C::Inherits | C::Flags => unreachable!(),
         }
     }
 
