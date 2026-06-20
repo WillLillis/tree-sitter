@@ -330,11 +330,12 @@ fn type_of(
             }
             use crate::nativedsl::ast::ConfigField as C;
             Ok(match field {
+                C::Language => Ty::STR,
                 C::Extras | C::Externals | C::Inline | C::Supertypes => Ty::LIST_RULE,
                 C::Conflicts | C::Precedences => Ty::LIST_LIST_RULE,
                 C::Word | C::Start => Ty::RULE,
                 C::Reserved => Ty::OBJ_LIST_RULE,
-                C::Language | C::Inherits | C::Flags => unreachable!(),
+                C::Inherits | C::Flags => unreachable!(),
             })
         }
         &Node::MacroParam { ty, .. } | &Node::ForBinding { ty, .. } => Ok(ty),
