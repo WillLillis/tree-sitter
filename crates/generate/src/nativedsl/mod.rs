@@ -142,6 +142,14 @@ impl Module {
         };
         exports.get(name).copied()
     }
+
+    /// The names this module exports, for "did you mean" suggestions.
+    pub(crate) fn export_keys(&self) -> impl Iterator<Item = &str> {
+        let exports = match self {
+            Self::Helper { exports, .. } | Self::Grammar { exports, .. } => exports,
+        };
+        exports.keys().map(|k| &**k)
+    }
 }
 
 /// The lowered output a module exposes, passed to [`build_exports`].
