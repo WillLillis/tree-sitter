@@ -134,6 +134,15 @@ impl Module {
         }
     }
 
+    /// This module's lowered helper rules; empty for a grammar module. Used to
+    /// dereference an [`ImportedRule`] handle.
+    pub(crate) fn helper_rules(&self) -> &[(String, Rule)] {
+        match self {
+            Self::Helper { lowered_rules, .. } => lowered_rules,
+            Self::Grammar { .. } => &[],
+        }
+    }
+
     /// Look up a name in this module's export table.
     #[must_use]
     pub fn export(&self, name: &str) -> Option<Export> {
@@ -222,12 +231,12 @@ pub fn build_exports(
 /// argument is the span of the import statement that brought the helper
 /// into scope (used for "first defined here" notes when registering helper
 /// rule names).
-pub(super) fn for_each_imported_helper<'a, E>(
+pub(super) fn for_each_imported_helper<'a>(
     arena: &ast::NodeArena,
     initial_refs: &[ast::NodeId],
     modules: &'a [Module],
-    mut f: impl FnMut(ModuleId, &'a Module, Span) -> Result<(), E>,
-) -> Result<(), E> {
+    mut f: impl FnMut(ModuleId, &'a Module, Span),
+) {
     let mut visited: rustc_hash::FxHashSet<u8> = rustc_hash::FxHashSet::default();
     let mut stack: Vec<(u8, Span)> = Vec::new();
 
@@ -253,11 +262,44 @@ pub(super) fn for_each_imported_helper<'a, E>(
         }
         let module = &modules[usize::from(idx)];
         if matches!(module, Module::Helper { .. }) {
-            f(idx, module, ref_span)?;
+            f(idx, module, ref_span);
             seed(&mut stack, &module.ctx().module_refs);
         }
     }
-    Ok(())
+}
+
+/// A rule contributed by a transitively-imported helper - a handle into the
+/// owning helper's `lowered_rules`.
+///
+/// Resolved once after child modules load and shared by resolve (bare-name
+/// registration) and lower (materialization), so the two passes can't disagree
+/// about what an import contributes.
+#[derive(Clone, Copy)]
+pub struct ImportedRule {
+    pub module: ModuleId,
+    pub index: u32,
+    /// The import statement that brought the rule into scope, for notes.
+    pub ref_span: Span,
+}
+
+/// Flatten the transitive helper imports once into an ordered handle list, in
+/// place of the separate resolve-side and lower-side import-graph walks.
+pub(crate) fn collect_imported_rules(
+    arena: &ast::NodeArena,
+    initial_refs: &[ast::NodeId],
+    modules: &[Module],
+) -> Vec<ImportedRule> {
+    let mut rules = Vec::new();
+    for_each_imported_helper(arena, initial_refs, modules, |module, helper, ref_span| {
+        for index in 0..helper.helper_rules().len() {
+            rules.push(ImportedRule {
+                module,
+                index: index as u32,
+                ref_span,
+            });
+        }
+    });
+    rules
 }
 
 /// Entry point. Parse a native DSL source file into an [`InputGrammar`].

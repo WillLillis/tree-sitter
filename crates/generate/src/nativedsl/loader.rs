@@ -122,13 +122,25 @@ impl Loader<'_> {
 
         self.load_import_children(&ctx, module_dir)?;
 
+        // Flatten the transitive helper imports once; resolve and lower both
+        // consume this list instead of each re-walking the import graph.
+        let imported_rules =
+            super::collect_imported_rules(&self.shared.arena, &ctx.module_refs, self.modules);
+
         // Resolve identifiers + typecheck. Child modules already populated env
         // during their own load_module calls.
         let base = ctx
             .inherit_module(&self.shared.arena)
             .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
-        resolve::resolve(self.shared, &ctx, self.strings, self.modules, base)
-            .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
+        resolve::resolve(
+            self.shared,
+            &ctx,
+            self.strings,
+            self.modules,
+            base,
+            &imported_rules,
+        )
+        .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         typecheck::check(self.shared, &ctx, self.env)?;
         let module = match kind {
@@ -139,6 +151,7 @@ impl Loader<'_> {
                     self.shared,
                     self.modules,
                     &ctx,
+                    &imported_rules,
                 )?);
                 let exports = super::build_exports(
                     &self.shared.arena,
