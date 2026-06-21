@@ -532,9 +532,6 @@ pub struct ModuleContext {
     /// evaluated under each call's args at expand time, paired with their span.
     /// Resolve validates each against the rule-name table.
     pub computed_refs: Vec<Spanned<Str>>,
-    /// Top-level macro names mapped to their `MacroId`, recorded by the parser
-    /// as it builds each decl.
-    pub macro_index: FxHashMap<String, MacroId>,
     /// Optional `let name: ty` annotations, keyed by the `Node::Let` id. Stored
     /// out-of-line (most lets have none) so the annotation doesn't widen `Node`.
     /// Written by the parser, read by typecheck.
