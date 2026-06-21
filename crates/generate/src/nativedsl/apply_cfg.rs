@@ -99,14 +99,12 @@ pub fn apply_cfg(
     state: &CfgState,
     kind: ModuleKind,
 ) -> Result<(), ResolveError> {
-    // The cfg walk is the single builder of the node-position side tables
-    // (module_refs, macro_index, external_names): it visits every surviving
-    // node, so a nested cfg-dropped import / macro / external is simply never
-    // collected, and nothing can be missed by position. Cleared here and
-    // repopulated by the walk; the no-cfg path keeps the parser's population
-    // since apply_cfg only runs when has_cfg.
+    // The cfg walk rebuilds module_refs from the surviving AST: it visits every
+    // surviving node, so a nested cfg-dropped import / inherit is never
+    // collected. Cleared here, repopulated by the walk; the no-cfg path keeps
+    // the parser's population since apply_cfg only runs when has_cfg. (sym_refs
+    // are pruned per-macro below; top-level-only tables are derived where used.)
     ctx.module_refs.clear();
-    ctx.external_names.clear();
     let mut w = Walker {
         shared: &mut *shared,
         state,
@@ -115,7 +113,6 @@ pub fn apply_cfg(
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
-        external_names: &mut ctx.external_names,
         current_macro: None,
     };
     // Walk grammar config fields first - cfg attrs may appear on members of
@@ -155,10 +152,9 @@ struct Walker<'a> {
     /// decls for `enrich_resolve_error` to use later.
     cfg_declared: &'a FxHashMap<String, Span>,
     cfg_dropped: &'a mut FxHashMap<String, NodeId>,
-    /// Node-position side tables, rebuilt from the surviving AST as the walk
-    /// visits each kept node - nothing is collected from a dropped subtree.
+    /// The module's import/inherit refs, rebuilt from the surviving AST as the
+    /// walk visits each one - a nested cfg-dropped ref is never collected.
     module_refs: &'a mut Vec<NodeId>,
-    external_names: &'a mut Vec<Span>,
     /// The rule-set macro currently being walked, so its body's surviving
     /// computed-name refs (`@<expr>`) collect into that macro's `sym_refs`.
     current_macro: Option<MacroId>,
@@ -308,13 +304,12 @@ impl Walker<'_> {
                 self.walk(self.shared.pools.get_macro(macro_id).body)?;
                 self.current_macro = None;
             }
-            // External decl + import/inherit ref: collected into the
-            // node-position tables; no children to descend into.
-            Node::External { name } => self.external_names.push(name),
+            // Import/inherit ref: collected so resolve and lower see the
+            // surviving set; no children to descend into.
             Node::ModuleRef { .. } => self.module_refs.push(id),
             // Leaves / nothing to descend into.
             #[rustfmt::skip]
-            Node::Grammar | Node::StringLit | Node::RawStringLit { .. }
+            Node::Grammar | Node::External { .. } | Node::StringLit | Node::RawStringLit { .. }
             | Node::IntLit(_) | Node::Ident(_) | Node::Blank
             | Node::MacroParam { .. } | Node::ForBinding { .. } | Node::Unreachable
             // handled by walk(), unreachable here
