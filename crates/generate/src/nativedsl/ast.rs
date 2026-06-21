@@ -406,6 +406,10 @@ impl AstPools {
         &self.macro_configs[id.index()]
     }
 
+    pub fn get_macro_mut(&mut self, id: MacroId) -> &mut MacroConfig {
+        &mut self.macro_configs[id.index()]
+    }
+
     #[must_use]
     pub fn get_for(&self, id: ForId) -> &ForConfig {
         &self.for_configs[id.index()]
