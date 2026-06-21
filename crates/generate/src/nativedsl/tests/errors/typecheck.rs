@@ -363,18 +363,13 @@ fn error_duplicate_object_key_has_note() {
 
 #[test]
 fn error_grammar_config_on_import_module() {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("helper.tsg");
-    std::fs::write(&helper, "let X: int_t = 1").unwrap();
-    let grammar = dir.path().join("grammar.tsg");
-    let src = format!(
-        "let h = import(\"{}\")\n\
-         grammar {{ language: \"t\", extras: grammar_config(h, extras) }}\n\
-         rule program {{ \"x\" }}",
-        dsl_path(&helper)
-    );
-    std::fs::write(&grammar, &src).unwrap();
-    let err = parse_native_dsl(&src, &grammar).unwrap_err();
+    let err = parse_with_modules(
+        &[("helper.tsg", "let X: int_t = 1")],
+        "let h = import(\"helper.tsg\")\n\
+         grammar { language: \"t\", extras: grammar_config(h, extras) }\n\
+         rule program { \"x\" }",
+    )
+    .unwrap_err();
     let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::GrammarConfigRequiresInherit);
 }

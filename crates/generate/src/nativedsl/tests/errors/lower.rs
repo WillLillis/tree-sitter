@@ -267,17 +267,13 @@ fn error_inherit_cycle() {
 fn error_self_inherit_cycle() {
     // A grammar that inherits itself should be caught as a cycle,
     // not spin until MAX_MODULE_DEPTH.
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("grammar.tsg");
-    std::fs::write(
-        &path,
+    let err = parse_with_modules(
+        &[],
         r#"let base = inherit("grammar.tsg")
         grammar { language: "test", inherits: base }
         rule program { "x" }"#,
     )
-    .unwrap();
-    let source = std::fs::read_to_string(&path).unwrap();
-    let err = parse_native_dsl(&source, &path).unwrap_err();
+    .unwrap_err();
     match &err {
         DslError::Module(m) => {
             assert!(
