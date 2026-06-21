@@ -995,3 +995,34 @@ fn helper_rules_materialize_in_import_source_order() {
     // ha imports before hb, so its rules materialize first.
     assert_eq!(names, vec!["program", "a_rule", "b_rule"]);
 }
+
+#[test]
+fn override_reaching_helper_top_level_via_macro_is_rejected() {
+    // A helper can't inherit, so an `override` that reaches its top level via a
+    // called rules-macro has nothing to override. Reject it like a direct
+    // top-level `override rule`, rather than silently demoting it to a plain rule.
+    // The macro *definition* stays legal - only the helper calling it is rejected.
+    let err = parse_with_modules(
+        &[(
+            "helper.tsg",
+            r#"
+            rules wrap(rhs: rule_t) { override rule expr { choice("a", rhs) } }
+            @wrap("b")
+            "#,
+        )],
+        r#"
+        let h = import("helper.tsg")
+        grammar { language: "t" }
+        rule program { h::expr }
+        "#,
+    )
+    .unwrap_err();
+    let outer = assert_err!(err, Module);
+    let DslError::Lower(e) = outer.inner.as_ref() else {
+        panic!("expected Lower error, got {:?}", outer.inner)
+    };
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::OverrideRule)
+    );
+}

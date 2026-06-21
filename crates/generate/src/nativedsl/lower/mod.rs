@@ -150,10 +150,71 @@ pub fn lower_with_base(
     build_grammar(current, result, base_grammar, previous, imported_rules)
 }
 
+/// One lowered top-level item: a rule (plain or `override`) as a `RuleId`, tagged
+/// so grammar lowering can split overrides out while helper lowering treats them
+/// all as plain rules. Built in source order.
+struct LoweredItem {
+    src: NameSource,
+    rule_id: RuleId,
+    is_override: bool,
+    /// Attribution span for an override (the rule name, or the macro call site).
+    span: Span,
+}
+
+/// Walk `root_items`, evaluating lets and lowering each rule / expanded rule to
+/// a `RuleId` in source order. Shared by grammar and helper lowering; the caller
+/// decides what to do with the `override`-tagged items.
+fn lower_items(
+    eval: &mut Evaluator,
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+) -> LowerResult<Vec<LoweredItem>> {
+    let mut items = Vec::with_capacity(ctx.root_items.len());
+    for &item_id in &ctx.root_items {
+        match shared.arena.get(item_id) {
+            // Grammar block (config is read separately), macros, and externals
+            // register names but don't materialize a rule here.
+            Node::Grammar | Node::Macro(_) | Node::External { .. } => {}
+            Node::Let { .. } => {
+                eval.eval_let(item_id)?;
+            }
+            &Node::Rule {
+                is_override,
+                name,
+                body,
+            } => {
+                let rule_id = eval.lower_to_rule(body)?;
+                items.push(LoweredItem {
+                    src: NameSource::Span(name),
+                    rule_id,
+                    is_override,
+                    span: name,
+                });
+            }
+            &Node::ExpandedRule(expand_id) => {
+                let exp = *shared.pools.get_expansion(expand_id);
+                // expand_macro_calls sets the item span to the macro call site,
+                // used for override attribution diagnostics.
+                let span = shared.arena.span(item_id);
+                let rule_id = eval.lower_expansion(expand_id, span)?;
+                items.push(LoweredItem {
+                    src: NameSource::Str(exp.name),
+                    rule_id,
+                    is_override: exp.is_override,
+                    span,
+                });
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(items)
+}
+
 /// Lower a helper module's rules into a name-keyed list.
 ///   - Lets/macros are evaluated through the same Evaluator as grammar lowering;
-///   - `external` decls and macros register names but don't materialize. Helper
-///     validation rejects grammar blocks and override rules.
+///   - `external` decls and macros register names but don't materialize. Grammar
+///     blocks and direct override rules are rejected by validation; an override
+///     reaching the top level via a called macro is rejected below.
 pub fn lower_helper(
     state: &mut LoweringState,
     strings: &mut StringPool,
@@ -162,36 +223,24 @@ pub fn lower_helper(
     current: &super::ModuleContext,
 ) -> LowerResult<Vec<(String, Rule)>> {
     let mut eval = Evaluator::new(state, strings, shared, previous, current);
-    let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::new();
-
-    for &item_id in &current.root_items {
-        match shared.arena.get(item_id) {
-            Node::Macro(_) | Node::External { .. } => {}
-            Node::Let { .. } => {
-                eval.eval_let(item_id)?;
-            }
-            &Node::Rule {
-                name,
-                body,
-                is_override: false,
-            } => {
-                let rule_id = eval.lower_to_rule(body)?;
-                rule_entries.push((NameSource::Span(name), rule_id));
-            }
-            &Node::ExpandedRule(expand_id) => {
-                let name = shared.pools.get_expansion(expand_id).name;
-                let rule_id = eval.lower_expansion(expand_id, shared.arena.span(item_id))?;
-                rule_entries.push((NameSource::Str(name), rule_id));
-            }
-            // Validation rejects grammar blocks and override rules in helpers.
-            _ => unreachable!(),
+    let mut rules = Vec::new();
+    for it in lower_items(&mut eval, shared, current)? {
+        if it.is_override {
+            // A helper can't inherit, so an `override` reaching its top level via
+            // a called rules-macro (a direct `override rule` is rejected earlier
+            // by validate_import_items) has nothing to override. Reject it rather
+            // than silently demoting it to a plain rule.
+            return Err(LowerError::new(
+                LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::OverrideRule),
+                it.span,
+            ));
         }
+        rules.push((
+            resolve_name(it.src, &eval, current),
+            eval.build_rule(it.rule_id),
+        ));
     }
-
-    Ok(rule_entries
-        .into_iter()
-        .map(|(src, rid)| (resolve_name(src, &eval, current), eval.build_rule(rid)))
-        .collect())
+    Ok(rules)
 }
 
 fn resolve_name(src: NameSource, eval: &Evaluator, ctx: &super::ModuleContext) -> String {
@@ -209,41 +258,13 @@ fn evaluate(
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
     let mut eval = Evaluator::new(state, strings, shared, previous, ctx);
-    let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::with_capacity(ctx.root_items.len());
+    let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::new();
     let mut override_entries: Vec<(NameSource, RuleId, Span)> = Vec::new();
-
-    for &item_id in &ctx.root_items {
-        match shared.arena.get(item_id) {
-            // External decls register a symbol name; nothing to lower.
-            Node::Grammar | Node::Macro(_) | Node::External { .. } => {}
-            Node::Let { .. } => {
-                eval.eval_let(item_id)?;
-            }
-            Node::Rule {
-                is_override,
-                name,
-                body,
-            } => {
-                let rule_id = eval.lower_to_rule(*body)?;
-                if *is_override {
-                    override_entries.push((NameSource::Span(*name), rule_id, *name));
-                } else {
-                    rule_entries.push((NameSource::Span(*name), rule_id));
-                }
-            }
-            &Node::ExpandedRule(expand_id) => {
-                let exp = *shared.pools.get_expansion(expand_id);
-                // Set by expand_macro_calls to the macro call's span; used for
-                // override attribution diagnostics.
-                let span = shared.arena.span(item_id);
-                let rule_id = eval.lower_expansion(expand_id, span)?;
-                if exp.is_override {
-                    override_entries.push((NameSource::Str(exp.name), rule_id, span));
-                } else {
-                    rule_entries.push((NameSource::Str(exp.name), rule_id));
-                }
-            }
-            _ => unreachable!(),
+    for it in lower_items(&mut eval, shared, ctx)? {
+        if it.is_override {
+            override_entries.push((it.src, it.rule_id, it.span));
+        } else {
+            rule_entries.push((it.src, it.rule_id));
         }
     }
     // grammar_config is guaranteed present by `validate_grammar`, language
