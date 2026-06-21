@@ -79,7 +79,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 cfg_declared: FxHashMap::default(),
                 cfg_dropped: FxHashMap::default(),
                 computed_refs: Vec::new(),
-                macro_index: FxHashMap::default(),
                 let_types: FxHashMap::default(),
             },
             scratch: Vec::with_capacity(32),
@@ -514,12 +513,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             kind,
             sym_refs,
         });
-        // Record the name -> id so expand resolves call sites without scanning.
-        // A duplicate name is a malformed grammar that resolve rejects, so the
-        // overwritten entry never reaches a successful build.
-        self.ctx
-            .macro_index
-            .insert(self.ctx.text(name).to_string(), macro_idx);
         Ok(self
             .shared
             .arena
