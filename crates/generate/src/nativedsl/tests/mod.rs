@@ -65,6 +65,26 @@ pub(super) fn dsl_err(input: &str) -> DslError {
     parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap_err()
 }
 
+/// Write `modules` (filename -> source) into a fresh tempdir and parse `root`
+/// against it, so imports/inherits resolve by relative filename - e.g.
+/// `import("helper.tsg")`. The tempdir drops after parsing, which has already
+/// read every file. Returns the raw result so callers `.unwrap()` for the
+/// grammar or `.unwrap_err()` for the error.
+pub(super) fn parse_with_modules(
+    modules: &[(&str, &str)],
+    root: &str,
+) -> Result<InputGrammar, DslError> {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, src) in modules {
+        std::fs::write(dir.path().join(name), src).unwrap();
+    }
+    // The root path must exist on disk - it's canonicalized to seed cycle
+    // detection - even though parsing reads `root` directly.
+    let root_path = dir.path().join("grammar.tsg");
+    std::fs::write(&root_path, root).unwrap();
+    parse_native_dsl(root, &root_path)
+}
+
 /// Build the Rule tree for `comma_sep1(item)`:
 /// `seq(item, choice(repeat(seq(",", item)), blank))`
 pub(super) fn comma_sep1_rule(item: &str) -> Rule {

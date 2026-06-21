@@ -212,27 +212,22 @@ fn import_module_values_only() {
 
 #[test]
 fn import_function_uses_own_let_binding() {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("self_ref.tsg");
-    std::fs::write(
-        &helper,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "self_ref.tsg",
+            r#"
 let DELIM = ","
 macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
 "#,
+        )],
+        r#"
+        let h = import("self_ref.tsg")
+        grammar { language: "test" }
+        rule program { h::delimited(identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
     )
     .unwrap();
-
-    let input = format!(
-        r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ h::delimited(identifier) }}
-        rule identifier {{ regexp(r"[a-z]+") }}
-    "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
 }
 
@@ -386,14 +381,11 @@ fn error_import_disallowed_items() {
         ),
         ("let b = inherit(\"base.tsg\")", DisallowedItemKind::Inherit),
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        let bad_helper = dir.path().join("bad.tsg");
-        std::fs::write(&bad_helper, content).unwrap();
-        let input = format!(
-            "let h = import(\"{}\")\ngrammar {{ language: \"test\" }}\nrule program {{ \"x\" }}",
-            dsl_path(&bad_helper)
-        );
-        let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+        let err = parse_with_modules(
+            &[("bad.tsg", content)],
+            "let h = import(\"bad.tsg\")\ngrammar { language: \"test\" }\nrule program { \"x\" }",
+        )
+        .unwrap_err();
         let outer = assert_err!(err, Module);
         let DslError::Lower(e) = outer.inner.as_ref() else {
             panic!("expected Lower error, got {:?}", outer.inner)
@@ -404,30 +396,18 @@ fn error_import_disallowed_items() {
 
 #[test]
 fn error_import_cycle() {
-    let dir = tempfile::tempdir().unwrap();
-    let a_path = dir.path().join("a.tsg");
-    let b_path = dir.path().join("b.tsg");
-
-    std::fs::write(
-        &a_path,
-        format!("let b = import(\"{}\")", dsl_path(&b_path)),
-    )
-    .unwrap();
-    std::fs::write(
-        &b_path,
-        format!("let a = import(\"{}\")", dsl_path(&a_path)),
-    )
-    .unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[
+            ("a.tsg", "let b = import(\"b.tsg\")"),
+            ("b.tsg", "let a = import(\"a.tsg\")"),
+        ],
         r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
+        let h = import("a.tsg")
+        grammar { language: "test" }
+        rule program { "x" }
     "#,
-        dsl_path(&a_path)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    )
+    .unwrap_err();
     // Should detect cycle somewhere in the chain
     let is_cycle = matches!(
         &err,
@@ -447,32 +427,17 @@ fn error_import_cycle() {
 
 #[test]
 fn error_import_cycle_three_levels() {
-    let dir = tempfile::tempdir().unwrap();
-    let a_path = dir.path().join("a.tsg");
-    let b_path = dir.path().join("b.tsg");
-    let c_path = dir.path().join("c.tsg");
-    std::fs::write(
-        &a_path,
-        format!("let b = import(\"{}\")", dsl_path(&b_path)),
+    let err = parse_with_modules(
+        &[
+            ("a.tsg", "let b = import(\"b.tsg\")"),
+            ("b.tsg", "let c = import(\"c.tsg\")"),
+            ("c.tsg", "let a = import(\"a.tsg\")"),
+        ],
+        r#"let h = import("a.tsg")
+        grammar { language: "test" }
+        rule program { "x" }"#,
     )
-    .unwrap();
-    std::fs::write(
-        &b_path,
-        format!("let c = import(\"{}\")", dsl_path(&c_path)),
-    )
-    .unwrap();
-    std::fs::write(
-        &c_path,
-        format!("let a = import(\"{}\")", dsl_path(&a_path)),
-    )
-    .unwrap();
-    let input = format!(
-        r#"let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}"#,
-        dsl_path(&a_path)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    .unwrap_err();
     fn has_cycle(e: &DslError) -> bool {
         match e {
             DslError::Lower(l) => matches!(l.kind, LowerErrorKind::ModuleCycle),
@@ -517,19 +482,15 @@ fn error_import_bad_path() {
 
 #[test]
 fn error_import_nested_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let bad_helper = dir.path().join("bad_syntax.tsg");
-    std::fs::write(&bad_helper, "let x = ~~~").unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[("bad_syntax.tsg", "let x = ~~~")],
         r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
+        let h = import("bad_syntax.tsg")
+        grammar { language: "test" }
+        rule program { "x" }
     "#,
-        dsl_path(&bad_helper)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    )
+    .unwrap_err();
     let outer = assert_err!(err, Module);
     assert!(matches!(outer.inner.as_ref(), DslError::Lex(_)));
 }
@@ -538,21 +499,18 @@ fn error_import_nested_error() {
 fn error_import_transitive_nested_error() {
     // root -> middle.tsg -> bad.tsg (lex error)
     // Error should be double-wrapped: Module(Module(Lex(...)))
-    let dir = tempfile::tempdir().unwrap();
-    let bad = dir.path().join("bad.tsg");
-    std::fs::write(&bad, "let x = ~~~").unwrap();
-    let middle = dir.path().join("middle.tsg");
-    std::fs::write(&middle, format!("let h = import(\"{}\")", dsl_path(&bad))).unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[
+            ("bad.tsg", "let x = ~~~"),
+            ("middle.tsg", "let h = import(\"bad.tsg\")"),
+        ],
         r#"
-        let m = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
+        let m = import("middle.tsg")
+        grammar { language: "test" }
+        rule program { "x" }
     "#,
-        dsl_path(&middle)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    )
+    .unwrap_err();
     let outer = assert_err!(err, Module);
     let inner = assert_err!(*outer.inner, Module);
     assert!(matches!(inner.inner.as_ref(), DslError::Lex(_)));
@@ -625,40 +583,26 @@ fn import_same_module_twice() {
 fn import_diamond() {
     // A imports B and C. Both B and C import helpers.tsg.
     // Should work (each gets its own copy of helpers).
-    let dir = tempfile::tempdir().unwrap();
-    let b_path = dir.path().join("b.tsg");
-    let c_path = dir.path().join("c.tsg");
-    let helpers_path = dir.path().join("helpers.tsg");
-
-    std::fs::write(&helpers_path, "let VAL = 10").unwrap();
-    std::fs::write(
-        &b_path,
-        format!(
-            "let h = import(\"{}\")\nmacro b_fn(x: rule_t) rule_t {{ prec(h::VAL, x) }}",
-            dsl_path(&helpers_path)
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        &c_path,
-        format!(
-            "let h = import(\"{}\")\nmacro c_fn(x: rule_t) rule_t {{ prec(h::VAL, x) }}",
-            dsl_path(&helpers_path)
-        ),
-    )
-    .unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[
+            ("helpers.tsg", "let VAL = 10"),
+            (
+                "b.tsg",
+                "let h = import(\"helpers.tsg\")\nmacro b_fn(x: rule_t) rule_t { prec(h::VAL, x) }",
+            ),
+            (
+                "c.tsg",
+                "let h = import(\"helpers.tsg\")\nmacro c_fn(x: rule_t) rule_t { prec(h::VAL, x) }",
+            ),
+        ],
         r#"
-        let b = import("{}")
-        let c = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ choice(b::b_fn("a"), c::c_fn("b")) }}
+        let b = import("b.tsg")
+        let c = import("c.tsg")
+        grammar { language: "test" }
+        rule program { choice(b::b_fn("a"), c::c_fn("b")) }
     "#,
-        dsl_path(&b_path),
-        dsl_path(&c_path)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert_eq!(
         *find_rule(&g, "program"),
         Rule::choice(vec![
@@ -699,23 +643,19 @@ fn import_diamond_dedups_shared_leaf() {
 #[test]
 fn helper_rule_collision_errors() {
     // Two helpers each defining `expression` -> resolver collision error.
-    let dir = tempfile::tempdir().unwrap();
-    let a = dir.path().join("a.tsg");
-    let b = dir.path().join("b.tsg");
-    std::fs::write(&a, "rule expression { \"a\" }").unwrap();
-    std::fs::write(&b, "rule expression { \"b\" }").unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[
+            ("a.tsg", "rule expression { \"a\" }"),
+            ("b.tsg", "rule expression { \"b\" }"),
+        ],
         r#"
-        let a = import("{}")
-        let b = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ expression }}
+        let a = import("a.tsg")
+        let b = import("b.tsg")
+        grammar { language: "test" }
+        rule program { expression }
     "#,
-        dsl_path(&a),
-        dsl_path(&b)
-    );
-    let err = parse_native_dsl(&input, Path::new(".")).unwrap_err();
+    )
+    .unwrap_err();
     let outer = assert_err!(err, Resolve);
     assert_eq!(
         outer.kind,
@@ -728,20 +668,16 @@ fn override_helper_rule() {
     // Helper defines `digit`. Root overrides it. The override should appear
     // in the final grammar; the original is accessible via h::digit (which
     // inlines).
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("h.tsg");
-    std::fs::write(&helper, r#"rule digit { regexp(r"[0-9]") }"#).unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
         r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ digit }}
-        override rule digit {{ choice(h::digit, "x") }}
+        let h = import("h.tsg")
+        grammar { language: "test" }
+        rule program { digit }
+        override rule digit { choice(h::digit, "x") }
     "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     // `digit` in final grammar = the override body, with h::digit inlined to
     // the original pattern.
     assert_eq!(
@@ -758,28 +694,18 @@ fn helper_rule_transitive_promotion() {
     // root -> A -> B. B has rule `inner`. Root references `inner` by bare
     // name (no qualified access). Transitive promotion should make this
     // work.
-    let dir = tempfile::tempdir().unwrap();
-    let b = dir.path().join("b.tsg");
-    let a = dir.path().join("a.tsg");
-    std::fs::write(&b, r#"rule inner { "leaf" }"#).unwrap();
-    std::fs::write(
-        &a,
-        format!(
-            "let b = import(\"{}\")\nrule middle {{ inner }}",
-            dsl_path(&b)
-        ),
+    let g = parse_with_modules(
+        &[
+            ("b.tsg", r#"rule inner { "leaf" }"#),
+            ("a.tsg", "let b = import(\"b.tsg\")\nrule middle { inner }"),
+        ],
+        r#"
+        let a = import("a.tsg")
+        grammar { language: "test" }
+        rule program { seq(middle, inner) }
+    "#,
     )
     .unwrap();
-
-    let input = format!(
-        r#"
-        let a = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ seq(middle, inner) }}
-    "#,
-        dsl_path(&a)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert!(rule_names(&g).contains(&"inner"));
     assert!(rule_names(&g).contains(&"middle"));
     assert_eq!(*find_rule(&g, "inner"), Rule::String("leaf".into()));
@@ -789,19 +715,15 @@ fn helper_rule_transitive_promotion() {
 fn helper_rule_qualified_inlines() {
     // `h::rule_name` inlines the rule body, mirroring `base::rule_name` for
     // inherited grammars.
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("h.tsg");
-    std::fs::write(&helper, r#"rule greeting { "hello" }"#).unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[("h.tsg", r#"rule greeting { "hello" }"#)],
         r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ seq(h::greeting, "!") }}
+        let h = import("h.tsg")
+        grammar { language: "test" }
+        rule program { seq(h::greeting, "!") }
     "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     // h::greeting inlined - program body has the literal "hello", not a
     // NamedSymbol reference.
     assert_eq!(
@@ -815,19 +737,15 @@ fn helper_rule_materialized_into_grammar() {
     // Helper defines `digit`. Root references it by bare name. The rule
     // should materialize as a top-level Variable in the final grammar,
     // accessible as a NamedSymbol.
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("h.tsg");
-    std::fs::write(&helper, r#"rule digit { regexp(r"[0-9]") }"#).unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
         r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ repeat1(digit) }}
+        let h = import("h.tsg")
+        grammar { language: "test" }
+        rule program { repeat1(digit) }
     "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert_eq!(rule_names(&g), vec!["program", "digit"]);
     assert_eq!(
         *find_rule(&g, "program"),
@@ -845,20 +763,15 @@ fn error_helper_rule_collides_with_root_rule() {
     // collision between a helper rule and a root rule is a duplicate
     // declaration, not silent shadowing - tree-sitter's grammar JSON can't
     // hold two variables with the same name.
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("h.tsg");
-    std::fs::write(&helper, r#"rule expression { "from_helper" }"#).unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[("h.tsg", r#"rule expression { "from_helper" }"#)],
         r#"
-        let h = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ expression }}
-        rule expression {{ "from_root" }}
+        let h = import("h.tsg")
+        grammar { language: "test" }
+        rule program { expression }
+        rule expression { "from_root" }
     "#,
-        dsl_path(&helper)
     );
-    let err = parse_native_dsl(&input, Path::new("."));
     let e = assert_err!(err.unwrap_err(), Resolve);
     assert_eq!(
         e.kind,
@@ -871,46 +784,37 @@ fn helper_can_define_rules() {
     // Mutually-recursive helper rules with intra-helper references plus a
     // reference to a helper-declared external. Rules materialize into the
     // root grammar's variables.
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("exp.tsg");
-    std::fs::write(
-        &helper,
-        r"
+    let g = parse_with_modules(
+        &[(
+            "exp.tsg",
+            r"
         external _paren_open
         external _paren_close
         rule expression { choice(application, seq(_paren_open, expression, _paren_close)) }
         rule application { seq(expression, expression) }
     ",
+        )],
+        r#"
+        let exp = import("exp.tsg")
+        grammar { language: "test", externals: [exp::_paren_open, exp::_paren_close] }
+        rule program { expression }
+    "#,
     )
     .unwrap();
-
-    let input = format!(
-        r#"
-        let exp = import("{}")
-        grammar {{ language: "test", externals: [exp::_paren_open, exp::_paren_close] }}
-        rule program {{ expression }}
-    "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert_eq!(rule_names(&g), vec!["program", "expression", "application"]);
 }
 
 #[test]
 fn helper_external_qualified_in_rule_body() {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("ext.tsg");
-    std::fs::write(&helper, "external _foo\nexternal _bar\n").unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[("ext.tsg", "external _foo\nexternal _bar\n")],
         r#"
-        let e = import("{}")
-        grammar {{ language: "test", externals: [e::_foo, e::_bar] }}
-        rule program {{ seq(e::_foo, e::_bar) }}
+        let e = import("ext.tsg")
+        grammar { language: "test", externals: [e::_foo, e::_bar] }
+        rule program { seq(e::_foo, e::_bar) }
     "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert_eq!(g.external_tokens.len(), 2);
     assert_eq!(
         *find_rule(&g, "program"),
@@ -923,19 +827,14 @@ fn helper_external_qualified_in_rule_body() {
 
 #[test]
 fn helper_external_member_not_found() {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("ext.tsg");
-    std::fs::write(&helper, "external _foo\n").unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[("ext.tsg", "external _foo\n")],
         r#"
-        let e = import("{}")
-        grammar {{ language: "test", externals: [e::_missing] }}
-        rule program {{ "x" }}
+        let e = import("ext.tsg")
+        grammar { language: "test", externals: [e::_missing] }
+        rule program { "x" }
     "#,
-        dsl_path(&helper)
     );
-    let err = parse_native_dsl(&input, Path::new("."));
     let e = assert_err!(err.unwrap_err(), Resolve);
     assert_eq!(
         e.kind,
@@ -945,20 +844,15 @@ fn helper_external_member_not_found() {
 
 #[test]
 fn cfg_disabled_helper_external_not_exported() {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("ext.tsg");
-    std::fs::write(&helper, "external _foo\n#[cfg(X)] external _gated\n").unwrap();
-
-    let input = format!(
+    let err = parse_with_modules(
+        &[("ext.tsg", "external _foo\n#[cfg(X)] external _gated\n")],
         r#"
-        let e = import("{}")
-        grammar {{ language: "test", flags: {{ disabled: ["X"] }}, externals: [e::_gated] }}
-        rule program {{ "x" }}
+        let e = import("ext.tsg")
+        grammar { language: "test", flags: { disabled: ["X"] }, externals: [e::_gated] }
+        rule program { "x" }
     "#,
-        dsl_path(&helper)
     );
     // `_gated` is cfg-disabled in the helper, so `e::_gated` must not resolve.
-    let err = parse_native_dsl(&input, Path::new("."));
     let e = assert_err!(err.unwrap_err(), Resolve);
     assert_eq!(
         e.kind,
@@ -968,37 +862,29 @@ fn cfg_disabled_helper_external_not_exported() {
 
 #[test]
 fn import_empty_module() {
-    let dir = tempfile::tempdir().unwrap();
-    let empty = dir.path().join("empty.tsg");
-    std::fs::write(&empty, "// nothing here\n").unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[("empty.tsg", "// nothing here\n")],
         r#"
-        let e = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "x" }}
+        let e = import("empty.tsg")
+        grammar { language: "test" }
+        rule program { "x" }
     "#,
-        dsl_path(&empty)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert_eq!(*find_rule(&g, "program"), Rule::String("x".into()));
 }
 
 #[test]
 fn import_value_in_config_extras() {
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("ws.tsg");
-    std::fs::write(&helper, r#"let WS = [regexp(r"\s"), regexp(r"//[^\n]*")]"#).unwrap();
-
-    let input = format!(
+    let g = parse_with_modules(
+        &[("ws.tsg", r#"let WS = [regexp(r"\s"), regexp(r"//[^\n]*")]"#)],
         r#"
-        let ws = import("{}")
-        grammar {{ language: "test", extras: ws::WS }}
-        rule program {{ "x" }}
+        let ws = import("ws.tsg")
+        grammar { language: "test", extras: ws::WS }
+        rule program { "x" }
     "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert_eq!(g.extra_symbols.len(), 2);
     assert_eq!(
         g.extra_symbols[0],
@@ -1092,22 +978,19 @@ fn import_rule_preserves_metadata_and_reserved() {
 
 #[test]
 fn helper_rules_materialize_in_import_source_order() {
-    let dir = tempfile::tempdir().unwrap();
-    let a = dir.path().join("a.tsg");
-    std::fs::write(&a, "rule a_rule { \"a\" }\n").unwrap();
-    let b = dir.path().join("b.tsg");
-    std::fs::write(&b, "rule b_rule { \"b\" }\n").unwrap();
-    let input = format!(
+    let g = parse_with_modules(
+        &[
+            ("a.tsg", "rule a_rule { \"a\" }\n"),
+            ("b.tsg", "rule b_rule { \"b\" }\n"),
+        ],
         r#"
-        let ha = import("{}")
-        let hb = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ "p" }}
+        let ha = import("a.tsg")
+        let hb = import("b.tsg")
+        grammar { language: "test" }
+        rule program { "p" }
     "#,
-        dsl_path(&a),
-        dsl_path(&b),
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
     // ha imports before hb, so its rules materialize first.
     assert_eq!(names, vec!["program", "a_rule", "b_rule"]);

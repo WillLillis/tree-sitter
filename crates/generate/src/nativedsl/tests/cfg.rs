@@ -381,24 +381,20 @@ fn cfg_dropped_let_enriches_error() {
 fn helper_module_inherits_cfg_from_importer() {
     // Helper modules can't declare their own flags (no grammar block). They
     // see the importing grammar's full declared set transparently.
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("h.tsg");
-    std::fs::write(
-        &helper,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "h.tsg",
+            r#"
             macro gated() rule_t { choice("a", #[cfg(GFM)] "b", "c") }
+        "#,
+        )],
+        r#"
+        let h = import("h.tsg")
+        grammar { language: "t", flags: { enabled: ["GFM"] } }
+        rule program { h::gated() }
         "#,
     )
     .unwrap();
-    let input = format!(
-        r#"
-        let h = import("{}")
-        grammar {{ language: "t", flags: {{ enabled: ["GFM"] }} }}
-        rule program {{ h::gated() }}
-        "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
     // GFM is enabled in the importer; the helper's cfg branch survives.
     assert_eq!(
         find_rule(&g, "program"),
@@ -457,56 +453,48 @@ fn cfg_disabled_import_does_not_load_file() {
 fn cfg_disabled_inherit_does_not_merge_parent() {
     // Parent grammar defines `parent_only`. If cfg gating doesn't actually
     // skip the inherit load, we'd see `parent_only` in the child's rule set.
-    let dir = tempfile::tempdir().unwrap();
-    let parent = dir.path().join("parent.tsg");
-    std::fs::write(
-        &parent,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "parent.tsg",
+            r#"
             grammar { language: "p" }
             rule parent_only { "p" }
         "#,
+        )],
+        r#"
+        grammar { language: "t", flags: { disabled: ["EXT"] } }
+        #[cfg(EXT)]
+        let base = inherit("parent.tsg")
+        rule program { "x" }
+        "#,
     )
     .unwrap();
-    let input = format!(
-        r#"
-        grammar {{ language: "t", flags: {{ disabled: ["EXT"] }} }}
-        #[cfg(EXT)]
-        let base = inherit("{}")
-        rule program {{ "x" }}
-        "#,
-        dsl_path(&parent)
-    );
-    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
     assert_eq!(rule_names(&g), vec!["program"]);
 }
 
 #[test]
 fn cfg_enabled_inherit_still_loads_parent() {
     // Positive control: with the flag on, parent rules merge as usual.
-    let dir = tempfile::tempdir().unwrap();
-    let parent = dir.path().join("parent.tsg");
-    std::fs::write(
-        &parent,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "parent.tsg",
+            r#"
             grammar { language: "p" }
             rule parent_only { "p" }
         "#,
-    )
-    .unwrap();
-    let input = format!(
+        )],
         r#"
         #[cfg(EXT)]
-        let base = inherit("{}")
-        grammar {{
+        let base = inherit("parent.tsg")
+        grammar {
             language: "t",
-            flags: {{ enabled: ["EXT"] }},
+            flags: { enabled: ["EXT"] },
             inherits: base,
-        }}
-        rule program {{ "x" }}
+        }
+        rule program { "x" }
         "#,
-        dsl_path(&parent)
-    );
-    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert_eq!(rule_names(&g), vec!["parent_only", "program"]);
 }
 
@@ -515,23 +503,19 @@ fn cfg_disabled_first_inherit_promotes_second() {
     // The first inherit() is cfg-disabled, so the second must become the active
     // inherit. apply_cfg used to clear inherit_ref but leave a stale
     // duplicate_inherit, so validate_grammar's `inherit_ref.expect(...)` panicked.
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n",
-    )
-    .unwrap();
-    let input = format!(
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n",
+        )],
         r#"
         #[cfg(X)] let skipped = inherit("missing.tsg")
-        let chosen = inherit("{}")
-        grammar {{ language: "t", inherits: chosen, flags: {{ disabled: ["X"] }} }}
-        rule program {{ "x" }}
+        let chosen = inherit("base.tsg")
+        grammar { language: "t", inherits: chosen, flags: { disabled: ["X"] } }
+        rule program { "x" }
         "#,
-        dsl_path(&base)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert!(
         rule_names(&g).contains(&"base_rule"),
         "got {:?}",
@@ -544,23 +528,19 @@ fn cfg_disabled_second_inherit_is_not_multiple_inherits() {
     // The second inherit() is cfg-disabled, leaving a single active inherit.
     // apply_cfg left duplicate_inherit set, so this valid grammar was wrongly
     // rejected with MultipleInherits pointing at the disabled line.
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n",
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            "grammar { language: \"base\" }\nrule base_rule { \"b\" }\n",
+        )],
+        r#"
+        let chosen = inherit("base.tsg")
+        #[cfg(X)] let skipped = inherit("missing.tsg")
+        grammar { language: "t", inherits: chosen, flags: { disabled: ["X"] } }
+        rule program { "x" }
+        "#,
     )
     .unwrap();
-    let input = format!(
-        r#"
-        let chosen = inherit("{}")
-        #[cfg(X)] let skipped = inherit("missing.tsg")
-        grammar {{ language: "t", inherits: chosen, flags: {{ disabled: ["X"] }} }}
-        rule program {{ "x" }}
-        "#,
-        dsl_path(&base)
-    );
-    let g = parse_native_dsl(&input, Path::new(".")).unwrap();
     assert!(
         rule_names(&g).contains(&"base_rule"),
         "got {:?}",
@@ -575,31 +555,27 @@ fn cfg_dropped_attribution_uses_owning_module() {
     // for its own reference to `strikethrough`; the note should point at
     // parent's own cfg flag (P), not at child's (C) just because child
     // happened to apply_cfg first and win or_insert in a global map.
-    let dir = tempfile::tempdir().unwrap();
-    let parent = dir.path().join("parent.tsg");
-    std::fs::write(
-        &parent,
-        r#"
+    let err = parse_with_modules(
+        &[(
+            "parent.tsg",
+            r#"
             grammar { language: "p", flags: { disabled: ["P"] } }
             rule program_p { strikethrough }
             #[cfg(P)] rule strikethrough { "p" }
         "#,
-    )
-    .unwrap();
-    let input = format!(
+        )],
         r#"
-        let base = inherit("{}")
-        grammar {{
+        let base = inherit("parent.tsg")
+        grammar {
             language: "t",
-            flags: {{ disabled: ["C"] }},
+            flags: { disabled: ["C"] },
             inherits: base,
-        }}
-        rule program {{ "x" }}
-        #[cfg(C)] rule strikethrough {{ "c" }}
+        }
+        rule program { "x" }
+        #[cfg(C)] rule strikethrough { "c" }
         "#,
-        dsl_path(&parent),
-    );
-    let err = parse_native_dsl(&input, std::path::Path::new(".")).unwrap_err();
+    )
+    .unwrap_err();
     // Error originates from the inherited (parent) grammar load, so it's
     // wrapped in `Module(...)` once.
     let inner = *assert_err!(err, Module).inner;
@@ -617,33 +593,29 @@ fn cfg_inheriting_grammar_overrides_parent_flag_value() {
     // Setup: parent declares X disabled and gates `parent_only`. Child
     // declares X enabled and gates `child_only`. With child overriding,
     // X=enabled wins and BOTH gated rules survive.
-    let dir = tempfile::tempdir().unwrap();
-    let parent = dir.path().join("parent.tsg");
-    std::fs::write(
-        &parent,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "parent.tsg",
+            r#"
             grammar { language: "p", flags: { disabled: ["X"] } }
             rule parent_base { "p" }
             #[cfg(X)]
             rule parent_only { "po" }
         "#,
+        )],
+        r#"
+        let base = inherit("parent.tsg")
+        grammar {
+            language: "t",
+            flags: { enabled: ["X"] },
+            inherits: base,
+        }
+        rule program { "x" }
+        #[cfg(X)]
+        rule child_only { "co" }
+        "#,
     )
     .unwrap();
-    let input = format!(
-        r#"
-        let base = inherit("{}")
-        grammar {{
-            language: "t",
-            flags: {{ enabled: ["X"] }},
-            inherits: base,
-        }}
-        rule program {{ "x" }}
-        #[cfg(X)]
-        rule child_only {{ "co" }}
-        "#,
-        dsl_path(&parent)
-    );
-    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
     // parent_base appears unconditionally; both X-gated rules survive because
     // child's enabled overrode parent's disabled in the global active map.
     assert_eq!(
@@ -658,52 +630,45 @@ fn cfg_three_level_inheritance_root_flag_wins() {
     // Grandparent and parent want X enabled; root forces it disabled.
     // First-write-wins on the global active map (root parses first), so
     // X=disabled across all three levels and every gated rule drops.
-    let dir = tempfile::tempdir().unwrap();
-    let grandparent = dir.path().join("grandparent.tsg");
-    std::fs::write(
-        &grandparent,
-        r#"
+    let g = parse_with_modules(
+        &[
+            (
+                "grandparent.tsg",
+                r#"
             grammar { language: "g", flags: { enabled: ["X"] } }
             rule grandparent_base { "g" }
             #[cfg(X)]
             rule grandparent_only { "go" }
         "#,
-    )
-    .unwrap();
-    let parent = dir.path().join("parent.tsg");
-    std::fs::write(
-        &parent,
-        format!(
-            r#"
-                let gbase = inherit("{}")
-                grammar {{
+            ),
+            (
+                "parent.tsg",
+                r#"
+                let gbase = inherit("grandparent.tsg")
+                grammar {
                     language: "p",
-                    flags: {{ enabled: ["X"] }},
+                    flags: { enabled: ["X"] },
                     inherits: gbase,
-                }}
-                rule parent_base {{ "p" }}
+                }
+                rule parent_base { "p" }
                 #[cfg(X)]
-                rule parent_only {{ "po" }}
+                rule parent_only { "po" }
             "#,
-            dsl_path(&grandparent),
-        ),
+            ),
+        ],
+        r#"
+        let pbase = inherit("parent.tsg")
+        grammar {
+            language: "t",
+            flags: { disabled: ["X"] },
+            inherits: pbase,
+        }
+        rule program { "x" }
+        #[cfg(X)]
+        rule root_only { "ro" }
+        "#,
     )
     .unwrap();
-    let input = format!(
-        r#"
-        let pbase = inherit("{}")
-        grammar {{
-            language: "t",
-            flags: {{ disabled: ["X"] }},
-            inherits: pbase,
-        }}
-        rule program {{ "x" }}
-        #[cfg(X)]
-        rule root_only {{ "ro" }}
-        "#,
-        dsl_path(&parent),
-    );
-    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
     // X=disabled (root won), so all three `#[cfg(X)]` rules dropped.
     assert_eq!(
         rule_names(&g),
@@ -791,21 +756,18 @@ fn cfg_disabled_nested_import_does_not_load() {
 fn cfg_disabled_nested_import_does_not_merge_rules() {
     // The silent-miscompilation form: a cfg-disabled nested import of a real
     // helper must not merge that helper's rules into the grammar.
-    let dir = tempfile::tempdir().unwrap();
-    let helper = dir.path().join("helper.tsg");
-    std::fs::write(&helper, "rule helper_only { \"h\" }\n").unwrap();
-    let input = format!(
+    let g = parse_with_modules(
+        &[("helper.tsg", "rule helper_only { \"h\" }\n")],
         r#"
-        grammar {{
+        grammar {
             language: "t",
-            flags: {{ disabled: ["EXT"] }},
-            extras: [ #[cfg(EXT)] import("{}") ],
-        }}
-        rule program {{ "x" }}
+            flags: { disabled: ["EXT"] },
+            extras: [ #[cfg(EXT)] import("helper.tsg") ],
+        }
+        rule program { "x" }
     "#,
-        dsl_path(&helper)
-    );
-    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
+    )
+    .unwrap();
     assert!(
         !g.variables.iter().any(|v| v.name == "helper_only"),
         "cfg-disabled import's rule leaked into the grammar"
