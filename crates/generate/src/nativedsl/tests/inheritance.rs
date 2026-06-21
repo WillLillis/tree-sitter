@@ -687,3 +687,33 @@ fn grammar_config_reads_base_language() {
     "#);
     assert_eq!(*find_rule(&g, "lang_name"), Rule::String("base".into()));
 }
+
+#[test]
+fn override_with_rule_from_two_sources_errors() {
+    // `expr` is supplied by two imported helpers (two rule sources). An
+    // `override rule expr` claims one of them; the second is no longer skipped
+    // and collides - the same duplicate-declaration a two-source name hits
+    // without an override, not a silently duplicated variable.
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.tsg");
+    std::fs::write(&a, "rule expr { \"from_a\" }\n").unwrap();
+    let b = dir.path().join("b.tsg");
+    std::fs::write(&b, "rule expr { \"from_b\" }\n").unwrap();
+    let input = format!(
+        r#"
+        let a = import("{}")
+        let b = import("{}")
+        grammar {{ language: "test" }}
+        rule program {{ expr }}
+        override rule expr {{ "overridden" }}
+    "#,
+        dsl_path(&a),
+        dsl_path(&b)
+    );
+    let err = parse_native_dsl(&input, std::path::Path::new(".")).unwrap_err();
+    let e = assert_err!(err, Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::DuplicateDeclaration("expr".into())
+    );
+}
