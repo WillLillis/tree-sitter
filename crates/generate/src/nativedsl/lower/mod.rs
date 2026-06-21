@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
-    nativedsl::{Module, ast::ModuleContext},
+    nativedsl::{ImportedRule, Module, ast::ModuleContext},
     rules::Rule,
 };
 
@@ -141,38 +141,13 @@ pub fn lower_with_base(
     shared: &SharedAst,
     previous: &[Module],
     current: &ModuleContext,
+    imported_rules: &[ImportedRule],
 ) -> LowerResult<InputGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[idx as usize].lowered());
-    let helper_rules = collect_helper_rules(shared, current, previous);
     let result = evaluate(state, strings, shared, previous, current)?;
-    build_grammar(current, result, base_grammar, helper_rules)
-}
-
-/// Collect rules from all transitively-reachable imported helpers, in
-/// depth-first order. Cloned because helpers may be referenced from
-/// multiple parents (diamond imports).
-fn collect_helper_rules(
-    shared: &SharedAst,
-    current: &ModuleContext,
-    previous: &[Module],
-) -> Vec<(String, Rule)> {
-    let mut collected = Vec::new();
-    super::for_each_imported_helper::<std::convert::Infallible>(
-        &shared.arena,
-        &current.module_refs,
-        previous,
-        |_idx, module, _ref_span| {
-            let Module::Helper { lowered_rules, .. } = module else {
-                unreachable!()
-            };
-            collected.extend(lowered_rules.iter().cloned());
-            Ok(())
-        },
-    )
-    .unwrap();
-    collected
+    build_grammar(current, result, base_grammar, previous, imported_rules)
 }
 
 /// Lower a helper module's rules into a name-keyed list.
@@ -360,7 +335,8 @@ fn build_grammar(
     ctx: &ModuleContext,
     result: EvalResult,
     base: Option<&InputGrammar>,
-    helper_rules: Vec<(String, Rule)>,
+    previous: &[Module],
+    imported_rules: &[ImportedRule],
 ) -> LowerResult<InputGrammar> {
     let mut overrides: FxHashMap<String, Spanned<Rule>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
@@ -393,11 +369,15 @@ fn build_grammar(
         });
     }
 
-    // Helper rules can also be override targets.
-    for (name, rule) in helper_rules {
-        let final_rule = overrides.remove(&name).map_or(rule, |s| s.value);
+    // Helper rules (materialized from the shared imported-rule list) can also be
+    // override targets. The clone happens here, once, at final assembly.
+    for ir in imported_rules {
+        let (name, rule) = &previous[ir.module as usize].helper_rules()[ir.index as usize];
+        let final_rule = overrides
+            .remove(name)
+            .map_or_else(|| rule.clone(), |s| s.value);
         variables.push(Variable {
-            name,
+            name: name.clone(),
             kind: VariableType::Named,
             rule: final_rule,
         });

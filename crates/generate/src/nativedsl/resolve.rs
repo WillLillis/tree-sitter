@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::{
     grammars::InputGrammar,
     nativedsl::{
-        Export, Module, ModuleId, NoteMessage, ResolveError,
+        Export, ImportedRule, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
             AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
             Span, Spanned,
@@ -58,8 +58,17 @@ pub fn resolve(
     strings: &StringPool,
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
+    imported_rules: &[ImportedRule],
 ) -> ResolveResult<()> {
-    let decls = collect_decls(shared, ctx, strings, &ctx.root_items, base, modules)?;
+    let decls = collect_decls(
+        shared,
+        ctx,
+        strings,
+        &ctx.root_items,
+        base,
+        modules,
+        imported_rules,
+    )?;
 
     // Validate computed-name references (`@<expr>`), evaluated under each call's
     // args at expand, against the complete name table (which includes generated
@@ -132,6 +141,7 @@ fn collect_decls<'a>(
     root_items: &[NodeId],
     base: Option<(&'a InputGrammar, Span)>,
     modules: &'a [Module],
+    imported_rules: &[ImportedRule],
 ) -> ResolveResult<Decls<'a>> {
     // Size to the item count up front: nearly every top-level item declares a
     // name, so this avoids rehashing the table as decls are collected.
@@ -224,9 +234,17 @@ fn collect_decls<'a>(
         }
     }
 
-    // Register helper rule names from imported helpers (transitively). Same
-    // strictness as inherited: collisions error unless overridden locally.
-    register_helper_rules(shared, ctx, modules, &mut decls, &mut override_names)?;
+    // Register bare names for every transitively-imported helper rule, from the
+    // shared imported-rule list (resolve and lower consume the same list and
+    // order). Same strictness as inherited: collisions error unless overridden.
+    for ir in imported_rules {
+        let name = &modules[ir.module as usize].helper_rules()[ir.index as usize].0;
+        // First source of an overridden name claims the override; a later
+        // source is no longer skipped and collides (see the base loop above).
+        if !override_names.remove(name.as_str()) {
+            insert_decl(&mut decls, name, IdentKind::Rule, ir.ref_span, ctx)?;
+        }
+    }
 
     // Pre-register external token names. Externals are the only config field
     // that introduces names not declared as rules in the grammar file.
@@ -241,35 +259,6 @@ fn collect_decls<'a>(
     }
 
     Ok(decls)
-}
-
-/// Register each transitively-reachable helper's rule names. Names already
-/// in `override_names` are skipped (the local override will replace them).
-fn register_helper_rules<'a>(
-    shared: &SharedAst,
-    ctx: &'a ModuleContext,
-    modules: &'a [Module],
-    decls: &mut Decls<'a>,
-    override_names: &mut FxHashSet<&str>,
-) -> ResolveResult<()> {
-    super::for_each_imported_helper(
-        &shared.arena,
-        &ctx.module_refs,
-        modules,
-        |_idx, module, ref_span| {
-            let Module::Helper { lowered_rules, .. } = module else {
-                unreachable!()
-            };
-            for (name, _) in lowered_rules {
-                // First source of an overridden name claims the override; a
-                // later source collides (see the inherited-rule loop above).
-                if !override_names.remove(name.as_str()) {
-                    insert_decl(decls, name.as_str(), IdentKind::Rule, ref_span, ctx)?;
-                }
-            }
-            Ok(())
-        },
-    )
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
