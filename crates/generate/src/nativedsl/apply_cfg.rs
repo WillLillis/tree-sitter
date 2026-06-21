@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{
-        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField,
+        ChildRange, ConfigField, GrammarConfig, MacroId, ModuleContext, Node, NodeId, ObjectField,
         SharedAst, Span,
     },
     loader::ModuleKind,
@@ -99,72 +99,51 @@ pub fn apply_cfg(
     state: &CfgState,
     kind: ModuleKind,
 ) -> Result<(), ResolveError> {
-    let dropped_top_level = {
-        let mut w = Walker {
-            shared: &mut *shared,
-            state,
-            kind,
-            source: &ctx.source,
-            cfg_declared: &ctx.cfg_declared,
-            cfg_dropped: &mut ctx.cfg_dropped,
-        };
-        // Walk grammar config fields first - cfg attrs may appear on members of
-        // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
-        // consumed by `merge_module_flags`.
-        for (_, id) in ctx
-            .grammar_config
-            .as_ref()
-            .into_iter()
-            .flat_map(GrammarConfig::node_fields)
-            .filter(|(field, _)| !matches!(field, ConfigField::Flags))
-        {
-            w.walk(id)?;
-        }
-        // Compact root_items, repointing each surviving entry at the id the walk
-        // surfaced (an active cfg resolves to its unwrapped child's id).
-        let original_len = ctx.root_items.len();
-        let mut write = 0;
-        for read in 0..original_len {
-            let id = ctx.root_items[read];
-            if let Some(kept) = w.walk(id)? {
-                ctx.root_items[write] = kept;
-                write += 1;
-            }
-        }
-        ctx.root_items.truncate(write);
-        write < original_len
+    // The cfg walk is the single builder of the node-position side tables
+    // (module_refs, macro_index, external_names): it visits every surviving
+    // node, so a nested cfg-dropped import / macro / external is simply never
+    // collected, and nothing can be missed by position. Cleared here and
+    // repopulated by the walk; the no-cfg path keeps the parser's population
+    // since apply_cfg only runs when has_cfg.
+    ctx.module_refs.clear();
+    ctx.macro_index.clear();
+    ctx.external_names.clear();
+    let mut w = Walker {
+        shared: &mut *shared,
+        state,
+        kind,
+        source: &ctx.source,
+        cfg_declared: &ctx.cfg_declared,
+        cfg_dropped: &mut ctx.cfg_dropped,
+        module_refs: &mut ctx.module_refs,
+        macro_index: &mut ctx.macro_index,
+        external_names: &mut ctx.external_names,
+        current_macro: None,
     };
-    // A dropped top-level decl is the only thing that can invalidate the
-    // macro/module/external working sets (an active unwrap leaves macro_index's
-    // name key, module_refs' never-relocated ModuleRef value, and an external's
-    // name span intact). Rebuild them from the survivors rather than pruning in
-    // place - a dropped macro/import/external is simply absent.
-    if dropped_top_level {
-        ctx.macro_index.clear();
-        ctx.module_refs.clear();
-        ctx.external_names.clear();
-        for read in 0..ctx.root_items.len() {
-            let id = ctx.root_items[read];
-            match *shared.arena.get(id) {
-                Node::Macro(mid) => {
-                    let name = shared
-                        .pools
-                        .get_macro(mid)
-                        .name
-                        .resolve(&ctx.source)
-                        .to_owned();
-                    ctx.macro_index.insert(name, mid);
-                }
-                Node::Let { value, .. }
-                    if matches!(shared.arena.get(value), Node::ModuleRef { .. }) =>
-                {
-                    ctx.module_refs.push(value);
-                }
-                Node::External { name } => ctx.external_names.push(name),
-                _ => {}
-            }
+    // Walk grammar config fields first - cfg attrs may appear on members of
+    // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
+    // consumed by `merge_module_flags`.
+    for (_, id) in ctx
+        .grammar_config
+        .as_ref()
+        .into_iter()
+        .flat_map(GrammarConfig::node_fields)
+        .filter(|(field, _)| !matches!(field, ConfigField::Flags))
+    {
+        w.walk(id)?;
+    }
+    // Compact root_items, repointing each surviving entry at the id the walk
+    // surfaced (an active cfg resolves to its unwrapped child's id).
+    let original_len = ctx.root_items.len();
+    let mut write = 0;
+    for read in 0..original_len {
+        let id = ctx.root_items[read];
+        if let Some(kept) = w.walk(id)? {
+            ctx.root_items[write] = kept;
+            write += 1;
         }
     }
+    ctx.root_items.truncate(write);
     Ok(())
 }
 
@@ -178,6 +157,14 @@ struct Walker<'a> {
     /// decls for `enrich_resolve_error` to use later.
     cfg_declared: &'a FxHashMap<String, Span>,
     cfg_dropped: &'a mut FxHashMap<String, NodeId>,
+    /// Node-position side tables, rebuilt from the surviving AST as the walk
+    /// visits each kept node - nothing is collected from a dropped subtree.
+    module_refs: &'a mut Vec<NodeId>,
+    macro_index: &'a mut FxHashMap<String, MacroId>,
+    external_names: &'a mut Vec<Span>,
+    /// The rule-set macro currently being walked, so its body's surviving
+    /// computed-name refs (`@<expr>`) collect into that macro's `sym_refs`.
+    current_macro: Option<MacroId>,
 }
 
 impl Walker<'_> {
@@ -279,8 +266,16 @@ impl Walker<'_> {
             | Node::Token { inner: c, .. } | Node::Field { content: c, .. }
             | Node::Reserved { content: c, .. } | Node::FieldAccess { obj: c, .. }  | Node::Neg(c)
             | Node::QualifiedAccess { obj: c, .. } | Node::GrammarConfig { module: c, .. }
-            | Node::SymRef { expr: c } | Node::For { body: c, .. } => {
+            | Node::For { body: c, .. } => {
                 self.walk(c)?;
+            }
+            // SymRef (`@<expr>` in a rule-set body): collect it for the enclosing
+            // macro (its list was cleared at the Macro node), then walk the expr.
+            Node::SymRef { expr } => {
+                if let Some(mid) = self.current_macro {
+                    self.shared.pools.get_macro_mut(mid).sym_refs.push(id);
+                }
+                self.walk(expr)?;
             }
             // Two-child wrappers.
             Node::Alias {
@@ -307,13 +302,31 @@ impl Walker<'_> {
                     self.walk(c)?;
                 }
             }
-            // Macro: body lives in pools.get_macro(id).body, not in arena
-            // children. Walk it explicitly.
-            Node::Macro(macro_id) => _ = self.walk(self.shared.pools.get_macro(macro_id).body)?,
+            // Macro: index the name, rebuild its computed-ref list from the
+            // surviving body (cleared here, collected at each SymRef below), then
+            // walk the body (which lives in pools.get_macro(id).body).
+            Node::Macro(macro_id) => {
+                let name = self
+                    .shared
+                    .pools
+                    .get_macro(macro_id)
+                    .name
+                    .resolve(self.source)
+                    .to_owned();
+                self.macro_index.insert(name, macro_id);
+                self.shared.pools.get_macro_mut(macro_id).sym_refs.clear();
+                self.current_macro = Some(macro_id);
+                self.walk(self.shared.pools.get_macro(macro_id).body)?;
+                self.current_macro = None;
+            }
+            // External decl + import/inherit ref: collected into the
+            // node-position tables; no children to descend into.
+            Node::External { name } => self.external_names.push(name),
+            Node::ModuleRef { .. } => self.module_refs.push(id),
             // Leaves / nothing to descend into.
             #[rustfmt::skip]
-            Node::Grammar | Node::External { .. } | Node::StringLit | Node::RawStringLit { .. }
-            | Node::IntLit(_) | Node::Ident(_) | Node::Blank | Node::ModuleRef { .. }
+            Node::Grammar | Node::StringLit | Node::RawStringLit { .. }
+            | Node::IntLit(_) | Node::Ident(_) | Node::Blank
             | Node::MacroParam { .. } | Node::ForBinding { .. } | Node::Unreachable
             // handled by walk(), unreachable here
             | Node::Cfg { .. } => {}

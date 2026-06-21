@@ -769,3 +769,60 @@ fn cfg_flags_non_string_errors() {
     let e = assert_err!(err, Resolve);
     assert!(matches!(e.kind, ResolveErrorKind::CfgFlagsNonLiteral));
 }
+
+#[test]
+fn cfg_disabled_nested_import_does_not_load() {
+    // A cfg-disabled import nested inside a list (not a top-level `let`) must not
+    // load the referenced file. Regression: module_refs was rebuilt only when a
+    // top-level item dropped, so a nested cfg-dropped import stayed live and
+    // load_import_children loaded it anyway.
+    let g = dsl(r#"
+        grammar {
+            language: "t",
+            flags: { disabled: ["EXT"] },
+            externals: [ #[cfg(EXT)] import("does-not-exist.tsg") ],
+        }
+        rule program { "x" }
+    "#);
+    assert!(g.variables.iter().any(|v| v.name == "program"));
+}
+
+#[test]
+fn cfg_disabled_nested_import_does_not_merge_rules() {
+    // The silent-miscompilation form: a cfg-disabled nested import of a real
+    // helper must not merge that helper's rules into the grammar.
+    let dir = tempfile::tempdir().unwrap();
+    let helper = dir.path().join("helper.tsg");
+    std::fs::write(&helper, "rule helper_only { \"h\" }\n").unwrap();
+    let input = format!(
+        r#"
+        grammar {{
+            language: "t",
+            flags: {{ disabled: ["EXT"] }},
+            extras: [ #[cfg(EXT)] import("{}") ],
+        }}
+        rule program {{ "x" }}
+    "#,
+        dsl_path(&helper)
+    );
+    let g = parse_native_dsl(&input, std::path::Path::new(".")).unwrap();
+    assert!(
+        !g.variables.iter().any(|v| v.name == "helper_only"),
+        "cfg-disabled import's rule leaked into the grammar"
+    );
+}
+
+#[test]
+fn cfg_disabled_symref_not_validated() {
+    // A cfg-disabled `@<expr>` ref in a rule-set macro body must not be evaluated
+    // or validated. Regression: MacroConfig.sym_refs kept the dropped ref, so
+    // expand still computed it and resolve flagged the (nonexistent) rule.
+    let g = dsl(r#"
+        rules m(s: str_t) {
+            rule program { choice(#[cfg(X)] @concat("missing_", s), "ok") }
+        }
+        grammar { language: "t", flags: { disabled: ["X"] } }
+        @m("rule")
+    "#);
+    assert!(g.variables.iter().any(|v| v.name == "program"));
+}
