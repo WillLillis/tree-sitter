@@ -73,7 +73,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 grammar_config: None,
                 root_items: Vec::with_capacity(root_cap),
                 module_refs: Vec::new(),
-                external_names: Vec::new(),
                 node_range: 0..0,
                 has_cfg: false,
                 cfg_declared: FxHashMap::default(),
@@ -326,7 +325,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     fn parse_external_decl(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwExternal)?;
         let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
-        self.ctx.external_names.push(name);
         Ok(self
             .shared
             .arena
