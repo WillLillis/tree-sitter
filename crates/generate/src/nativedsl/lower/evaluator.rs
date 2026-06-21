@@ -728,8 +728,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::ModuleRule { module, target } => {
                 let target_module = &self.previous[usize::from(module)];
                 let rid = match target {
-                    RuleTarget::ExternalName(i) => {
-                        let span = target_module.ctx().external_names[i as usize];
+                    RuleTarget::ExternalName(span) => {
                         let sid = self.strings.intern_span(span, module);
                         self.alloc_rule(ARule::NamedSymbol(sid))
                     }

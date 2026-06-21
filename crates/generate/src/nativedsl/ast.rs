@@ -250,8 +250,8 @@ pub enum RuleTarget {
     GrammarExternal(u32),
     /// Index into the target helper's `lowered_rules`.
     HelperRule(u32),
-    /// Index into the target module's `ctx.external_names`.
-    ExternalName(u32),
+    /// The span of the top-level `external X` declaration's name.
+    ExternalName(Span),
 }
 
 /// Byte offset range `[start, end)` in the source text.
@@ -514,10 +514,6 @@ pub struct ModuleContext {
     /// arena. The inherit set (see [`ModuleContext::inherits`]) is derived from
     /// this, so cfg gating only has to prune this one structure.
     pub module_refs: Vec<NodeId>,
-    /// Spans of all top-level `external <name>` decls' names, in source order.
-    /// Populated by the parser. Used by resolve and lower to look up
-    /// `helper::external_name` references without scanning `root_items`.
-    pub external_names: Vec<Span>,
     /// `true` if the parser pushed at least one `Node::Cfg` for this module.
     /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
     /// attributes appear in source.

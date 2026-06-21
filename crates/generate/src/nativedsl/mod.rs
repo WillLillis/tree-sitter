@@ -199,11 +199,10 @@ pub fn build_exports(
         add(name, Export::Local(kind));
     }
     // Top-level `external X` declarations.
-    for (i, &span) in ctx.external_names.iter().enumerate() {
-        add(
-            ctx.text(span),
-            Export::Rule(RuleTarget::ExternalName(i as u32)),
-        );
+    for &item_id in &ctx.root_items {
+        if let Node::External { name } = *arena.get(item_id) {
+            add(ctx.text(name), Export::Rule(RuleTarget::ExternalName(name)));
+        }
     }
     // Lowered output.
     match lowered {
