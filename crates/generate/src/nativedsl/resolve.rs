@@ -199,7 +199,10 @@ fn collect_decls<'a>(
     // target.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
-            if override_names.contains(var.name.as_str()) {
+            // The first source of an overridden name coexists with the override
+            // (claim it by removing); a later source is no longer skipped and so
+            // collides as a duplicate, exactly as it would without the override.
+            if override_names.remove(var.name.as_str()) {
                 continue;
             }
             insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
@@ -223,7 +226,7 @@ fn collect_decls<'a>(
 
     // Register helper rule names from imported helpers (transitively). Same
     // strictness as inherited: collisions error unless overridden locally.
-    register_helper_rules(shared, ctx, modules, &mut decls, &override_names)?;
+    register_helper_rules(shared, ctx, modules, &mut decls, &mut override_names)?;
 
     // Pre-register external token names. Externals are the only config field
     // that introduces names not declared as rules in the grammar file.
@@ -247,7 +250,7 @@ fn register_helper_rules<'a>(
     ctx: &'a ModuleContext,
     modules: &'a [Module],
     decls: &mut Decls<'a>,
-    override_names: &FxHashSet<&str>,
+    override_names: &mut FxHashSet<&str>,
 ) -> ResolveResult<()> {
     super::for_each_imported_helper(
         &shared.arena,
@@ -258,7 +261,9 @@ fn register_helper_rules<'a>(
                 unreachable!()
             };
             for (name, _) in lowered_rules {
-                if !override_names.contains(name.as_str()) {
+                // First source of an overridden name claims the override; a
+                // later source collides (see the inherited-rule loop above).
+                if !override_names.remove(name.as_str()) {
                     insert_decl(decls, name.as_str(), IdentKind::Rule, ref_span, ctx)?;
                 }
             }
