@@ -106,7 +106,6 @@ pub fn apply_cfg(
     // repopulated by the walk; the no-cfg path keeps the parser's population
     // since apply_cfg only runs when has_cfg.
     ctx.module_refs.clear();
-    ctx.macro_index.clear();
     ctx.external_names.clear();
     let mut w = Walker {
         shared: &mut *shared,
@@ -116,7 +115,6 @@ pub fn apply_cfg(
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
-        macro_index: &mut ctx.macro_index,
         external_names: &mut ctx.external_names,
         current_macro: None,
     };
@@ -160,7 +158,6 @@ struct Walker<'a> {
     /// Node-position side tables, rebuilt from the surviving AST as the walk
     /// visits each kept node - nothing is collected from a dropped subtree.
     module_refs: &'a mut Vec<NodeId>,
-    macro_index: &'a mut FxHashMap<String, MacroId>,
     external_names: &'a mut Vec<Span>,
     /// The rule-set macro currently being walked, so its body's surviving
     /// computed-name refs (`@<expr>`) collect into that macro's `sym_refs`.
@@ -302,18 +299,10 @@ impl Walker<'_> {
                     self.walk(c)?;
                 }
             }
-            // Macro: index the name, rebuild its computed-ref list from the
-            // surviving body (cleared here, collected at each SymRef below), then
-            // walk the body (which lives in pools.get_macro(id).body).
+            // Macro: rebuild its computed-ref list from the surviving body
+            // (cleared here, collected at each SymRef below), then walk the body
+            // (which lives in pools.get_macro(id).body).
             Node::Macro(macro_id) => {
-                let name = self
-                    .shared
-                    .pools
-                    .get_macro(macro_id)
-                    .name
-                    .resolve(self.source)
-                    .to_owned();
-                self.macro_index.insert(name, macro_id);
                 self.shared.pools.get_macro_mut(macro_id).sym_refs.clear();
                 self.current_macro = Some(macro_id);
                 self.walk(self.shared.pools.get_macro(macro_id).body)?;

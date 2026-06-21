@@ -10,13 +10,13 @@
 //! Only local macros are visible at item position; qualified calls aren't
 //! supported (the parser rejects `@mod::foo(...)`).
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
     ExpandError, NoteMessage,
-    ast::{Expansion, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
+    ast::{Expansion, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
     lexer::{is_ident_str, unescape_string},
     string_pool::{Str, StringPool},
 };
@@ -49,9 +49,9 @@ pub fn expand_macro_calls(
 ) -> Result<(), ExpandError> {
     // A name declared by more than one top-level macro is rejected by resolve
     // as a duplicate. Skip expanding its calls so we don't surface an arbitrary
-    // arg-count or kind error against whichever definition the parser's
-    // macro_index kept - collect_decls rejects the dup before pass 2 runs.
-    let duplicates = duplicate_macro_names(shared, ctx);
+    // arg-count or kind error against whichever definition the macro table
+    // kept - collect_decls rejects the dup before pass 2 runs.
+    let (macros, duplicates) = collect_macros(shared, ctx);
     // Walk only the original indices. Each Call writes its first expanded
     // rule into its own slot; the rest are pushed to the end. Parser's
     // EmptyRuleSetMacroBody guarantees the slot is always filled.
@@ -64,30 +64,37 @@ pub fn expand_macro_calls(
         if duplicates.contains(ctx.text(shared.arena.span(name))) {
             continue;
         }
-        expand_one_call(shared, strings, ctx, id, i)?;
+        expand_one_call(shared, strings, ctx, &macros, id, i)?;
     }
     Ok(())
 }
 
-/// Names declared by more than one top-level `rules`/`macro`.
-fn duplicate_macro_names(shared: &SharedAst, ctx: &ModuleContext) -> FxHashSet<String> {
-    let mut seen: FxHashSet<&str> = FxHashSet::default();
-    let mut dups = FxHashSet::default();
+/// The local top-level macro table (name -> id) plus the set of names declared
+/// by more than one `rules`/`macro`, built in one scan. Replaces a `macro_index`
+/// carried on the ctx: it's needed only here, after cfg gating, so deriving it
+/// from the surviving `root_items` keeps it off the parser/cfg side tables.
+fn collect_macros(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+) -> (FxHashMap<String, MacroId>, FxHashSet<String>) {
+    let mut macros: FxHashMap<String, MacroId> = FxHashMap::default();
+    let mut dups: FxHashSet<String> = FxHashSet::default();
     for &id in &ctx.root_items {
         if let Node::Macro(macro_id) = *shared.arena.get(id) {
             let name = ctx.text(shared.pools.get_macro(macro_id).name);
-            if !seen.insert(name) {
+            if macros.insert(name.to_string(), macro_id).is_some() {
                 dups.insert(name.to_string());
             }
         }
     }
-    dups
+    (macros, dups)
 }
 
 fn expand_one_call(
     shared: &mut SharedAst,
     strings: &mut StringPool,
     ctx: &mut ModuleContext,
+    macros: &FxHashMap<String, MacroId>,
     call_id: NodeId,
     slot: usize,
 ) -> Result<(), ExpandError> {
@@ -96,7 +103,7 @@ fn expand_one_call(
     };
     let name_span = shared.arena.span(name);
     let name_text = ctx.text(name_span);
-    let Some(macro_id) = ctx.macro_index.get(name_text).copied() else {
+    let Some(macro_id) = macros.get(name_text).copied() else {
         let mut err = ExpandError::new(
             ExpandErrorKind::UnknownMacro(name_text.to_string()),
             name_span,
