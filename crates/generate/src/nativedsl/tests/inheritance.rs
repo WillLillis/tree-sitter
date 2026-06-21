@@ -342,29 +342,22 @@ fn override_rule_can_access_base_let() {
     // override rule body referencing a let defined in the inherited grammar.
     // This exercises eager evaluation of the base's let bindings before any
     // override rule body that references them.
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"
         let GREETING: str_t = "hello"
         grammar { language: "base" }
         rule program { GREETING }
         "#,
+        )],
+        r#"
+        let base = inherit("base.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule program { seq(base::GREETING, "!") }
+        "#,
     )
     .unwrap();
-
-    let parent = dir.path().join("parent.tsg");
-    let src = format!(
-        r#"
-        let base = inherit("{}")
-        grammar {{ language: "derived", inherits: base }}
-        override rule program {{ seq(base::GREETING, "!") }}
-        "#,
-        dsl_path(&base)
-    );
-    std::fs::write(&parent, &src).unwrap();
-    let g = parse_native_dsl(&src, &parent).unwrap();
     assert_eq!(
         *find_rule(&g, "program"),
         Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
@@ -529,28 +522,21 @@ fn inherited_external_qualified_access() {
     // Symmetric with helper externals: a child grammar can reference an
     // inherited grammar's external token via `base::name`. Resolves through
     // the inherited grammar's lowered external_tokens.
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        r#"
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"
         grammar { language: "base", externals: [_token] }
         rule program { _token }
     "#,
+        )],
+        r#"
+        let base = inherit("base.tsg")
+        grammar { language: "child", inherits: base, externals: [base::_token] }
+        override rule program { seq(base::_token, "!") }
+    "#,
     )
     .unwrap();
-
-    let parent = dir.path().join("child.tsg");
-    let src = format!(
-        r#"
-        let base = inherit("{}")
-        grammar {{ language: "child", inherits: base, externals: [base::_token] }}
-        override rule program {{ seq(base::_token, "!") }}
-    "#,
-        dsl_path(&base)
-    );
-    std::fs::write(&parent, &src).unwrap();
-    let g = parse_native_dsl(&src, &parent).unwrap();
     assert_eq!(g.external_tokens.len(), 1);
     assert_eq!(g.external_tokens[0], Rule::NamedSymbol("_token".into()));
     assert_eq!(
@@ -566,25 +552,19 @@ fn inherited_external_qualified_access() {
 fn inherited_external_bare_reference() {
     // An inherited external is referenceable by bare name, like an inherited
     // rule (and like grammar.js's `$.name`) - not only via `base::name`.
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        r#"grammar { language: "base", externals: [_token] }
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"grammar { language: "base", externals: [_token] }
         external _token
         rule program { _token }
         "#,
+        )],
+        r#"let base = inherit("base.tsg")
+        grammar { language: "child", inherits: base }
+        rule extra { _token }"#,
     )
     .unwrap();
-    let child = dir.path().join("child.tsg");
-    let src = format!(
-        r#"let base = inherit("{}")
-        grammar {{ language: "child", inherits: base }}
-        rule extra {{ _token }}"#,
-        dsl_path(&base)
-    );
-    std::fs::write(&child, &src).unwrap();
-    let g = parse_native_dsl(&src, &child).unwrap();
     assert_eq!(*find_rule(&g, "extra"), Rule::NamedSymbol("_token".into()));
 }
 
@@ -595,24 +575,18 @@ fn inherited_rule_also_in_externals() {
     // name ends up in both variables and external_tokens. Inheriting it must not
     // double-register the name into the child's scope; grammar.js accepts the
     // equivalent (the symbol is the same whether backed by a rule or external).
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        r#"grammar { language: "base", externals: [tok] }
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"grammar { language: "base", externals: [tok] }
         rule tok { "x" }
         "#,
+        )],
+        r#"let base = inherit("base.tsg")
+        grammar { language: "child", inherits: base }
+        rule extra { tok }"#,
     )
     .unwrap();
-    let child = dir.path().join("child.tsg");
-    let src = format!(
-        r#"let base = inherit("{}")
-        grammar {{ language: "child", inherits: base }}
-        rule extra {{ tok }}"#,
-        dsl_path(&base)
-    );
-    std::fs::write(&child, &src).unwrap();
-    let g = parse_native_dsl(&src, &child).unwrap();
     assert_eq!(*find_rule(&g, "extra"), Rule::NamedSymbol("tok".into()));
 }
 
@@ -621,24 +595,18 @@ fn config_only_base_is_allowed() {
     // A base with no rules (config only) is a native-DSL extension over
     // grammar.js: it can't compile standalone, but it contributes config to a
     // child that supplies the rules. The root's rule count is what's enforced.
-    let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().join("base.tsg");
-    std::fs::write(
-        &base,
-        r#"grammar { language: "base", externals: [_eof] }
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"grammar { language: "base", externals: [_eof] }
         external _eof
         "#,
+        )],
+        r#"let base = inherit("base.tsg")
+        grammar { language: "child", inherits: base }
+        rule program { "x" }"#,
     )
     .unwrap();
-    let child = dir.path().join("child.tsg");
-    let src = format!(
-        r#"let base = inherit("{}")
-        grammar {{ language: "child", inherits: base }}
-        rule program {{ "x" }}"#,
-        dsl_path(&base)
-    );
-    std::fs::write(&child, &src).unwrap();
-    let g = parse_native_dsl(&src, &child).unwrap();
     // Child supplies the only rule; base contributes its externals as config.
     assert_eq!(rule_names(&g), vec!["program"]);
     assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("_eof".into())]);
@@ -694,23 +662,20 @@ fn override_with_rule_from_two_sources_errors() {
     // `override rule expr` claims one of them; the second is no longer skipped
     // and collides - the same duplicate-declaration a two-source name hits
     // without an override, not a silently duplicated variable.
-    let dir = tempfile::tempdir().unwrap();
-    let a = dir.path().join("a.tsg");
-    std::fs::write(&a, "rule expr { \"from_a\" }\n").unwrap();
-    let b = dir.path().join("b.tsg");
-    std::fs::write(&b, "rule expr { \"from_b\" }\n").unwrap();
-    let input = format!(
+    let err = parse_with_modules(
+        &[
+            ("a.tsg", "rule expr { \"from_a\" }\n"),
+            ("b.tsg", "rule expr { \"from_b\" }\n"),
+        ],
         r#"
-        let a = import("{}")
-        let b = import("{}")
-        grammar {{ language: "test" }}
-        rule program {{ expr }}
-        override rule expr {{ "overridden" }}
+        let a = import("a.tsg")
+        let b = import("b.tsg")
+        grammar { language: "test" }
+        rule program { expr }
+        override rule expr { "overridden" }
     "#,
-        dsl_path(&a),
-        dsl_path(&b)
-    );
-    let err = parse_native_dsl(&input, std::path::Path::new(".")).unwrap_err();
+    )
+    .unwrap_err();
     let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
