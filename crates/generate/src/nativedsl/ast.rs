@@ -594,7 +594,7 @@ impl ModuleContext {
             message,
             span,
             path: self.path.clone(),
-            source: self.source.clone(),
+            src: self.source.clone(),
         }
     }
 }
@@ -671,7 +671,6 @@ pub enum Node {
     /// A `mod::name` reference resolved to a rule (or external symbol) in
     /// another module's lowered output. Replaces a `QualifiedAccess` during
     /// resolve once the target is found; the lowerer indexes directly.
-    /// (References to an AST-level `let`/`macro` become `Ident` instead.)
     ModuleRule {
         module: ModuleId,
         target: RuleTarget,

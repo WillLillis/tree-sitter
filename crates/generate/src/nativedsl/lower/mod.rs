@@ -393,7 +393,11 @@ fn build_grammar(
     // Helper rules (materialized from the shared imported-rule list) can also be
     // override targets. The clone happens here, once, at final assembly.
     for ir in imported_rules {
-        let (name, rule) = &previous[ir.module as usize].helper_rules()[ir.index as usize];
+        expect_pat!(
+            Module::Helper { lowered_rules, .. },
+            &previous[ir.module as usize]
+        );
+        let (name, rule) = &lowered_rules[ir.index as usize];
         let final_rule = overrides
             .remove(name)
             .map_or_else(|| rule.clone(), |s| s.value);
@@ -463,9 +467,9 @@ fn build_grammar(
     })
 }
 
-pub type LowerResult<T> = Result<T, super::LowerError>;
+pub type LowerResult<T> = Result<T, LowerError>;
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisallowedItemKind {
     OverrideRule,
     GrammarBlock,
@@ -492,7 +496,7 @@ pub enum LowerErrorKind {
     ModuleTooMany,
     #[error("module import chain too deep (max 256)")]
     ModuleDepthExceeded,
-    #[error("imported files cannot contain a {}", format_disallowed(.0))]
+    #[error("imported files cannot contain a {}", format_disallowed(*.0))]
     ModuleDisallowedItem(DisallowedItemKind),
     #[error("cycle while loading module")]
     ModuleCycle,
@@ -525,7 +529,7 @@ pub enum LowerErrorKind {
     CircularLet(String),
 }
 
-const fn format_disallowed(kind: &DisallowedItemKind) -> &'static str {
+const fn format_disallowed(kind: DisallowedItemKind) -> &'static str {
     match kind {
         DisallowedItemKind::OverrideRule => "override rule",
         DisallowedItemKind::GrammarBlock => "grammar block",

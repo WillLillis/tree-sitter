@@ -1,12 +1,11 @@
 //! Native DSL front-end for tree-sitter grammar definitions.
 //!
-//! Pipeline: lex -> parse -> `expand_macro_calls` -> resolve -> typecheck -> lower,
-//! producing an [`InputGrammar`] equivalent to what `grammar.json` parsing produces.
+//! Pipeline: lex -> parse -> `merge_module_flags` -> `apply_cfg` -> `validate` ->
+//! `expand_macro_calls` -> `resolve` -> `typecheck` -> `lower` -> `build_exports`
+//! (imported/inherited modules load before resolve). Produces an [`InputGrammar`].
 
 /// Save the length of one or more `Vec`s used as stacks, run a body, then
-/// truncate each back. The body is wrapped in a closure so `?` inside
-/// short-circuits the closure rather than the outer function, letting the
-/// truncates always run.
+/// truncate each back.
 macro_rules! stack_scope {
     ($buf:expr, |$base:ident| $body:expr) => {{
         let $base = $buf.len();
@@ -71,7 +70,7 @@ pub use typecheck::{
 
 use std::path::{Path, PathBuf};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -85,21 +84,17 @@ use typecheck::TypeEnv;
 pub type ModuleId = u8;
 
 /// A loaded and resolved module.
-///
-/// `Helper` modules come from `import(...)` and expose let/macro/rule/external
-/// bindings. Their rules are lowered eagerly into `lowered_rules` so importers
-/// can materialize them by bare name or inline via `helper::rule_name`.
-/// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
-/// a fully lowered grammar for rule merging and `grammar_config` access. The
-/// `lowered` field is boxed because `InputGrammar` is far larger than
-/// `ModuleContext`, and most modules are `Helper`s.
 #[derive(Debug)]
 pub enum Module {
+    /// `Helper` modules come from `import(...)` and expose let/macro/rule/external
+    /// bindings. Their rules are lowered eagerly into `lowered_rules`.
     Helper {
         ctx: ModuleContext,
         lowered_rules: Vec<(String, Rule)>,
         exports: FxHashMap<Box<str>, Export>,
     },
+    /// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
+    /// a fully lowered grammar for rule merging and `grammar_config` access.
     Grammar {
         ctx: ModuleContext,
         lowered: Box<InputGrammar>,
@@ -107,8 +102,7 @@ pub enum Module {
     },
 }
 
-/// What a name exported by a module resolves to, so a `mod::name` reference
-/// becomes an ID-based lookup at resolve time instead of a name scan.
+/// What a name exported by a module resolves to
 #[derive(Clone, Copy, Debug)]
 pub enum Export {
     /// An AST-level `let` or `macro` (resolves to `Ident(Var | Macro)`).
@@ -131,15 +125,6 @@ impl Module {
         match self {
             Self::Grammar { lowered, .. } => Some(lowered),
             Self::Helper { .. } => None,
-        }
-    }
-
-    /// This module's lowered helper rules; empty for a grammar module. Used to
-    /// dereference an [`ImportedRule`] handle.
-    pub(crate) fn helper_rules(&self) -> &[(String, Rule)] {
-        match self {
-            Self::Helper { lowered_rules, .. } => lowered_rules,
-            Self::Grammar { .. } => &[],
         }
     }
 
@@ -168,6 +153,7 @@ pub enum LoweredRef<'a> {
     Helper(&'a [(String, Rule)]),
 }
 
+// TODO: questionable wording, precedence?
 /// Build a module's export table.
 ///
 /// The table maps each name a module exposes to `mod::name` references onto an
@@ -198,6 +184,8 @@ pub fn build_exports(
         };
         add(name, Export::Local(kind));
     }
+    // TODO: Should external decls be exported from a module? Seems wrong but need to check
+    // roundtrip tests
     // Top-level `external X` declarations.
     for &item_id in &ctx.root_items {
         if let Node::External { name } = *arena.get(item_id) {
@@ -225,18 +213,29 @@ pub fn build_exports(
     exports
 }
 
-/// Walk the import graph depth-first from `initial_refs`, calling `f` for
-/// each transitively-reachable helper module exactly once. The `Span`
-/// argument is the span of the import statement that brought the helper
-/// into scope (used for "first defined here" notes when registering helper
-/// rule names).
-pub(super) fn for_each_imported_helper<'a>(
+/// A rule contributed by a transitively-imported helper, exposed as a handle
+/// into the owning helper's `lowered_rules`.
+///
+/// Resolved once after child modules load and shared by resolve (bare-name
+/// registration) and lower (materialization), so the two passes can't disagree
+/// about what an import contributes.
+#[derive(Clone, Copy)]
+pub struct ImportedRule {
+    pub module: ModuleId,
+    pub index: u32,
+    /// The import statement that brought the rule into scope, for error locations.
+    pub ref_span: Span,
+}
+
+/// Flatten the transitive helper imports into an ordered handle list. Each helper
+/// is visited once, yielding one handle per rule in source order.
+pub(crate) fn collect_imported_rules(
     arena: &ast::NodeArena,
     initial_refs: &[ast::NodeId],
-    modules: &'a [Module],
-    mut f: impl FnMut(ModuleId, &'a Module, Span),
-) {
-    let mut visited: rustc_hash::FxHashSet<u8> = rustc_hash::FxHashSet::default();
+    modules: &[Module],
+) -> Vec<ImportedRule> {
+    let mut rules = Vec::new();
+    let mut visited = FxHashSet::default();
     let mut stack: Vec<(u8, Span)> = Vec::new();
 
     let seed = |stack: &mut Vec<(u8, Span)>, refs: &[ast::NodeId]| {
@@ -260,44 +259,17 @@ pub(super) fn for_each_imported_helper<'a>(
             continue;
         }
         let module = &modules[usize::from(idx)];
-        if matches!(module, Module::Helper { .. }) {
-            f(idx, module, ref_span);
+        if let Module::Helper { lowered_rules, .. } = module {
+            for index in 0..lowered_rules.len() {
+                rules.push(ImportedRule {
+                    module: idx,
+                    index: index as u32,
+                    ref_span,
+                });
+            }
             seed(&mut stack, &module.ctx().module_refs);
         }
     }
-}
-
-/// A rule contributed by a transitively-imported helper - a handle into the
-/// owning helper's `lowered_rules`.
-///
-/// Resolved once after child modules load and shared by resolve (bare-name
-/// registration) and lower (materialization), so the two passes can't disagree
-/// about what an import contributes.
-#[derive(Clone, Copy)]
-pub struct ImportedRule {
-    pub module: ModuleId,
-    pub index: u32,
-    /// The import statement that brought the rule into scope, for notes.
-    pub ref_span: Span,
-}
-
-/// Flatten the transitive helper imports once into an ordered handle list, in
-/// place of the separate resolve-side and lower-side import-graph walks.
-pub(crate) fn collect_imported_rules(
-    arena: &ast::NodeArena,
-    initial_refs: &[ast::NodeId],
-    modules: &[Module],
-) -> Vec<ImportedRule> {
-    let mut rules = Vec::new();
-    for_each_imported_helper(arena, initial_refs, modules, |module, helper, ref_span| {
-        for index in 0..helper.helper_rules().len() {
-            rules.push(ImportedRule {
-                module,
-                index: index as u32,
-                ref_span,
-            });
-        }
-    });
     rules
 }
 
@@ -305,8 +277,7 @@ pub(crate) fn collect_imported_rules(
 ///
 /// # Errors
 ///
-/// Returns [`DslError`] if any pipeline stage fails, or if `grammar_path`
-/// cannot be canonicalized.
+/// Returns [`DslError`] if any pipeline stage fails.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
     let canonical = dunce::canonicalize(grammar_path).map_err(|e| {
         LowerError::without_span(LowerErrorKind::ModuleResolveFailed {
@@ -334,18 +305,13 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     dsl_loader.load_module(input, &canonical, loader::ModuleKind::Grammar)?;
     // Root is the last-pushed module by construction.
     expect_pat!(Some(Module::Grammar { ctx, lowered, .. }), modules.pop());
-    // The root grammar becomes the emitted grammar.json, which tree-sitter
-    // requires to have at least one rule (grammar.js enforces the same). An
-    // inherited base may be config-only - it contributes its rules (possibly
-    // none) plus config - but the root, after merging inherited/local/helper
-    // rules, must not be empty.
     if lowered.variables.is_empty() {
         let span = ctx
             .root_items
             .iter()
             .find(|&&id| matches!(shared.arena.get(id), Node::Grammar))
             .map(|&id| shared.arena.span(id))
-            .expect("grammar module has a grammar block");
+            .unwrap();
         Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, span))?;
     }
     Ok(*lowered)
@@ -369,8 +335,7 @@ pub struct Diagnostic<K> {
     pub notes: Vec<Note>,
     /// Source + path the primary `span` indexes into, when that differs from the
     /// module the error surfaces in (a lower error born evaluating an imported
-    /// module's macro body). `None` uses the caller-supplied source. Mirrors the
-    /// per-[`Note`] source. (Not `source`: that name is reserved by `thiserror`.)
+    /// module's macro body). `None` uses the caller-supplied source.
     #[serde(skip)]
     pub src: Option<Box<(String, PathBuf)>>,
 }
@@ -411,8 +376,6 @@ impl<K> Diagnostic<K> {
         self
     }
 
-    /// Append an additional note (e.g. enrichment running after the primary
-    /// note was attached). Preserves existing notes.
     pub fn add_note(&mut self, note: Note) {
         self.notes.push(note);
     }
@@ -468,33 +431,25 @@ pub struct Note {
     #[serde(skip)]
     pub path: PathBuf,
     #[serde(skip)]
-    pub source: String,
+    pub src: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,
-    /// An unmatched `override rule` declaration's location, one per extra
-    /// override in an `OverrideRuleNotFound` error.
+    /// An unmatched `override rule` declaration's location
     OverrideDeclaredHere,
-    /// One per redundant `inherit()` beyond the first in a `MultipleInherits`
-    /// error; the note's span points at the extra inherit call.
+    /// One per redundant `inherit()` beyond the first in a `MultipleInherits` error
     AlsoInheritedHere,
-    /// Carries the cfg flag name; the note's span points at the gated decl.
+    /// Carries the cfg flag name, the note's span points at the gated decl.
     GatedByDisabledCfg(String),
-    /// Carries the suggested name; emitted when an unknown identifier or
-    /// macro is close to a known name.
     DidYouMean(String),
-    /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the
-    /// imported path string so the note can show the exact transformation.
+    /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the imported path string.
     SwitchImportToInherit(String),
-    /// Points at a let value's reference back to itself (only reachable through
-    /// a macro); attached to a `CircularLet` lower error.
+    /// Points at a let value's reference back to itself.
     SelfReferenceHere,
-    /// Attached to the arg-count error when `prec_left`/`prec_right` is given a
-    /// single argument (the DSL requires the precedence explicitly, unlike
-    /// grammar.js). `is_left` picks the name; `arg` is the lone argument's text.
+    /// Attached to the arg-count error when `prec_left`/`prec_right` is given a single arg.
     PrecNeedsExplicitPrecedence {
         is_left: bool,
         arg: String,
@@ -509,10 +464,7 @@ impl std::fmt::Display for NoteMessage {
             Self::OverrideDeclaredHere => write!(f, "override declared here"),
             Self::AlsoInheritedHere => write!(f, "also inherited here"),
             Self::GatedByDisabledCfg(flag) => {
-                write!(
-                    f,
-                    "this declaration is gated by `#[cfg({flag})]`, currently disabled"
-                )
+                write!(f, "this declaration is disabled by `#[cfg({flag})]`")
             }
             Self::DidYouMean(name) => write!(f, "did you mean `{name}`?"),
             Self::SwitchImportToInherit(path) => {
@@ -523,7 +475,7 @@ impl std::fmt::Display for NoteMessage {
                 let name = if *is_left { "prec_left" } else { "prec_right" };
                 write!(
                     f,
-                    "{name} requires an explicit precedence, did you mean `{name}(0, {arg})`?"
+                    "{name} requires a precedence, did you mean `{name}(0, {arg})`?"
                 )
             }
         }

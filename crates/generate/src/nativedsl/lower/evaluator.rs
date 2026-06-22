@@ -722,12 +722,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 })
             }
             // A `mod::name` reference that resolve recorded as a concrete
-            // target in another module's lowered output. Index directly; no
-            // name scan. `&self.previous[..]` is `&'a Module`, decoupled from
-            // the `&mut self` that `import_rule` needs.
+            // target in another module's lowered output.
             &Node::ModuleRule { module, target } => {
                 let target_module = &self.previous[usize::from(module)];
                 let rid = match target {
+                    // TODO: Should external decls be exported from a module? Seems wrong but need to check
+                    // roundtrip tests
                     RuleTarget::ExternalName(span) => {
                         let sid = self.strings.intern_span(span, module);
                         self.alloc_rule(ARule::NamedSymbol(sid))
