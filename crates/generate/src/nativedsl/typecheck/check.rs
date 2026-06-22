@@ -736,7 +736,7 @@ fn type_of_call(
             return Err(TypeError::with_note(
                 kind,
                 span,
-                ctx.note(NoteMessage::DidYouMean(suggestion), span),
+                ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span),
             ));
         }
         return Err(TypeError::new(kind, span));

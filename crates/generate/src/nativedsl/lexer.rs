@@ -1,6 +1,3 @@
-//! Lexer for the native grammar DSL. Produces a flat `Vec<Token>` from
-//! source bytes.
-
 use memchr::{memchr, memchr2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -9,9 +6,9 @@ use super::LexError;
 use super::ast::Span;
 
 /// Byte classification flags for the lexer's hot loops.
-const CLASS_WHITESPACE: u8 = 1;
-const CLASS_IDENT_CONTINUE: u8 = 2;
-const CLASS_IDENT_START: u8 = 4;
+const CLASS_WHITESPACE: u8 = 0b0000_0001;
+const CLASS_IDENT_CONTINUE: u8 = 0b0000_0010;
+const CLASS_IDENT_START: u8 = 0b0000_0100;
 
 /// Lookup table mapping byte value to classification flags.
 const BYTE_CLASS: [u8; 256] = {
@@ -45,9 +42,7 @@ const fn byte_is(b: u8, class: u8) -> bool {
     BYTE_CLASS[b as usize] & class != 0
 }
 
-/// True iff `s` is shaped like an `Ident` token. Used by expand to
-/// validate computed names against the same predicate the lexer uses
-/// for source-text idents.
+/// True iff `s` is shaped like an `Ident` token.
 #[must_use]
 pub fn is_ident_str(s: &str) -> bool {
     let bytes = s.as_bytes();
@@ -573,7 +568,7 @@ impl<'src> Lexer<'src> {
     }
 }
 
-pub type LexResult<T> = Result<T, super::LexError>;
+pub type LexResult<T> = Result<T, LexError>;
 
 /// The specific kind of lexer error.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
