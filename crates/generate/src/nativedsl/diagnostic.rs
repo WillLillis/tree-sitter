@@ -179,7 +179,7 @@ fn render_error(
             f,
             Source {
                 span: note.span,
-                text: &note.source,
+                text: &note.src,
                 path: &note.path,
             },
             SnippetKind::Note(note.message.clone()),

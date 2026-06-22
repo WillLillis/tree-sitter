@@ -1,5 +1,3 @@
-//! Recursive descent parser for the native grammar DSL.
-
 use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
@@ -35,26 +33,17 @@ pub struct Parser<'tok, 'shared> {
     ctx: ModuleContext,
     scratch: Vec<NodeId>,
     /// Stack of local bindings (macro params and for-loop bindings).
-    /// Innermost scope is at the end. Pushed before parsing a body,
-    /// truncated after.
     locals: Vec<(Span, LocalBinding)>,
     depth: u16,
-    /// True while parsing a `rules` macro body. The `@` computed-rule syntax
-    /// (both `rule @<expr>` definitions and `@<expr>` references) is only valid
-    /// there - `expand_macro_calls` rewrites it during macro expansion, so any
-    /// `@` outside a rule-set body would leak unresolved into later stages.
-    in_rule_set: bool,
-    /// `SymRef` node ids created while parsing the current rule-set body, drained
-    /// into the macro's `MacroConfig.sym_refs` when the body finishes.
-    pending_sym_refs: Vec<NodeId>,
+    /// `Some` while parsing a `rules` macro body, containing the
+    /// `SymRef` node ids created.
+    pending_sym_refs: Option<Vec<NodeId>>,
 }
 
 impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// SAFETY:
     ///
-    /// Caller must pass a token stream produced by
-    /// [`super::lexer::Lexer::tokenize`] (in particular, terminated by
-    /// `TokenKind::Eof`).
+    /// Caller must pass a token stream produced by terminated by `TokenKind::Eof`.
     #[must_use]
     pub fn new(
         tokens: &'tok [Token],
@@ -83,14 +72,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
             depth: 0,
-            in_rule_set: false,
-            pending_sym_refs: Vec::new(),
+            pending_sym_refs: None,
         }
     }
 
     pub fn parse(mut self) -> ParseResult<ModuleContext> {
-        // Capture this module's NodeId range so consumers (e.g. LSP) can
-        // attribute nodes back to the right ModuleContext / source text.
         let start = self.shared.arena.next_id().into();
         self.skip_comments();
         while !self.at_eof() {
@@ -99,7 +85,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             self.skip_comments();
         }
         let end = self.shared.arena.next_id().into();
-        debug_assert!(start <= end);
         self.ctx.node_range = start..end;
         Ok(self.ctx)
     }
@@ -135,9 +120,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             return false;
         }
         let mut i = self.pos + 1;
-        // SAFETY: token stream is terminated by Eof. Since pos is not at Eof
-        // (checked above), pos + 1 is at most the Eof position, and the loop
-        // stops when it hits any non-Comment (including Eof).
+        // SAFETY: token stream is terminated by Eof. Since pos is not at Eof,
+        // `pos + 1` is at most the Eof position, and the loop stops when it hits
+        // any non-Comment (including Eof).
         while unsafe { self.tokens.get_unchecked(i) }.kind == TokenKind::Comment {
             i += 1;
         }
@@ -147,9 +132,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// Advance past the current token, skipping any comments.
     fn advance_pos(&mut self) {
         self.pos += 1;
-        while self.current().kind == TokenKind::Comment {
-            self.pos += 1;
-        }
+        self.skip_comments();
     }
 
     fn eat(&mut self, kind: TokenKind) -> Option<Span> {
@@ -238,19 +221,15 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_item(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
-            // Cfg attribute layers stack via recursion here and through
-            // apply_cfg's walk_cfg later. Cap nesting via the shared parse
-            // depth budget to keep both recursive paths safe.
             self.depth += 1;
             if self.depth > MAX_PARSE_DEPTH {
                 return Err(self.error(ParseErrorKind::NestingTooDeep));
             }
             let child = self.parse_item()?;
             self.depth -= 1;
-            // A cfg-gated grammar block is structurally meaningless: the
-            // grammar's `flags` declaration is read before cfg gating runs,
-            // so the block would either fail to declare its own gating flag
-            // or self-disable inconsistently. Reject at parse time.
+            // A cfg-gated grammar block is structurally meaningless. The grammar's
+            // `flags` declaration is read before cfg gating runs, so the block would
+            // either fail to declare its own gating flag or self-disable.
             if matches!(self.shared.arena.get(child), Node::Grammar) {
                 return Err(ParseError::new(
                     ParseErrorKind::CfgOnGrammarBlock,
@@ -271,15 +250,13 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwMacro => self.parse_macro_def(),
             TokenKind::KwRules => self.parse_rule_set_def(),
             TokenKind::KwExternal => self.parse_external_decl(),
-            // `@name(args...)` - rule-set macro invocation, expanded later.
             TokenKind::At => self.parse_top_level_call(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
         }
     }
 
     /// If the next token is `#`, consume `#[cfg(IDENT)]` and return the
-    /// `(attribute span, flag-name span)` pair. Otherwise return `None`
-    /// without consuming anything.
+    /// `(attribute span, flag-name span)` pair. Otherwise return `None`.
     fn try_parse_cfg_attribute(&mut self) -> ParseResult<Option<(Span, Span)>> {
         let Some(start) = self.eat(TokenKind::Pound) else {
             return Ok(None);
@@ -301,10 +278,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         Ok(Some((start.merge(end), name)))
     }
 
-    /// Parse an expression, optionally preceded by one or more `#[cfg(NAME)]`
-    /// attributes. Used in list-member positions (seq/choice members, list
-    /// literal elements). Nested cfgs are intersection: all must be active for
-    /// the wrapped expression to survive.
+    /// Parse an expression, optionally preceded by one or more `#[cfg(NAME)]` attributes.
     fn parse_expr_with_cfg(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
             self.depth += 1;
@@ -400,9 +374,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         } else {
             self.expect(TokenKind::KwRule)?
         };
-        // `rule @<expr> { ... }` - computed name; consumed by expand.
         if self.eat(TokenKind::At).is_some() {
-            if !self.in_rule_set {
+            if self.pending_sym_refs.is_none() {
                 Err(self.error(ParseErrorKind::ComputedRuleTopLevel))?;
             }
             let name_expr = self.parse_postfix()?;
@@ -457,13 +430,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.parse_macro_like(start, /* rule_set */ false)
     }
 
-    /// `rules NAME(params) { rule decls... }` - expanded at each top-level
-    /// `@NAME(args)` call site by `expand_macro_calls`. Distinct keyword from
-    /// `macro` so the file-local, top-level-emitting nature of the binding is
-    /// visible at the def.
+    /// `rules NAME(params) { rule decls... }` expanded at each top-level
+    /// `@NAME(args)` call site by `expand_macro_calls`.
     fn parse_rule_set_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwRules)?;
-        self.parse_macro_like(start, /* rule_set */ true)
+        self.parse_macro_like(start, true)
     }
 
     fn parse_macro_like(&mut self, start: Span, rule_set: bool) -> ParseResult<NodeId> {
@@ -478,9 +449,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        // Duplicate names and module_t param/return types are rejected in
-        // typecheck (the AST is well-formed; these are semantic checks). The u8
-        // bound stays here - it's a representation limit on the param index.
         if params.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
@@ -490,7 +458,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             MacroKind::Expression(self.parse_type()?.0)
         };
         let brace_start = self.expect(TokenKind::LBrace)?;
-        let body = stack_scope!(self.locals, |_saved| {
+        let body = stack_scope!(self.locals, |saved| {
             for (i, p) in params.iter().enumerate() {
                 self.locals
                     .push((p.name, LocalBinding::MacroParam(p.ty, i as u8)));
@@ -503,7 +471,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let end = self.expect(TokenKind::RBrace)?;
         // `@` refs are only created inside rule-set bodies (and don't nest), so
         // pending_sym_refs holds exactly this body's refs (empty otherwise).
-        let sym_refs = std::mem::take(&mut self.pending_sym_refs);
+        let sym_refs = self.pending_sym_refs.take().unwrap_or_default();
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,
@@ -517,8 +485,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .push(Node::Macro(macro_idx), start.merge(end)))
     }
 
-    /// Emits `Node::Call` at item position; consumed by `expand_macro_calls`.
-    /// Caller is positioned at the leading `@`.
+    /// Emits `Node::Call` at item position, consumed by `expand_macro_calls`.
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
         let at_span = self.expect(TokenKind::At)?;
         let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
@@ -544,9 +511,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// Parse `rule` / `override rule` decls until `}`, wrap in `Node::RuleSet`.
     /// Caller consumes the closing brace.
     fn parse_rule_set_body(&mut self, brace_start: Span) -> ParseResult<NodeId> {
-        // Enables `@` computed-rule syntax for this body. Rule-set bodies never
-        // nest, so a plain flip back to false on exit is enough.
-        self.in_rule_set = true;
+        // Enables `@` computed-rule syntax for this body. Rule-set bodies drain their sym refs
+        // before returning here
+        debug_assert!(self.pending_sym_refs.is_none());
+        self.pending_sym_refs = Some(Vec::new());
         let mut decls = Vec::new();
         loop {
             if self.at(TokenKind::RBrace) {
@@ -559,8 +527,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             };
             decls.push(id);
         }
-        self.in_rule_set = false;
-        // expand_macro_calls relies on >=1 rule for in-place slot placement.
+        // `expand_macro_calls` relies on >=1 rule for in-place slot placement.
         if decls.is_empty() {
             return Err(self.error(ParseErrorKind::EmptyRuleSetMacroBody));
         }
@@ -594,13 +561,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 }
                 "tuple_t" => {
                     self.expect(TokenKind::Lt)?;
-                    // Comma-separated scalar element types. `list_t<tuple_t<...>>`
-                    // and `obj_t<tuple_t<...>>` fall out of the existing list/obj
-                    // recursion. Arity is bounded, so collect into a fixed
-                    // buffer; keep counting past it so an over-long tuple still
-                    // reports its real length.
                     let mut scalars = [ScalarTy::Rule; TUPLE_MAX_ARITY];
-                    let mut n = 0usize;
+                    let mut n = 0;
                     loop {
                         let (inner_ty, inner_span) = self.parse_type()?;
                         let Ty::Data(DataTy::Scalar(s)) = inner_ty else {
@@ -619,9 +581,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     }
                     let gt = self.expect(TokenKind::Gt)?;
                     let span = id_span.merge(gt);
-                    // `get(..n)` is None when `n` overran the buffer (too many
-                    // elements); `TupleSig::new` rejects too few. Either way the
-                    // real count `n` is reported.
                     let sig = scalars
                         .get(..n)
                         .and_then(|elems| TupleSig::new(elems).ok())
@@ -654,12 +613,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         Err(self.error(ParseErrorKind::ExpectedType))
     }
 
-    /// Count one more level of nesting toward `MAX_PARSE_DEPTH`. Called on
-    /// recursive entry and once per iteration of the iterative postfix/infix
-    /// loops below, whose left-nested chains the entry-only guard would
-    /// otherwise miss - a long `a.b.c` / `a::b::c` / `1+2+3` chain builds a deep
-    /// AST that later passes recurse over and would overflow the stack on. The
-    /// caller restores `self.depth` on the way out.
+    /// Count one more level of nesting toward `MAX_PARSE_DEPTH`. The caller
+    /// restores `self.depth` on the way out.
     fn deepen(&mut self) -> ParseResult<()> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
@@ -720,10 +675,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let kw = self.current().kind;
         // Builtin keywords are contextual: they act as keywords only when
         // followed by `(`. Otherwise they are identifiers so grammars can
-        // use names like `import`, `field`, `for`, etc. as rules. Only the
-        // keyword arms consult `next_lparen`, so skip the lookahead (a
-        // comment-skipping token scan) for the common operands - plain
-        // identifiers and literals, which are the bulk of primaries.
+        // use names like `import`, `field`, `for`, etc. as rules.
         let next_lparen = kw.is_keyword() && self.next_is(TokenKind::LParen);
         match kw {
             TokenKind::KwSeq | TokenKind::KwChoice if next_lparen => {
@@ -745,7 +697,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 self.advance_pos();
                 self.expect(TokenKind::LParen)?;
                 if !self.at(TokenKind::RParen) {
-                    let mut got = 0usize;
+                    let mut got = 0;
                     loop {
                         if self.at(TokenKind::RParen) {
                             break;
@@ -811,10 +763,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
             }
             TokenKind::At => {
-                // `@<primary>` - computed-name rule ref; valid in rule-set
-                // macro bodies, resolved by expand_macro_calls. Anywhere else
-                // it would leak unresolved into typecheck.
-                if !self.in_rule_set {
+                // @-computed rule names are only valid inside rule sets
+                if self.pending_sym_refs.is_none() {
                     return Err(self.error(ParseErrorKind::ComputedRuleTopLevel));
                 }
                 self.advance_pos();
@@ -823,9 +773,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                     Node::SymRef { expr: inner },
                     start.merge(self.shared.arena.span(inner)),
                 );
-                // Record for the enclosing rule-set macro so expand can evaluate
-                // it (with call args) without re-walking the body.
-                self.pending_sym_refs.push(id);
+                // Record for the enclosing rule-set macro so expand can evaluate it
+                if let Some(ref mut refs) = self.pending_sym_refs {
+                    refs.push(id);
+                }
                 Ok(id)
             }
             TokenKind::LBracket => self.parse_delimited(
@@ -891,8 +842,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 field_span,
             )
         })?;
-        // inherits/flags are real fields but not composable values, so
-        // grammar_config() doesn't expose them (language reads as the base's name).
+        // inherits/flags are real fields but not composable values
         if matches!(field, ConfigField::Inherits | ConfigField::Flags) {
             Err(ParseError::new(
                 ParseErrorKind::GrammarFieldNotReadable(field_name.to_string()),
@@ -961,9 +911,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             Ok(parsed) => parsed,
             Err(mut err) => {
                 // grammar.js lets prec.left/right omit the precedence (it
-                // defaults to 0); the DSL requires it, since its optional args
-                // are trailing (e.g. regexp(p, flags?)). Suggest the explicit
-                // form, quoting the lone arg parse_binary just parsed (last node).
+                // defaults to 0) but the DSL requires it.
                 if let PrecKind::Left | PrecKind::Right = kind
                     && matches!(err.kind, ParseErrorKind::WrongArgumentCount { got: 1, .. })
                 {
@@ -1042,8 +990,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             },
             start.merge(end),
         );
-        // The loader/validate_grammar derive the inherit set from `module_refs`
-        // (filtered to non-import), so the parser only records the ref here.
         self.ctx.module_refs.push(id);
         Ok(id)
     }
@@ -1068,9 +1014,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             })
         })?;
         self.expect(TokenKind::RParen)?;
-        // Duplicate names and the empty-bindings case are rejected in typecheck
-        // (well-formed AST, semantic checks). The u8 bound stays - it's a
-        // representation limit on the binding index.
         if bindings.len() > u8::MAX as usize {
             return Err(self.error(ParseErrorKind::TooManyBindings));
         }
@@ -1205,8 +1148,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 value: this.parse_expr()?,
             })
         })?;
-        // Duplicate keys are rejected in typecheck (well-formed AST, semantic
-        // check), which keeps all fields so the duplicate is detectable.
         let end = self.expect(TokenKind::RBrace)?;
         let fields_len = fields.len();
         let range = self
@@ -1223,10 +1164,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// Parse comma-separated children directly into a [`ChildRange`].
     /// `prefix` is prepended to the resulting range (e.g. `[obj, name]`
     /// for a qualified call).
-    ///
-    /// Uses a scratch buffer as a stack to avoid per-call heap allocation.
-    /// Nested calls push above the parent's items and truncate back, so
-    /// interleaving is impossible.
     fn comma_sep_children(
         &mut self,
         prefix: &[NodeId],
@@ -1317,7 +1254,7 @@ pub enum ParseErrorKind {
     TooManyChildren(usize),
     #[error("too many bindings (maximum 255)")]
     TooManyBindings,
-    #[error("{}", format_arg_count(*.expected, .name, *.got))]
+    #[error("{}", format_arg_count(*.expected, *.name, *.got))]
     WrongArgumentCount {
         name: TokenKind,
         expected: u8,
@@ -1337,11 +1274,7 @@ pub enum ParseErrorKind {
     QualifiedRuleSetCall,
 }
 
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "called by thiserror with references"
-)]
-fn format_arg_count(expected: u8, name: &TokenKind, got: usize) -> String {
+fn format_arg_count(expected: u8, name: TokenKind, got: usize) -> String {
     match expected {
         0 => format!("{name} takes no arguments, got {got}"),
         1 => format!("{name} takes 1 argument, got {got}"),
