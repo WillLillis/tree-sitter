@@ -1,6 +1,4 @@
-//! Module system and glue code for the native DSL.
-//!
-//! Dispatches the lexer, parser, and lowerer throughout the module system.
+//! Module system and glue code for the native DSL pipeline.
 
 use std::path::{Path, PathBuf};
 
@@ -26,11 +24,7 @@ pub struct Loader<'a> {
     pub strings: &'a mut StringPool,
     pub cfg: &'a mut CfgState,
     pub ancestor_paths: Vec<PathBuf>,
-    /// Loader-wide dedup cache: each (canonical path, kind) loads at most once
-    /// across the whole import graph for a single `parse_native_dsl` call. Keyed
-    /// by kind so that the unusual case of the same file being both inherited
-    /// and imported still loads twice (once per kind), letting validation fail
-    /// the inappropriate one.
+    /// Module dedup cache. Each (canonical path, kind) loads at most once
     pub loaded: Vec<(PathBuf, ModuleKind, ModuleId)>,
 }
 
@@ -48,10 +42,7 @@ impl Loader<'_> {
     /// # Errors
     ///
     /// Returns `Err` if the module isn't valid tsg source.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `path` has no parent directory.
+    #[expect(clippy::missing_panics_doc)]
     pub fn load_module(
         &mut self,
         source: &str,
@@ -69,18 +60,12 @@ impl Loader<'_> {
             parser::Parser::new(&tokens, source.to_string(), path.to_path_buf(), self.shared)
                 .parse()?;
 
-        // Register this module's flag declarations into the global state.
-        // Runs before children load and the active map is first-write-wins,
-        // so this module's flag values win over the modules it imports.
+        // Register this module's flag declarations into the global state. This module's
+        // flag values win over flags in any modules it imports.
         self.cfg.merge_module_flags(self.shared, &mut ctx)?;
 
-        // Apply cfg gating *before* loading children so cfg-disabled
-        // `inherit(...)` / `import(...)` calls don't trigger file loads (and
-        // don't merge their rules into this module). Also runs before module
-        // validation so the inherit/inherits consistency check sees the
-        // post-gating state. Skip the whole walk when no `#[cfg(...)]`
-        // appears anywhere in this module (the common case for grammars that
-        // don't use the feature).
+        // Apply cfg gating *before* loading children so cfg-disabled imports don't trigger file
+        // loads and other side effects. Skip the whole walk when no cfgs are used.
         if ctx.has_cfg {
             apply_cfg(self.shared, &mut ctx, self.cfg, kind)?;
         }
@@ -90,16 +75,13 @@ impl Loader<'_> {
             ModuleKind::Helper => self.validate_import_items(&ctx)?,
         }
 
-        // Inline top-level rule-set macro invocations into ExpandedRule
+        // Inline top-level rule-set macro invocations into `ExpandedRule`
         // decls. Runs before child loads so all nodes this module owns
-        // sit in one contiguous arena range; runs before resolve so the
-        // name table sees the post-expansion shape of root_items.
+        // sit in one contiguous arena range.
         expand_macro_calls::expand_macro_calls(self.shared, self.strings, &mut ctx)?;
         ctx.node_range.end = self.shared.arena.next_id().into();
 
         // Load inherited grammar (Grammar kind only, must happen before typecheck).
-        // The active base is the first inherit() in source order (a second is
-        // rejected by validate_grammar above).
         let inherit_id = ctx.inherits(&self.shared.arena).next();
         if let Some(inherit_id) = inherit_id
             && let Node::ModuleRef {
@@ -122,12 +104,11 @@ impl Loader<'_> {
 
         self.load_import_children(&ctx, module_dir)?;
 
-        // Flatten the transitive helper imports once; resolve and lower both
-        // consume this list instead of each re-walking the import graph.
+        // Flatten the transitive helper imports once
         let imported_rules =
             super::collect_imported_rules(&self.shared.arena, &ctx.module_refs, self.modules);
 
-        // Resolve identifiers + typecheck. Child modules already populated env
+        // Resolve identifiers + typecheck. Child modules already populated `env`
         // during their own load_module calls.
         let base = ctx
             .inherit_module(&self.shared.arena)
@@ -208,12 +189,13 @@ impl Loader<'_> {
         let Some(cfg_node) = cfg_node else {
             return e;
         };
-        let Node::Cfg {
-            name: flag_span, ..
-        } = *self.shared.arena.get(cfg_node)
-        else {
-            return e; // shouldn't happen - apply_cfg only stores Cfg nodes here
-        };
+        expect_pat!(
+            Node::Cfg {
+                name: flag_span,
+                ..
+            },
+            *self.shared.arena.get(cfg_node)
+        );
         // Find which module's source the cfg flag span resolves against.
         // `current` covers the module-being-processed case (not yet pushed
         // to `self.modules`).
@@ -277,8 +259,7 @@ impl Loader<'_> {
         Ok(gid)
     }
 
-    /// Resolve unresolved `ModuleRef` nodes (those still `module: None`),
-    /// loading each child file.
+    /// Resolve unresolved `ModuleRef` nodes, loading each child file.
     fn load_import_children(
         &mut self,
         ctx: &ModuleContext,
@@ -317,35 +298,24 @@ impl Loader<'_> {
         Ok(())
     }
 
-    /// Validate that grammar block exists, inherits field consistency.
-    /// Multiple `inherit()` calls are caught by the parser.
+    /// Validate that grammar block exists, inherits field consistency, <= 1 `inherit`
     fn validate_grammar(&self, ctx: &ModuleContext) -> DslResult<()> {
         let Some(config) = ctx.grammar_config.as_ref() else {
             return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
         };
-        // A grammar block without `language` and more than one inherit() are
-        // both reported here rather than at parse, so a well-formed AST is still
-        // produced for tooling. The inherit set is derived from `module_refs`.
         if config.language.is_none() {
-            // The grammar block always exists here (config is Some); find it for
-            // the span. Only runs on this error path, so the scan is fine.
             let block = ctx
                 .root_items
                 .iter()
                 .find(|&&id| matches!(self.shared.arena.get(id), Node::Grammar))
-                .expect("grammar config implies a grammar block node");
-            return Err(LowerError::new(
+                .unwrap();
+            Err(LowerError::new(
                 LowerErrorKind::MissingLanguageField,
                 self.shared.arena.span(*block),
-            )
-            .into());
+            ))?;
         }
-        // Derived from module_refs (post-cfg-gating), so no cached field can go
-        // stale: the first inherit is the active base, any others are errors.
         let inherits = ctx.inherits(&self.shared.arena).collect::<Vec<_>>();
         if let [first, second, rest @ ..] = inherits.as_slice() {
-            // Point at the first redundant inherit, note the base, then note
-            // every further redundant inherit so the user sees all of them.
             let mut err = LowerError::with_note(
                 LowerErrorKind::MultipleInherits,
                 self.shared.arena.span(*second),
@@ -360,7 +330,7 @@ impl Loader<'_> {
                     self.shared.arena.span(extra),
                 ));
             }
-            return Err(err.into());
+            Err(err)?;
         }
         let config_inherits = config.inherits;
 
@@ -387,13 +357,9 @@ impl Loader<'_> {
         Ok(())
     }
 
-    /// Validate that an imported file only contains allowed items.
-    /// Helpers may host rules, lets, macros, externals, and imports - but not
-    /// a grammar block (that's a root concept), `override rule` (a root-grammar
-    /// privilege), or `inherit()` (a helper never materializes a base's rules).
+    /// Validate that an `import`ed file only contains allowed items (No grammar
+    /// block, `override` rules, or `inherit` calls).
     fn validate_import_items(&self, ctx: &ModuleContext) -> DslResult<()> {
-        // Reject inherit() before the inherit-load below would load the base
-        // file; lower ignores a helper's base, so the reference would dangle.
         if let Some(inherit_id) = ctx.inherits(&self.shared.arena).next() {
             Err(LowerError::new(
                 LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::Inherit),
@@ -422,6 +388,8 @@ fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
         LowerError::new(
             LowerErrorKind::ModuleResolveFailed {
                 path: path.to_path_buf(),
+                // TODO: Pull custom deserializer from upstream
+                // so we store the error as a value
                 error: e.to_string(),
             },
             span,

@@ -1,7 +1,3 @@
-//! Interned string pool, shared across parse / expand / lower so that all
-//! stages can intern names (source-span references or computed strings)
-//! through a single uniform handle.
-
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
@@ -15,10 +11,8 @@ use super::ast::Span;
 pub struct Str(NonZeroU32);
 
 impl Str {
-    /// Raw index into [`StringPool::entries`]. Always nonzero (index 0 is
-    /// the `Unreachable` sentinel). Exposed so consumers that have
-    /// materialized the pool into their own `Vec<_>` can key off the same
-    /// offset.
+    /// Raw index into [`StringPool::entries`].
+    #[inline]
     #[must_use]
     pub const fn index(self) -> u32 {
         self.0.get()
@@ -67,9 +61,6 @@ impl StringPool {
         id
     }
 
-    /// Get the raw entry. Resolution to `&str` lives on the caller since
-    /// `Source` entries may reference an in-progress module whose source
-    /// isn't yet in the `previous` modules slice.
     #[must_use]
     pub fn entry(&self, id: Str) -> &StrEntry {
         // Safety: id was produced by intern_span/intern_owned which return
@@ -77,8 +68,7 @@ impl StringPool {
         unsafe { self.entries.get_unchecked(id.0.get() as usize) }
     }
 
-    /// Resolve a `Str` whose `Source` entries are known to reference
-    /// `source` (caller asserts the local-module invariant).
+    /// Resolve a `Str` whose `Source` entries are known to reference `source`
     #[must_use]
     pub fn resolve_local<'a>(&'a self, id: Str, source: &'a str) -> &'a str {
         match self.entry(id) {

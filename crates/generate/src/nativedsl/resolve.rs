@@ -19,6 +19,7 @@ use crate::{
             Span, Spanned,
         },
         string_pool::StringPool,
+        suggest::suggest_name,
     },
     rules::Rule,
 };
@@ -71,8 +72,7 @@ pub fn resolve(
     )?;
 
     // Validate computed-name references (`@<expr>`), evaluated under each call's
-    // args at expand, against the complete name table (which includes generated
-    // and inherited rules).
+    // args at expand, against the complete name table.
     for &Spanned { value: name, span } in &ctx.computed_refs {
         let text = strings.resolve_local(name, &ctx.source);
         // Must resolve to a rule: decls already holds rules, macros, and lets
@@ -143,10 +143,8 @@ fn collect_decls<'a>(
     modules: &'a [Module],
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<Decls<'a>> {
-    // Size to the item count up front: nearly every top-level item declares a
-    // name, so this avoids rehashing the table as decls are collected.
     let mut decls = FxHashMap::with_capacity_and_hasher(root_items.len(), FxBuildHasher);
-    let mut override_names: FxHashSet<&str> = FxHashSet::default();
+    let mut override_names = FxHashSet::default();
 
     // Register rules, macros, and lets upfront (forward references allowed).
     for &item_id in root_items {
@@ -182,9 +180,6 @@ fn collect_decls<'a>(
                 )?;
             }
             Node::Let { name, .. } => {
-                // Registered up front (like rules/macros) so forward and
-                // mutually-referential lets resolve; a self-reference resolves
-                // to its own Var and is caught downstream as a cycle.
                 insert_decl(
                     &mut decls,
                     ctx.text(*name),
@@ -202,28 +197,26 @@ fn collect_decls<'a>(
         }
     }
 
-    // Register inherited rule names. Strict: collisions with local rules
-    // error, except for names that have a corresponding `override rule`
-    // (which is the explicit way to redefine an inherited rule). The
-    // inherit statement's span gives "first defined here" notes a sensible
-    // target.
+    // Register inherited rule names. Collisions with local rules error, except
+    // for names that have a corresponding `override rule`. The inherit statement's
+    // span gives "first defined here" notes a sensible target.
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
             // The first source of an overridden name coexists with the override
-            // (claim it by removing); a later source is no longer skipped and so
+            // (claim it by removing). A later source is no longer skipped and so
             // collides as a duplicate, exactly as it would without the override.
             if override_names.remove(var.name.as_str()) {
                 continue;
             }
             insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
         }
+        // TODO: Check here as well for externals nonsense
         // Inherited external tokens are referenceable by bare name too, just
-        // like inherited rules (and like grammar.js's `$.name`). Anonymous
-        // externals (string/pattern) have no name to bring into scope. A base
-        // may list one of its own rules in `externals` (an external-scanner
-        // token with a grammar-rule fallback), putting the name in both lists;
-        // it's one symbol, already registered by the rule loop, so skip it
-        // rather than colliding with ourselves.
+        // like inherited rules). Anonymous externals (string/pattern) have no
+        // name to bring into scope. A base may list one of its own rules in
+        // `externals` (an external-scanner token with a grammar-rule fallback),
+        // putting the name in both lists; it's one symbol, already registered by
+        // the rule loop, so skip it rather than colliding with ourselves.
         for ext in &base_grammar.external_tokens {
             if let Rule::NamedSymbol(name) = ext
                 && !override_names.contains(name.as_str())
@@ -235,11 +228,14 @@ fn collect_decls<'a>(
     }
 
     // Register bare names for every transitively-imported helper rule, from the
-    // shared imported-rule list (resolve and lower consume the same list and
-    // order). Same strictness as inherited: collisions error unless overridden.
+    // shared imported-rule list.
     for ir in imported_rules {
-        let name = &modules[ir.module as usize].helper_rules()[ir.index as usize].0;
-        // First source of an overridden name claims the override; a later
+        expect_pat!(
+            Module::Helper { lowered_rules, .. },
+            &modules[ir.module as usize]
+        );
+        let name = &lowered_rules[ir.index as usize].0;
+        // First source of an overridden name claims the override. A later
         // source is no longer skipped and collides (see the base loop above).
         if !override_names.remove(name.as_str()) {
             insert_decl(&mut decls, name, IdentKind::Rule, ir.ref_span, ctx)?;
@@ -275,7 +271,7 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
         &Node::Rule { body: inner, .. } | &Node::Let { value: inner, .. } => {
             resolve_expr(arena, rcx, inner)
         }
-        // The template body is shared and resolved once via the Macro item;
+        // The template body is shared and resolved once via the Macro item,
         // here we only resolve the call's args (module-scope expressions).
         &Node::ExpandedRule(expand_id) => {
             let args = rcx.pools.get_expansion(expand_id).args;
@@ -303,8 +299,7 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
             match macro_cfg.kind {
                 MacroKind::Expression(_) => resolve_expr(arena, rcx, macro_cfg.body),
                 // Walk the RuleSet body so the original (template) decls'
-                // identifiers get resolved too. Typecheck reuses these to
-                // catch errors at definition time.
+                // identifiers get resolved too.
                 MacroKind::RuleSet => {
                     let Node::RuleSet(range) = arena.get(macro_cfg.body) else {
                         unreachable!()
@@ -316,9 +311,6 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
                         let decl_id = rcx.pools.children[i];
                         match *arena.get(decl_id) {
                             Node::Rule { body, .. } => resolve_expr(arena, rcx, body)?,
-                            // Resolve the computed name too, not just the body -
-                            // otherwise a bare-ident name leaves Ident(Unresolved)
-                            // for definition-time typecheck to hit unreachable.
                             Node::ComputedRule {
                                 name_expr, body, ..
                             } => {
@@ -339,7 +331,7 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
 /// Resolve identifiers within a single expression.
 fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
     // Local bindings are emitted as MacroParam/ForBinding by the parser,
-    // so any remaining Ident(Unresolved) is a top-level reference.
+    // so any remaining `Ident(Unresolved)` is a top-level reference.
     if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
         let span = arena.span(id);
         let name = rcx.ctx.text(span);
@@ -354,8 +346,7 @@ fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveR
     // Alias target: resolve a bare identifier against `decls` like any other
     // (a `let` resolves to its value, a rule to a named-symbol reference). Only
     // an UNDECLARED bare identifier becomes a named-alias rule reference,
-    // mirroring grammar.js `alias($.x, $.undeclared)`. Forcing every bare ident
-    // to a rule would shadow a same-named `let` (wrong value + named flag).
+    // mirroring grammar.js `alias($.x, $.undeclared)`.
     if let &Node::Alias { content, target } = arena.get(id) {
         resolve_expr(arena, rcx, content)?;
         if matches!(arena.get(target), Node::Ident(IdentKind::Unresolved)) {
@@ -371,8 +362,6 @@ fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveR
         return Ok(());
     }
 
-    // For-loop bindings are resolved by the parser (ForBinding nodes).
-    // Just recurse into iterable and body.
     if let &Node::For { for_id, body } = arena.get(id) {
         let iterable = rcx.pools.get_for(for_id).iterable;
         resolve_expr(arena, rcx, iterable)?;
@@ -382,7 +371,7 @@ fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveR
     resolve_children(arena, rcx, id)
 }
 
-/// Resolve identifiers in children of a node (mechanical traversal).
+/// Resolve identifiers in children of a node.
 fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
     // Variadic nodes: Seq, Choice, List, Tuple, Concat
     if let Some(range) = arena.get(id).child_range() {
@@ -406,11 +395,9 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             }
             Ok(())
         }
-        Node::Repeat { inner: c, .. }
-        | Node::Token { inner: c, .. }
-        | Node::Neg(c)
-        | Node::GrammarConfig { module: c, .. }
-        | Node::Field { content: c, .. }
+        #[rustfmt::skip]
+        Node::Repeat { inner: c, .. } | Node::Token { inner: c, .. } | Node::Neg(c)
+        | Node::GrammarConfig { module: c, .. } | Node::Field { content: c, .. }
         | Node::Reserved { content: c, .. } => resolve_expr(arena, rcx, *c),
         &Node::Append { left: a, right: b }
         | &Node::BinOp { lhs: a, rhs: b, .. }
@@ -429,22 +416,18 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             }
             Ok(())
         }
-        // `@<expr>` computed-name ref: resolve the inner name expression.
-        // Only reached for rule-set macro templates (expand rewrites invoked
-        // instances to SynthRef before resolve runs); without this the inner
-        // ident would stay Unresolved and crash definition-time typecheck.
         &Node::SymRef { expr } => resolve_expr(arena, rcx, expr),
         &Node::FieldAccess { obj, .. } => resolve_expr(arena, rcx, obj),
         &Node::QualifiedAccess { obj, member } => {
             resolve_expr(arena, rcx, obj)?;
-            // None when obj isn't a module ref - type checker reports the error
-            if let Some(idx) = resolve_module_index(arena, obj) {
+            // None when obj isn't a module ref, let type checker reports the error
+            if let Some(idx) = resolve_module_id(arena, obj) {
                 let member_name = rcx.ctx.text(member);
                 resolve_qualified_member(
                     rcx.ctx,
                     arena,
-                    &rcx.modules[idx],
-                    idx as ModuleId,
+                    &rcx.modules[usize::from(idx)],
+                    idx,
                     id,
                     member_name,
                     member,
@@ -455,10 +438,16 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
         Node::QualifiedCall(range) => {
             let (obj, name, args) = rcx.pools.get_qualified_call(*range);
             resolve_expr(arena, rcx, obj)?;
-            // None when obj isn't a module ref - type checker reports the error
-            if let Some(idx) = resolve_module_index(arena, obj) {
+            // None when obj isn't a module ref, let type checker reports the error
+            if let Some(idx) = resolve_module_id(arena, obj) {
                 let macro_name = rcx.ctx.text(arena.span(name));
-                resolve_qualified_call_name(rcx.ctx, arena, &rcx.modules[idx], name, macro_name)?;
+                resolve_qualified_call_name(
+                    rcx.ctx,
+                    arena,
+                    &rcx.modules[usize::from(idx)],
+                    name,
+                    macro_name,
+                )?;
             }
             for &arg in args {
                 resolve_expr(arena, rcx, arg)?;
@@ -469,9 +458,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
     }
 }
 
-/// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`. A
-/// missing member is reported here (with a suggestion); a member that exists but
-/// isn't a macro stays unresolved for the type checker to reject.
+/// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
 fn resolve_qualified_call_name(
     ctx: &ModuleContext,
     arena: &mut NodeArena,
@@ -481,14 +468,13 @@ fn resolve_qualified_call_name(
 ) -> ResolveResult<()> {
     match target.export(macro_name) {
         Some(Export::Local(kind @ IdentKind::Macro(_))) => arena.set(name_id, Node::Ident(kind)),
-        None => {
-            return Err(import_member_not_found(
-                ctx,
-                target,
-                macro_name,
-                arena.span(name_id),
-            ));
-        }
+        None => Err(import_member_not_found(
+            ctx,
+            target,
+            macro_name,
+            arena.span(name_id),
+        ))?,
+        // member exists but isn't a macro, leave for typechecker to reject
         Some(_) => {}
     }
     Ok(())
@@ -496,9 +482,9 @@ fn resolve_qualified_call_name(
 
 /// Resolve a `QualifiedAccess { obj, member }` against the target module's
 /// export table:
-/// - `let` / `macro` -> `Ident(Var | Macro)`
-/// - lowered rule / external -> `ImportRef` (the lowerer indexes directly)
-/// - not found -> error
+///   - `let` / `macro` -> `Ident(Var | Macro)`
+///   - lowered rule / external -> `ImportRef` (the lowerer indexes directly)
+///   - not found -> error
 fn resolve_qualified_member(
     ctx: &ModuleContext,
     arena: &mut NodeArena,
@@ -511,20 +497,17 @@ fn resolve_qualified_member(
     match target.export(member_name) {
         Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
         Some(Export::Rule(target)) => arena.set(node_id, Node::ModuleRule { module, target }),
-        None => {
-            return Err(import_member_not_found(
-                ctx,
-                target,
-                member_name,
-                member_span,
-            ));
-        }
+        None => Err(import_member_not_found(
+            ctx,
+            target,
+            member_name,
+            member_span,
+        ))?,
     }
     Ok(())
 }
 
-/// Build an `ImportMemberNotFound` error, attaching a "did you mean" note when a
-/// close export name exists in `target`.
+/// Build an `ImportMemberNotFound` error, attaching a "did you mean" note when appropriate
 fn import_member_not_found(
     ctx: &ModuleContext,
     target: &Module,
@@ -532,31 +515,29 @@ fn import_member_not_found(
     span: Span,
 ) -> ResolveError {
     let kind = ResolveErrorKind::ImportMemberNotFound(name.to_string());
-    if let Some(suggestion) = super::suggest::suggest_name(name, target.export_keys()) {
+    if let Some(suggestion) = suggest_name(name, target.export_keys()) {
         return ResolveError::with_note(
             kind,
             span,
-            ctx.note(NoteMessage::DidYouMean(suggestion), span),
+            ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span),
         );
     }
     ResolveError::new(kind, span)
 }
 
 /// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
-/// a `ModuleRef`, returning its module index. Handles `let h = import(...)`
-/// directly as well as chained aliases like `let h2 = h`.
-fn resolve_module_index(arena: &NodeArena, obj: NodeId) -> Option<usize> {
+/// a `ModuleRef`, returning its module id.
+fn resolve_module_id(arena: &NodeArena, obj: NodeId) -> Option<ModuleId> {
     let ref_id = resolve_module_ref(arena, obj)?;
     match arena.get(ref_id) {
         Node::ModuleRef {
             module: Some(idx), ..
-        } => Some(*idx as usize),
+        } => Some(*idx),
         _ => None,
     }
 }
 
-/// Walk `Ident(Var) -> Let.value` chains to find the underlying `ModuleRef`
-/// node, returning its `NodeId` so callers can read its span or fields.
+/// Walk `Ident(Var) -> Let.value` chains to find the underlying `ModuleRef` node
 pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<NodeId> {
     loop {
         match arena.get(obj) {
@@ -610,25 +591,17 @@ fn collect_external_names<'src>(
             collect_external_names(shared, ctx, *left, ec)?;
             collect_external_names(shared, ctx, *right, ec)?;
         }
-        // Literals don't introduce names.
-        // grammar_config(base).externals - inherited values already registered.
-        Node::StringLit
-        | Node::RawStringLit { .. }
-        | Node::IntLit(_)
-        | Node::Blank
-        | Node::DynRegex { .. }
-        | Node::GrammarConfig { .. }
-        | Node::FieldAccess { .. }
+        // Literals don't introduce names, inherited values already registered.
+        #[rustfmt::skip]
+        Node::StringLit | Node::RawStringLit { .. } | Node::IntLit(_) | Node::Blank
+        | Node::DynRegex { .. } | Node::GrammarConfig { .. } | Node::FieldAccess { .. }
         | Node::QualifiedAccess { .. } => {}
-        // Anything else (macro calls, for-loops, etc.) is not a valid
-        // externals expression. Externals must be a list literal, append,
-        // or variable reference.
-        _ => {
-            return Err(ResolveError::new(
-                ResolveErrorKind::InvalidExternalsExpression,
-                arena.span(id),
-            ));
-        }
+        // Anything else is not a valid externals expression. Externals must be a
+        // list literal, append, or variable reference.
+        _ => Err(ResolveError::new(
+            ResolveErrorKind::InvalidExternalsExpression,
+            arena.span(id),
+        ))?,
     }
     Ok(())
 }
@@ -667,8 +640,7 @@ pub enum ResolveErrorKind {
     CfgFlagDeclaredTwice(String),
 }
 
-/// Build an `UnknownIdentifier` error, attaching a "did you mean" note if the
-/// name is close to a known decl or keyword.
+/// Build an `UnknownIdentifier` error, attaching a "did you mean" note if appropriate
 fn unknown_ident_error(ctx: &ModuleContext, decls: &Decls, name: &str, span: Span) -> ResolveError {
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
     let candidates = decls.keys().copied().chain(
@@ -676,11 +648,11 @@ fn unknown_ident_error(ctx: &ModuleContext, decls: &Decls, name: &str, span: Spa
             .iter()
             .copied(),
     );
-    if let Some(suggestion) = super::suggest::suggest_name(name, candidates) {
+    if let Some(suggestion) = suggest_name(name, candidates) {
         return ResolveError::with_note(
             kind,
             span,
-            ctx.note(NoteMessage::DidYouMean(suggestion), span),
+            ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span),
         );
     }
     ResolveError::new(kind, span)
