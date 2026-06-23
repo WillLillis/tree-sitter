@@ -15,7 +15,7 @@ use crate::{
     nativedsl::{
         Export, ImportedRule, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, MacroKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
+            AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
             Span, Spanned,
         },
         string_pool::StringPool,
@@ -283,7 +283,6 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
         Node::Macro(macro_id) => {
             let macro_cfg = rcx.pools.get_macro(*macro_id);
             let params = macro_cfg.params;
-            let kind = macro_cfg.kind;
             let body = macro_cfg.body;
             // Macro params must not shadow any top-level declaration
             for param in rcx.pools.param_slice(params) {
@@ -299,30 +298,9 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
                     ));
                 }
             }
-            match kind {
-                MacroKind::Expression(_) => resolve_expr(arena, rcx, body),
-                // Walk the RuleSet body so the original (template) decls'
-                // identifiers get resolved too.
-                MacroKind::RuleSet => {
-                    expect_pat!(Node::RuleSet(range), *arena.get(body));
-                    let start = range.start as usize;
-                    let end = start + range.len as usize;
-                    for i in start..end {
-                        let decl_id = rcx.pools.children[i];
-                        match *arena.get(decl_id) {
-                            Node::Rule { body, .. } => resolve_expr(arena, rcx, body)?,
-                            Node::ComputedRule {
-                                name_expr, body, ..
-                            } => {
-                                resolve_expr(arena, rcx, name_expr)?;
-                                resolve_expr(arena, rcx, body)?;
-                            }
-                            _ => unreachable!(),
-                        }
-                    }
-                    Ok(())
-                }
-            }
+            // Resolve the body once: an expression body directly, a rule-set body
+            // through resolve_children -> each Rule/ComputedRule decl.
+            resolve_expr(arena, rcx, body)
         }
         _ => Ok(()),
     }
@@ -398,12 +376,18 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
         #[rustfmt::skip]
         Node::Repeat { inner: c, .. } | Node::Token { inner: c, .. } | Node::Neg(c)
         | Node::GrammarConfig { module: c, .. } | Node::Field { content: c, .. }
-        | Node::Reserved { content: c, .. } => resolve_expr(arena, rcx, *c),
+        | Node::Reserved { content: c, .. }
+        | Node::Rule { body: c, .. } => resolve_expr(arena, rcx, *c),
         &Node::Append { left: a, right: b }
         | &Node::BinOp { lhs: a, rhs: b, .. }
         | &Node::Prec {
             value: a,
             content: b,
+            ..
+        }
+        | &Node::ComputedRule {
+            name_expr: a,
+            body: b,
             ..
         } => {
             resolve_expr(arena, rcx, a)?;
