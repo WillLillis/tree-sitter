@@ -188,7 +188,7 @@ fn collect_decls<'a>(
                     ctx,
                 )?;
             }
-            Node::External { name } => {
+            Node::Forward { name } => {
                 // External decls register the symbol name as a rule-shaped
                 // identifier so it can be referenced from rule bodies.
                 insert_decl(&mut decls, ctx.text(*name), IdentKind::Rule, span, ctx)?;

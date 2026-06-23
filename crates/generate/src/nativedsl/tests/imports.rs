@@ -788,8 +788,8 @@ fn helper_can_define_rules() {
         &[(
             "exp.tsg",
             r"
-        external _paren_open
-        external _paren_close
+        expect _paren_open
+        expect _paren_close
         rule expression { choice(application, seq(_paren_open, expression, _paren_close)) }
         rule application { seq(expression, expression) }
     ",
@@ -807,7 +807,7 @@ fn helper_can_define_rules() {
 #[test]
 fn helper_external_qualified_in_rule_body() {
     let g = parse_with_modules(
-        &[("ext.tsg", "external _foo\nexternal _bar\n")],
+        &[("ext.tsg", "expect _foo\nexpect _bar\n")],
         r#"
         let e = import("ext.tsg")
         grammar { language: "test", externals: [e::_foo, e::_bar] }
@@ -828,7 +828,7 @@ fn helper_external_qualified_in_rule_body() {
 #[test]
 fn helper_external_member_not_found() {
     let err = parse_with_modules(
-        &[("ext.tsg", "external _foo\n")],
+        &[("ext.tsg", "expect _foo\n")],
         r#"
         let e = import("ext.tsg")
         grammar { language: "test", externals: [e::_missing] }
@@ -845,7 +845,7 @@ fn helper_external_member_not_found() {
 #[test]
 fn cfg_disabled_helper_external_not_exported() {
     let err = parse_with_modules(
-        &[("ext.tsg", "external _foo\n#[cfg(X)] external _gated\n")],
+        &[("ext.tsg", "expect _foo\n#[cfg(X)] expect _gated\n")],
         r#"
         let e = import("ext.tsg")
         grammar { language: "test", flags: { disabled: ["X"] }, externals: [e::_gated] }

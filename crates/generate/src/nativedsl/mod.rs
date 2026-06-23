@@ -188,7 +188,7 @@ pub fn build_exports(
     // roundtrip tests
     // Top-level `external X` declarations.
     for &item_id in &ctx.root_items {
-        if let Node::External { name } = *arena.get(item_id) {
+        if let Node::Forward { name } = *arena.get(item_id) {
             add(ctx.text(name), Export::Rule(RuleTarget::ExternalName(name)));
         }
     }

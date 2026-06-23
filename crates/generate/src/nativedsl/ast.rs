@@ -665,11 +665,10 @@ pub enum Node {
         value: NodeId,
     },
     Macro(MacroId),
-    /// `external <name>` top-level declaration. Forward-declares an
-    /// externally-provided symbol name. In a grammar file, redundant with
-    /// the grammar block's `externals: [...]` list. In a helper file, the
-    /// only way to expose a scanner symbol via qualified access.
-    External {
+    /// `expect <name>` top-level forward-declaration: names a symbol defined
+    /// elsewhere (a rule, an `externals:` token, or an inherited rule) so this
+    /// file can reference it before/without defining it here.
+    Forward {
         name: Span,
     },
     StringLit,
@@ -688,13 +687,12 @@ pub enum Node {
     },
     /// A `mod::name` reference resolved to a rule (or external symbol) in
     /// another module's lowered output. Replaces a `QualifiedAccess` during
-    /// resolve once the target is found; the lowerer indexes directly.
+    /// resolve once the target is found.
     ModuleRule {
         module: ModuleId,
         target: RuleTarget,
     },
-    /// `seq(a, b, ...)` or `choice(a, b, ...)`.
-    /// Children: `[member0, member1, ...]` - each is a rule expression.
+    /// `seq(a, b, ...)` or `choice(a, b, ...)`. Children: `[member0, member1, ...]`
     SeqOrChoice {
         seq: bool,
         range: ChildRange,
@@ -812,8 +810,7 @@ const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl Node {
     /// Range of children for variadic nodes whose children are a flat list of
-    /// `NodeId`s: `SeqOrChoice`, `List`, `Tuple`, `Concat`, and `RuleSet` (its
-    /// rule decls). Lets resolve iterate and `apply_cfg` shrink them uniformly.
+    /// `NodeId`s: `SeqOrChoice`, `List`, `Tuple`, `Concat`, and `RuleSet`.
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {
@@ -826,9 +823,7 @@ impl Node {
         }
     }
 
-    /// Mutable counterpart to [`Self::child_range`]: shrink a variadic node's
-    /// range in place (e.g. after dropping cfg-gated members) without rebuilding
-    /// the `Node`.
+    /// Mutable counterpart to [`Self::child_range`].
     pub const fn child_range_mut(&mut self) -> Option<&mut ChildRange> {
         match self {
             Self::SeqOrChoice { range: r, .. }

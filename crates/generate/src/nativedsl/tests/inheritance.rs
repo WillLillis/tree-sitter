@@ -556,7 +556,7 @@ fn inherited_external_bare_reference() {
         &[(
             "base.tsg",
             r#"grammar { language: "base", externals: [_token] }
-        external _token
+        expect _token
         rule program { _token }
         "#,
         )],
@@ -599,7 +599,7 @@ fn config_only_base_is_allowed() {
         &[(
             "base.tsg",
             r#"grammar { language: "base", externals: [_eof] }
-        external _eof
+        expect _eof
         "#,
         )],
         r#"let base = inherit("base.tsg")
