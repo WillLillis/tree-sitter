@@ -349,6 +349,7 @@ pub struct AstPools {
     pub macro_configs: Vec<MacroConfig>,
     pub for_configs: Vec<ForConfig>,
     pub object_fields: Vec<ObjectField>,
+    pub params: Vec<Param>,
     pub expansions: Vec<Expansion>,
 }
 
@@ -362,6 +363,7 @@ impl SharedAst {
                 macro_configs: Vec::new(),
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
+                params: Vec::new(),
                 expansions: Vec::new(),
             },
         }
@@ -401,6 +403,17 @@ impl AstPools {
         Some(ChildRange::new(start, len))
     }
 
+    /// Pool a macro's params or a for-loop's bindings. Both are bounded to
+    /// `u8::MAX` at parse time (their indices are `u8`), so the count always
+    /// fits `ChildRange::len` and this cannot overflow like [`Self::push_children`].
+    pub fn push_params(&mut self, params: &[Param]) -> ChildRange {
+        let start = self.params.len() as u32;
+        debug_assert!(u8::try_from(params.len()).is_ok());
+        let len = params.len() as u16;
+        self.params.extend_from_slice(params);
+        ChildRange::new(start, len)
+    }
+
     #[must_use]
     pub fn get_macro(&self, id: MacroId) -> &MacroConfig {
         &self.macro_configs[id.index()]
@@ -428,6 +441,11 @@ impl AstPools {
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         &self.children[range.as_range()]
+    }
+
+    #[must_use]
+    pub fn param_slice(&self, range: ChildRange) -> &[Param] {
+        &self.params[range.as_range()]
     }
 
     /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
@@ -459,7 +477,7 @@ impl AstPools {
 #[derive(Clone)]
 pub struct MacroConfig {
     pub name: Span,
-    pub params: Vec<Param>,
+    pub params: ChildRange,
     pub body: NodeId,
     pub kind: MacroKind,
     /// Computed-name references (`@<expr>` -> `SymRef`) in a r+ule-set macro's
@@ -482,9 +500,9 @@ pub struct Param {
     pub ty: Ty,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct ForConfig {
-    pub bindings: Vec<Param>,
+    pub bindings: ChildRange,
     pub iterable: NodeId,
 }
 
