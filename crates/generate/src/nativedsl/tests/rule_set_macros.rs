@@ -15,6 +15,19 @@ fn rule_set_macro_single_rule() {
 }
 
 #[test]
+fn rule_set_macro_empty_body_is_noop() {
+    // An empty `rules` body is allowed; calling it contributes no rules.
+    let g = dsl(r#"
+        grammar { language: "test" }
+        rule program { "p" }
+        rules nothing() {}
+        @nothing()
+        "#);
+    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, vec!["program"]);
+}
+
+#[test]
 fn rule_set_macro_multiple_rules() {
     let g = dsl(r#"
         rules pair() {

@@ -811,28 +811,31 @@ pub enum Node {
 const _: () = assert!(std::mem::size_of::<Node>() == 16);
 
 impl Node {
-    /// Range of children for variadic nodes whose children are `NodeId`s
-    /// directly: `SeqOrChoice`, `List`, `Tuple`, and `Concat`.
+    /// Range of children for variadic nodes whose children are a flat list of
+    /// `NodeId`s: `SeqOrChoice`, `List`, `Tuple`, `Concat`, and `RuleSet` (its
+    /// rule decls). Lets resolve iterate and `apply_cfg` shrink them uniformly.
     #[must_use]
     pub const fn child_range(&self) -> Option<ChildRange> {
         match self {
             Self::SeqOrChoice { range: r, .. }
             | Self::List(r)
             | Self::Tuple(r)
-            | Self::Concat(r) => Some(*r),
+            | Self::Concat(r)
+            | Self::RuleSet(r) => Some(*r),
             _ => None,
         }
     }
 
-    /// Mutable counterpart to [`Self::child_range`]. Lets callers shrink a
-    /// variadic node's range in place (e.g. after dropping cfg-gated members)
-    /// without rebuilding the whole `Node` value.
+    /// Mutable counterpart to [`Self::child_range`]: shrink a variadic node's
+    /// range in place (e.g. after dropping cfg-gated members) without rebuilding
+    /// the `Node`.
     pub const fn child_range_mut(&mut self) -> Option<&mut ChildRange> {
         match self {
             Self::SeqOrChoice { range: r, .. }
             | Self::List(r)
             | Self::Tuple(r)
-            | Self::Concat(r) => Some(r),
+            | Self::Concat(r)
+            | Self::RuleSet(r) => Some(r),
             _ => None,
         }
     }

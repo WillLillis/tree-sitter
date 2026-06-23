@@ -524,21 +524,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         debug_assert!(self.pending_sym_refs.is_none());
         self.pending_sym_refs = Some(Vec::new());
         let mut decls = Vec::new();
-        loop {
-            if self.at(TokenKind::RBrace) {
-                break;
-            }
-            let id = match self.current().kind {
-                TokenKind::KwRule => self.parse_rule_def(false)?,
-                TokenKind::KwOverride => self.parse_rule_def(true)?,
-                _ => return Err(self.error(ParseErrorKind::RuleSetBodyRequiresRuleDecl)),
-            };
+        while !self.at(TokenKind::RBrace) {
+            let id = self.parse_rule_set_decl()?;
             decls.push(id);
         }
-        // `expand_macro_calls` relies on >=1 rule for in-place slot placement.
-        if decls.is_empty() {
-            return Err(self.error(ParseErrorKind::EmptyRuleSetMacroBody));
-        }
+        // An empty set - written `{}` or left empty after cfg gating - is allowed;
+        // a call to it expands to nothing (see expand_macro_calls).
         let range = self
             .shared
             .pools
@@ -549,6 +540,27 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .shared
             .arena
             .push(Node::RuleSet(range), brace_start.merge(end)))
+    }
+
+    /// A rule-set member: a `rule`/`override rule` decl, optionally preceded by
+    /// one or more `#[cfg(NAME)]` attributes (mirrors `parse_expr_with_cfg`).
+    /// cfg-gated decls are dropped from the set by `apply_cfg` before expansion.
+    fn parse_rule_set_decl(&mut self) -> ParseResult<NodeId> {
+        if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
+            self.deepen()?;
+            let child = self.parse_rule_set_decl()?;
+            self.depth -= 1;
+            let end = self.shared.arena.span(child);
+            return Ok(self
+                .shared
+                .arena
+                .push(Node::Cfg { name, child }, cfg_start.merge(end)));
+        }
+        match self.current().kind {
+            TokenKind::KwRule => self.parse_rule_def(false),
+            TokenKind::KwOverride => self.parse_rule_def(true),
+            _ => Err(self.error(ParseErrorKind::RuleSetBodyRequiresRuleDecl)),
+        }
     }
 
     fn parse_type(&mut self) -> ParseResult<(Ty, Span)> {
@@ -1278,8 +1290,6 @@ pub enum ParseErrorKind {
     RuleSetBodyRequiresRuleDecl,
     #[error("`@` computed-rule syntax is only valid inside a `rules` macro body")]
     ComputedRuleTopLevel,
-    #[error("rule-set macro body must declare at least one rule")]
-    EmptyRuleSetMacroBody,
     #[error("qualified calls to rule-set macros are not supported")]
     QualifiedRuleSetCall,
 }
