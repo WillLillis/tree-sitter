@@ -480,10 +480,10 @@ pub struct MacroConfig {
     pub params: ChildRange,
     pub body: NodeId,
     pub kind: MacroKind,
-    /// Computed-name references (`@<expr>` -> `SymRef`) in a r+ule-set macro's
+    /// Computed-name references (`@<expr>` -> `SymRef`) in a rule-set macro's
     /// body, recorded by the parser as it builds them. Expand evaluates each
     /// under a call's args; resolve validates the result exists.
-    pub sym_refs: Vec<NodeId>,
+    pub sym_refs: ChildRange,
 }
 
 #[derive(Clone, Copy, Debug)]
