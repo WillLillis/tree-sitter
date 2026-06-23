@@ -63,23 +63,27 @@ pub(super) fn check_item(
         }
         Node::Macro(macro_id) => {
             let config = shared.pools.get_macro(*macro_id);
+            let params = config.params;
+            let kind = config.kind;
+            let name = config.name;
+            let body = config.body;
             check_duplicate_names(
                 ctx,
-                &config.params,
+                shared.pools.param_slice(params),
                 |p| p.name,
                 TypeErrorKind::DuplicateParameter,
             )?;
-            for p in &config.params {
+            for p in shared.pools.param_slice(params) {
                 reject_module_type(p.ty, p.name)?;
             }
-            match config.kind {
+            match kind {
                 MacroKind::Expression(return_ty) => {
                     // No return-type span is kept on the AST, so point at the
                     // macro name for a module_t return type.
-                    reject_module_type(return_ty, config.name)?;
-                    type_of(shared, ctx, config.body, env, Constraint::Exact(return_ty))?;
+                    reject_module_type(return_ty, name)?;
+                    type_of(shared, ctx, body, env, Constraint::Exact(return_ty))?;
                 }
-                MacroKind::RuleSet => check_rule_set_body(shared, ctx, config.body, env)?,
+                MacroKind::RuleSet => check_rule_set_body(shared, ctx, body, env)?,
             }
             Ok(())
         }
@@ -89,15 +93,10 @@ pub(super) fn check_item(
         // validated at expand, so params and args line up).
         &Node::ExpandedRule(expand_id) => {
             let exp = *shared.pools.get_expansion(expand_id);
-            let config = shared.pools.get_macro(exp.macro_id);
+            let params = shared.pools.get_macro(exp.macro_id).params;
             for (i, &arg) in shared.pools.child_slice(exp.args).iter().enumerate() {
-                type_of(
-                    shared,
-                    ctx,
-                    arg,
-                    env,
-                    Constraint::Exact(config.params[i].ty),
-                )?;
+                let ty = shared.pools.param_slice(params)[i].ty;
+                type_of(shared, ctx, arg, env, Constraint::Exact(ty))?;
             }
             Ok(())
         }
@@ -611,26 +610,23 @@ fn check_macro_args(
     env: &mut TypeEnv,
 ) -> TypeResult<Ty> {
     let config = shared.pools.get_macro(macro_id);
-    if args.len() != config.params.len() {
+    let params = config.params;
+    let kind = config.kind;
+    if args.len() != params.len as usize {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
                 macro_name: macro_name.to_string(),
-                expected: config.params.len(),
+                expected: params.len as usize,
                 got: args.len(),
             },
             span,
         ));
     }
     for (i, &arg_id) in args.iter().enumerate() {
-        type_of(
-            shared,
-            ctx,
-            arg_id,
-            env,
-            Constraint::Exact(config.params[i].ty),
-        )?;
+        let ty = shared.pools.param_slice(params)[i].ty;
+        type_of(shared, ctx, arg_id, env, Constraint::Exact(ty))?;
     }
-    match config.kind {
+    match kind {
         MacroKind::Expression(return_ty) => Ok(return_ty),
         MacroKind::RuleSet => Err(TypeError::new(
             TypeErrorKind::RuleSetMacroInExpressionContext(macro_name.to_string()),
@@ -822,7 +818,7 @@ where
     CheckBody: FnOnce(NodeId, &mut TypeEnv) -> TypeResult<Ty>,
 {
     let config = shared.pools.get_for(for_idx);
-    let bindings = &config.bindings;
+    let bindings = shared.pools.param_slice(config.bindings);
     let iterable = config.iterable;
 
     if bindings.is_empty() {

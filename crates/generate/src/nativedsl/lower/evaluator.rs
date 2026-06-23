@@ -1159,7 +1159,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     {
         let for_config = self.shared.pools.get_for(for_id);
         let iterable = for_config.iterable;
-        let n_bindings = for_config.bindings.len();
+        let n_bindings = usize::from(for_config.bindings.len);
         let iter_vid = self.eval_expr(iterable)?;
         let iter_range = self.list_range(iter_vid);
         let n_items = usize::from(iter_range.len);
