@@ -10,8 +10,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::{
     Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{
-        ChildRange, ConfigField, GrammarConfig, MacroId, ModuleContext, Node, NodeId, ObjectField,
-        SharedAst, Span,
+        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField, SharedAst,
+        Span,
     },
     loader::ModuleKind,
 };
@@ -113,7 +113,7 @@ pub fn apply_cfg(
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
-        current_macro: None,
+        sym_ref_cursor: None,
     };
     // Walk grammar config fields first - cfg attrs may appear on members of
     // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
@@ -155,9 +155,11 @@ struct Walker<'a> {
     /// The module's import/inherit refs, rebuilt from the surviving AST as the
     /// walk visits each one - a nested cfg-dropped ref is never collected.
     module_refs: &'a mut Vec<NodeId>,
-    /// The rule-set macro currently being walked, so its body's surviving
-    /// computed-name refs (`@<expr>`) collect into that macro's `sym_refs`.
-    current_macro: Option<MacroId>,
+    /// Write head into the active rule-set macro's `sym_refs` range while its
+    /// body is walked; `None` outside a macro body. Surviving `@<expr>` refs are
+    /// compacted to the front of the range in place (cfg only ever drops refs),
+    /// mirroring [`Self::filter`].
+    sym_ref_cursor: Option<usize>,
 }
 
 impl Walker<'_> {
@@ -262,11 +264,12 @@ impl Walker<'_> {
             | Node::For { body: c, .. } => {
                 self.walk(c)?;
             }
-            // SymRef (`@<expr>` in a rule-set body): collect it for the enclosing
-            // macro (its list was cleared at the Macro node), then walk the expr.
+            // SymRef (`@<expr>` in a rule-set body): compact it to the front of
+            // the enclosing macro's sym_refs range in place, then walk the expr.
             Node::SymRef { expr } => {
-                if let Some(mid) = self.current_macro {
-                    self.shared.pools.get_macro_mut(mid).sym_refs.push(id);
+                if let Some(w) = self.sym_ref_cursor.as_mut() {
+                    self.shared.pools.children[*w] = id;
+                    *w += 1;
                 }
                 self.walk(expr)?;
             }
@@ -295,14 +298,17 @@ impl Walker<'_> {
                     self.walk(c)?;
                 }
             }
-            // Macro: rebuild its computed-ref list from the surviving body
-            // (cleared here, collected at each SymRef below), then walk the body
-            // (which lives in pools.get_macro(id).body).
+            // Macro: prune its sym_refs to the cfg-surviving subset by compacting
+            // the range in place as the body is walked, then shrink its length to
+            // the survivors. The range sits past every body pool entry, so the
+            // body walk never touches its slots.
             Node::Macro(macro_id) => {
-                self.shared.pools.get_macro_mut(macro_id).sym_refs.clear();
-                self.current_macro = Some(macro_id);
-                self.walk(self.shared.pools.get_macro(macro_id).body)?;
-                self.current_macro = None;
+                let sym_refs = self.shared.pools.get_macro(macro_id).sym_refs;
+                let body = self.shared.pools.get_macro(macro_id).body;
+                self.sym_ref_cursor = Some(sym_refs.start as usize);
+                self.walk(body)?;
+                let kept = (self.sym_ref_cursor.take().unwrap() - sym_refs.start as usize) as u16;
+                self.shared.pools.get_macro_mut(macro_id).sym_refs.len = kept;
             }
             // Import/inherit ref: collected so resolve and lower see the
             // surviving set; no children to descend into.
