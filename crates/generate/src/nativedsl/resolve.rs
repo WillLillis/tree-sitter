@@ -282,8 +282,11 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
         }
         Node::Macro(macro_id) => {
             let macro_cfg = rcx.pools.get_macro(*macro_id);
+            let params = macro_cfg.params;
+            let kind = macro_cfg.kind;
+            let body = macro_cfg.body;
             // Macro params must not shadow any top-level declaration
-            for param in &macro_cfg.params {
+            for param in rcx.pools.param_slice(params) {
                 let name = rcx.ctx.text(param.name);
                 if let Some(&Spanned {
                     span: first_span, ..
@@ -296,15 +299,12 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
                     ));
                 }
             }
-            match macro_cfg.kind {
-                MacroKind::Expression(_) => resolve_expr(arena, rcx, macro_cfg.body),
+            match kind {
+                MacroKind::Expression(_) => resolve_expr(arena, rcx, body),
                 // Walk the RuleSet body so the original (template) decls'
                 // identifiers get resolved too.
                 MacroKind::RuleSet => {
-                    let Node::RuleSet(range) = arena.get(macro_cfg.body) else {
-                        unreachable!()
-                    };
-                    let range = *range;
+                    expect_pat!(Node::RuleSet(range), *arena.get(body));
                     let start = range.start as usize;
                     let end = start + range.len as usize;
                     for i in start..end {

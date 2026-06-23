@@ -126,7 +126,7 @@ fn expand_one_call(
     // Snapshot before recursive calls reborrow shared mutably.
     let config = shared.pools.get_macro(macro_id);
     let kind = config.kind;
-    let param_count = config.params.len();
+    let param_count = config.params.len as usize;
     let body_id = config.body;
     let MacroKind::RuleSet = kind else {
         return Err(ExpandError::new(
