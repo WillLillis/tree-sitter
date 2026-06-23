@@ -469,6 +469,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             }
         })?;
         let end = self.expect(TokenKind::RBrace)?;
+        let params = self.shared.pools.push_params(&params);
         // `@` refs are only created inside rule-set bodies (and don't nest), so
         // pending_sym_refs holds exactly this body's refs (empty otherwise).
         let sym_refs = self.pending_sym_refs.take().unwrap_or_default();
@@ -1019,11 +1020,13 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
+        let bindings = self.shared.pools.push_params(&bindings);
         let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
-            let config = self.shared.pools.get_for(for_id);
-            for (i, &Param { name, ty }) in config.bindings.iter().enumerate() {
+            let bindings = self.shared.pools.get_for(for_id).bindings;
+            for (i, &Param { name, ty }) in self.shared.pools.param_slice(bindings).iter().enumerate()
+            {
                 self.locals
                     .push((name, LocalBinding::ForBinding(for_id, ty, i as u8)));
             }
