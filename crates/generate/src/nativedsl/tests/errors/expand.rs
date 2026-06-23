@@ -5,10 +5,6 @@ error_tests! { Parse {
         r#"grammar { language: "test" } rules bad() { let x = 1 } rule program { "x" }"#,
         ParseErrorKind::RuleSetBodyRequiresRuleDecl
     }
-    error_empty_rule_set_macro_body {
-        r#"grammar { language: "test" } rules bad() {} rule program { "x" }"#,
-        ParseErrorKind::EmptyRuleSetMacroBody
-    }
 }}
 
 error_tests! { Expand {

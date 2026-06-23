@@ -788,3 +788,73 @@ fn cfg_disabled_symref_not_validated() {
     "#);
     assert!(g.variables.iter().any(|v| v.name == "program"));
 }
+
+#[test]
+fn cfg_rule_in_rule_set_enabled() {
+    // A #[cfg]-gated rule decl inside a `rules` body is kept when its flag is on.
+    let g = dsl(r#"
+        grammar { language: "test", flags: { enabled: ["X"] } }
+        rule program { a }
+        rules pair() {
+            rule a { "x" }
+            #[cfg(X)]
+            rule b { "y" }
+        }
+        @pair()
+    "#);
+    assert_eq!(rule_names(&g), vec!["program", "a", "b"]);
+}
+
+#[test]
+fn cfg_rule_in_rule_set_disabled() {
+    // The gated decl is dropped from the set when its flag is off.
+    let g = dsl(r#"
+        grammar { language: "test", flags: { disabled: ["X"] } }
+        rule program { a }
+        rules pair() {
+            rule a { "x" }
+            #[cfg(X)]
+            rule b { "y" }
+        }
+        @pair()
+    "#);
+    assert_eq!(rule_names(&g), vec!["program", "a"]);
+}
+
+#[test]
+fn cfg_rule_set_fully_gated_call_is_noop() {
+    // Every decl gated out: the @call expands to nothing and is dropped rather
+    // than erroring (an empty expansion contributes no rules).
+    let g = dsl(r#"
+        grammar { language: "test", flags: { disabled: ["X"] } }
+        rule program { "p" }
+        rules extras() {
+            #[cfg(X)]
+            rule a { "x" }
+        }
+        @extras()
+    "#);
+    assert_eq!(rule_names(&g), vec!["program"]);
+}
+
+#[test]
+fn cfg_rule_in_rule_set_dropped_reference_is_undefined() {
+    // Referencing a rule gated out of the set is undefined, exactly as for a
+    // gated-out top-level rule.
+    let err = dsl_err(
+        r#"
+        grammar { language: "test", flags: { disabled: ["X"] } }
+        rules pair() {
+            rule a { b }
+            #[cfg(X)]
+            rule b { "y" }
+        }
+        @pair()
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert!(matches!(
+        e.kind,
+        ResolveErrorKind::UnknownIdentifier(ref n) if n == "b"
+    ));
+}
