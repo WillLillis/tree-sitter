@@ -16,8 +16,8 @@ use super::{
     loader::ModuleKind,
 };
 
-/// `name -> enabled?`. First write wins via `or_insert`; a module merges
-/// before loading its imports, so importers override imported modules.
+/// `name -> enabled?`. First write wins. A module merges before loading its
+/// imports, so importers override imported modules.
 #[derive(Default)]
 pub struct CfgState {
     pub active: FxHashMap<String, bool>,
@@ -186,7 +186,7 @@ impl Walker<'_> {
             }
             // Record a dropped named top-level decl for `enrich_resolve_error`.
             let dropped_name = match self.shared.arena.get(item) {
-                Node::Rule { name, .. } | Node::Let { name, .. } | Node::External { name } => {
+                Node::Rule { name, .. } | Node::Let { name, .. } | Node::Forward { name } => {
                     Some(*name)
                 }
                 Node::Macro(macro_id) => Some(self.shared.pools.get_macro(*macro_id).name),
@@ -196,10 +196,11 @@ impl Walker<'_> {
                 let key = decl_name.resolve(self.source).to_owned();
                 self.cfg_dropped.entry(key).or_insert(id);
             }
-            return Ok(None);
+            Ok(None)
+        } else {
+            // Active: surface the unwrapped child's id so the parent references it directly.
+            self.walk(child)
         }
-        // Active: surface the unwrapped child's id so the parent references it directly.
-        self.walk(child)
     }
 
     fn walk_children(&mut self, id: NodeId) -> Result<(), ResolveError> {
@@ -276,25 +277,24 @@ impl Walker<'_> {
             // Import/inherit ref: collected so resolve and lower see the
             // surviving set; no children to descend into.
             Node::ModuleRef { .. } => self.module_refs.push(id),
-            // Leaves / nothing to descend into.
+            // Leaves: nothing to descend into.
             #[rustfmt::skip]
-            Node::Grammar | Node::External { .. } | Node::StringLit | Node::RawStringLit { .. }
+            Node::Grammar | Node::Forward { .. } | Node::StringLit | Node::RawStringLit { .. }
             | Node::IntLit(_) | Node::Ident(_) | Node::Blank | Node::MacroParam { .. }
-            | Node::ForBinding { .. } | Node::Unreachable
-            // handled by walk(), unreachable here
-            | Node::Cfg { .. } => {}
-            // Emitted by expand_macro_calls / resolve, both of which run after
-            // apply_cfg.
-            Node::ExpandedRule(_) | Node::ModuleRule { .. } => unreachable!(),
+            | Node::ForBinding { .. } => {}
+            // `Cfg` is intercepted by walk(), `ExpandedRule`/`ModuleRule` are emitted by
+            // expand/resolve (after apply_cfg), `Unreachable` is the arena sentinel.
+            // None can legitimately reach here.
+            #[rustfmt::skip]
+            Node::Cfg { .. } | Node::ExpandedRule(_) | Node::ModuleRule { .. }
+            | Node::Unreachable => unreachable!(),
         }
         Ok(())
     }
 
-    /// Filter a child range in place and shrink `id`'s range to match.
-    /// `NodeIds` are `Copy` so we can read each slot, walk it (recursive
-    /// walks only ever *append* to `pools.children`, never touch our slots),
-    /// then overwrite earlier slots with survivors. Slots past the new end
-    /// are orphaned but no `ChildRange` references them.
+    /// Filter a child range in place and shrink `id`'s range to match. Walk each
+    /// `NodeId` slot, then overwrite earlier slots with survivors. Slots past the
+    /// new end are orphaned but no `ChildRange` references them.
     fn filter(&mut self, id: NodeId, range: ChildRange) -> Result<(), ResolveError> {
         let start = range.start as usize;
         let mut write = start;

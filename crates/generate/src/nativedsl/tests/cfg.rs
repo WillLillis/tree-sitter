@@ -347,7 +347,7 @@ fn cfg_dropped_external_enriches_error() {
         r#"
         grammar { language: "t", flags: { disabled: ["X"] } }
         rule program { gated_token }
-        #[cfg(X)] external gated_token
+        #[cfg(X)] expect gated_token
     "#,
     );
     let e = assert_err!(err, Resolve);

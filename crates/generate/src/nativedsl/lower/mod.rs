@@ -174,7 +174,7 @@ fn lower_items(
         match shared.arena.get(item_id) {
             // Grammar block (config is read separately), macros, and externals
             // register names but don't materialize a rule here.
-            Node::Grammar | Node::Macro(_) | Node::External { .. } => {}
+            Node::Grammar | Node::Macro(_) | Node::Forward { .. } => {}
             Node::Let { .. } => {
                 eval.eval_let(item_id)?;
             }
