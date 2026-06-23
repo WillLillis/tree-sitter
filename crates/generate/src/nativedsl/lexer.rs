@@ -158,7 +158,7 @@ pub enum TokenKind {
     KwOverride,
     KwAppend,
     KwGrammarConfig,
-    KwExternal,
+    KwExpect,
     // Punctuation
     LBrace,
     RBrace,
@@ -223,7 +223,7 @@ macro_rules! keywords {
 keywords! {
     decls {
         KwGrammar => "grammar", KwRule => "rule", KwRules => "rules", KwLet => "let",
-        KwMacro => "macro", KwOverride => "override", KwExternal => "external",
+        KwMacro => "macro", KwOverride => "override", KwExpect => "expect",
         KwIn => "in",
     }
     combinators {

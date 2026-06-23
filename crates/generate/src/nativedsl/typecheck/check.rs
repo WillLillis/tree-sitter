@@ -101,7 +101,7 @@ pub(super) fn check_item(
             Ok(())
         }
         // External decls have no body to typecheck.
-        Node::External { .. } => Ok(()),
+        Node::Forward { .. } => Ok(()),
         _ => unreachable!(),
     }
 }
