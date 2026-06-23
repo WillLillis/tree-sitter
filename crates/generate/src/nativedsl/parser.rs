@@ -472,7 +472,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let params = self.shared.pools.push_params(&params);
         // `@` refs are only created inside rule-set bodies (and don't nest), so
         // pending_sym_refs holds exactly this body's refs (empty otherwise).
-        let sym_refs = self.pending_sym_refs.take().unwrap_or_default();
+        // Pushed after the body, so the range sits past every body pool entry -
+        // apply_cfg relies on that to compact it in place.
+        let sym_ref_ids = self.pending_sym_refs.take().unwrap_or_default();
+        let sym_refs = self
+            .shared
+            .pools
+            .push_children(&sym_ref_ids)
+            .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren(sym_ref_ids.len())))?;
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
             name,
             params,

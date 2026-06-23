@@ -192,7 +192,8 @@ fn expand_one_call(
     }
     // Evaluate this macro's computed-name references under the call's args and
     // record them for resolve to validate.
-    for &sym_ref in &shared.pools.get_macro(macro_id).sym_refs {
+    let sym_refs = shared.pools.get_macro(macro_id).sym_refs;
+    for &sym_ref in shared.pools.child_slice(sym_refs) {
         expect_pat!(Node::SymRef { expr }, *shared.arena.get(sym_ref));
         let span = shared.arena.span(sym_ref);
         let name = eval_name(shared, strings, ctx, args_start, expr, span)?;
