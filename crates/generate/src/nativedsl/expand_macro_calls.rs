@@ -52,9 +52,9 @@ pub fn expand_macro_calls(
     // arg-count or kind error against whichever definition the macro table
     // kept - collect_decls rejects the dup before pass 2 runs.
     let (macros, duplicates) = collect_macros(shared, ctx);
-    // Walk only the original indices. Each Call writes its first expanded
-    // rule into its own slot; the rest are pushed to the end. Parser's
-    // EmptyRuleSetMacroBody guarantees the slot is always filled.
+    // Walk only the original indices. Each Call writes its first expanded rule
+    // into its own slot; the rest are pushed to the end. A call whose set has
+    // zero decls (empty or fully cfg-gated) leaves its Call node in the slot.
     let original_len = ctx.root_items.len();
     for i in 0..original_len {
         let id = ctx.root_items[i];
@@ -66,6 +66,10 @@ pub fn expand_macro_calls(
         }
         expand_one_call(shared, strings, ctx, &macros, id, i)?;
     }
+    // A zero-decl expansion contributes nothing, so drop any Call left in place
+    // (a duplicate-skipped call also lands here; resolve rejects the dup anyway).
+    ctx.root_items
+        .retain(|&id| !matches!(shared.arena.get(id), Node::Call { .. }));
     Ok(())
 }
 

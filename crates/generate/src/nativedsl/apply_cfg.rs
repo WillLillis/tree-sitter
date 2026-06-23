@@ -5,25 +5,21 @@
 //! merges its own flags before loading the modules it imports or inherits, so
 //! an importing module overrides the flag values of the modules it pulls in.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use super::{
     Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{
-        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField, SharedAst,
-        Span,
+        ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField,
+        SharedAst, Span,
     },
     loader::ModuleKind,
 };
 
+/// `name -> enabled?`. First write wins via `or_insert`; a module merges
+/// before loading its imports, so importers override imported modules.
 #[derive(Default)]
 pub struct CfgState {
-    /// Union of every module's `cfg_declared`: every flag name declared
-    /// anywhere in the load chain. Cached for the helper-module visibility
-    /// check (which sees the global declared set, not per-module).
-    pub declared_any: FxHashSet<String>,
-    /// `name -> enabled?`. First write wins via `or_insert`; a module merges
-    /// before loading its imports, so importers override imported modules.
     pub active: FxHashMap<String, bool>,
 }
 
@@ -83,7 +79,6 @@ impl CfgState {
                     ));
                 }
                 let name = name_text.to_owned();
-                self.declared_any.insert(name.clone());
                 ctx.cfg_declared.insert(name.clone(), span);
                 self.active.entry(name).or_insert(enable);
             }
@@ -99,12 +94,7 @@ pub fn apply_cfg(
     state: &CfgState,
     kind: ModuleKind,
 ) -> Result<(), ResolveError> {
-    // The cfg walk rebuilds module_refs from the surviving AST: it visits every
-    // surviving node, so a nested cfg-dropped import / inherit is never
-    // collected. Cleared here, repopulated by the walk; the no-cfg path keeps
-    // the parser's population since apply_cfg only runs when has_cfg. (sym_refs
-    // are pruned per-macro below; top-level-only tables are derived where used.)
-    ctx.module_refs.clear();
+    ctx.module_refs.clear(); // rebuilt during cfg walk
     let mut w = Walker {
         shared: &mut *shared,
         state,
@@ -115,20 +105,17 @@ pub fn apply_cfg(
         module_refs: &mut ctx.module_refs,
         sym_ref_cursor: None,
     };
-    // Walk grammar config fields first - cfg attrs may appear on members of
-    // `conflicts`, `precedences`, `externals`, etc. Skip `flags:` already
-    // consumed by `merge_module_flags`.
     for (_, id) in ctx
         .grammar_config
         .as_ref()
         .into_iter()
         .flat_map(GrammarConfig::node_fields)
+        // `flags` already consumed by `merge_module_flags`
         .filter(|(field, _)| !matches!(field, ConfigField::Flags))
     {
         w.walk(id)?;
     }
-    // Compact root_items, repointing each surviving entry at the id the walk
-    // surfaced (an active cfg resolves to its unwrapped child's id).
+    // Compact root_items, repointing each surviving entry at the id the walk surfaced
     let original_len = ctx.root_items.len();
     let mut write = 0;
     for read in 0..original_len {
@@ -147,25 +134,22 @@ struct Walker<'a> {
     state: &'a CfgState,
     kind: ModuleKind,
     source: &'a str,
-    /// Disjoint borrows of `ctx`. `cfg_declared` is the local declared set for
-    /// the grammar visibility check; `cfg_dropped` records cfg-dropped top-level
-    /// decls for `enrich_resolve_error` to use later.
+    /// Local declared set for the grammar visibility check
     cfg_declared: &'a FxHashMap<String, Span>,
+    /// cfg-dropped top-level decls for `enrich_resolve_error` to use later.
     cfg_dropped: &'a mut FxHashMap<String, NodeId>,
     /// The module's import/inherit refs, rebuilt from the surviving AST as the
     /// walk visits each one - a nested cfg-dropped ref is never collected.
     module_refs: &'a mut Vec<NodeId>,
     /// Write head into the active rule-set macro's `sym_refs` range while its
     /// body is walked; `None` outside a macro body. Surviving `@<expr>` refs are
-    /// compacted to the front of the range in place (cfg only ever drops refs),
-    /// mirroring [`Self::filter`].
+    /// compacted to the front of the range in place
     sym_ref_cursor: Option<usize>,
 }
 
 impl Walker<'_> {
-    /// `Ok(Some(id))` = keep and reference `id` (an active cfg resolves to its
-    /// unwrapped child's id); `Ok(None)` = drop. Shrinks filtered list ranges in
-    /// place but never relocates a node.
+    /// `Ok(Some(id))` = keep `id` (an active cfg resolves to its unwrapped child's id)
+    /// `Ok(None)` = drop. Shrinks filtered list ranges in place.
     fn walk(&mut self, id: NodeId) -> Result<Option<NodeId>, ResolveError> {
         if let &Node::Cfg { name, child } = self.shared.arena.get(id) {
             return self.walk_cfg(id, name, child);
@@ -185,13 +169,13 @@ impl Walker<'_> {
         // see the importing grammar's declared set.
         let visible = match self.kind {
             ModuleKind::Grammar => self.cfg_declared.contains_key(name_text),
-            ModuleKind::Helper => self.state.declared_any.contains(name_text),
+            ModuleKind::Helper => self.state.active.contains_key(name_text),
         };
         if !visible {
-            return Err(err(
+            Err(err(
                 ResolveErrorKind::CfgFlagUnknown(name_text.into()),
                 name,
-            ));
+            ))?;
         }
         let active = self.state.active.get(name_text).copied().unwrap_or(false);
         if !active {
@@ -201,8 +185,6 @@ impl Walker<'_> {
                 item = inner;
             }
             // Record a dropped named top-level decl for `enrich_resolve_error`.
-            // The macro/module working sets are rebuilt from the surviving
-            // root_items after the walk, so a dropped decl needs no fixup here.
             let dropped_name = match self.shared.arena.get(item) {
                 Node::Rule { name, .. } | Node::Let { name, .. } | Node::External { name } => {
                     Some(*name)
@@ -216,27 +198,23 @@ impl Walker<'_> {
             }
             return Ok(None);
         }
-        // Active: surface the unwrapped child's id (it already carries the
-        // child's span) so the parent references it directly. No relocation
-        // means no node-id-keyed side table needs re-keying.
+        // Active: surface the unwrapped child's id so the parent references it directly.
         self.walk(child)
     }
 
     fn walk_children(&mut self, id: NodeId) -> Result<(), ResolveError> {
         let node = *self.shared.arena.get(id);
         match node {
-            // List-shaped variants where cfg members are allowed (per the
-            // parser's `parse_expr_with_cfg` routing): filter dropped members
-            // in place, shrink the node's range if any change.
-            Node::SeqOrChoice { range, .. } | Node::List(range) | Node::Concat(range) => {
+            // List-shaped variants whose members can be cfg-gated. Filter dropped
+            // members in place, shrink the node's range on change.
+            #[rustfmt::skip]
+            Node::SeqOrChoice { range, .. } | Node::List(range)
+            | Node::Concat(range) | Node::RuleSet(range) => {
                 self.filter(id, range)?;
             }
-            // Variadic but cfg not allowed in members: just recurse. Index
-            // into the backing pool directly so we don't hold a borrow across
-            // the recursive `walk` call (which needs `&mut self.shared`).
-            // Recursive walks only ever append to the pools, never touching
-            // existing slots, so indices in our range stay valid.
-            Node::Tuple(r) | Node::QualifiedCall(r) | Node::RuleSet(r) => {
+            // Fixed-arity / positional members can't be cfg-gated, but recurse to
+            // reach any cfg nested deeper inside each.
+            Node::Tuple(r) | Node::QualifiedCall(r) => {
                 for i in r.as_range() {
                     let c = self.shared.pools.children[i];
                     self.walk(c)?;
@@ -255,7 +233,6 @@ impl Walker<'_> {
                     self.walk(c)?;
                 }
             }
-            // Single-child wrappers.
             #[rustfmt::skip]
             Node::Rule { body: c, .. } | Node::Let { value: c, .. } | Node::Repeat { inner: c, .. }
             | Node::Token { inner: c, .. } | Node::Field { content: c, .. }
@@ -273,23 +250,10 @@ impl Walker<'_> {
                 }
                 self.walk(expr)?;
             }
-            // Two-child wrappers.
-            Node::Alias {
-                content: a,
-                target: b,
-            }
-            | Node::Append { left: a, right: b }
-            | Node::BinOp { lhs: a, rhs: b, .. }
-            | Node::Prec {
-                value: a,
-                content: b,
-                ..
-            }
-            | Node::ComputedRule {
-                name_expr: a,
-                body: b,
-                ..
-            } => {
+            #[rustfmt::skip]
+            Node::Alias { content: a, target: b } | Node::Append { left: a, right: b }
+            | Node::BinOp { lhs: a, rhs: b, .. } | Node::Prec { value: a, content: b, .. }
+            | Node::ComputedRule { name_expr: a, body: b, .. } => {
                 self.walk(a)?;
                 self.walk(b)?;
             }
@@ -300,8 +264,7 @@ impl Walker<'_> {
             }
             // Macro: prune its sym_refs to the cfg-surviving subset by compacting
             // the range in place as the body is walked, then shrink its length to
-            // the survivors. The range sits past every body pool entry, so the
-            // body walk never touches its slots.
+            // the survivors.
             Node::Macro(macro_id) => {
                 let sym_refs = self.shared.pools.get_macro(macro_id).sym_refs;
                 let body = self.shared.pools.get_macro(macro_id).body;
@@ -316,15 +279,13 @@ impl Walker<'_> {
             // Leaves / nothing to descend into.
             #[rustfmt::skip]
             Node::Grammar | Node::External { .. } | Node::StringLit | Node::RawStringLit { .. }
-            | Node::IntLit(_) | Node::Ident(_) | Node::Blank
-            | Node::MacroParam { .. } | Node::ForBinding { .. } | Node::Unreachable
+            | Node::IntLit(_) | Node::Ident(_) | Node::Blank | Node::MacroParam { .. }
+            | Node::ForBinding { .. } | Node::Unreachable
             // handled by walk(), unreachable here
             | Node::Cfg { .. } => {}
             // Emitted by expand_macro_calls / resolve, both of which run after
             // apply_cfg.
-            Node::ExpandedRule(_) | Node::ModuleRule { .. } => {
-                unreachable!()
-            }
+            Node::ExpandedRule(_) | Node::ModuleRule { .. } => unreachable!(),
         }
         Ok(())
     }
