@@ -427,12 +427,12 @@ fn error_externals_via_function_call() {
 }
 
 #[test]
-fn external_decl_in_grammar_file() {
+fn expect_decl_in_grammar_file() {
     // Top-level `external` decl forward-declares a name; the grammar block's
     // externals list still does the actual registration. The name is usable
     // in rule bodies via the resolver's decl table.
     let g = dsl(r#"
-        external _foo
+        expect _foo
         grammar { language: "test", externals: [_foo] }
         rule program { _foo }
     "#);
@@ -441,12 +441,31 @@ fn external_decl_in_grammar_file() {
 }
 
 #[test]
-fn external_decl_duplicate_errors() {
+#[ignore = "enabled with the symbol-completeness validation (next commit)"]
+fn expect_referenced_but_not_defined_is_rejected() {
+    // An `expect` forward-decl names a symbol defined elsewhere (a rule or an
+    // `externals:` token). Referencing it without ever defining it leaves a
+    // dangling NamedSymbol (no rule, no external token), so it must be rejected.
+    let result = try_dsl(
+        r#"
+        expect _foo
+        grammar { language: "test" }
+        rule program { _foo }
+    "#,
+    );
+    assert!(
+        result.is_err(),
+        "referencing expect _foo without listing it in externals: should be rejected"
+    );
+}
+
+#[test]
+fn expect_decl_duplicate_errors() {
     let e = assert_err!(
         dsl_err(
             r#"
-            external _foo
-            external _foo
+            expect _foo
+            expect _foo
             grammar { language: "test", externals: [_foo] }
             rule program { _foo }
         "#
@@ -460,12 +479,12 @@ fn external_decl_duplicate_errors() {
 }
 
 #[test]
-fn external_decl_redundant_with_grammar_block() {
-    // Both `external _foo` and `externals: [_foo]` declare the same name.
+fn expect_decl_redundant_with_grammar_block() {
+    // Both `expect _foo` and `externals: [_foo]` declare the same name.
     // The decl table sees `external` first; the grammar block's pre-registration
     // skips already-declared names (collect_external_names checks contains_key).
     let g = dsl(r#"
-        external _foo
+        expect _foo
         grammar { language: "test", externals: [_foo, _bar] }
         rule program { seq(_foo, _bar) }
     "#);
