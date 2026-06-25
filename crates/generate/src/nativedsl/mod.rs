@@ -184,14 +184,10 @@ pub fn build_exports(
         };
         add(name, Export::Local(kind));
     }
-    // TODO: Should external decls be exported from a module? Seems wrong but need to check
-    // roundtrip tests
-    // Top-level `external X` declarations.
-    for &item_id in &ctx.root_items {
-        if let Node::Forward { name } = *arena.get(item_id) {
-            add(ctx.text(name), Export::Rule(RuleTarget::ExternalName(name)));
-        }
-    }
+    // `expect` forward-decls are NOT exported: a symbol is referenced across
+    // modules through the lowered output below (a rule or registered external),
+    // by flat name. A bare forward-decl names something defined elsewhere and so
+    // has nothing to export on its own.
     // Lowered output.
     match lowered {
         LoweredRef::Grammar(g) => {
@@ -442,6 +438,9 @@ pub enum NoteMessage {
     OverrideDeclaredHere,
     /// One per redundant `inherit()` beyond the first in a `MultipleInherits` error
     AlsoInheritedHere,
+    /// Points at an `expect <name>` forward-decl whose promised symbol, referenced
+    /// somewhere in the grammar, was never defined.
+    ForwardDeclaredHere,
     /// Carries the cfg flag name, the note's span points at the gated decl.
     GatedByDisabledCfg(String),
     DidYouMean(String),
@@ -463,6 +462,7 @@ impl std::fmt::Display for NoteMessage {
             Self::ReferencedFromHere => write!(f, "referenced from here"),
             Self::OverrideDeclaredHere => write!(f, "override declared here"),
             Self::AlsoInheritedHere => write!(f, "also inherited here"),
+            Self::ForwardDeclaredHere => write!(f, "forward-declared with `expect` here"),
             Self::GatedByDisabledCfg(flag) => {
                 write!(f, "this declaration is disabled by `#[cfg({flag})]`")
             }

@@ -782,8 +782,9 @@ fn error_helper_rule_collides_with_root_rule() {
 #[test]
 fn helper_can_define_rules() {
     // Mutually-recursive helper rules with intra-helper references plus a
-    // reference to a helper-declared external. Rules materialize into the
-    // root grammar's variables.
+    // reference to an external the helper forward-declares. Rules materialize
+    // into the root grammar's variables; the grammar registers the externals by
+    // bare name.
     let g = parse_with_modules(
         &[(
             "exp.tsg",
@@ -796,7 +797,7 @@ fn helper_can_define_rules() {
         )],
         r#"
         let exp = import("exp.tsg")
-        grammar { language: "test", externals: [exp::_paren_open, exp::_paren_close] }
+        grammar { language: "test", externals: [_paren_open, _paren_close] }
         rule program { expression }
     "#,
     )
@@ -805,58 +806,48 @@ fn helper_can_define_rules() {
 }
 
 #[test]
-fn helper_external_qualified_in_rule_body() {
+fn helper_rule_uses_grammar_registered_external() {
+    // Flat externals: a helper forward-declares an external and uses it in a
+    // rule; the grammar registers it by bare name. They connect by name with no
+    // qualified reference, and the helper rule materializes into the grammar.
     let g = parse_with_modules(
-        &[("ext.tsg", "expect _foo\nexpect _bar\n")],
+        &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
         r#"
         let e = import("ext.tsg")
-        grammar { language: "test", externals: [e::_foo, e::_bar] }
-        rule program { seq(e::_foo, e::_bar) }
+        grammar { language: "test", externals: [_tok] }
+        rule program { wrapped }
     "#,
     )
     .unwrap();
-    assert_eq!(g.external_tokens.len(), 2);
+    assert_eq!(g.external_tokens.len(), 1);
     assert_eq!(
-        *find_rule(&g, "program"),
+        *find_rule(&g, "wrapped"),
         Rule::seq(vec![
-            Rule::NamedSymbol("_foo".into()),
-            Rule::NamedSymbol("_bar".into()),
+            Rule::NamedSymbol("_tok".into()),
+            Rule::NamedSymbol("_tok".into()),
         ])
     );
 }
 
 #[test]
-fn helper_external_member_not_found() {
+fn helper_hole_unregistered_external_is_rejected() {
+    // Mirror of `helper_rule_uses_grammar_registered_external` with the grammar's
+    // `externals: [_tok]` dropped. The helper rule materializes into the grammar
+    // carrying a dangling `_tok`, which the symbol-completeness check rejects -
+    // anchored at the helper's `expect`, not left to tree-sitter's generic error.
     let err = parse_with_modules(
-        &[("ext.tsg", "expect _foo\n")],
+        &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
         r#"
         let e = import("ext.tsg")
-        grammar { language: "test", externals: [e::_missing] }
-        rule program { "x" }
+        grammar { language: "test" }
+        rule program { wrapped }
     "#,
-    );
-    let e = assert_err!(err.unwrap_err(), Resolve);
+    )
+    .unwrap_err();
+    let e = assert_err!(err, Lower);
     assert_eq!(
         e.kind,
-        ResolveErrorKind::ImportMemberNotFound("_missing".into())
-    );
-}
-
-#[test]
-fn cfg_disabled_helper_external_not_exported() {
-    let err = parse_with_modules(
-        &[("ext.tsg", "expect _foo\n#[cfg(X)] expect _gated\n")],
-        r#"
-        let e = import("ext.tsg")
-        grammar { language: "test", flags: { disabled: ["X"] }, externals: [e::_gated] }
-        rule program { "x" }
-    "#,
-    );
-    // `_gated` is cfg-disabled in the helper, so `e::_gated` must not resolve.
-    let e = assert_err!(err.unwrap_err(), Resolve);
-    assert_eq!(
-        e.kind,
-        ResolveErrorKind::ImportMemberNotFound("_gated".into())
+        LowerErrorKind::UndefinedSymbols(vec!["_tok".into()])
     );
 }
 

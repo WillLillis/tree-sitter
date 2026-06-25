@@ -65,12 +65,6 @@ pub(super) fn dsl_err(input: &str) -> DslError {
     parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap_err()
 }
 
-/// Raw pipeline result, for tests that assert only success-or-failure without
-/// committing to a grammar or a specific error kind.
-pub(super) fn try_dsl(input: &str) -> Result<InputGrammar, DslError> {
-    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg"))
-}
-
 /// Write `modules` (filename -> source) into a fresh tempdir and parse `root`
 /// against it, so imports/inherits resolve by relative filename - e.g.
 /// `import("helper.tsg")`. The tempdir drops after parsing, which has already

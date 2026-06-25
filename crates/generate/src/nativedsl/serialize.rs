@@ -1,12 +1,12 @@
 //! JSON serialization for [`InputGrammar`] - produces `grammar.json` format.
 
 use crate::grammars::{InputGrammar, PrecedenceEntry};
-use crate::rules::{Associativity, Precedence, Rule};
+use crate::rules::{Alias, Associativity, Precedence, Rule};
+
+use serde_json::{Map, Value, json};
 
 /// Convert an [`InputGrammar`] to `grammar.json` format.
 pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
-    use serde_json::{Map, Value, json};
-
     let mut obj = Map::new();
     obj.insert("name".into(), Value::String(grammar.name.clone()));
 
@@ -76,8 +76,6 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
 }
 
 fn rule_to_json(rule: &Rule) -> serde_json::Value {
-    use crate::rules::Alias;
-    use serde_json::json;
     match rule {
         Rule::Blank => json!({"type": "BLANK"}),
         Rule::String(s) => json!({"type": "STRING", "value": s}),
