@@ -47,6 +47,56 @@ fn cfg_rule_def_disabled() {
 }
 
 #[test]
+fn cfg_disabled_definition_with_expect_is_undefined_symbol() {
+    // Like `cfg_rule_def_disabled`, but an `expect` keeps `strikethrough` in the
+    // decl table so the reference survives resolve. cfg then drops its only
+    // definition, leaving a dangling symbol that the symbol-completeness check
+    // catches at lower (the forward-decl is what promotes this past resolve).
+    let err = dsl_err(
+        r#"
+        grammar { language: "t", flags: { disabled: ["GFM"] } }
+        expect strikethrough
+        rule program { strikethrough }
+        #[cfg(GFM)]
+        rule strikethrough { "~~" }
+    "#,
+    );
+    let e = assert_err!(err, Lower);
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::UndefinedSymbols(vec!["strikethrough".into()])
+    );
+}
+
+#[test]
+fn cfg_enabled_definition_with_expect_compiles() {
+    // The same grammar with the flag enabled keeps the definition, so the
+    // forward-decl is fulfilled and the symbol-completeness check passes.
+    let g = dsl(r#"
+        grammar { language: "t", flags: { enabled: ["GFM"] } }
+        expect strikethrough
+        rule program { strikethrough }
+        #[cfg(GFM)]
+        rule strikethrough { "~~" }
+    "#);
+    assert_eq!(rule_names(&g), vec!["program", "strikethrough"]);
+}
+
+#[test]
+fn cfg_disabled_expect_and_user_compiles() {
+    // cfg drops the forward-decl and its only referencing rule together, leaving
+    // no dangling symbol. The check must not false-positive on the gated-out
+    // `expect` (it is removed from the arena before lowering).
+    let g = dsl(r#"
+        grammar { language: "t", flags: { disabled: ["GFM"] } }
+        #[cfg(GFM)] expect _ext
+        #[cfg(GFM)] rule uses_ext { _ext }
+        rule program { "x" }
+    "#);
+    assert_eq!(rule_names(&g), vec!["program"]);
+}
+
+#[test]
 fn cfg_choice_member_enabled() {
     let g = dsl(r#"
         grammar { language: "t", flags: { enabled: ["GFM"] } }

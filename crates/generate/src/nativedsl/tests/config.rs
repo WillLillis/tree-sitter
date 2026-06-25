@@ -428,9 +428,9 @@ fn error_externals_via_function_call() {
 
 #[test]
 fn expect_decl_in_grammar_file() {
-    // Top-level `external` decl forward-declares a name; the grammar block's
-    // externals list still does the actual registration. The name is usable
-    // in rule bodies via the resolver's decl table.
+    // A top-level `expect` forward-declares a name; the grammar block's externals
+    // list still does the actual registration. The name is usable in rule bodies
+    // via the resolver's decl table.
     let g = dsl(r#"
         expect _foo
         grammar { language: "test", externals: [_foo] }
@@ -441,41 +441,55 @@ fn expect_decl_in_grammar_file() {
 }
 
 #[test]
-#[ignore = "enabled with the symbol-completeness validation (next commit)"]
+fn expect_fulfilled_by_same_file_rule() {
+    // A forward-decl is fulfilled by a later same-file definition rather than
+    // colliding with it: declarations don't collide with definitions, so the
+    // `rule` claims the name the `expect` declared (forward-declare, then define).
+    let g = dsl(r#"
+        expect helper
+        grammar { language: "test" }
+        rule program { helper }
+        rule helper { "x" }
+    "#);
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::NamedSymbol("helper".into())
+    );
+    assert_eq!(*find_rule(&g, "helper"), Rule::String("x".into()));
+}
+
+#[test]
 fn expect_referenced_but_not_defined_is_rejected() {
     // An `expect` forward-decl names a symbol defined elsewhere (a rule or an
     // `externals:` token). Referencing it without ever defining it leaves a
     // dangling NamedSymbol (no rule, no external token), so it must be rejected.
-    let result = try_dsl(
+    let err = dsl_err(
         r#"
         expect _foo
         grammar { language: "test" }
         rule program { _foo }
     "#,
     );
-    assert!(
-        result.is_err(),
-        "referencing expect _foo without listing it in externals: should be rejected"
+    let e = assert_err!(err, Lower);
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::UndefinedSymbols(vec!["_foo".into()])
     );
 }
 
 #[test]
-fn expect_decl_duplicate_errors() {
-    let e = assert_err!(
-        dsl_err(
-            r#"
-            expect _foo
-            expect _foo
-            grammar { language: "test", externals: [_foo] }
-            rule program { _foo }
-        "#
-        ),
-        Resolve
-    );
-    assert_eq!(
-        e.kind,
-        ResolveErrorKind::DuplicateDeclaration("_foo".into())
-    );
+fn expect_decl_repeated_is_idempotent() {
+    // Forward-decls are idempotent, like C: declaring the same name with `expect`
+    // more than once is a redundancy, not a duplicate. Declarations don't collide;
+    // only definitions do.
+    let g = dsl(r#"
+        expect _foo
+        expect _foo
+        grammar { language: "test", externals: [_foo] }
+        rule program { _foo }
+    "#);
+    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(*find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
 }
 
 #[test]

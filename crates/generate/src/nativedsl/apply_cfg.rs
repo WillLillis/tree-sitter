@@ -115,17 +115,21 @@ pub fn apply_cfg(
     {
         w.walk(id)?;
     }
-    // Compact root_items, repointing each surviving entry at the id the walk surfaced
+    // Compact root_items, repointing each surviving entry at the id the walk
+    // surfaced.
+    let mut has_forward_decls = false;
     let original_len = ctx.root_items.len();
     let mut write = 0;
     for read in 0..original_len {
         let id = ctx.root_items[read];
         if let Some(kept) = w.walk(id)? {
+            has_forward_decls |= matches!(w.shared.arena.get(kept), Node::Forward { .. });
             ctx.root_items[write] = kept;
             write += 1;
         }
     }
     ctx.root_items.truncate(write);
+    ctx.has_forward_decls = has_forward_decls;
     Ok(())
 }
 
