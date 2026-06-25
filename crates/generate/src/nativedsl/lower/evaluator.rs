@@ -726,12 +726,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::ModuleRule { module, target } => {
                 let target_module = &self.previous[usize::from(module)];
                 let rid = match target {
-                    // TODO: Should external decls be exported from a module? Seems wrong but need to check
-                    // roundtrip tests
-                    RuleTarget::ExternalName(span) => {
-                        let sid = self.strings.intern_span(span, module);
-                        self.alloc_rule(ARule::NamedSymbol(sid))
-                    }
                     RuleTarget::HelperRule(i) => {
                         expect_pat!(Module::Helper { lowered_rules, .. }, target_module);
                         self.import_rule(&lowered_rules[i as usize].1)

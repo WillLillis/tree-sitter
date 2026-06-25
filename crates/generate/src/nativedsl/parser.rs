@@ -64,6 +64,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 module_refs: Vec::new(),
                 node_range: 0..0,
                 has_cfg: false,
+                has_forward_decls: false,
                 cfg_declared: FxHashMap::default(),
                 cfg_dropped: FxHashMap::default(),
                 computed_refs: Vec::new(),
@@ -299,6 +300,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     fn parse_expect_decl(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwExpect)?;
         let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        self.ctx.has_forward_decls = true;
         Ok(self
             .shared
             .arena
@@ -1044,7 +1046,8 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
             let bindings = self.shared.pools.get_for(for_id).bindings;
-            for (i, &Param { name, ty }) in self.shared.pools.param_slice(bindings).iter().enumerate()
+            for (i, &Param { name, ty }) in
+                self.shared.pools.param_slice(bindings).iter().enumerate()
             {
                 self.locals
                     .push((name, LocalBinding::ForBinding(for_id, ty, i as u8)));

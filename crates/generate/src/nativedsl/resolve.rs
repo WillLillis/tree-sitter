@@ -15,8 +15,7 @@ use crate::{
     nativedsl::{
         Export, ImportedRule, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst,
-            Span, Spanned,
+            AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span, Spanned,
         },
         string_pool::StringPool,
         suggest::suggest_name,
@@ -188,18 +187,12 @@ fn collect_decls<'a>(
                     ctx,
                 )?;
             }
-            Node::Forward { name } => {
-                // External decls register the symbol name as a rule-shaped
-                // identifier so it can be referenced from rule bodies.
-                insert_decl(&mut decls, ctx.text(*name), IdentKind::Rule, span, ctx)?;
-            }
+            // Forward-decls (`expect X`) are registered last (below)
             _ => {}
         }
     }
 
-    // Register inherited rule names. Collisions with local rules error, except
-    // for names that have a corresponding `override rule`. The inherit statement's
-    // span gives "first defined here" notes a sensible target.
+    // Register inherited rule names. Collisions with local non-`override` rules error
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
             // The first source of an overridden name coexists with the override
@@ -210,7 +203,6 @@ fn collect_decls<'a>(
             }
             insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
         }
-        // TODO: Check here as well for externals nonsense
         // Inherited external tokens are referenceable by bare name too, just
         // like inherited rules). Anonymous externals (string/pattern) have no
         // name to bring into scope. A base may list one of its own rules in
@@ -252,6 +244,22 @@ fn collect_decls<'a>(
             expanding_lets: FxHashSet::default(),
         };
         collect_external_names(shared, ctx, ext_id, &mut ec)?;
+    }
+
+    // Forward-decls (`expect X`) name a symbol provided elsewhere: a rule (here or
+    // in an imported helper), an external token, or an inherited rule. Registered
+    // last, so a real definition from any pass above fulfills the declaration
+    // rather than colliding with it; the name is added only if still undefined (an
+    // unfulfilled `expect` is then caught by the lower symbol-completeness check).
+    for &item_id in root_items {
+        let Node::Forward { name } = shared.arena.get(item_id) else {
+            continue;
+        };
+        let name_text = ctx.text(*name);
+        let span = shared.arena.span(item_id);
+        decls
+            .entry(name_text)
+            .or_insert_with(|| Spanned::new(IdentKind::Rule, span));
     }
 
     Ok(decls)

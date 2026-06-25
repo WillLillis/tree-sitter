@@ -250,8 +250,6 @@ pub enum RuleTarget {
     GrammarExternal(u32),
     /// Index into the target helper's `lowered_rules`.
     HelperRule(u32),
-    /// The span of the top-level `external X` declaration's name.
-    ExternalName(Span),
 }
 
 /// Byte offset range `[start, end)` in the source text.
@@ -536,6 +534,8 @@ pub struct ModuleContext {
     /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
     /// attributes appear in source.
     pub has_cfg: bool,
+    /// `true` if the parser pushed at least one `Node::Forward` for this module.
+    pub has_forward_decls: bool,
     /// Flag names declared in this module's `flags`, mapped to the span of
     /// their first occurrence (used for `FirstDefinedHere` notes).
     pub cfg_declared: FxHashMap<String, Span>,

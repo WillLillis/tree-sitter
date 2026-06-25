@@ -16,8 +16,8 @@ pub(super) fn suggest_name<'a>(
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
+    let a = a.chars().collect::<Vec<_>>();
+    let b = b.chars().collect::<Vec<_>>();
     if a.is_empty() {
         return b.len();
     }
