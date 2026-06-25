@@ -1,10 +1,8 @@
-use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::{num::NonZeroU32, rc::Rc};
 
 use rustc_hash::FxHashMap;
 
-use super::ModuleId;
-use super::ast::Span;
+use super::{ModuleId, ast::Span};
 
 /// Interned string id. Indexes into [`StringPool::entries`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -63,8 +61,8 @@ impl StringPool {
 
     #[must_use]
     pub fn entry(&self, id: Str) -> &StrEntry {
-        // Safety: id was produced by intern_span/intern_owned which return
-        // sequential indices into self.entries.
+        // Safety: `id` was produced by `intern_span`/`intern_owned` which return
+        // sequential indices into `self.entries`.
         unsafe { self.entries.get_unchecked(id.0.get() as usize) }
     }
 

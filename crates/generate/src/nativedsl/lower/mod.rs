@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    LowerError, ModuleId, NoteMessage,
+    LowerError, ModuleId, Note, NoteMessage,
     ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
     string_pool::{Str, StringPool},
 };
@@ -147,7 +147,120 @@ pub fn lower_with_base(
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[idx as usize].lowered());
     let result = evaluate(state, strings, shared, previous, current)?;
-    build_grammar(current, result, base_grammar, previous, imported_rules)
+    let grammar = build_grammar(current, result, base_grammar, previous, imported_rules)?;
+    check_symbol_completeness(shared, current, previous, &grammar)?;
+    Ok(grammar)
+}
+
+/// Every `NamedSymbol` a grammar references must resolve to a definition.
+/// An `expect` forward-decl makes a name *referenceable* without defining it,
+/// so an unfulfilled `expect` must be caught.
+fn check_symbol_completeness(
+    shared: &SharedAst,
+    current: &ModuleContext,
+    previous: &[Module],
+    grammar: &InputGrammar,
+) -> LowerResult<()> {
+    if !current.has_forward_decls && !previous.iter().any(|m| m.ctx().has_forward_decls) {
+        return Ok(());
+    }
+    let mut defined: FxHashSet<&str> = grammar.variables.iter().map(|v| v.name.as_str()).collect();
+    for ext in &grammar.external_tokens {
+        if let Rule::NamedSymbol(name) = ext {
+            defined.insert(name.as_str());
+        }
+    }
+    let mut undefined: Vec<&str> = Vec::new();
+    for v in &grammar.variables {
+        collect_undefined(&v.rule, &defined, &mut undefined);
+    }
+    if undefined.is_empty() {
+        return Ok(());
+    }
+    Err(undefined_symbols_error(
+        shared, current, previous, undefined,
+    ))
+}
+
+/// Push every `NamedSymbol` in `rule` whose name is absent from `defined` into `out`.
+fn collect_undefined<'a>(rule: &'a Rule, defined: &FxHashSet<&str>, out: &mut Vec<&'a str>) {
+    match rule {
+        Rule::NamedSymbol(name) if !defined.contains(name.as_str()) => out.push(name.as_str()),
+        Rule::Seq(rules) | Rule::Choice(rules) => {
+            for r in rules {
+                collect_undefined(r, defined, out);
+            }
+        }
+        Rule::Metadata { rule, .. } | Rule::Repeat(rule) | Rule::Reserved { rule, .. } => {
+            collect_undefined(rule, defined, out);
+        }
+        Rule::NamedSymbol(_)
+        | Rule::Blank
+        | Rule::String(_)
+        | Rule::Pattern(..)
+        | Rule::Symbol(_) => {}
+    }
+}
+
+/// Build the error for one or more dangling `names`.
+fn undefined_symbols_error(
+    shared: &SharedAst,
+    current: &ModuleContext,
+    previous: &[Module],
+    mut names: Vec<&str>,
+) -> LowerError {
+    names.sort_unstable();
+    names.dedup();
+    let kind = LowerErrorKind::UndefinedSymbols(names.iter().map(|n| (*n).to_string()).collect());
+    let mut notes = names
+        .iter()
+        .filter_map(|name| forward_decl_note(shared, current, previous, name));
+    let Some(primary) = notes.next() else {
+        // No `expect` behind any dangling symbol: anchor at the grammar block,
+        // which `validate_grammar` guarantees is present in a grammar module.
+        let block = current
+            .root_items
+            .iter()
+            .find(|&&id| matches!(shared.arena.get(id), Node::Grammar));
+        return match block {
+            Some(&id) => LowerError::new(kind, shared.arena.span(id)),
+            None => LowerError::without_span(kind),
+        };
+    };
+    let mut err = LowerError::new(kind, primary.span).with_source(&primary.src, &primary.path);
+    for note in notes {
+        err.add_note(note);
+    }
+    err
+}
+
+/// A `forward-declared here` note anchored at the `expect <name>` decl, searched
+/// in this grammar then any imported helper so the note renders against the file
+/// that made the promise. `None` if no `expect` declares `name`.
+fn forward_decl_note(
+    shared: &SharedAst,
+    current: &ModuleContext,
+    previous: &[Module],
+    name: &str,
+) -> Option<Note> {
+    if let Some(span) = forward_decl_span(shared, current, name) {
+        return Some(current.note(NoteMessage::ForwardDeclaredHere, span));
+    }
+    previous.iter().find_map(|module| match module {
+        Module::Helper { ctx, .. } => forward_decl_span(shared, ctx, name)
+            .map(|span| ctx.note(NoteMessage::ForwardDeclaredHere, span)),
+        Module::Grammar { .. } => None,
+    })
+}
+
+/// Span of an `expect <name>` forward-decl in `ctx`, if one is present.
+fn forward_decl_span(shared: &SharedAst, ctx: &ModuleContext, name: &str) -> Option<Span> {
+    ctx.root_items
+        .iter()
+        .find_map(|&id| match *shared.arena.get(id) {
+            Node::Forward { name: decl } if ctx.text(decl) == name => Some(decl),
+            _ => None,
+        })
 }
 
 /// One lowered top-level item: a rule (plain or `override`) as a `RuleId`, tagged
@@ -506,6 +619,8 @@ pub enum LowerErrorKind {
         "external token '{0}' cannot be the start rule; the start symbol must be a grammar rule"
     )]
     ExternalCannotBeStart(String),
+    #[error("symbol(s) referenced but never defined: {}: ", .0.join(", "))]
+    UndefinedSymbols(Vec<String>),
     #[error("object has no field '{field}'; available: {}", available.join(", "))]
     FieldNotFound {
         field: String,
