@@ -700,62 +700,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         // Builtin keywords are contextual: they act as keywords only when
         // followed by `(`. Otherwise they are identifiers so grammars can
         // use names like `import`, `field`, `for`, etc. as rules.
-        let next_lparen = kw.is_keyword() && self.next_is(TokenKind::LParen);
+        if kw.is_keyword() && self.next_is(TokenKind::LParen) {
+            return self.parse_builtin_call(start, kw);
+        }
         match kw {
-            TokenKind::KwSeq | TokenKind::KwChoice if next_lparen => {
-                let seq = kw == TokenKind::KwSeq;
-                self.parse_variadic(start, |r| Node::SeqOrChoice { seq, range: r })
-            }
-            TokenKind::KwRepeat | TokenKind::KwRepeat1 | TokenKind::KwOptional if next_lparen => {
-                let repeat_kind = match kw {
-                    TokenKind::KwRepeat => RepeatKind::ZeroOrMore,
-                    TokenKind::KwRepeat1 => RepeatKind::OneOrMore,
-                    _ => RepeatKind::Optional,
-                };
-                self.parse_unary(start, kw, |inner| Node::Repeat {
-                    kind: repeat_kind,
-                    inner,
-                })
-            }
-            TokenKind::KwBlank if next_lparen => {
-                self.advance_pos();
-                self.expect(TokenKind::LParen)?;
-                if !self.at(TokenKind::RParen) {
-                    let mut got = 0;
-                    loop {
-                        if self.at(TokenKind::RParen) {
-                            break;
-                        }
-                        self.parse_expr()?;
-                        got += 1;
-                        if self.eat(TokenKind::Comma).is_none() {
-                            break;
-                        }
-                    }
-                    return Err(self.err_arg_count(TokenKind::KwBlank, 0, got, start));
-                }
-                let end = self.expect(TokenKind::RParen)?;
-                Ok(self.shared.arena.push(Node::Blank, start.merge(end)))
-            }
-            TokenKind::KwField if next_lparen => self.parse_field(start),
-            TokenKind::KwAlias if next_lparen => self.parse_alias(start),
-            TokenKind::KwToken | TokenKind::KwTokenImmediate if next_lparen => {
-                let immediate = kw == TokenKind::KwTokenImmediate;
-                self.parse_unary(start, kw, |inner| Node::Token { immediate, inner })
-            }
-            TokenKind::KwPrec if next_lparen => self.parse_prec(start, PrecKind::Default),
-            TokenKind::KwPrecLeft if next_lparen => self.parse_prec(start, PrecKind::Left),
-            TokenKind::KwPrecRight if next_lparen => self.parse_prec(start, PrecKind::Right),
-            TokenKind::KwPrecDynamic if next_lparen => self.parse_prec(start, PrecKind::Dynamic),
-            TokenKind::KwReserved if next_lparen => self.parse_reserved_expr(start),
-            TokenKind::KwConcat if next_lparen => self.parse_variadic(start, Node::Concat),
-            TokenKind::KwRegexp if next_lparen => self.parse_regexp(start),
-            TokenKind::KwInherit | TokenKind::KwImport if next_lparen => {
-                self.parse_module_path(start, kw, kw == TokenKind::KwImport)
-            }
-            TokenKind::KwAppend if next_lparen => self.parse_append(start),
-            TokenKind::KwGrammarConfig if next_lparen => self.parse_grammar_config(start),
-            TokenKind::KwFor if next_lparen => self.parse_for(start),
             TokenKind::Ident => self.parse_ident_expr(start),
             _ if kw.is_keyword() => self.parse_ident_expr(start),
             TokenKind::StringLit => {
@@ -814,6 +762,70 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             }
             TokenKind::LBrace => self.parse_object(start),
             _ => Err(self.error(ParseErrorKind::ExpectedExpression)),
+        }
+    }
+
+    /// Parse a builtin call (`seq(...)`, `prec(...)`, etc.). Only reached when
+    /// `kw` is a keyword immediately followed by `(`; a keyword + `(` that is not
+    /// a builtin is treated as an identifier (a rule named after the keyword).
+    fn parse_builtin_call(&mut self, start: Span, kw: TokenKind) -> ParseResult<NodeId> {
+        match kw {
+            TokenKind::KwSeq | TokenKind::KwChoice => {
+                let seq = kw == TokenKind::KwSeq;
+                self.parse_variadic(start, |r| Node::SeqOrChoice { seq, range: r })
+            }
+            TokenKind::KwRepeat | TokenKind::KwRepeat1 | TokenKind::KwOptional => {
+                let repeat_kind = match kw {
+                    TokenKind::KwRepeat => RepeatKind::ZeroOrMore,
+                    TokenKind::KwRepeat1 => RepeatKind::OneOrMore,
+                    _ => RepeatKind::Optional,
+                };
+                self.parse_unary(start, kw, |inner| Node::Repeat {
+                    kind: repeat_kind,
+                    inner,
+                })
+            }
+            TokenKind::KwBlank => {
+                self.advance_pos();
+                self.expect(TokenKind::LParen)?;
+                if !self.at(TokenKind::RParen) {
+                    let mut got = 0;
+                    loop {
+                        if self.at(TokenKind::RParen) {
+                            break;
+                        }
+                        self.parse_expr()?;
+                        got += 1;
+                        if self.eat(TokenKind::Comma).is_none() {
+                            break;
+                        }
+                    }
+                    return Err(self.err_arg_count(TokenKind::KwBlank, 0, got, start));
+                }
+                let end = self.expect(TokenKind::RParen)?;
+                Ok(self.shared.arena.push(Node::Blank, start.merge(end)))
+            }
+            TokenKind::KwField => self.parse_field(start),
+            TokenKind::KwAlias => self.parse_alias(start),
+            TokenKind::KwToken | TokenKind::KwTokenImmediate => {
+                let immediate = kw == TokenKind::KwTokenImmediate;
+                self.parse_unary(start, kw, |inner| Node::Token { immediate, inner })
+            }
+            TokenKind::KwPrec => self.parse_prec(start, PrecKind::Default),
+            TokenKind::KwPrecLeft => self.parse_prec(start, PrecKind::Left),
+            TokenKind::KwPrecRight => self.parse_prec(start, PrecKind::Right),
+            TokenKind::KwPrecDynamic => self.parse_prec(start, PrecKind::Dynamic),
+            TokenKind::KwReserved => self.parse_reserved_expr(start),
+            TokenKind::KwConcat => self.parse_variadic(start, Node::Concat),
+            TokenKind::KwRegexp => self.parse_regexp(start),
+            TokenKind::KwInherit | TokenKind::KwImport => {
+                self.parse_module_path(start, kw, kw == TokenKind::KwImport)
+            }
+            TokenKind::KwAppend => self.parse_append(start),
+            TokenKind::KwGrammarConfig => self.parse_grammar_config(start),
+            TokenKind::KwFor => self.parse_for(start),
+            // A keyword followed by `(` that isn't a builtin is just an identifier.
+            _ => self.parse_ident_expr(start),
         }
     }
 
@@ -934,8 +946,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let (value, content, end) = match parsed {
             Ok(parsed) => parsed,
             Err(mut err) => {
-                // grammar.js lets prec.left/right omit the precedence (it
-                // defaults to 0) but the DSL requires it.
+                // grammar.js lets prec.left/right omit the precedence (it defaults to 0) we requires it.
                 if let PrecKind::Left | PrecKind::Right = kind
                     && matches!(err.kind, ParseErrorKind::WrongArgumentCount { got: 1, .. })
                 {
