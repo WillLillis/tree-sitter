@@ -7,7 +7,8 @@ use anstyle::{AnsiColor, Color, Style};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{DslError, NoteMessage, ast::Span};
+use super::{DslError, NoteMessage};
+use crate::nativedsl::ast::Span;
 
 struct Paint<T>(Style, T);
 

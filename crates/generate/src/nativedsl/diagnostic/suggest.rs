@@ -2,7 +2,7 @@
 
 /// Pick the candidate closest to `target` if any is within a small edit distance.
 /// Returns `None` if no candidate is close enough, ignoring exact matches.
-pub(super) fn suggest_name<'a>(
+pub fn suggest_name<'a>(
     target: &str,
     candidates: impl Iterator<Item = &'a str>,
 ) -> Option<&'a str> {
