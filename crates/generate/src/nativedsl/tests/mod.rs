@@ -27,6 +27,36 @@ macro_rules! compile_tests {
     };
 }
 
+/// Generate tests that parse a grammar and assert on a named rule's body.
+macro_rules! find_rule_tests {
+    ($($name:ident { $input:expr, $rule:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let g = dsl($input);
+            assert_eq!(*find_rule(&g, $rule), $expected);
+        })*
+    };
+}
+
+/// Generate tests that parse a grammar and assert on its full rule-name list.
+macro_rules! rule_names_tests {
+    ($($name:ident { $input:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let g = dsl($input);
+            assert_eq!(rule_names(&g), $expected);
+        })*
+    };
+}
+
+/// Generate tests that parse a grammar and assert on its full external-token list.
+macro_rules! externals_tests {
+    ($($name:ident { $input:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let g = dsl($input);
+            assert_eq!(g.external_tokens, $expected);
+        })*
+    };
+}
+
 macro_rules! assert_err {
     ($err:expr, $variant:ident) => {
         match $err {
