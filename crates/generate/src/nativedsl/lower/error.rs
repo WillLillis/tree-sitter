@@ -47,7 +47,7 @@ pub enum LowerErrorKind {
         "external token '{0}' cannot be the start rule; the start symbol must be a grammar rule"
     )]
     ExternalCannotBeStart(String),
-    #[error("symbol(s) referenced but never defined: {}: ", .0.join(", "))]
+    #[error("symbol(s) referenced but never defined: {}", .0.join(", "))]
     UndefinedSymbols(Vec<String>),
     #[error("object has no field '{field}'; available: {}", available.join(", "))]
     FieldNotFound {
