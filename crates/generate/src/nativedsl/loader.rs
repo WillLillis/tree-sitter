@@ -108,11 +108,10 @@ impl Loader<'_> {
         let imported_rules =
             super::collect_imported_rules(&self.shared.arena, &ctx.module_refs, self.modules);
 
-        // Resolve identifiers + typecheck. Child modules already populated `env`
-        // during their own load_module calls.
+        // Resolve identifiers
         let base = ctx
             .inherit_module(&self.shared.arena)
-            .and_then(|(idx, span)| Some((self.modules[idx as usize].lowered()?, span)));
+            .and_then(|(idx, span)| self.modules[idx as usize].lowered().map(|g| (g, span)));
         resolve::resolve(
             self.shared,
             &ctx,
@@ -123,6 +122,7 @@ impl Loader<'_> {
         )
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
+        // Child modules already populated `env` during their own `load_module` calls.
         typecheck::check(self.shared, &ctx, self.env)?;
         let module = match kind {
             ModuleKind::Grammar => {
@@ -169,46 +169,33 @@ impl Loader<'_> {
         Ok(global_id)
     }
 
-    /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped
-    /// declaration, attach a note pointing at the gated decl with the cfg
-    /// flag named in the message. Otherwise pass through unchanged.
+    /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped declaration,
+    /// attach a note pointing at the gated decl with the cfg flag name.
     fn enrich_resolve_error(&self, current: &ModuleContext, mut e: ResolveError) -> ResolveError {
         let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
             return e;
         };
-        // Prefer the failing module's own drops (resolves the collision case
-        // where two modules both gate a decl with the same name); fall back
-        // to scanning other modules so inherited / imported drops are still
-        // attributed correctly.
-        let cfg_node = current.cfg_dropped.get(name).copied().or_else(|| {
-            self.modules
-                .iter()
-                .map(Module::ctx)
-                .find_map(|m| m.cfg_dropped.get(name).copied())
-        });
-        let Some(cfg_node) = cfg_node else {
+        // The module that recorded the drop also parsed it, so its ctx is where
+        // the cfg flag span resolves. Prefer the failing module's own drops (the
+        // collision case where two modules gate the same name), then any loaded
+        // module so inherited / imported drops are still attributed correctly.
+        let Some((cfg_id, owner)) = current
+            .cfg_dropped
+            .get(name)
+            .map(|&id| (id, current))
+            .or_else(|| {
+                self.modules
+                    .iter()
+                    .map(Module::ctx)
+                    .find_map(|m| m.cfg_dropped.get(name).map(|&id| (id, m)))
+            })
+        else {
             return e;
         };
-        expect_pat!(
-            Node::Cfg {
-                name: flag_span,
-                ..
-            },
-            *self.shared.arena.get(cfg_node)
-        );
-        // Find which module's source the cfg flag span resolves against.
-        // `current` covers the module-being-processed case (not yet pushed
-        // to `self.modules`).
-        let module_ctx = self
-            .modules
-            .iter()
-            .map(Module::ctx)
-            .chain(std::iter::once(current))
-            .find(|m| m.owns_node(cfg_node))
-            .unwrap_or(current);
-        let flag_name = module_ctx.text(flag_span).to_owned();
-        let decl_span = self.shared.arena.span(cfg_node);
-        e.add_note(module_ctx.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
+        expect_pat!(Node::Cfg { name: flag, .. }, *self.shared.arena.get(cfg_id));
+        let flag_name = owner.text(flag).to_owned();
+        let decl_span = self.shared.arena.span(cfg_id);
+        e.add_note(owner.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
         e
     }
 
@@ -259,7 +246,7 @@ impl Loader<'_> {
         Ok(gid)
     }
 
-    /// Resolve unresolved `ModuleRef` nodes, loading each child file.
+    /// Resolve `ModuleRef` nodes, loading each child file.
     fn load_import_children(
         &mut self,
         ctx: &ModuleContext,
@@ -272,8 +259,7 @@ impl Loader<'_> {
                 module: None,
             } = self.shared.arena.get(node_id)
             else {
-                // Already resolved (e.g. the inherit ref handled by the caller).
-                continue;
+                continue; // Already resolved
             };
             let kind = if is_import {
                 ModuleKind::Helper
@@ -298,7 +284,7 @@ impl Loader<'_> {
         Ok(())
     }
 
-    /// Validate that grammar block exists, inherits field consistency, <= 1 `inherit`
+    /// Validate that grammar block exists, `inherits` field consistency, <= 1 `inherit`
     fn validate_grammar(&self, ctx: &ModuleContext) -> DslResult<()> {
         let Some(config) = ctx.grammar_config.as_ref() else {
             return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
@@ -332,11 +318,10 @@ impl Loader<'_> {
             }
             Err(err)?;
         }
-        let config_inherits = config.inherits;
 
-        // inherit() exists but no `inherits` in grammar config
+        // `inherit()` exists but no `inherits` in grammar config
         if let Some(&inherit_ref) = inherits.first()
-            && config_inherits.is_none()
+            && config.inherits.is_none()
         {
             Err(LowerError::new(
                 LowerErrorKind::InheritWithoutConfig,
@@ -345,7 +330,7 @@ impl Loader<'_> {
         }
 
         // `inherits` in config but doesn't resolve to an inherit() call
-        if let Some(id) = config_inherits
+        if let Some(id) = config.inherits
             && inherits.is_empty()
         {
             Err(LowerError::new(
