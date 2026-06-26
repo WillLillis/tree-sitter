@@ -134,6 +134,193 @@ rule_tests! {
         let MY_VAR: str_t = "x""#,
         Rule::String("x".into())
     }
+    for_in_choice_nested {
+        // Nested for-loop spread inside choice() (seq/choice path), confirming
+        // the same flatMap behavior as in list literals.
+        r#"
+        let prefixes: list_t<str_t> = ["a", "b"]
+        let suffixes: list_t<str_t> = ["1", "2"]
+        grammar { language: "test" }
+        rule program {
+            choice(for (p: str_t) in prefixes {
+                for (s: str_t) in suffixes { concat(p, s) }
+            })
+        }
+    "#,
+        Rule::choice(vec![
+            Rule::String("a1".into()),
+            Rule::String("a2".into()),
+            Rule::String("b1".into()),
+            Rule::String("b2".into()),
+        ])
+    }
+    nested_function_calls {
+        r#"grammar { language: "test" }
+        macro comma_sep1(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
+        macro comma_sep(item: rule_t) rule_t { optional(comma_sep1(item)) }
+        rule program { comma_sep(identifier) }
+        rule identifier { regexp("[a-z]+") }"#,
+        comma_sep_rule("identifier")
+    }
+    for_tuple_destructure {
+        r#"grammar { language: "test" }
+        rule binary {
+            choice(for (op: str_t, p: int_t) in [("+", 1), ("*", 2)] {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#,
+        Rule::choice(vec![
+            Rule::prec_left(
+                Precedence::Integer(1),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("+".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+            Rule::prec_left(
+                Precedence::Integer(2),
+                Rule::seq(vec![
+                    Rule::NamedSymbol("expr".into()),
+                    Rule::String("*".into()),
+                    Rule::NamedSymbol("expr".into()),
+                ])
+            ),
+        ])
+    }
+    tuple_elements_from_macro_calls {
+        // A tuple element can be any scalar-typed expression, not just a literal -
+        // including a macro call that returns a scalar (`tag` returns its rule_t
+        // argument, so `tag("+")` lowers to the string rule "+").
+        r#"grammar { language: "test" }
+        macro tag(r: rule_t) rule_t { r }
+        rule binary {
+            choice(for (op: rule_t, p: int_t) in [(tag("+"), 1), (tag("*"), 2)] {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#,
+        plus_times_choice()
+    }
+    for_named_list_of_tuples {
+        // Tier-1 tuples: a list of tuples bound to a let (type inferred as
+        // list_t<tuple_t<str_t, int_t>>), then destructured by a multi-binding
+        // for-loop. Before tier-1 the table had to be written inline in the loop.
+        r#"grammar { language: "test" }
+        let ops = [("+", 1), ("*", 2)]
+        rule binary {
+            choice(for (op: str_t, p: int_t) in ops {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#,
+        plus_times_choice()
+    }
+    tuple_annotations_check_against_values {
+        // Explicit `tuple_t<...>` and `list_t<tuple_t<...>>` annotations parse and
+        // check against their values; the list mixes a tuple-typed variable with a
+        // literal tuple, then destructures in a for-loop.
+        r#"grammar { language: "test" }
+        let plus: tuple_t<str_t, int_t> = ("+", 1)
+        let ops: list_t<tuple_t<str_t, int_t>> = [plus, ("*", 2)]
+        rule binary {
+            choice(for (op: str_t, p: int_t) in ops {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#,
+        plus_times_choice()
+    }
+    tuple_value_bound_to_let {
+        // Each tuple is a first-class value bound to its own let, then collected
+        // into a list literal and destructured - exercises tuples-as-values and
+        // tuple-typed variables flowing into a list.
+        r#"grammar { language: "test" }
+        let plus = ("+", 1)
+        let times = ("*", 2)
+        rule binary {
+            choice(for (op: str_t, p: int_t) in [plus, times] {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#,
+        plus_times_choice()
+    }
+    macro_with_tuple_table_param {
+        // A macro whose parameter is a list-of-tuples, iterated and destructured in
+        // the body; the call passes a literal table.
+        r#"grammar { language: "test" }
+        macro binops(ops: list_t<tuple_t<str_t, int_t>>) rule_t {
+            choice(for (op: str_t, p: int_t) in ops {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule binary { binops([("+", 1), ("*", 2)]) }
+        rule expr { "x" }"#,
+        plus_times_choice()
+    }
+    for_over_appended_tuple_lists {
+        // append() of two tuple lists is itself a list-of-tuples; the for-loop
+        // types and destructures the appended result with no special-casing.
+        r#"grammar { language: "test" }
+        let a = [("+", 1)]
+        let b = [("*", 2)]
+        rule binary {
+            choice(for (op: str_t, p: int_t) in append(a, b) {
+                prec_left(p, seq(expr, op, expr))
+            })
+        }
+        rule expr { "x" }"#,
+        plus_times_choice()
+    }
+    for_multi_binding_empty_literal {
+        // A multi-binding for over an empty literal contributes zero iterations;
+        // the binding annotations stand alone with no iterable type to infer.
+        r#"grammar { language: "test" }
+        rule program {
+            choice("fallback", for (op: str_t, p: int_t) in [] { prec(p, op) })
+        }"#,
+        Rule::choice(vec![Rule::String("fallback".into())])
+    }
+    for_with_rule_items {
+        r#"grammar { language: "test" }
+        rule program {
+            choice(for (r: rule_t) in [seq("a", "b"), seq("c", "d")] { r })
+        }"#,
+        Rule::choice(vec![
+            Rule::seq(vec![Rule::String("a".into()), Rule::String("b".into())]),
+            Rule::seq(vec![Rule::String("c".into()), Rule::String("d".into())]),
+        ])
+    }
+    for_empty_list {
+        r#"grammar { language: "test" }
+        let ops: list_t<str_t> = []
+        rule program {
+            choice("fallback", for (s: str_t) in ops { s })
+        }"#,
+        Rule::choice(vec![Rule::String("fallback".into())])
+    }
+    macro_reads_let_defined_after_call_site {
+        // A macro body is resolved at its (late) definition site, but lower expands
+        // it at the (earlier) call site. The expanded body still reads a let defined
+        // after that call site, so lower must evaluate the let on demand instead of
+        // assuming the source-order loop reached it first. Cluster L (was a panic).
+        r#"grammar { language: "test" }
+        rule prog { m() }
+        let b = "x"
+        macro m() str_t { b }"#,
+        Rule::String("x".into())
+    }
+    macro_for_loop_iterates_let_defined_after_call_site {
+        // Same forward reference, but the macro body iterates the later let rather
+        // than reading it as a scalar - exercises the for-loop iterable path.
+        r#"grammar { language: "test" }
+        rule prog { m() }
+        let items: list_t<str_t> = ["a", "b"]
+        macro m() rule_t { choice(for (x: str_t) in items { x }) }"#,
+        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())])
+    }
 }
 
 #[test]
@@ -262,31 +449,6 @@ fn for_in_list_nested() {
 }
 
 #[test]
-fn for_in_choice_nested() {
-    // Nested for-loop spread inside choice() (seq/choice path), confirming
-    // the same flatMap behavior as in list literals.
-    let g = dsl(r#"
-        let prefixes: list_t<str_t> = ["a", "b"]
-        let suffixes: list_t<str_t> = ["1", "2"]
-        grammar { language: "test" }
-        rule program {
-            choice(for (p: str_t) in prefixes {
-                for (s: str_t) in suffixes { concat(p, s) }
-            })
-        }
-    "#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::String("a1".into()),
-            Rule::String("a2".into()),
-            Rule::String("b1".into()),
-            Rule::String("b2".into()),
-        ]),
-    );
-}
-
-#[test]
 fn object_with_list_rule_values() {
     let g = dsl(r#"grammar {
         language: "test",
@@ -324,48 +486,6 @@ fn function_multiple_calls() {
     );
 }
 
-#[test]
-fn nested_function_calls() {
-    let g = dsl(r#"grammar { language: "test" }
-        macro comma_sep1(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
-        macro comma_sep(item: rule_t) rule_t { optional(comma_sep1(item)) }
-        rule program { comma_sep(identifier) }
-        rule identifier { regexp("[a-z]+") }"#);
-    assert_eq!(g.variables[0].rule, comma_sep_rule("identifier"));
-}
-
-#[test]
-fn for_tuple_destructure() {
-    let g = dsl(r#"grammar { language: "test" }
-        rule binary {
-            choice(for (op: str_t, p: int_t) in [("+", 1), ("*", 2)] {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule expr { "x" }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::prec_left(
-                Precedence::Integer(1),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-            Rule::prec_left(
-                Precedence::Integer(2),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("*".into()),
-                    Rule::NamedSymbol("expr".into()),
-                ])
-            ),
-        ])
-    );
-}
-
 /// The lowered `choice` of two `prec_left` binary rules for the `("+", 1)` /
 /// `("*", 2)` precedence table - the expected output shared by the tier-1
 /// tuple tests, which differ only in how that table reaches the for-loop.
@@ -384,151 +504,12 @@ fn plus_times_choice() -> Rule {
 }
 
 #[test]
-fn tuple_elements_from_macro_calls() {
-    // A tuple element can be any scalar-typed expression, not just a literal -
-    // including a macro call that returns a scalar (`tag` returns its rule_t
-    // argument, so `tag("+")` lowers to the string rule "+").
-    let g = dsl(r#"grammar { language: "test" }
-        macro tag(r: rule_t) rule_t { r }
-        rule binary {
-            choice(for (op: rule_t, p: int_t) in [(tag("+"), 1), (tag("*"), 2)] {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule expr { "x" }"#);
-    assert_eq!(g.variables[0].rule, plus_times_choice());
-}
-
-#[test]
-fn for_named_list_of_tuples() {
-    // Tier-1 tuples: a list of tuples bound to a let (type inferred as
-    // list_t<tuple_t<str_t, int_t>>), then destructured by a multi-binding
-    // for-loop. Before tier-1 the table had to be written inline in the loop.
-    let g = dsl(r#"grammar { language: "test" }
-        let ops = [("+", 1), ("*", 2)]
-        rule binary {
-            choice(for (op: str_t, p: int_t) in ops {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule expr { "x" }"#);
-    assert_eq!(g.variables[0].rule, plus_times_choice());
-}
-
-#[test]
-fn tuple_annotations_check_against_values() {
-    // Explicit `tuple_t<...>` and `list_t<tuple_t<...>>` annotations parse and
-    // check against their values; the list mixes a tuple-typed variable with a
-    // literal tuple, then destructures in a for-loop.
-    let g = dsl(r#"grammar { language: "test" }
-        let plus: tuple_t<str_t, int_t> = ("+", 1)
-        let ops: list_t<tuple_t<str_t, int_t>> = [plus, ("*", 2)]
-        rule binary {
-            choice(for (op: str_t, p: int_t) in ops {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule expr { "x" }"#);
-    assert_eq!(g.variables[0].rule, plus_times_choice());
-}
-
-#[test]
 fn tuple_in_object_annotation_checks() {
     // obj_t<tuple_t<...>> parses and checks: objects hold tuples, preserving the
     // InnerTy == DataTy - Object invariant.
     dsl(r#"grammar { language: "test" }
         let m: obj_t<tuple_t<str_t, int_t>> = { plus: ("+", 1) }
         rule program { "x" }"#);
-}
-
-#[test]
-fn tuple_value_bound_to_let() {
-    // Each tuple is a first-class value bound to its own let, then collected
-    // into a list literal and destructured - exercises tuples-as-values and
-    // tuple-typed variables flowing into a list.
-    let g = dsl(r#"grammar { language: "test" }
-        let plus = ("+", 1)
-        let times = ("*", 2)
-        rule binary {
-            choice(for (op: str_t, p: int_t) in [plus, times] {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule expr { "x" }"#);
-    assert_eq!(g.variables[0].rule, plus_times_choice());
-}
-
-#[test]
-fn macro_with_tuple_table_param() {
-    // A macro whose parameter is a list-of-tuples, iterated and destructured in
-    // the body; the call passes a literal table.
-    let g = dsl(r#"grammar { language: "test" }
-        macro binops(ops: list_t<tuple_t<str_t, int_t>>) rule_t {
-            choice(for (op: str_t, p: int_t) in ops {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule binary { binops([("+", 1), ("*", 2)]) }
-        rule expr { "x" }"#);
-    assert_eq!(g.variables[0].rule, plus_times_choice());
-}
-
-#[test]
-fn for_over_appended_tuple_lists() {
-    // append() of two tuple lists is itself a list-of-tuples; the for-loop
-    // types and destructures the appended result with no special-casing.
-    let g = dsl(r#"grammar { language: "test" }
-        let a = [("+", 1)]
-        let b = [("*", 2)]
-        rule binary {
-            choice(for (op: str_t, p: int_t) in append(a, b) {
-                prec_left(p, seq(expr, op, expr))
-            })
-        }
-        rule expr { "x" }"#);
-    assert_eq!(g.variables[0].rule, plus_times_choice());
-}
-
-#[test]
-fn for_multi_binding_empty_literal() {
-    // A multi-binding for over an empty literal contributes zero iterations;
-    // the binding annotations stand alone with no iterable type to infer.
-    let g = dsl(r#"grammar { language: "test" }
-        rule program {
-            choice("fallback", for (op: str_t, p: int_t) in [] { prec(p, op) })
-        }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![Rule::String("fallback".into())])
-    );
-}
-
-#[test]
-fn for_with_rule_items() {
-    let g = dsl(r#"grammar { language: "test" }
-        rule program {
-            choice(for (r: rule_t) in [seq("a", "b"), seq("c", "d")] { r })
-        }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::seq(vec![Rule::String("a".into()), Rule::String("b".into())]),
-            Rule::seq(vec![Rule::String("c".into()), Rule::String("d".into())]),
-        ])
-    );
-}
-
-#[test]
-fn for_empty_list() {
-    let g = dsl(r#"grammar { language: "test" }
-        let ops: list_t<str_t> = []
-        rule program {
-            choice("fallback", for (s: str_t) in ops { s })
-        }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![Rule::String("fallback".into())])
-    );
 }
 
 #[test]
@@ -553,33 +534,6 @@ fn recursive_fn_depth_limit() {
     );
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)));
-}
-
-#[test]
-fn macro_reads_let_defined_after_call_site() {
-    // A macro body is resolved at its (late) definition site, but lower expands
-    // it at the (earlier) call site. The expanded body still reads a let defined
-    // after that call site, so lower must evaluate the let on demand instead of
-    // assuming the source-order loop reached it first. Cluster L (was a panic).
-    let g = dsl(r#"grammar { language: "test" }
-        rule prog { m() }
-        let b = "x"
-        macro m() str_t { b }"#);
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
-}
-
-#[test]
-fn macro_for_loop_iterates_let_defined_after_call_site() {
-    // Same forward reference, but the macro body iterates the later let rather
-    // than reading it as a scalar - exercises the for-loop iterable path.
-    let g = dsl(r#"grammar { language: "test" }
-        rule prog { m() }
-        let items: list_t<str_t> = ["a", "b"]
-        macro m() rule_t { choice(for (x: str_t) in items { x }) }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())]),
-    );
 }
 
 #[test]
