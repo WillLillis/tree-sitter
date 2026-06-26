@@ -26,8 +26,7 @@ macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
 
 #[test]
 fn import_member_not_found_suggests_close_name() {
-    // A misspelled member access gets a "did you mean" note, like in-module
-    // unknown-identifier errors.
+    // A misspelled member access gets a did-you-mean note, like in-module errors.
     let err = dsl_err(
         r#"
         let h = import("import_helpers/helpers.tsg")
@@ -246,8 +245,7 @@ fn import_function_receives_complex_expr() {
 
 #[test]
 fn import_diamond() {
-    // A imports B and C. Both B and C import helpers.tsg.
-    // Should work (each gets its own copy of helpers).
+    // A imports B and C, which both import helpers.tsg; each gets its own copy.
     let g = parse_with_modules(
         &[
             ("helpers.tsg", "let VAL = 10"),
@@ -279,10 +277,8 @@ fn import_diamond() {
 
 #[test]
 fn import_diamond_dedups_shared_leaf() {
-    // 128 helpers each importing the same leaf. Without loader-wide dedup,
-    // the leaf would be loaded once per helper (128 leaf instances + 128
-    // helpers + 1 root = 257, tripping the u8 module limit). With dedup,
-    // the leaf loads once total (128 + 1 + 1 = 130, well under 256).
+    // Loader-wide dedup loads the shared leaf once (130 modules), not once per
+    // helper (257, which would trip the u8 module limit).
     let dir = tempfile::tempdir().unwrap();
     let leaf = dir.path().join("leaf.tsg");
     std::fs::write(&leaf, "let X: int_t = 10").unwrap();
@@ -330,9 +326,8 @@ fn helper_rule_collision_errors() {
 
 #[test]
 fn override_helper_rule() {
-    // Helper defines `digit`. Root overrides it. The override should appear
-    // in the final grammar; the original is accessible via h::digit (which
-    // inlines).
+    // An `override` of a helper rule wins in the final grammar; the original is
+    // still reachable via h::digit (which inlines).
     let g = parse_with_modules(
         &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
         r#"
@@ -343,8 +338,7 @@ fn override_helper_rule() {
     "#,
     )
     .unwrap();
-    // `digit` in final grammar = the override body, with h::digit inlined to
-    // the original pattern.
+    // Final `digit` is the override body, with h::digit inlined to the original.
     assert_eq!(
         *find_rule(&g, "digit"),
         Rule::choice(vec![
@@ -356,9 +350,8 @@ fn override_helper_rule() {
 
 #[test]
 fn helper_rule_transitive_promotion() {
-    // root -> A -> B. B has rule `inner`. Root references `inner` by bare
-    // name (no qualified access). Transitive promotion should make this
-    // work.
+    // root -> A -> B: root references B's `inner` by bare name, which transitive
+    // promotion must make resolvable.
     let g = parse_with_modules(
         &[
             ("b.tsg", r#"rule inner { "leaf" }"#),
@@ -399,9 +392,8 @@ fn helper_rule_qualified_inlines() {
 
 #[test]
 fn helper_rule_materialized_into_grammar() {
-    // Helper defines `digit`. Root references it by bare name. The rule
-    // should materialize as a top-level Variable in the final grammar,
-    // accessible as a NamedSymbol.
+    // A helper rule referenced by bare name materializes as a top-level Variable,
+    // reachable as a NamedSymbol.
     let g = parse_with_modules(
         &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
         r#"
@@ -424,10 +416,8 @@ fn helper_rule_materialized_into_grammar() {
 
 #[test]
 fn error_helper_rule_collides_with_root_rule() {
-    // Helper rules materialize bare-named into the root grammar. A name
-    // collision between a helper rule and a root rule is a duplicate
-    // declaration, not silent shadowing - tree-sitter's grammar JSON can't
-    // hold two variables with the same name.
+    // A helper rule and a root rule sharing a name is a duplicate declaration,
+    // not silent shadowing (grammar JSON can't hold two same-named variables).
     let err = parse_with_modules(
         &[("h.tsg", r#"rule expression { "from_helper" }"#)],
         r#"
@@ -446,10 +436,8 @@ fn error_helper_rule_collides_with_root_rule() {
 
 #[test]
 fn helper_can_define_rules() {
-    // Mutually-recursive helper rules with intra-helper references plus a
-    // reference to an external the helper forward-declares. Rules materialize
-    // into the root grammar's variables; the grammar registers the externals by
-    // bare name.
+    // Mutually-recursive helper rules (plus a forward-declared external)
+    // materialize into the root's variables, connecting to externals by bare name.
     let g = parse_with_modules(
         &[(
             "exp.tsg",
@@ -472,9 +460,8 @@ fn helper_can_define_rules() {
 
 #[test]
 fn helper_rule_uses_grammar_registered_external() {
-    // Flat externals: a helper forward-declares an external and uses it in a
-    // rule; the grammar registers it by bare name. They connect by name with no
-    // qualified reference, and the helper rule materializes into the grammar.
+    // A helper forward-declares an external and uses it; the grammar registers it
+    // by bare name, and they connect by name with no qualified reference.
     let g = parse_with_modules(
         &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
         r#"
@@ -496,10 +483,9 @@ fn helper_rule_uses_grammar_registered_external() {
 
 #[test]
 fn helper_hole_unregistered_external_is_rejected() {
-    // Mirror of `helper_rule_uses_grammar_registered_external` with the grammar's
-    // `externals: [_tok]` dropped. The helper rule materializes into the grammar
-    // carrying a dangling `_tok`, which the symbol-completeness check rejects -
-    // anchored at the helper's `expect`, not left to tree-sitter's generic error.
+    // With the grammar's `externals: [_tok]` dropped, the materialized helper rule
+    // carries a dangling `_tok` that the completeness check rejects, anchored at
+    // the helper's `expect`.
     let err = parse_with_modules(
         &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
         r#"
@@ -564,9 +550,8 @@ fn import_keyword_as_rule_name() {
 
 #[test]
 fn import_helper_rule_set_macro_expands_locally() {
-    // A helper that defines a `rules` macro and calls it via `@pair(...)` at
-    // its own item position should expand into ExpandedRule items that flow
-    // into the importing grammar's variable table.
+    // A helper's `@pair(...)` rule-set call expands into ExpandedRule items that
+    // flow into the importing grammar's variables.
     let g = dsl(r#"
         let h = import("import_helpers/rule_set_self.tsg")
         grammar { language: "test", start: program }
@@ -605,10 +590,9 @@ fn import_call_depth_shared_across_modules() {
 
 #[test]
 fn import_rule_preserves_metadata_and_reserved() {
-    // Referencing a helper rule (`h::decorated`) inlines its full lowered tree
-    // via `import_rule`. Lowering the same expression directly must produce an
-    // identical Rule, proving import_rule reconstructs prec/field/alias/token
-    // (the Metadata arm) and reserved (the Reserved arm) faithfully.
+    // h::decorated inlines via import_rule; it must reconstruct the same Rule as
+    // lowering directly, covering the Metadata (prec/field/alias/token) and
+    // Reserved arms.
     let g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
@@ -643,10 +627,9 @@ fn helper_rules_materialize_in_import_source_order() {
 
 #[test]
 fn override_reaching_helper_top_level_via_macro_is_rejected() {
-    // A helper can't inherit, so an `override` that reaches its top level via a
-    // called rules-macro has nothing to override. Reject it like a direct
-    // top-level `override rule`, rather than silently demoting it to a plain rule.
-    // The macro *definition* stays legal - only the helper calling it is rejected.
+    // A helper can't inherit, so an `override` reaching its top level via a
+    // rules-macro call has nothing to override and is rejected (the macro
+    // definition stays legal; only the call is rejected).
     let err = parse_with_modules(
         &[(
             "helper.tsg",

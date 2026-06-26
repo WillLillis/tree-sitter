@@ -1,19 +1,16 @@
 use super::super::*;
 
 error_tests! { Lower {
-    // Field access on a computed object (here a macro result) can't be validated
-    // at typecheck - obj_t<X> carries the value type, not the key set - so a
-    // missing field is reported at lower with the available keys.
+    // obj_t<X> carries the value type, not the key set, so a missing field on a
+    // computed object can't be caught at typecheck - lower reports it with the keys.
     error_field_not_found_on_computed_object {
         r#"grammar { language: "test" }
         macro mk() obj_t<rule_t> { { a: program } }
         rule program { seq(mk().b) }"#,
         LowerErrorKind::FieldNotFound { field: "b".into(), available: vec!["a".into()] }
     }
-    // A str_t value laundered past the str_t->rule_t widen (via a let, append,
-    // or a mixed list) into a name-only config field (inline/supertypes/conflicts)
-    // can't be rejected at typecheck - type_of_list widens elements to the widest
-    // type - so lower reports it gracefully instead of panicking in rule_id.
+    // A str_t widened to rule_t (via let/append/mixed list) into a name-only config
+    // field can't be caught at typecheck, so lower reports it instead of panicking.
     error_inline_str_list_via_let {
         r#"let names = ["a"]
         grammar { language: "test", inline: names }
@@ -175,10 +172,9 @@ error_tests! { Resolve {
 
 #[test]
 fn error_recursive_macro_combinator_product() {
-    // A self-recursive expression macro whose body nests combinators deeply.
-    // Each macro level re-enters the deep nest, so the product of macro recursion
-    // x combinator depth used to overflow the native stack before MAX_CALL_DEPTH
-    // fired. The eval-depth guard now reports it cleanly, with the macro trace.
+    // A self-recursive macro nesting combinators deeply: the macro-recursion x
+    // combinator-depth product once overflowed the stack before MAX_CALL_DEPTH;
+    // the eval-depth guard now reports it cleanly.
     let body = format!("{}seq(x, m(x)){}", "seq(".repeat(90), ")".repeat(90));
     let src = format!(
         "grammar {{ language: \"test\" }}\nmacro m(x: rule_t) rule_t {{ {body} }}\nrule prog {{ m(\"a\") }}"
@@ -205,9 +201,8 @@ fn error_inherit_bad_path() {
 
 #[test]
 fn error_module_read_failure_renders_without_panic() {
-    // Path canonicalizes but read_to_string fails (a directory).
-    // The inner ModuleError carries an empty source_text plus the import-path
-    // span from the parent; NativeDslError rendering must not slice out of range.
+    // When read_to_string fails (a directory) the inner ModuleError has empty
+    // source_text plus the parent's import-path span; rendering must not slice OOB.
     let dir = tempfile::tempdir().unwrap();
     let subdir = dir.path().join("not_a_file");
     std::fs::create_dir(&subdir).unwrap();
