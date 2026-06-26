@@ -23,11 +23,10 @@ impl<T: std::fmt::Display> std::fmt::Display for Paint<T> {
 }
 
 /// Renders a span's leading-text as caret-line indent: tabs stay tabs (same tab
-/// stop as the source line), every other char becomes one space. Writes through
-/// the formatter so no indent string is allocated.
-struct CaretIndent<'a>(&'a str);
+/// stop as the source line), every other char becomes one space.
+struct CaretPad<'a>(&'a str);
 
-impl std::fmt::Display for CaretIndent<'_> {
+impl std::fmt::Display for CaretPad<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for c in self.0.chars() {
             write!(f, "{}", if c == '\t' { '\t' } else { ' ' })?;
@@ -38,7 +37,6 @@ impl std::fmt::Display for CaretIndent<'_> {
 
 fn color_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    // Per https://no-color.org: any non-empty value of NO_COLOR disables color.
     *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
 }
 
@@ -160,13 +158,12 @@ fn render_error(
     writeln!(f, "{ERROR}: {error}")?;
 
     // A lower error born evaluating an imported module's macro body carries that
-    // module's source, so the caret lands in the right file; everything else
+    // module's source, so the caret lands in the right file. Everything else
     // falls back to the caller-supplied source.
     let (text, path) = error.primary_source().unwrap_or((text, path));
 
     // A file-level error (e.g. a missing grammar block) has no location within
-    // the source, but still name the file so the user knows where; located
-    // errors fall through to the snippet below.
+    // the source, located errors fall through to the snippet below.
     let Some(span) = error.span() else {
         writeln!(f, " {ARROW} {}", path.display())?;
         return Ok(());
@@ -247,7 +244,7 @@ fn render_snippet(
         f,
         " {pad:>gutter$} {PIPE} {indent}{underline}",
         pad = "",
-        indent = CaretIndent(ctx.caret_prefix)
+        indent = CaretPad(ctx.caret_prefix)
     )?;
     if let SnippetKind::Note(msg) = kind {
         write!(f, " {NOTE}: {}", Paint(marker.style, msg))?;

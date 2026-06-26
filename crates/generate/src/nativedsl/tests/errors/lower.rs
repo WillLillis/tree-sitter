@@ -244,8 +244,14 @@ fn helper_lower_error_carries_helper_source() {
         .src
         .as_deref()
         .expect("helper lower error must carry the helper's source");
-    assert!(path.ends_with("helper.tsg"), "expected helper.tsg, got {path:?}");
-    assert!(src.contains("macro big"), "expected helper source, got {src:?}");
+    assert!(
+        path.ends_with("helper.tsg"),
+        "expected helper.tsg, got {path:?}"
+    );
+    assert!(
+        src.contains("macro big"),
+        "expected helper source, got {src:?}"
+    );
 }
 
 inherit_error_tests! { Resolve {
