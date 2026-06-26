@@ -66,6 +66,17 @@ macro_rules! assert_err {
     };
 }
 
+/// Generate test functions that assert a specific error kind for a given input.
+/// `$variant` is the `DslError` variant to match (e.g. Parse, Resolve, Lower).
+macro_rules! error_tests {
+    ($variant:ident { $($name:ident { $input:expr, $expected:expr })* }) => {
+        $(#[test] fn $name() {
+            let e = assert_err!(dsl_err($input), $variant);
+            assert_eq!(e.kind, $expected);
+        })*
+    };
+}
+
 mod bindings;
 mod cfg;
 mod combinators;
