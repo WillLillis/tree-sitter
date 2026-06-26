@@ -4,213 +4,6 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 #[test]
-fn import_function_expands_comma_sep1() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::comma_sep1(identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), comma_sep1_rule("identifier"));
-}
-
-#[test]
-fn import_function_expands_comma_sep() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::comma_sep(identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), comma_sep_rule("identifier"));
-}
-
-#[test]
-fn import_function_with_string_param() {
-    let g = dsl(r#"
-        let n = import("import_helpers/nested.tsg")
-        grammar { language: "test" }
-        rule program { n::sep_by1(";", identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(";", "identifier"));
-}
-
-#[test]
-fn import_function_intra_module_call() {
-    let g = dsl(r#"
-        let c = import("import_helpers/chained.tsg")
-        grammar { language: "test" }
-        rule program { c::double_wrap(identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    // double_wrap(x) = wrap(seq(x, ",", x))
-    // wrap(y) = seq("(", y, ")")
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::seq(vec![
-                Rule::NamedSymbol("identifier".into()),
-                Rule::String(",".into()),
-                Rule::NamedSymbol("identifier".into()),
-            ]),
-            Rule::String(")".into()),
-        ])
-    );
-}
-
-#[test]
-fn import_string_value() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::GREETING }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), Rule::String("hello".into()));
-}
-
-#[test]
-fn import_let_name_does_not_collide_with_local() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        let GREETING: str_t = "goodbye"
-        grammar { language: "test" }
-        rule program { seq(h::GREETING, GREETING) }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::String("hello".into()),
-            Rule::String("goodbye".into()),
-        ])
-    );
-}
-
-#[test]
-fn import_int_value_in_prec() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program {
-            prec_left(h::PREC.ADD, seq(program, "+", program))
-        }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::prec_left(
-            Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::NamedSymbol("program".into()),
-                Rule::String("+".into()),
-                Rule::NamedSymbol("program".into()),
-            ])
-        )
-    );
-}
-
-#[test]
-fn import_value_reassigned_to_local() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        let p = h::PREC
-        grammar { language: "test" }
-        rule program {
-            prec_left(p.MUL, seq(program, "*", program))
-        }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::prec_left(
-            Precedence::Integer(2),
-            Rule::seq(vec![
-                Rule::NamedSymbol("program".into()),
-                Rule::String("*".into()),
-                Rule::NamedSymbol("program".into()),
-            ])
-        )
-    );
-}
-
-#[test]
-fn import_transitive_function_body() {
-    let g = dsl(r#"
-        let n = import("import_helpers/nested.tsg")
-        grammar { language: "test" }
-        rule program { n::sep_by1(",", identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
-}
-
-#[test]
-fn import_transitive_value() {
-    let g = dsl(r#"
-        let n = import("import_helpers/nested.tsg")
-        grammar { language: "test" }
-        rule program { prec(n::NESTED_VAL, "x") }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::prec(Precedence::Integer(42), Rule::String("x".into()))
-    );
-}
-
-#[test]
-fn import_multiple_modules_body() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        let n = import("import_helpers/nested.tsg")
-        grammar { language: "test" }
-        rule program {
-            choice(
-                h::comma_sep1(identifier),
-                n::sep_by1(";", identifier),
-            )
-        }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::choice(vec![
-            sep_by1_rule(",", "identifier"),
-            sep_by1_rule(";", "identifier")
-        ])
-    );
-}
-
-#[test]
-fn import_function_result_in_seq() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { seq("{", h::comma_sep1(identifier), "}") }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::String("{".into()),
-            comma_sep1_rule("identifier"),
-            Rule::String("}".into()),
-        ])
-    );
-}
-
-#[test]
-fn import_module_values_only() {
-    let g = dsl(r#"
-        let m = import("import_helpers/minimal.tsg")
-        grammar { language: "test" }
-        rule program { prec(m::X, "x") }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
-    );
-}
-
-#[test]
 fn import_function_uses_own_let_binding() {
     let g = parse_with_modules(
         &[(
@@ -229,54 +22,6 @@ macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
     )
     .unwrap();
     assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
-}
-
-#[test]
-fn error_import_member_not_found() {
-    let err = dsl_err(
-        r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::nonexistent }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(
-        e.kind,
-        ResolveErrorKind::ImportMemberNotFound("nonexistent".into())
-    );
-}
-
-#[test]
-fn error_import_macro_used_as_value() {
-    let err = dsl_err(
-        r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::comma_sep1 }
-    "#,
-    );
-    let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::MacroUsedAsValue("h::comma_sep1".into())
-    );
-}
-
-#[test]
-fn error_import_function_not_found() {
-    let err = dsl_err(
-        r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::nonexistent("x") }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert_eq!(
-        e.kind,
-        ResolveErrorKind::ImportMemberNotFound("nonexistent".into())
-    );
 }
 
 #[test]
@@ -326,45 +71,6 @@ fn import_call_member_not_found_suggests_close_name() {
             .any(|n| matches!(&n.message, NoteMessage::DidYouMean(s) if s == "sep_by")),
         "expected did-you-mean sep_by, got {:?}",
         e.notes
-    );
-}
-
-#[test]
-fn error_qualified_call_on_non_module() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "test" }
-        let x = { a: 1 }
-        rule program { x::something("y") }
-    "#,
-    );
-    let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))),
-        }
-    );
-}
-
-#[test]
-fn error_import_wrong_arg_count() {
-    let err = dsl_err(
-        r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { h::comma_sep1("a", "b") }
-    "#,
-    );
-    let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::ArgCountMismatch {
-            macro_name: "comma_sep1".into(),
-            expected: 1,
-            got: 2,
-        }
     );
 }
 
@@ -534,47 +240,6 @@ fn import_function_receives_complex_expr() {
                 Rule::repeat(Rule::seq(vec![Rule::String(",".into()), pair])),
                 Rule::Blank,
             ]),
-        ])
-    );
-}
-
-#[test]
-fn import_function_receives_caller_let_binding() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        let SEP: str_t = ";"
-        rule program { h::sep_by(SEP, identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(";", "identifier"));
-}
-
-#[test]
-fn import_function_receives_object_field() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        let SEPS = { list: ",", stmt: ";" }
-        rule program { h::sep_by(SEPS.stmt, identifier) }
-        rule identifier { regexp(r"[a-z]+") }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(";", "identifier"));
-}
-
-#[test]
-fn import_same_module_twice() {
-    let g = dsl(r#"
-        let h1 = import("import_helpers/helpers.tsg")
-        let h2 = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { choice(h1::GREETING, h2::GREETING) }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::choice(vec![
-            Rule::String("hello".into()),
-            Rule::String("hello".into()),
         ])
     );
 }
@@ -898,17 +563,6 @@ fn import_keyword_as_rule_name() {
 }
 
 #[test]
-fn chained_let_alias_to_import_module() {
-    let g = dsl(r#"
-        let h = import("import_helpers/helpers.tsg")
-        let h2 = h
-        grammar { language: "test" }
-        rule program { h2::GREETING }
-    "#);
-    assert_eq!(*find_rule(&g, "program"), Rule::String("hello".into()));
-}
-
-#[test]
 fn import_helper_rule_set_macro_expands_locally() {
     // A helper that defines a `rules` macro and calls it via `@pair(...)` at
     // its own item position should expand into ExpandedRule items that flow
@@ -1017,3 +671,274 @@ fn override_reaching_helper_top_level_via_macro_is_rejected() {
         LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::OverrideRule)
     );
 }
+
+find_rule_tests! {
+    import_function_expands_comma_sep1 {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::comma_sep1(identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        comma_sep1_rule("identifier")
+    }
+    import_function_expands_comma_sep {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::comma_sep(identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        comma_sep_rule("identifier")
+    }
+    import_function_with_string_param {
+        r#"
+        let n = import("import_helpers/nested.tsg")
+        grammar { language: "test" }
+        rule program { n::sep_by1(";", identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        sep_by1_rule(";", "identifier")
+    }
+    import_function_intra_module_call {
+        // double_wrap(x) = wrap(seq(x, ",", x))
+        // wrap(y) = seq("(", y, ")")
+        r#"
+        let c = import("import_helpers/chained.tsg")
+        grammar { language: "test" }
+        rule program { c::double_wrap(identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        Rule::seq(vec![
+            Rule::String("(".into()),
+            Rule::seq(vec![
+                Rule::NamedSymbol("identifier".into()),
+                Rule::String(",".into()),
+                Rule::NamedSymbol("identifier".into()),
+            ]),
+            Rule::String(")".into()),
+        ])
+    }
+    import_string_value {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::GREETING }
+    "#,
+        "program",
+        Rule::String("hello".into())
+    }
+    import_let_name_does_not_collide_with_local {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        let GREETING: str_t = "goodbye"
+        grammar { language: "test" }
+        rule program { seq(h::GREETING, GREETING) }
+    "#,
+        "program",
+        Rule::seq(vec![
+            Rule::String("hello".into()),
+            Rule::String("goodbye".into()),
+        ])
+    }
+    import_int_value_in_prec {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program {
+            prec_left(h::PREC.ADD, seq(program, "+", program))
+        }
+    "#,
+        "program",
+        Rule::prec_left(
+            Precedence::Integer(1),
+            Rule::seq(vec![
+                Rule::NamedSymbol("program".into()),
+                Rule::String("+".into()),
+                Rule::NamedSymbol("program".into()),
+            ])
+        )
+    }
+    import_value_reassigned_to_local {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        let p = h::PREC
+        grammar { language: "test" }
+        rule program {
+            prec_left(p.MUL, seq(program, "*", program))
+        }
+    "#,
+        "program",
+        Rule::prec_left(
+            Precedence::Integer(2),
+            Rule::seq(vec![
+                Rule::NamedSymbol("program".into()),
+                Rule::String("*".into()),
+                Rule::NamedSymbol("program".into()),
+            ])
+        )
+    }
+    import_transitive_function_body {
+        r#"
+        let n = import("import_helpers/nested.tsg")
+        grammar { language: "test" }
+        rule program { n::sep_by1(",", identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        sep_by1_rule(",", "identifier")
+    }
+    import_transitive_value {
+        r#"
+        let n = import("import_helpers/nested.tsg")
+        grammar { language: "test" }
+        rule program { prec(n::NESTED_VAL, "x") }
+    "#,
+        "program",
+        Rule::prec(Precedence::Integer(42), Rule::String("x".into()))
+    }
+    import_multiple_modules_body {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        let n = import("import_helpers/nested.tsg")
+        grammar { language: "test" }
+        rule program {
+            choice(
+                h::comma_sep1(identifier),
+                n::sep_by1(";", identifier),
+            )
+        }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        Rule::choice(vec![
+            sep_by1_rule(",", "identifier"),
+            sep_by1_rule(";", "identifier")
+        ])
+    }
+    import_function_result_in_seq {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { seq("{", h::comma_sep1(identifier), "}") }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        Rule::seq(vec![
+            Rule::String("{".into()),
+            comma_sep1_rule("identifier"),
+            Rule::String("}".into()),
+        ])
+    }
+    import_module_values_only {
+        r#"
+        let m = import("import_helpers/minimal.tsg")
+        grammar { language: "test" }
+        rule program { prec(m::X, "x") }
+    "#,
+        "program",
+        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+    }
+    import_function_receives_caller_let_binding {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        let SEP: str_t = ";"
+        rule program { h::sep_by(SEP, identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        sep_by1_rule(";", "identifier")
+    }
+    import_function_receives_object_field {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        let SEPS = { list: ",", stmt: ";" }
+        rule program { h::sep_by(SEPS.stmt, identifier) }
+        rule identifier { regexp(r"[a-z]+") }
+    "#,
+        "program",
+        sep_by1_rule(";", "identifier")
+    }
+    import_same_module_twice {
+        r#"
+        let h1 = import("import_helpers/helpers.tsg")
+        let h2 = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { choice(h1::GREETING, h2::GREETING) }
+    "#,
+        "program",
+        Rule::choice(vec![
+            Rule::String("hello".into()),
+            Rule::String("hello".into()),
+        ])
+    }
+    chained_let_alias_to_import_module {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        let h2 = h
+        grammar { language: "test" }
+        rule program { h2::GREETING }
+    "#,
+        "program",
+        Rule::String("hello".into())
+    }
+}
+
+error_tests! { Resolve {
+    error_import_member_not_found {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::nonexistent }
+    "#,
+        ResolveErrorKind::ImportMemberNotFound("nonexistent".into())
+    }
+    error_import_function_not_found {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::nonexistent("x") }
+    "#,
+        ResolveErrorKind::ImportMemberNotFound("nonexistent".into())
+    }
+}}
+
+error_tests! { Type {
+    error_import_macro_used_as_value {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::comma_sep1 }
+    "#,
+        TypeErrorKind::MacroUsedAsValue("h::comma_sep1".into())
+    }
+    error_qualified_call_on_non_module {
+        r#"
+        grammar { language: "test" }
+        let x = { a: 1 }
+        rule program { x::something("y") }
+    "#,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))),
+        }
+    }
+    error_import_wrong_arg_count {
+        r#"
+        let h = import("import_helpers/helpers.tsg")
+        grammar { language: "test" }
+        rule program { h::comma_sep1("a", "b") }
+    "#,
+        TypeErrorKind::ArgCountMismatch {
+            macro_name: "comma_sep1".into(),
+            expected: 1,
+            got: 2,
+        }
+    }
+}}
