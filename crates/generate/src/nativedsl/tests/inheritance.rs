@@ -76,9 +76,8 @@ fn config_expr_word() {
 
 #[test]
 fn override_rule_emitted_by_rule_set_macro() {
-    // `override rule` decls inside a `rules` body should propagate is_override
-    // through expansion, so the macro-generated rule replaces the inherited
-    // base rule rather than colliding with it.
+    // `override rule` inside a `rules` body propagates is_override through
+    // expansion, so the generated rule replaces the inherited base rule.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         rules wrap_expression(rhs: rule_t) {
@@ -323,9 +322,8 @@ fn append_concatenates_lists() {
 
 #[test]
 fn inherit_from_grammar_that_imports() {
-    // The base grammar itself imports a helper. This exercises the offset-based
-    // module table: the base has global_id > 0 and its import has global_id > 1,
-    // so the base's evaluator must use base_id to offset table indices.
+    // The base itself imports a helper, so its evaluator must offset module-table
+    // indices by base_id (base global_id > 0, its import > 1).
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_import.tsg")
         grammar { language: "derived", inherits: base }
@@ -339,9 +337,8 @@ fn inherit_from_grammar_that_imports() {
 
 #[test]
 fn override_rule_can_access_base_let() {
-    // override rule body referencing a let defined in the inherited grammar.
-    // This exercises eager evaluation of the base's let bindings before any
-    // override rule body that references them.
+    // An override rule body referencing a base let exercises eager evaluation of
+    // the base's let bindings before the override body reads them.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -397,9 +394,8 @@ fn nested_inheritance_merges_all_rules() {
 
 #[test]
 fn nested_inheritance_qualified_access_to_grandparent_via_parent() {
-    // child references parent::identifier where identifier is defined in
-    // grandparent. The merge in parent's lowering puts identifier into
-    // parent.lowered.variables, so resolution succeeds without traversing.
+    // child references parent::identifier (defined in grandparent); parent's
+    // lowering merged it into parent.lowered.variables, so resolution succeeds.
     let g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
@@ -469,9 +465,8 @@ fn nested_inheritance_grammar_config_transitive() {
 
 #[test]
 fn nested_inheritance_chain_accesses_pre_override_rule() {
-    // parent overrides `statement`; grandparent's original is `identifier`.
-    // From the child, `parent::statement` should yield parent's override,
-    // while `parent::gp::statement` should yield grandparent's original.
+    // parent overrides `statement`: from the child, `parent::statement` yields
+    // parent's override while `parent::gp::statement` yields grandparent's.
     let g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
@@ -519,9 +514,8 @@ fn import_before_inherit_in_source_order() {
 
 #[test]
 fn inherited_external_qualified_access() {
-    // Symmetric with helper externals: a child grammar can reference an
-    // inherited grammar's external token via `base::name`. Resolves through
-    // the inherited grammar's lowered external_tokens.
+    // A child can reference an inherited external via `base::name`, resolving
+    // through the base's lowered external_tokens.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -570,11 +564,9 @@ fn inherited_external_bare_reference() {
 
 #[test]
 fn inherited_rule_also_in_externals() {
-    // A base may list one of its own rules in `externals` (a real tree-sitter
-    // pattern: an external-scanner token with a grammar-rule fallback), so the
-    // name ends up in both variables and external_tokens. Inheriting it must not
-    // double-register the name into the child's scope; grammar.js accepts the
-    // equivalent (the symbol is the same whether backed by a rule or external).
+    // A base may list one of its own rules in `externals` (external-scanner token
+    // with a grammar-rule fallback), so the name is in both variables and
+    // external_tokens; inheriting it must not double-register in the child.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -592,9 +584,9 @@ fn inherited_rule_also_in_externals() {
 
 #[test]
 fn config_only_base_is_allowed() {
-    // A base with no rules (config only) is a native-DSL extension over
-    // grammar.js: it can't compile standalone, but it contributes config to a
-    // child that supplies the rules. The root's rule count is what's enforced.
+    // A config-only base (no rules) is a native-DSL extension: it can't compile
+    // standalone but contributes config to a child; only the root's rule count
+    // is enforced.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -614,9 +606,8 @@ fn config_only_base_is_allowed() {
 
 #[test]
 fn start_rotates_inherited_rule_to_front() {
-    // Mirrors the ocaml_type case: the start rule lives mid-grammar in the
-    // base, and we want it as the start in the inheriting grammar without
-    // re-declaring every rule.
+    // The start rule lives mid-grammar in the base; `start:` makes it the start
+    // in the inheriting grammar without re-declaring every rule.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, start: identifier }
@@ -631,9 +622,8 @@ fn start_rotates_inherited_rule_to_front() {
 
 #[test]
 fn start_picks_derived_rule_under_inheritance() {
-    // `start:` can name a rule defined in the derived grammar (not the base).
-    // Build_grammar pushes base rules first, then locals, then helpers; the
-    // start rotation must find names in any of those buckets.
+    // `start:` can name a derived-grammar rule (not the base); the rotation must
+    // find names across the base/local/helper buckets build_grammar produces.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, start: extra }
@@ -658,10 +648,8 @@ fn grammar_config_reads_base_language() {
 
 #[test]
 fn override_with_rule_from_two_sources_errors() {
-    // `expr` is supplied by two imported helpers (two rule sources). An
-    // `override rule expr` claims one of them; the second is no longer skipped
-    // and collides - the same duplicate-declaration a two-source name hits
-    // without an override, not a silently duplicated variable.
+    // `expr` comes from two imported helpers; an `override rule expr` claims one,
+    // so the second collides as a duplicate declaration, not a silent dup.
     let err = parse_with_modules(
         &[
             ("a.tsg", "rule expr { \"from_a\" }\n"),
