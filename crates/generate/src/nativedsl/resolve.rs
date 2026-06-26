@@ -17,8 +17,8 @@ use crate::{
         ast::{
             AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span, Spanned,
         },
+        diagnostic::suggest_name,
         string_pool::StringPool,
-        suggest::suggest_name,
     },
     rules::Rule,
 };
