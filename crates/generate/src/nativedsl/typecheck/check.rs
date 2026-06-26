@@ -7,8 +7,8 @@ use crate::nativedsl::{
         ChildRange, ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, ObjectField,
         Param, PrecKind, SharedAst, Span,
     },
+    diagnostic::suggest_name,
     resolve::resolve_module_ref,
-    suggest::suggest_name,
     typecheck::{Constraint, TypeEnv, TypeResult},
 };
 
