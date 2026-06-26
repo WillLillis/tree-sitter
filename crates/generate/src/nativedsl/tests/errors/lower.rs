@@ -132,28 +132,46 @@ error_tests! { Lower {
         rule program { prec(x - 2000000000, "y") }"#,
         LowerErrorKind::IntegerOverflow(-4_000_000_000)
     }
-}}
-
-#[test]
-fn error_multiple_override_rules_not_found() {
     // Multiple unmatched overrides should produce a list in deterministic
     // (sorted) order so users see a stable error and tests don't flake.
-    let e = assert_err!(
-        dsl_err(
-            r#"let base = inherit("inherit_base/grammar.tsg")
-            grammar { language: "derived", inherits: base }
-            override rule zzz { "z" }
-            override rule aaa { "a" }
-            override rule mmm { "m" }"#
-        ),
-        Lower
-    );
-    let LowerErrorKind::OverrideRuleNotFound(entries) = e.kind else {
-        panic!("expected OverrideRuleNotFound, got {:?}", e.kind);
-    };
-    let names: Vec<&str> = entries.iter().map(String::as_str).collect();
-    assert_eq!(names, vec!["aaa", "mmm", "zzz"]);
-}
+    error_multiple_override_rules_not_found {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        override rule zzz { "z" }
+        override rule aaa { "a" }
+        override rule mmm { "m" }"#,
+        LowerErrorKind::OverrideRuleNotFound(vec!["aaa".into(), "mmm".into(), "zzz".into()])
+    }
+    // A variable holding a non-name rule (e.g. seq) passed as alias target
+    // should produce a proper error, not panic.
+    error_alias_non_name_rule_via_var {
+        r#"grammar { language: "test" }
+        macro make_alias(target: rule_t) rule_t { alias("x", target) }
+        rule a { "a" }
+        rule b { "b" }
+        rule program { make_alias(seq(a, b)) }"#,
+        LowerErrorKind::ExpectedRuleName
+    }
+    // A variable holding a non-name rule in config name-lists (inline,
+    // supertypes, conflicts) should produce a proper error, not panic.
+    error_inline_non_name_rule_via_var {
+        r#"let x = seq(a, b)
+        grammar { language: "test", inline: [x] }
+        rule a { "a" }
+        rule b { "b" }
+        rule program { a }"#,
+        LowerErrorKind::ExpectedRuleName
+    }
+}}
+
+error_tests! { Resolve {
+    error_inherit_rule_not_found {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: base }
+        rule extra { base::nonexistent_rule }"#,
+        ResolveErrorKind::ImportMemberNotFound("nonexistent_rule".into())
+    }
+}}
 
 #[test]
 fn error_recursive_macro_combinator_product() {
@@ -282,54 +300,4 @@ fn error_self_inherit_cycle() {
         }
         other => panic!("expected Module(ModuleCycle), got {other:?}"),
     }
-}
-
-#[test]
-fn error_inherit_rule_not_found() {
-    let e = assert_err!(
-        dsl_err(
-            r#"let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: base }
-        rule extra { base::nonexistent_rule }"#
-        ),
-        Resolve
-    );
-    assert_eq!(
-        e.kind,
-        ResolveErrorKind::ImportMemberNotFound("nonexistent_rule".into())
-    );
-}
-
-#[test]
-fn error_alias_non_name_rule_via_var() {
-    // A variable holding a non-name rule (e.g. seq) passed as alias target
-    // should produce a proper error, not panic.
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            macro make_alias(target: rule_t) rule_t { alias("x", target) }
-            rule a { "a" }
-            rule b { "b" }
-            rule program { make_alias(seq(a, b)) }"#
-        ),
-        Lower
-    );
-    assert_eq!(e.kind, LowerErrorKind::ExpectedRuleName);
-}
-
-#[test]
-fn error_inline_non_name_rule_via_var() {
-    // A variable holding a non-name rule in config name-lists (inline,
-    // supertypes, conflicts) should produce a proper error, not panic.
-    let e = assert_err!(
-        dsl_err(
-            r#"let x = seq(a, b)
-            grammar { language: "test", inline: [x] }
-            rule a { "a" }
-            rule b { "b" }
-            rule program { a }"#
-        ),
-        Lower
-    );
-    assert_eq!(e.kind, LowerErrorKind::ExpectedRuleName);
 }
