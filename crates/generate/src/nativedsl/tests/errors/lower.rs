@@ -221,6 +221,33 @@ fn error_module_read_failure_renders_without_panic() {
     let _rendered = format!("{wrapped}");
 }
 
+#[test]
+fn helper_lower_error_carries_helper_source() {
+    // A lower error born inside an imported helper (an integer overflow in the
+    // helper's macro body) tags the diagnostic with the helper's source + path,
+    // so it renders against helper.tsg, not the root that imported it.
+    let err = parse_with_modules(
+        &[(
+            "helper.tsg",
+            "macro big() rule_t { prec(1000000000 + 2000000000, \"x\") }\n",
+        )],
+        r#"
+        let h = import("helper.tsg")
+        grammar { language: "test" }
+        rule program { h::big() }
+    "#,
+    )
+    .unwrap_err();
+    let e = assert_err!(err, Lower);
+    assert_eq!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000));
+    let (src, path) = e
+        .src
+        .as_deref()
+        .expect("helper lower error must carry the helper's source");
+    assert!(path.ends_with("helper.tsg"), "expected helper.tsg, got {path:?}");
+    assert!(src.contains("macro big"), "expected helper source, got {src:?}");
+}
+
 inherit_error_tests! { Resolve {
     error_inherit_child_error {
         "grammar { language: \"base\" }\nrule program { bogus_ref }\n",
