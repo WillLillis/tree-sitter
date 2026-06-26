@@ -42,6 +42,23 @@ pub struct Parser<'tok, 'shared> {
     pending_sym_refs: Option<Vec<NodeId>>,
 }
 
+/// Snapshot `self.depth`, run the body (which may `deepen()` one or more times),
+/// then restore depth.
+macro_rules! depth_scope {
+    ($self:ident, $body:expr) => {{
+        let __depth = $self.depth;
+        let result = {
+            #[allow(
+                clippy::redundant_closure_call,
+                reason = "IIFE scopes `?` to the closure so depth restores"
+            )]
+            (|| $body)()
+        };
+        $self.depth = __depth;
+        result
+    }};
+}
+
 impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// SAFETY:
     ///
@@ -224,26 +241,24 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_item(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
-            self.depth += 1;
-            if self.depth > MAX_PARSE_DEPTH {
-                return Err(self.error(ParseErrorKind::NestingTooDeep));
-            }
-            let child = self.parse_item()?;
-            self.depth -= 1;
-            // A cfg-gated grammar block is structurally meaningless. The grammar's
-            // `flags` declaration is read before cfg gating runs, so the block would
-            // either fail to declare its own gating flag or self-disable.
-            if matches!(self.shared.arena.get(child), Node::Grammar) {
-                return Err(ParseError::new(
-                    ParseErrorKind::CfgOnGrammarBlock,
-                    cfg_start,
-                ));
-            }
-            let end = self.shared.arena.span(child);
-            return Ok(self
-                .shared
-                .arena
-                .push(Node::Cfg { name, child }, cfg_start.merge(end)));
+            return depth_scope!(self, {
+                self.deepen()?;
+                let child = self.parse_item()?;
+                // A cfg-gated grammar block is structurally meaningless. The grammar's
+                // `flags` declaration is read before cfg gating runs, so the block would
+                // either fail to declare its own gating flag or self-disable.
+                if matches!(self.shared.arena.get(child), Node::Grammar) {
+                    return Err(ParseError::new(
+                        ParseErrorKind::CfgOnGrammarBlock,
+                        cfg_start,
+                    ));
+                }
+                let end = self.shared.arena.span(child);
+                Ok(self
+                    .shared
+                    .arena
+                    .push(Node::Cfg { name, child }, cfg_start.merge(end)))
+            });
         }
         match &self.current().kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
@@ -284,17 +299,15 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// Parse an expression, optionally preceded by one or more `#[cfg(NAME)]` attributes.
     fn parse_expr_with_cfg(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
-            self.depth += 1;
-            if self.depth > MAX_PARSE_DEPTH {
-                return Err(self.error(ParseErrorKind::NestingTooDeep));
-            }
-            let child = self.parse_expr_with_cfg()?;
-            self.depth -= 1;
-            let end = self.shared.arena.span(child);
-            return Ok(self
-                .shared
-                .arena
-                .push(Node::Cfg { name, child }, cfg_start.merge(end)));
+            return depth_scope!(self, {
+                self.deepen()?;
+                let child = self.parse_expr_with_cfg()?;
+                let end = self.shared.arena.span(child);
+                Ok(self
+                    .shared
+                    .arena
+                    .push(Node::Cfg { name, child }, cfg_start.merge(end)))
+            });
         }
         self.parse_expr()
     }
@@ -551,14 +564,15 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     /// cfg-gated decls are dropped from the set by `apply_cfg` before expansion.
     fn parse_rule_set_decl(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
-            self.deepen()?;
-            let child = self.parse_rule_set_decl()?;
-            self.depth -= 1;
-            let end = self.shared.arena.span(child);
-            return Ok(self
-                .shared
-                .arena
-                .push(Node::Cfg { name, child }, cfg_start.merge(end)));
+            return depth_scope!(self, {
+                self.deepen()?;
+                let child = self.parse_rule_set_decl()?;
+                let end = self.shared.arena.span(child);
+                Ok(self
+                    .shared
+                    .arena
+                    .push(Node::Cfg { name, child }, cfg_start.merge(end)))
+            });
         }
         match self.current().kind {
             TokenKind::KwRule => self.parse_rule_def(false),
@@ -648,50 +662,50 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_expr(&mut self) -> ParseResult<NodeId> {
-        let start_depth = self.depth;
-        self.deepen()?;
-        let mut lhs = self.parse_postfix()?;
-        // Left-associative chain of `+` / `-` at int_t positions.
-        while let Some(op) = match self.current().kind {
-            TokenKind::Plus => Some(BinOp::Add),
-            TokenKind::Minus => Some(BinOp::Sub),
-            _ => None,
-        } {
-            self.advance_pos();
+        depth_scope!(self, {
             self.deepen()?;
-            let rhs = self.parse_postfix()?;
-            let span = self
-                .shared
-                .arena
-                .span(lhs)
-                .merge(self.shared.arena.span(rhs));
-            lhs = self.shared.arena.push(Node::BinOp { op, lhs, rhs }, span);
-        }
-        self.depth = start_depth;
-        Ok(lhs)
+            let mut lhs = self.parse_postfix()?;
+            // Left-associative chain of `+` / `-` at int_t positions.
+            while let Some(op) = match self.current().kind {
+                TokenKind::Plus => Some(BinOp::Add),
+                TokenKind::Minus => Some(BinOp::Sub),
+                _ => None,
+            } {
+                self.advance_pos();
+                self.deepen()?;
+                let rhs = self.parse_postfix()?;
+                let span = self
+                    .shared
+                    .arena
+                    .span(lhs)
+                    .merge(self.shared.arena.span(rhs));
+                lhs = self.shared.arena.push(Node::BinOp { op, lhs, rhs }, span);
+            }
+            Ok(lhs)
+        })
     }
 
     /// Primary expression + post-primary `.field` chaining. Used as the
     /// operand parser for the `+`/`-` chain in `parse_expr` so RHS doesn't
     /// recurse into more arithmetic.
     fn parse_postfix(&mut self) -> ParseResult<NodeId> {
-        let start_depth = self.depth;
-        self.deepen()?;
-        let mut result = self.parse_primary()?;
-        // `.field` chaining on a non-ident primary, e.g. an object literal
-        // `{ k: v }.k`. (`ident.field` is consumed by `parse_ident_expr`.)
-        while self.at(TokenKind::Dot) {
-            let start = self.shared.arena.span(result);
-            self.advance_pos();
+        depth_scope!(self, {
             self.deepen()?;
-            let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
-            result = self
-                .shared
-                .arena
-                .push(Node::FieldAccess { obj: result, field }, start.merge(field));
-        }
-        self.depth = start_depth;
-        Ok(result)
+            let mut result = self.parse_primary()?;
+            // `.field` chaining on a non-ident primary, e.g. an object literal
+            // `{ k: v }.k`. (`ident.field` is consumed by `parse_ident_expr`.)
+            while self.at(TokenKind::Dot) {
+                let start = self.shared.arena.span(result);
+                self.advance_pos();
+                self.deepen()?;
+                let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
+                result = self
+                    .shared
+                    .arena
+                    .push(Node::FieldAccess { obj: result, field }, start.merge(field));
+            }
+            Ok(result)
+        })
     }
 
     fn parse_primary(&mut self) -> ParseResult<NodeId> {
@@ -1096,71 +1110,71 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 .arena
                 .push(Node::Ident(IdentKind::Unresolved), span)
         };
-        let mut id = name_id;
-        let start_depth = self.depth;
-        loop {
-            if self.at(TokenKind::Dot) {
-                self.advance_pos();
-                self.deepen()?;
-                let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
-                id = self
-                    .shared
-                    .arena
-                    .push(Node::FieldAccess { obj: id, field }, start.merge(field));
-            } else if self.at(TokenKind::ColonColon) {
-                self.advance_pos();
-                self.deepen()?;
-                let member_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
-                if self.at(TokenKind::LParen) {
-                    // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
-                    let member_id = self
-                        .shared
-                        .arena
-                        .push(Node::Ident(IdentKind::Unresolved), member_span);
+        depth_scope!(self, {
+            let mut id = name_id;
+            loop {
+                if self.at(TokenKind::Dot) {
                     self.advance_pos();
-                    let range = self.comma_sep_children(
-                        &[id, member_id],
-                        TokenKind::RParen,
-                        Self::parse_expr,
-                    )?;
-                    let end = self.expect(TokenKind::RParen)?;
+                    self.deepen()?;
+                    let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
                     id = self
                         .shared
                         .arena
-                        .push(Node::QualifiedCall(range), start.merge(end));
+                        .push(Node::FieldAccess { obj: id, field }, start.merge(field));
+                } else if self.at(TokenKind::ColonColon) {
+                    self.advance_pos();
+                    self.deepen()?;
+                    let member_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+                    if self.at(TokenKind::LParen) {
+                        // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
+                        let member_id = self
+                            .shared
+                            .arena
+                            .push(Node::Ident(IdentKind::Unresolved), member_span);
+                        self.advance_pos();
+                        let range = self.comma_sep_children(
+                            &[id, member_id],
+                            TokenKind::RParen,
+                            Self::parse_expr,
+                        )?;
+                        let end = self.expect(TokenKind::RParen)?;
+                        id = self
+                            .shared
+                            .arena
+                            .push(Node::QualifiedCall(range), start.merge(end));
+                        break;
+                    }
+                    id = self.shared.arena.push(
+                        Node::QualifiedAccess {
+                            obj: id,
+                            member: member_span,
+                        },
+                        start.merge(member_span),
+                    );
+                } else if self.at(TokenKind::LParen) {
+                    if !matches!(
+                        self.shared.arena.get(id),
+                        Node::Ident(IdentKind::Unresolved)
+                    ) {
+                        return Err(self.error(ParseErrorKind::ExpectedMacroName));
+                    }
+                    self.advance_pos();
+                    let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
+                    let end = self.expect(TokenKind::RParen)?;
+                    id = self.shared.arena.push(
+                        Node::Call {
+                            name: name_id,
+                            args,
+                        },
+                        start.merge(end),
+                    );
+                    break;
+                } else {
                     break;
                 }
-                id = self.shared.arena.push(
-                    Node::QualifiedAccess {
-                        obj: id,
-                        member: member_span,
-                    },
-                    start.merge(member_span),
-                );
-            } else if self.at(TokenKind::LParen) {
-                if !matches!(
-                    self.shared.arena.get(id),
-                    Node::Ident(IdentKind::Unresolved)
-                ) {
-                    return Err(self.error(ParseErrorKind::ExpectedMacroName));
-                }
-                self.advance_pos();
-                let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
-                let end = self.expect(TokenKind::RParen)?;
-                id = self.shared.arena.push(
-                    Node::Call {
-                        name: name_id,
-                        args,
-                    },
-                    start.merge(end),
-                );
-                break;
-            } else {
-                break;
             }
-        }
-        self.depth = start_depth;
-        Ok(id)
+            Ok(id)
+        })
     }
 
     fn parse_delimited(
