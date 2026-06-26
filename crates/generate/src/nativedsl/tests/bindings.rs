@@ -60,10 +60,8 @@ rule_tests! {
         r#"grammar { language: "test" } rule program { prec({ P: 1 }.P, "x") }"#,
         Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
     }
-    // A single for-binding over a list of tuples binds the WHOLE tuple, then a
-    // later multi-binding loop destructures it. Exercises eval_for_each's
-    // single-vs-multi binding distinction (regression: single binding wrongly
-    // took tuple element 0 instead of the whole tuple).
+    // A single for-binding over a list of tuples binds the WHOLE tuple (regression:
+    // it once took element 0); a later multi-binding loop then destructures it.
     for_single_tuple_binding_whole {
         r#"grammar { language: "test" }
         let copy = [for (p: tuple_t<str_t, int_t>) in [("kw_a", 1), ("kw_b", 2)] { p }]
@@ -190,9 +188,8 @@ rule_tests! {
         ])
     }
     tuple_elements_from_macro_calls {
-        // A tuple element can be any scalar-typed expression, not just a literal -
-        // including a macro call that returns a scalar (`tag` returns its rule_t
-        // argument, so `tag("+")` lowers to the string rule "+").
+        // A tuple element can be any scalar-typed expression, e.g. a macro call:
+        // `tag("+")` returns its rule_t arg, lowering to the string rule "+".
         r#"grammar { language: "test" }
         macro tag(r: rule_t) rule_t { r }
         rule binary {
@@ -204,9 +201,8 @@ rule_tests! {
         plus_times_choice()
     }
     for_named_list_of_tuples {
-        // Tier-1 tuples: a list of tuples bound to a let (type inferred as
-        // list_t<tuple_t<str_t, int_t>>), then destructured by a multi-binding
-        // for-loop. Before tier-1 the table had to be written inline in the loop.
+        // A list of tuples bound to a let (inferred list_t<tuple_t<str_t, int_t>>),
+        // then destructured by a multi-binding for-loop.
         r#"grammar { language: "test" }
         let ops = [("+", 1), ("*", 2)]
         rule binary {
@@ -218,9 +214,8 @@ rule_tests! {
         plus_times_choice()
     }
     tuple_annotations_check_against_values {
-        // Explicit `tuple_t<...>` and `list_t<tuple_t<...>>` annotations parse and
-        // check against their values; the list mixes a tuple-typed variable with a
-        // literal tuple, then destructures in a for-loop.
+        // Explicit tuple_t / list_t<tuple_t> annotations check against their values,
+        // mixing a tuple-typed variable with a literal tuple.
         r#"grammar { language: "test" }
         let plus: tuple_t<str_t, int_t> = ("+", 1)
         let ops: list_t<tuple_t<str_t, int_t>> = [plus, ("*", 2)]
@@ -233,9 +228,8 @@ rule_tests! {
         plus_times_choice()
     }
     tuple_value_bound_to_let {
-        // Each tuple is a first-class value bound to its own let, then collected
-        // into a list literal and destructured - exercises tuples-as-values and
-        // tuple-typed variables flowing into a list.
+        // Each tuple is a first-class value bound to its own let, then collected into
+        // a list and destructured.
         r#"grammar { language: "test" }
         let plus = ("+", 1)
         let times = ("*", 2)
@@ -302,10 +296,8 @@ rule_tests! {
         Rule::choice(vec![Rule::String("fallback".into())])
     }
     macro_reads_let_defined_after_call_site {
-        // A macro body is resolved at its (late) definition site, but lower expands
-        // it at the (earlier) call site. The expanded body still reads a let defined
-        // after that call site, so lower must evaluate the let on demand instead of
-        // assuming the source-order loop reached it first. Cluster L (was a panic).
+        // A macro expanded at an early call site reads a let defined later, so lower
+        // must evaluate that let on demand rather than assume source order (was a panic).
         r#"grammar { language: "test" }
         rule prog { m() }
         let b = "x"
@@ -419,9 +411,8 @@ fn for_in_list_mixed_with_concrete_elements() {
 
 #[test]
 fn for_in_list_empty_iterable() {
-    // Spreading a for-loop over an empty literal contributes zero elements.
-    // The binding annotation makes the body type self-sufficient; no inference
-    // from the iterable is needed.
+    // A for-loop spread over an empty literal contributes zero elements; the
+    // binding annotation makes the body type self-sufficient.
     let g = dsl(r#"grammar {
         language: "test",
         reserved: {
@@ -504,8 +495,7 @@ fn function_multiple_calls() {
 }
 
 /// The lowered `choice` of two `prec_left` binary rules for the `("+", 1)` /
-/// `("*", 2)` precedence table - the expected output shared by the tier-1
-/// tuple tests, which differ only in how that table reaches the for-loop.
+/// `("*", 2)` table - the shared expected output for the tuple tests.
 fn plus_times_choice() -> Rule {
     let binop = |op: &str, p: i32| {
         Rule::prec_left(
@@ -555,10 +545,8 @@ fn recursive_fn_depth_limit() {
 
 #[test]
 fn macro_let_cycle_reported_as_circular() {
-    // `b` is bound to m(), whose body reads `b`: a cycle resolve does not catch
-    // (the macro body resolves at its def site, after `let b`). On-demand let
-    // evaluation detects the reentry and reports it as a circular binding with a
-    // note at the self-reference - without it the recursion overflows the stack.
+    // `b = m()` whose body reads `b` is a cycle resolve can't catch (macro resolves
+    // at its def site); on-demand let eval detects the reentry as a circular binding.
     let err = dsl_err(
         r#"grammar { language: "test" }
         let b = m()
@@ -572,9 +560,8 @@ fn macro_let_cycle_reported_as_circular() {
 
 #[test]
 fn mutual_let_cycle_reported_as_circular() {
-    // Two lets defined in terms of each other. Now that forward references
-    // resolve, the direct cycle is caught at typecheck (before lower), with a
-    // note at the back-reference.
+    // Two lets defined in terms of each other: now that forward refs resolve, the
+    // cycle is caught at typecheck with a note at the back-reference.
     let err = dsl_err(
         r#"grammar { language: "test" }
         let a = b
