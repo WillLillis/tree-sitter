@@ -281,6 +281,19 @@ fn externals_used_in_extras_via_let() {
 }
 
 #[test]
+fn external_and_rule_same_name_is_valid() {
+    // A rule can also be an external token - the rule is registered first,
+    // then the externals walk sees it's already declared and skips re-registration.
+    let g = dsl(r#"
+        grammar { language: "test", externals: [foo] }
+        rule program { "x" }
+        rule foo { "y" }
+    "#);
+    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("foo".into())]);
+    assert_eq!(g.variables.len(), 2);
+}
+
+#[test]
 fn error_externals_via_function_call() {
     let e = assert_err!(
         dsl_err(

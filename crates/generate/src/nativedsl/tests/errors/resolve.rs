@@ -79,6 +79,15 @@ error_tests! { Resolve {
         let x = base::bogus"#,
         ResolveErrorKind::ImportMemberNotFound("bogus".into())
     }
+    // Mutual let references should not cause infinite recursion in
+    // collect_external_names.
+    error_mutual_let_ref_in_externals {
+        r#"let A: list_t<rule_t> = B
+        let B: list_t<rule_t> = A
+        grammar { language: "test", externals: A }
+        rule program { "x" }"#,
+        ResolveErrorKind::InvalidExternalsExpression
+    }
 }}
 
 #[test]
@@ -105,22 +114,6 @@ fn error_self_ref_in_container_reports_cycle() {
 }
 
 #[test]
-fn error_mutual_let_ref_in_externals() {
-    // Mutual let references should not cause infinite recursion in
-    // collect_external_names.
-    let e = assert_err!(
-        dsl_err(
-            r#"let A: list_t<rule_t> = B
-            let B: list_t<rule_t> = A
-            grammar { language: "test", externals: A }
-            rule program { "x" }"#
-        ),
-        Resolve
-    );
-    assert_eq!(e.kind, ResolveErrorKind::InvalidExternalsExpression);
-}
-
-#[test]
 fn error_duplicate_declaration_has_note() {
     let e = assert_err!(
         dsl_err(r#"grammar { language: "test" } rule foo { "a" } rule foo { "b" }"#),
@@ -138,19 +131,6 @@ fn error_duplicate_declaration_has_note() {
         note.span.start < e.span.unwrap().start,
         "note span should precede error span"
     );
-}
-
-#[test]
-fn external_and_rule_same_name_is_valid() {
-    // A rule can also be an external token - the rule is registered first,
-    // then the externals walk sees it's already declared and skips re-registration.
-    let g = dsl(r#"
-        grammar { language: "test", externals: [foo] }
-        rule program { "x" }
-        rule foo { "y" }
-    "#);
-    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("foo".into())]);
-    assert_eq!(g.variables.len(), 2);
 }
 
 inherit_error_tests! { Resolve {
