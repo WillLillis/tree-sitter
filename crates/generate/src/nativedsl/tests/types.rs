@@ -1,29 +1,6 @@
 use super::*;
 
 #[test]
-fn list_mixed_rule_and_str_coerces_to_list_rule() {
-    // String literals are str_t, rule refs are rule_t. A mixed list should
-    // coerce to list_t<rule_t> since str_t is a subtype of rule_t.
-    let g = dsl(r#"
-        grammar { language: "test" }
-        let items: list_t<rule_t> = [program, "literal"]
-        rule program { choice(for (r: rule_t) in items { r }) }
-    "#);
-    assert_eq!(g.variables.len(), 1);
-}
-
-#[test]
-fn list_str_first_then_rule_coerces_to_list_rule() {
-    // First element str, second rule - should widen to list_t<rule_t>
-    let g = dsl(r#"
-        grammar { language: "test" }
-        let items: list_t<rule_t> = ["literal", program]
-        rule program { "x" }
-    "#);
-    assert_eq!(g.variables.len(), 1);
-}
-
-#[test]
 fn extras_mixed_rule_and_str() {
     // extras is list_t<rule_t> - should accept a mix of rule refs and strings
     let g = dsl(r#"
@@ -35,6 +12,19 @@ fn extras_mixed_rule_and_str() {
 }
 
 compile_tests! {
+    list_mixed_rule_and_str_coerces_to_list_rule {
+        // String literals are str_t, rule refs are rule_t. A mixed list should
+        // coerce to list_t<rule_t> since str_t is a subtype of rule_t.
+        r#"grammar { language: "test" }
+        let items: list_t<rule_t> = [program, "literal"]
+        rule program { choice(for (r: rule_t) in items { r }) }"#
+    }
+    list_str_first_then_rule_coerces_to_list_rule {
+        // First element str, second rule - should widen to list_t<rule_t>
+        r#"grammar { language: "test" }
+        let items: list_t<rule_t> = ["literal", program]
+        rule program { "x" }"#
+    }
     object_mixed_str_and_rule_values_coerces {
         r#"grammar { language: "test" }
         let o = { a: program, b: "literal" }
