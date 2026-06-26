@@ -185,6 +185,44 @@ rule_tests! {
             Rule::NamedSymbol("alias".into()),
         ])
     }
+    regexp_combinator {
+        r#"grammar { language: "test" } rule program { regexp("[a-z]+") }"#,
+        Rule::Pattern("[a-z]+".into(), String::new())
+    }
+    regexp_with_flags {
+        r#"grammar { language: "test" } rule program { regexp("[a-z]+", "i") }"#,
+        Rule::Pattern("[a-z]+".into(), "i".into())
+    }
+    concat_combinator {
+        r#"grammar { language: "test" } rule program { regexp(concat("[", "a-z", "]+")) }"#,
+        Rule::Pattern("[a-z]+".into(), String::new())
+    }
+    raw_ident_as_let_binding_name {
+        // `r#name` works in let-binding position when the bare name collides
+        // with a DSL keyword.
+        r#"grammar { language: "test" }
+        let r#for: str_t = "x"
+        rule program { r#for }"#,
+        Rule::String("x".into())
+    }
+    raw_ident_as_object_key {
+        // `r#name` works as an object literal key when the bare name collides
+        // with a DSL keyword.
+        r#"grammar { language: "test" }
+        let cfg = { r#for: 1, r#in: 2 }
+        rule program { prec(cfg.r#for, "x") }"#,
+        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+    }
+    object_key_accepts_contextual_keyword {
+        // An object-literal key is a name, so it accepts contextual keywords like
+        // `field`, the same as the field-access member position already does.
+        r#"
+        let x = { field: "y" }
+        grammar { language: "test" }
+        rule program { x.field }
+        "#,
+        Rule::String("y".into())
+    }
 }
 
 #[test]
@@ -195,57 +233,6 @@ fn raw_ident_emits_bare_name_in_grammar_json() {
     // grammar.json rule names must match the bare identifier, not `r#let`.
     let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, vec!["program", "let"]);
-}
-
-#[test]
-fn raw_ident_as_let_binding_name() {
-    // `r#name` works in let-binding position when the bare name collides
-    // with a DSL keyword.
-    let g = dsl(r#"grammar { language: "test" }
-        let r#for: str_t = "x"
-        rule program { r#for }"#);
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
-}
-
-#[test]
-fn raw_ident_as_object_key() {
-    // `r#name` works as an object literal key when the bare name collides
-    // with a DSL keyword.
-    let g = dsl(r#"grammar { language: "test" }
-        let cfg = { r#for: 1, r#in: 2 }
-        rule program { prec(cfg.r#for, "x") }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::prec(Precedence::Integer(1), Rule::String("x".into())),
-    );
-}
-
-#[test]
-fn regexp_combinator() {
-    let g = dsl(r#"grammar { language: "test" } rule program { regexp("[a-z]+") }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::Pattern("[a-z]+".into(), String::new())
-    );
-}
-
-#[test]
-fn regexp_with_flags() {
-    let g = dsl(r#"grammar { language: "test" } rule program { regexp("[a-z]+", "i") }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::Pattern("[a-z]+".into(), "i".into())
-    );
-}
-
-#[test]
-fn concat_combinator() {
-    let g =
-        dsl(r#"grammar { language: "test" } rule program { regexp(concat("[", "a-z", "]+")) }"#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::Pattern("[a-z]+".into(), String::new())
-    );
 }
 
 #[test]
@@ -272,18 +259,6 @@ fn reserved_combinator() {
     assert!(
         matches!(&g.variables[0].rule, Rule::Reserved { context_name, .. } if context_name == "default")
     );
-}
-
-#[test]
-fn object_key_accepts_contextual_keyword() {
-    // An object-literal key is a name, so it accepts contextual keywords like
-    // `field`, the same as the field-access member position already does.
-    let g = dsl(r#"
-        let x = { field: "y" }
-        grammar { language: "test" }
-        rule program { x.field }
-    "#);
-    assert_eq!(g.variables[0].rule, Rule::String("y".into()));
 }
 
 #[test]
