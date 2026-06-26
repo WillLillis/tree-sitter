@@ -131,21 +131,17 @@ pub struct Note {
 pub enum NoteMessage {
     FirstDefinedHere,
     ReferencedFromHere,
-    /// An unmatched `override rule` declaration's location
     OverrideDeclaredHere,
     /// One per redundant `inherit()` beyond the first in a `MultipleInherits` error
     AlsoInheritedHere,
-    /// Points at an `expect <name>` forward-decl whose promised symbol, referenced
-    /// somewhere in the grammar, was never defined.
+    /// Points at an `expect` forward-decl whose promised symbol was never defined.
     ForwardDeclaredHere,
     /// Carries the cfg flag name, the note's span points at the gated decl.
     GatedByDisabledCfg(String),
     DidYouMean(String),
     /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the imported path string.
     SwitchImportToInherit(String),
-    /// Points at a let value's reference back to itself.
     SelfReferenceHere,
-    /// Attached to the arg-count error when `prec_left`/`prec_right` is given a single arg.
     PrecNeedsExplicitPrecedence {
         is_left: bool,
         arg: String,
