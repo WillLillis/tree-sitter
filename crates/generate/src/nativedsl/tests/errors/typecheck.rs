@@ -42,9 +42,8 @@ error_tests! { Type {
         TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
     error_computed_rule_name_not_string {
-        // `rule @<expr>` computes the name from a value, which must be a string.
-        // A rule reference resolves fine but is the wrong type (the name is a
-        // referenced value, not a declaration).
+        // `rule @<expr>` computes the name from a value that must be a string; a
+        // rule reference resolves but is the wrong type (a value, not a decl).
         r#"grammar { language: "test" }
         rules r() { rule @program { "x" } }
         rule program { "x" }"#,

@@ -310,9 +310,8 @@ fn error_externals_via_function_call() {
 
 #[test]
 fn expect_decl_in_grammar_file() {
-    // A top-level `expect` forward-declares a name; the grammar block's externals
-    // list still does the actual registration. The name is usable in rule bodies
-    // via the resolver's decl table.
+    // A top-level `expect` forward-declares a name (usable in rule bodies); the
+    // grammar block's externals list still does the actual registration.
     let g = dsl(r#"
         expect _foo
         grammar { language: "test", externals: [_foo] }
@@ -324,9 +323,8 @@ fn expect_decl_in_grammar_file() {
 
 #[test]
 fn expect_fulfilled_by_same_file_rule() {
-    // A forward-decl is fulfilled by a later same-file definition rather than
-    // colliding with it: declarations don't collide with definitions, so the
-    // `rule` claims the name the `expect` declared (forward-declare, then define).
+    // A forward-decl is fulfilled by a later same-file definition, not collided
+    // with: the `rule` claims the name the `expect` declared.
     let g = dsl(r#"
         expect helper
         grammar { language: "test" }
@@ -342,9 +340,8 @@ fn expect_fulfilled_by_same_file_rule() {
 
 #[test]
 fn expect_referenced_but_not_defined_is_rejected() {
-    // An `expect` forward-decl names a symbol defined elsewhere (a rule or an
-    // `externals:` token). Referencing it without ever defining it leaves a
-    // dangling NamedSymbol (no rule, no external token), so it must be rejected.
+    // An `expect` whose name is never defined (no rule, no externals token) leaves
+    // a dangling NamedSymbol when referenced, so it must be rejected.
     let err = dsl_err(
         r#"
         expect _foo
@@ -361,9 +358,8 @@ fn expect_referenced_but_not_defined_is_rejected() {
 
 #[test]
 fn expect_decl_repeated_is_idempotent() {
-    // Forward-decls are idempotent, like C: declaring the same name with `expect`
-    // more than once is a redundancy, not a duplicate. Declarations don't collide;
-    // only definitions do.
+    // Forward-decls are idempotent (like C): repeating `expect` for a name is
+    // redundant, not a duplicate - only definitions collide.
     let g = dsl(r#"
         expect _foo
         expect _foo
@@ -376,9 +372,8 @@ fn expect_decl_repeated_is_idempotent() {
 
 #[test]
 fn expect_decl_redundant_with_grammar_block() {
-    // Both `expect _foo` and `externals: [_foo]` declare the same name.
-    // The decl table sees `external` first; the grammar block's pre-registration
-    // skips already-declared names (collect_external_names checks contains_key).
+    // `expect _foo` and `externals: [_foo]` declare the same name; the grammar
+    // block's pre-registration skips already-declared names (contains_key check).
     let g = dsl(r#"
         expect _foo
         grammar { language: "test", externals: [_foo, _bar] }

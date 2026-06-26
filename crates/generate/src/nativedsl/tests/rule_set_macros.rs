@@ -82,9 +82,8 @@ fn rule_set_macro_at_string_name_unescapes() {
 
 #[test]
 fn dup_macro_with_call_reports_duplicate_not_argcount() {
-    // A duplicated rule-set macro plus a top-level call must report the
-    // duplicate, not an arg-count mismatch against whichever definition the
-    // parser's macro_index happened to keep (here the later 1-param def).
+    // A duplicated rule-set macro plus a call must report the duplicate, not an
+    // arg-count mismatch against whichever def macro_index happened to keep.
     let err = dsl_err(
         r#"
         rules m() { rule a { "x" } }
@@ -115,9 +114,8 @@ fn dup_macro_with_call_reports_duplicate_reversed() {
 
 #[test]
 fn computed_ref_to_macro_name_rejected() {
-    // `@"m"` computes the name "m", a macro - which `collect_decls` registers in
-    // the decl table before the computed-ref check. Without the rule-ness check
-    // it passes existence and lower emits a dangling NamedSymbol for it.
+    // `@"m"` computes the name of a macro; without the rule-ness check it would
+    // pass existence and lower a dangling NamedSymbol.
     let err = dsl_err(
         r#"
         macro m() str_t { "x" }
@@ -252,12 +250,9 @@ find_rule_tests! {
         ])
     }
     rule_set_macro_with_for_loop_over_param {
-        // For-loop inside a rule-set body iterates over a list_t<rule_t> macro
-        // param. The iterable lives in ForConfig (indexed by ForId), separate from
-        // the cloned body subtree - so substituting the param requires either a
-        // fresh ForId per expansion or some other plumbing. Without that, `items`
-        // is read from the macro template (where it's a MacroParam) instead of
-        // the substituted arg.
+        // A for-loop in a rule-set body iterating a list_t<rule_t> param must read
+        // the substituted arg, not the template's MacroParam (the iterable lives in
+        // ForConfig, separate from the cloned body).
         r#"
         rules with_choices(items: list_t<rule_t>) {
             rule program {
@@ -276,9 +271,8 @@ find_rule_tests! {
         ])
     }
     rule_set_macro_param_in_combinator_positions {
-        // Hits Repeat, Optional, Field, Alias, Prec arms of clone_with_subst all
-        // at once - a regression in any arm's recursive subst would corrupt the
-        // assertion below.
+        // Exercises the Repeat/Optional/Field/Alias/Prec arms of clone_with_subst
+        // at once; a regression in any arm's recursive subst breaks the assertion.
         r#"
         rules wrap(inner: rule_t, name: rule_t) {
             rule program {

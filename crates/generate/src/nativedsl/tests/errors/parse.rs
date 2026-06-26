@@ -125,9 +125,8 @@ error_tests! { Parse {
         ParseErrorKind::NestingTooDeep
     }
     error_nesting_too_deep_field_chain {
-        // Iterative `.field` chain in parse_ident_expr builds a left-nested
-        // FieldAccess tree the entry-only depth guard used to miss (the chain
-        // would parse fine, then overflow the stack in resolve/typecheck/lower).
+        // An iterative `.field` chain builds a left-nested FieldAccess tree the
+        // entry-only depth guard once missed (parses fine, then overflows later).
         &{
             let deep = ".b".repeat(300);
             format!("grammar {{ language: \"test\" }} rule foo {{ a{deep} }}")

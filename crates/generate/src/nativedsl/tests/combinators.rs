@@ -55,9 +55,8 @@ rule_tests! {
         Rule::alias(Rule::String("x".into()), "some_rule".to_string(), true)
     }
     alias_with_let_string_target {
-        // A `let`-bound string as the alias target resolves to the let's value
-        // (unnamed alias "renamed"), not a force-resolved named rule reference
-        // "FOO". Matches grammar.js evaluating a const used as the alias name.
+        // A let-bound string alias target resolves to the let's value (unnamed
+        // alias "renamed"), not a named rule "FOO" - matches grammar.js.
         r#"grammar { language: "test" }
         let FOO = "renamed"
         rule program { alias(identifier, FOO) }
@@ -65,9 +64,8 @@ rule_tests! {
         Rule::alias(Rule::NamedSymbol("identifier".into()), "renamed".to_string(), false)
     }
     alias_with_forward_let_target {
-        // Same as above but the `let` is defined AFTER the alias use. Lets
-        // resolve regardless of order, so this stays an unnamed alias to the
-        // let's value - not a named alias to a nonexistent rule "FOO".
+        // Same, but the `let` is defined after the alias use; lets resolve
+        // regardless of order, so it stays an unnamed alias to the let's value.
         r#"grammar { language: "test" }
         rule program { alias(identifier, FOO) }
         rule identifier { regexp("[a-z]+") }
@@ -277,9 +275,8 @@ fn reserved_multiple_sets() {
 
 #[test]
 fn reserved_inherited() {
-    // A child with no `reserved` of its own inherits the base's reserved sets
-    // (in base order, so the first/default set is preserved). No explicit
-    // `grammar_config(base, reserved)` re-import needed - it merges by default.
+    // A child with no `reserved` inherits the base's sets in base order (default
+    // set preserved), with no explicit grammar_config re-import needed.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
         grammar { language: "derived", inherits: base }
@@ -303,9 +300,8 @@ fn reserved_inherited() {
 
 #[test]
 fn reserved_child_merges_with_base() {
-    // The child adds a new set and overrides an existing one. Base order is
-    // preserved (global stays first = default), the overridden set keeps its
-    // base position with new words, and the new set is appended. Matches dsl.js.
+    // The child adds a set and overrides one: base order is preserved (global
+    // stays default), overridden sets keep position, new sets append.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
         grammar {

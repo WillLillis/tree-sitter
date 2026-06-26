@@ -13,8 +13,7 @@ fn extras_mixed_rule_and_str() {
 
 compile_tests! {
     list_mixed_rule_and_str_coerces_to_list_rule {
-        // String literals are str_t, rule refs are rule_t. A mixed list should
-        // coerce to list_t<rule_t> since str_t is a subtype of rule_t.
+        // A mixed str/rule list coerces to list_t<rule_t> (str_t <: rule_t).
         r#"grammar { language: "test" }
         let items: list_t<rule_t> = [program, "literal"]
         rule program { choice(for (r: rule_t) in items { r }) }"#

@@ -6,19 +6,17 @@ error_tests! { Resolve {
         ResolveErrorKind::UnknownIdentifier("nonexistent".into())
     }
     error_symref_inner_resolved_in_rule_set_template {
-        // `@<ident>` inside a rule-set template has its inner name resolved like
-        // any other ident; an undefined one is a normal unknown-identifier error.
-        // (Previously the inner stayed Unresolved and crashed definition-time
-        // typecheck at the type_of `_ => unreachable!()`.)
+        // `@<ident>` in a rule-set template has its inner name resolved like any
+        // ident; an undefined one is a normal unknown-identifier error (it once
+        // stayed Unresolved and crashed definition-time typecheck).
         r#"grammar { language: "test" }
         rules r() { rule x { @foo } }
         rule program { "x" }"#,
         ResolveErrorKind::UnknownIdentifier("foo".into())
     }
     error_computed_rule_name_resolved_in_rule_set_template {
-        // The computed name in `rule @<expr> { ... }` is resolved too, not just
-        // the body; an undefined bare-ident name is a normal unknown-identifier
-        // error rather than an unresolved-ident typecheck crash.
+        // The computed name in `rule @<expr> { ... }` is resolved too; an undefined
+        // bare-ident name is a normal unknown-identifier error, not a typecheck crash.
         r#"grammar { language: "test" }
         rules r() { rule @foo { "x" } }
         rule program { "x" }"#,
