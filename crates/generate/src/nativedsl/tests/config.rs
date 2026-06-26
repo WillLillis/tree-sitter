@@ -220,35 +220,6 @@ fn config_all_fields_at_once() {
 }
 
 #[test]
-fn externals_inline_list() {
-    let g = dsl(r#"
-        grammar { language: "test", externals: [heredoc, _eof] }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
-fn externals_with_string_literals() {
-    // String literals in externals (anonymous tokens) don't need pre-registration
-    let g = dsl(r#"
-        grammar { language: "test", externals: [heredoc, "||"] }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
-fn externals_mixed_with_declared_rules() {
-    let g = dsl(r#"
-        grammar { language: "test", externals: [heredoc, comment] }
-        rule program { "x" }
-        rule comment { regexp("//.*") }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
 fn externals_used_in_extras() {
     let g = dsl(r#"
         grammar {
@@ -263,28 +234,6 @@ fn externals_used_in_extras() {
 }
 
 #[test]
-fn externals_with_regexp_literal() {
-    let g = dsl(r#"
-        grammar { language: "test", externals: [regexp(r"\n")] }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(
-        g.external_tokens[0],
-        Rule::Pattern(r"\n".into(), String::new())
-    );
-}
-
-#[test]
-fn externals_used_in_rule_body() {
-    let g = dsl(r#"
-        grammar { language: "test", externals: [heredoc] }
-        rule program { choice("x", heredoc) }
-    "#);
-    assert_eq!(g.external_tokens.len(), 1);
-}
-
-#[test]
 fn externals_used_in_conflicts() {
     let g = dsl(r#"
         grammar {
@@ -295,25 +244,6 @@ fn externals_used_in_conflicts() {
         rule program { "x" }
     "#);
     assert_eq!(g.expected_conflicts.len(), 1);
-}
-
-#[test]
-fn externals_append_inline_lists() {
-    // append() of two inline lists
-    let g = dsl(r#"
-        grammar { language: "test", externals: append([heredoc], [_eof]) }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
-fn externals_empty_list() {
-    let g = dsl(r#"
-        grammar { language: "test", externals: [] }
-        rule program { "x" }
-    "#);
-    assert!(g.external_tokens.is_empty());
 }
 
 #[test]
@@ -336,56 +266,6 @@ fn externals_via_let_bindings() {
 }
 
 #[test]
-fn externals_via_let_with_append() {
-    let g = dsl(r#"
-        let ext: list_t<rule_t> = append([heredoc], [_eof])
-        grammar { language: "test", externals: ext }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
-fn externals_dag_let_referenced_twice_via_append() {
-    // Same `let` value reached through both arms of `append` should not
-    // be mistaken for a cycle.
-    let g = dsl(r#"
-        let ext: list_t<rule_t> = [heredoc]
-        grammar { language: "test", externals: append(ext, ext) }
-        rule program { "x" }
-    "#);
-    assert_eq!(
-        g.external_tokens,
-        vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("heredoc".into()),
-        ]
-    );
-}
-
-#[test]
-fn externals_via_let_mixed_declared_and_undeclared() {
-    let g = dsl(r#"
-        let ext: list_t<rule_t> = [heredoc, comment]
-        grammar { language: "test", externals: ext }
-        rule program { "x" }
-        rule comment { regexp("//.*") }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
-fn externals_via_append_let_and_inline() {
-    // append(let_binding, inline_list)
-    let g = dsl(r#"
-        let base_ext: list_t<rule_t> = [heredoc]
-        grammar { language: "test", externals: append(base_ext, [_eof]) }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
-}
-
-#[test]
 fn externals_used_in_extras_via_let() {
     let g = dsl(r#"
         let ext: list_t<rule_t> = [_newline]
@@ -398,17 +278,6 @@ fn externals_used_in_extras_via_let() {
     "#);
     assert_eq!(g.external_tokens.len(), 1);
     assert_eq!(g.extra_symbols.len(), 2);
-}
-
-#[test]
-fn externals_via_chained_let_with_append() {
-    let g = dsl(r#"
-        let a: list_t<rule_t> = [heredoc]
-        let b: list_t<rule_t> = append(a, [_eof])
-        grammar { language: "test", externals: b }
-        rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
 }
 
 #[test]
@@ -506,30 +375,6 @@ fn expect_decl_redundant_with_grammar_block() {
 }
 
 #[test]
-fn start_picks_named_rule() {
-    // `start: third` rotates `third` to position 0, overriding the default
-    // "first declared rule is the start symbol" convention.
-    let g = dsl(r#"
-        grammar { language: "test", start: third }
-        rule first { "a" }
-        rule second { "b" }
-        rule third { "c" }
-    "#);
-    assert_eq!(rule_names(&g), vec!["third", "first", "second"]);
-}
-
-#[test]
-fn start_default_first_rule_when_unset() {
-    // Regression: omitting `start:` keeps the existing positional behavior.
-    let g = dsl(r#"
-        grammar { language: "test" }
-        rule alpha { "a" }
-        rule beta { "b" }
-    "#);
-    assert_eq!(rule_names(&g), vec!["alpha", "beta"]);
-}
-
-#[test]
 fn error_start_unknown_rule() {
     // Resolver catches `start: <undeclared>` as UnknownIdentifier - no
     // bespoke lower-time check needed.
@@ -546,4 +391,114 @@ fn error_start_unknown_rule() {
         e.kind,
         ResolveErrorKind::UnknownIdentifier("nonexistent".into())
     );
+}
+
+externals_tests! {
+    externals_inline_list {
+        r#"grammar { language: "test", externals: [heredoc, _eof] } rule program { "x" }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("_eof".into()),
+        ]
+    }
+    externals_with_string_literals {
+        // String literals in externals (anonymous tokens) don't need pre-registration.
+        r#"grammar { language: "test", externals: [heredoc, "||"] } rule program { "x" }"#,
+        vec![Rule::NamedSymbol("heredoc".into()), Rule::String("||".into())]
+    }
+    externals_mixed_with_declared_rules {
+        r#"grammar { language: "test", externals: [heredoc, comment] }
+        rule program { "x" }
+        rule comment { regexp("//.*") }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("comment".into()),
+        ]
+    }
+    externals_with_regexp_literal {
+        r#"grammar { language: "test", externals: [regexp(r"\n")] } rule program { "x" }"#,
+        vec![Rule::Pattern(r"\n".into(), String::new())]
+    }
+    externals_used_in_rule_body {
+        r#"grammar { language: "test", externals: [heredoc] } rule program { choice("x", heredoc) }"#,
+        vec![Rule::NamedSymbol("heredoc".into())]
+    }
+    externals_append_inline_lists {
+        r#"grammar { language: "test", externals: append([heredoc], [_eof]) } rule program { "x" }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("_eof".into()),
+        ]
+    }
+    externals_empty_list {
+        r#"grammar { language: "test", externals: [] } rule program { "x" }"#,
+        vec![]
+    }
+    externals_via_let_with_append {
+        r#"let ext: list_t<rule_t> = append([heredoc], [_eof])
+        grammar { language: "test", externals: ext }
+        rule program { "x" }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("_eof".into()),
+        ]
+    }
+    externals_dag_let_referenced_twice_via_append {
+        // Same `let` value reached through both arms of `append` is not a cycle.
+        r#"let ext: list_t<rule_t> = [heredoc]
+        grammar { language: "test", externals: append(ext, ext) }
+        rule program { "x" }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("heredoc".into()),
+        ]
+    }
+    externals_via_let_mixed_declared_and_undeclared {
+        r#"let ext: list_t<rule_t> = [heredoc, comment]
+        grammar { language: "test", externals: ext }
+        rule program { "x" }
+        rule comment { regexp("//.*") }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("comment".into()),
+        ]
+    }
+    externals_via_append_let_and_inline {
+        r#"let base_ext: list_t<rule_t> = [heredoc]
+        grammar { language: "test", externals: append(base_ext, [_eof]) }
+        rule program { "x" }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("_eof".into()),
+        ]
+    }
+    externals_via_chained_let_with_append {
+        r#"let a: list_t<rule_t> = [heredoc]
+        let b: list_t<rule_t> = append(a, [_eof])
+        grammar { language: "test", externals: b }
+        rule program { "x" }"#,
+        vec![
+            Rule::NamedSymbol("heredoc".into()),
+            Rule::NamedSymbol("_eof".into()),
+        ]
+    }
+}
+
+rule_names_tests! {
+    start_picks_named_rule {
+        // `start: third` rotates `third` to position 0, overriding the default
+        // "first declared rule is the start symbol" convention.
+        r#"grammar { language: "test", start: third }
+        rule first { "a" }
+        rule second { "b" }
+        rule third { "c" }"#,
+        vec!["third", "first", "second"]
+    }
+    start_default_first_rule_when_unset {
+        // Regression: omitting `start:` keeps the existing positional behavior.
+        r#"grammar { language: "test" }
+        rule alpha { "a" }
+        rule beta { "b" }"#,
+        vec!["alpha", "beta"]
+    }
 }
