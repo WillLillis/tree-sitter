@@ -15,33 +15,6 @@ fn rule_set_macro_single_rule() {
 }
 
 #[test]
-fn rule_set_macro_empty_body_is_noop() {
-    // An empty `rules` body is allowed; calling it contributes no rules.
-    let g = dsl(r#"
-        grammar { language: "test" }
-        rule program { "p" }
-        rules nothing() {}
-        @nothing()
-        "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["program"]);
-}
-
-#[test]
-fn rule_set_macro_multiple_rules() {
-    let g = dsl(r#"
-        rules pair() {
-            rule a { "x" }
-            rule b { "y" }
-        }
-        grammar { language: "test", start: a }
-        @pair()
-        "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["a", "b"]);
-}
-
-#[test]
 fn rule_set_macro_str_param_substitution() {
     let g = dsl(r#"
         rules lit(s: str_t) {
@@ -52,55 +25,6 @@ fn rule_set_macro_str_param_substitution() {
         "#);
     assert_eq!(g.variables[0].name, "program");
     assert_eq!(g.variables[0].rule, Rule::String("hello".into()));
-}
-
-#[test]
-fn rule_set_macro_rule_param_substitution() {
-    let g = dsl(r#"
-        rules wrap(inner: rule_t) {
-            rule program { seq("(", inner, ")") }
-        }
-        rule digit { "1" }
-        grammar { language: "test", start: program }
-        @wrap(digit)
-        "#);
-    let program = g.variables.iter().find(|v| v.name == "program").unwrap();
-    assert_eq!(
-        program.rule,
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::NamedSymbol("digit".into()),
-            Rule::String(")".into()),
-        ])
-    );
-}
-
-#[test]
-fn rule_set_macro_computed_name_via_concat() {
-    let g = dsl(r#"
-        rules suffixed(s: str_t) {
-            rule @concat("foo_", s) { "x" }
-        }
-        grammar { language: "test", start: foo_bar }
-        @suffixed("bar")
-        "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["foo_bar"]);
-}
-
-#[test]
-fn rule_set_macro_multiple_invocations() {
-    let g = dsl(r#"
-        rules one(s: str_t) {
-            rule @concat("k_", s) { s }
-        }
-        grammar { language: "test", start: k_a }
-        @one("a")
-        @one("b")
-        @one("c")
-        "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["k_a", "k_b", "k_c"]);
 }
 
 #[test]
@@ -125,123 +49,6 @@ fn rule_set_macro_symref_in_expr_position() {
             Rule::String("y".into()),
         ])
     );
-}
-
-#[test]
-fn rule_set_macro_with_for_loop_over_param() {
-    // For-loop inside a rule-set body iterates over a list_t<rule_t> macro
-    // param. The iterable lives in ForConfig (indexed by ForId), separate from
-    // the cloned body subtree - so substituting the param requires either a
-    // fresh ForId per expansion or some other plumbing. Without that, `items`
-    // is read from the macro template (where it's a MacroParam) instead of
-    // the substituted arg.
-    let g = dsl(r#"
-        rules with_choices(items: list_t<rule_t>) {
-            rule program {
-                choice(for (x: rule_t) in items { x })
-            }
-        }
-        rule a { "a" }
-        rule b { "b" }
-        grammar { language: "test", start: program }
-        @with_choices([a, b])
-    "#);
-    let program = g.variables.iter().find(|v| v.name == "program").unwrap();
-    assert_eq!(
-        program.rule,
-        Rule::choice(vec![
-            Rule::NamedSymbol("a".into()),
-            Rule::NamedSymbol("b".into()),
-        ])
-    );
-}
-
-#[test]
-fn rule_set_macro_param_in_combinator_positions() {
-    // Hits Repeat, Optional, Field, Alias, Prec arms of clone_with_subst all
-    // at once - a regression in any arm's recursive subst would corrupt the
-    // assertion below.
-    let g = dsl(r#"
-        rules wrap(inner: rule_t, name: rule_t) {
-            rule program {
-                prec(1, seq(
-                    repeat1(inner),
-                    optional(inner),
-                    field(label, inner),
-                    alias(inner, name),
-                ))
-            }
-        }
-        rule digit { "1" }
-        rule pretty { "pretty" }
-        grammar { language: "test", start: program }
-        @wrap(digit, pretty)
-    "#);
-    let digit = || Rule::NamedSymbol("digit".into());
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::prec(
-            Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::repeat(digit()),
-                Rule::choice(vec![digit(), Rule::Blank]),
-                Rule::field("label".into(), digit()),
-                Rule::alias(digit(), "pretty".into(), /* is_named */ true),
-            ]),
-        )
-    );
-}
-
-#[test]
-fn rule_set_macro_cfg_gated_top_level_call() {
-    // apply_cfg runs before expand_macro_calls; a cfg-disabled @call should
-    // be dropped entirely, leaving no ExpandedRule items behind.
-    let g = dsl(r#"
-        rules extra_rules() {
-            rule extra_a { "ea" }
-            rule extra_b { "eb" }
-        }
-        grammar { language: "test", flags: { disabled: ["GFM"] } }
-        rule program { "p" }
-        #[cfg(GFM)]
-        @extra_rules()
-    "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["program"]);
-}
-
-#[test]
-fn rule_set_macro_cfg_gated_top_level_call_enabled() {
-    // Mirror of the above with the flag enabled - the @call survives apply_cfg
-    // and expands as normal.
-    let g = dsl(r#"
-        rules extra_rules() {
-            rule extra_a { "ea" }
-            rule extra_b { "eb" }
-        }
-        grammar { language: "test", flags: { enabled: ["GFM"] } }
-        rule program { "p" }
-        #[cfg(GFM)]
-        @extra_rules()
-    "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["program", "extra_a", "extra_b"]);
-}
-
-#[test]
-fn rule_set_macro_only_decls_no_static_rules() {
-    // Grammar has zero static `rule` decls outside the macro - all variables
-    // come from expansion.
-    let g = dsl(r#"
-        rules core(name: str_t) {
-            rule @concat(name, "_a") { "a" }
-            rule @concat(name, "_b") { "b" }
-        }
-        grammar { language: "test", start: x_a }
-        @core("x")
-    "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["x_a", "x_b"]);
 }
 
 #[test]
@@ -271,22 +78,6 @@ fn rule_set_macro_at_string_name_unescapes() {
         @emit()
     "#);
     assert_eq!(g.variables[0].name, "aA");
-}
-
-#[test]
-fn rule_set_macro_with_regular_rules_around() {
-    let g = dsl(r#"
-        rules extras() {
-            rule helper_a { "ha" }
-            rule helper_b { "hb" }
-        }
-        grammar { language: "test", start: program }
-        rule program { seq(helper_a, helper_b) }
-        @extras()
-        "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    // start: program rotates program to position 0; remaining order preserved.
-    assert_eq!(names, vec!["program", "helper_a", "helper_b"]);
 }
 
 #[test]
@@ -339,4 +130,180 @@ fn computed_ref_to_macro_name_rejected() {
     );
     let e = assert_err!(err, Resolve);
     assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("m".into()));
+}
+
+rule_names_tests! {
+    rule_set_macro_empty_body_is_noop {
+        // An empty `rules` body is allowed; calling it contributes no rules.
+        r#"
+        grammar { language: "test" }
+        rule program { "p" }
+        rules nothing() {}
+        @nothing()
+        "#,
+        vec!["program"]
+    }
+    rule_set_macro_multiple_rules {
+        r#"
+        rules pair() {
+            rule a { "x" }
+            rule b { "y" }
+        }
+        grammar { language: "test", start: a }
+        @pair()
+        "#,
+        vec!["a", "b"]
+    }
+    rule_set_macro_computed_name_via_concat {
+        r#"
+        rules suffixed(s: str_t) {
+            rule @concat("foo_", s) { "x" }
+        }
+        grammar { language: "test", start: foo_bar }
+        @suffixed("bar")
+        "#,
+        vec!["foo_bar"]
+    }
+    rule_set_macro_multiple_invocations {
+        r#"
+        rules one(s: str_t) {
+            rule @concat("k_", s) { s }
+        }
+        grammar { language: "test", start: k_a }
+        @one("a")
+        @one("b")
+        @one("c")
+        "#,
+        vec!["k_a", "k_b", "k_c"]
+    }
+    rule_set_macro_cfg_gated_top_level_call {
+        // apply_cfg runs before expand_macro_calls; a cfg-disabled @call should
+        // be dropped entirely, leaving no ExpandedRule items behind.
+        r#"
+        rules extra_rules() {
+            rule extra_a { "ea" }
+            rule extra_b { "eb" }
+        }
+        grammar { language: "test", flags: { disabled: ["GFM"] } }
+        rule program { "p" }
+        #[cfg(GFM)]
+        @extra_rules()
+    "#,
+        vec!["program"]
+    }
+    rule_set_macro_cfg_gated_top_level_call_enabled {
+        // Mirror of the above with the flag enabled - the @call survives apply_cfg
+        // and expands as normal.
+        r#"
+        rules extra_rules() {
+            rule extra_a { "ea" }
+            rule extra_b { "eb" }
+        }
+        grammar { language: "test", flags: { enabled: ["GFM"] } }
+        rule program { "p" }
+        #[cfg(GFM)]
+        @extra_rules()
+    "#,
+        vec!["program", "extra_a", "extra_b"]
+    }
+    rule_set_macro_only_decls_no_static_rules {
+        // Grammar has zero static `rule` decls outside the macro - all variables
+        // come from expansion.
+        r#"
+        rules core(name: str_t) {
+            rule @concat(name, "_a") { "a" }
+            rule @concat(name, "_b") { "b" }
+        }
+        grammar { language: "test", start: x_a }
+        @core("x")
+    "#,
+        vec!["x_a", "x_b"]
+    }
+    rule_set_macro_with_regular_rules_around {
+        // start: program rotates program to position 0; remaining order preserved.
+        r#"
+        rules extras() {
+            rule helper_a { "ha" }
+            rule helper_b { "hb" }
+        }
+        grammar { language: "test", start: program }
+        rule program { seq(helper_a, helper_b) }
+        @extras()
+        "#,
+        vec!["program", "helper_a", "helper_b"]
+    }
+}
+
+find_rule_tests! {
+    rule_set_macro_rule_param_substitution {
+        r#"
+        rules wrap(inner: rule_t) {
+            rule program { seq("(", inner, ")") }
+        }
+        rule digit { "1" }
+        grammar { language: "test", start: program }
+        @wrap(digit)
+        "#,
+        "program",
+        Rule::seq(vec![
+            Rule::String("(".into()),
+            Rule::NamedSymbol("digit".into()),
+            Rule::String(")".into()),
+        ])
+    }
+    rule_set_macro_with_for_loop_over_param {
+        // For-loop inside a rule-set body iterates over a list_t<rule_t> macro
+        // param. The iterable lives in ForConfig (indexed by ForId), separate from
+        // the cloned body subtree - so substituting the param requires either a
+        // fresh ForId per expansion or some other plumbing. Without that, `items`
+        // is read from the macro template (where it's a MacroParam) instead of
+        // the substituted arg.
+        r#"
+        rules with_choices(items: list_t<rule_t>) {
+            rule program {
+                choice(for (x: rule_t) in items { x })
+            }
+        }
+        rule a { "a" }
+        rule b { "b" }
+        grammar { language: "test", start: program }
+        @with_choices([a, b])
+    "#,
+        "program",
+        Rule::choice(vec![
+            Rule::NamedSymbol("a".into()),
+            Rule::NamedSymbol("b".into()),
+        ])
+    }
+    rule_set_macro_param_in_combinator_positions {
+        // Hits Repeat, Optional, Field, Alias, Prec arms of clone_with_subst all
+        // at once - a regression in any arm's recursive subst would corrupt the
+        // assertion below.
+        r#"
+        rules wrap(inner: rule_t, name: rule_t) {
+            rule program {
+                prec(1, seq(
+                    repeat1(inner),
+                    optional(inner),
+                    field(label, inner),
+                    alias(inner, name),
+                ))
+            }
+        }
+        rule digit { "1" }
+        rule pretty { "pretty" }
+        grammar { language: "test", start: program }
+        @wrap(digit, pretty)
+    "#,
+        "program",
+        Rule::prec(
+            Precedence::Integer(1),
+            Rule::seq(vec![
+                Rule::repeat(Rule::NamedSymbol("digit".into())),
+                Rule::choice(vec![Rule::NamedSymbol("digit".into()), Rule::Blank]),
+                Rule::field("label".into(), Rule::NamedSymbol("digit".into())),
+                Rule::alias(Rule::NamedSymbol("digit".into()), "pretty".into(), true),
+            ]),
+        )
+    }
 }
