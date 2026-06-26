@@ -599,12 +599,6 @@ impl ModuleContext {
         arena.iter_range(self.node_range.clone())
     }
 
-    /// `true` if `id` was produced while parsing this module.
-    #[must_use]
-    pub fn owns_node(&self, id: NodeId) -> bool {
-        self.node_range.contains(&(id.index() as u32))
-    }
-
     /// Build a [`Note`] anchored to this module's source.
     #[must_use]
     pub fn note(&self, message: NoteMessage, span: Span) -> Note {
