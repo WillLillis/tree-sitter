@@ -310,18 +310,6 @@ fn error_builtin_arg_count_display() {
     }
 }
 
-#[test]
-fn keywords_as_identifiers() {
-    let g = dsl(r#"grammar { language: "test" } rule seq { "x" }"#);
-    assert_eq!(g.variables[0].name, "seq");
-    let g = dsl(r#"grammar { language: "test" } let token = "x" rule foo { token }"#);
-    assert_eq!(g.variables[0].name, "foo");
-    let g = dsl(
-        r#"grammar { language: "test" } macro repeat(x: rule_t) rule_t { x } rule foo { repeat("a") }"#,
-    );
-    assert_eq!(g.variables[0].name, "foo");
-}
-
 inherit_error_tests! { Parse {
     error_inherited_parse_error {
         "grammar { language: \"base\" }\nrule program { seq(\"a\" \"b\") }\n",

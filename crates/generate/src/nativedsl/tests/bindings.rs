@@ -323,6 +323,23 @@ rule_tests! {
     }
 }
 
+// Keywords (seq/token/repeat) are contextual: usable as a rule, let, or macro
+// name. Each context is its own case; the lone rule is the only variable.
+rule_names_tests! {
+    keyword_seq_as_rule_name {
+        r#"grammar { language: "test" } rule seq { "x" }"#,
+        vec!["seq"]
+    }
+    keyword_token_as_let_name {
+        r#"grammar { language: "test" } let token = "x" rule foo { token }"#,
+        vec!["foo"]
+    }
+    keyword_repeat_as_macro_name {
+        r#"grammar { language: "test" } macro repeat(x: rule_t) rule_t { x } rule foo { repeat("a") }"#,
+        vec!["foo"]
+    }
+}
+
 #[test]
 fn for_in_list_str_body_via_let() {
     // For-loop spreads its body into a list literal under a let binding.
