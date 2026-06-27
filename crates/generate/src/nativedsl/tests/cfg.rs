@@ -468,6 +468,36 @@ fn cfg_three_level_inheritance_root_flag_wins() {
 }
 
 #[test]
+fn wrapper_overrides_base_extension_flags() {
+    // The markdown wrapper pattern: a base grammar bakes a default extension
+    // config (TABLE on, TAGS off) gating rules; a thin wrapper inherits it and
+    // flips both flags while declaring no rules of its own. The inherited rules
+    // must re-gate against the wrapper's flags (now-enabled rule appears,
+    // now-disabled drops) and a rules-less flag-only wrapper must be valid.
+    let g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"
+            grammar { language: "md", flags: { enabled: ["TABLE"], disabled: ["TAGS"] } }
+            rule document { "x" }
+            #[cfg(TABLE)] rule pipe_table { "|" }
+            #[cfg(TAGS)] rule tag { "<" }
+        "#,
+        )],
+        r#"
+        let base = inherit("base.tsg")
+        grammar {
+            language: "md",
+            inherits: base,
+            flags: { enabled: ["TAGS"], disabled: ["TABLE"] },
+        }
+        "#,
+    )
+    .unwrap();
+    assert_eq!(rule_names(&g), vec!["document", "tag"]);
+}
+
+#[test]
 fn cfg_disabled_nested_import_does_not_load() {
     // A cfg-disabled import nested in a list (not a top-level let) must not load
     // (module_refs was once rebuilt only when a top-level item dropped).
