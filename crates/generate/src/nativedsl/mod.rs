@@ -281,7 +281,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
             error: e.to_string(),
         })
     })?;
-    let cap = input.len() / 30;
+    let cap = input.len() / 10;
     let mut shared = SharedAst::new(cap);
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
