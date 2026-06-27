@@ -70,7 +70,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         grammar_path: PathBuf,
         shared: &'shared mut SharedAst,
     ) -> Self {
-        let root_cap = tokens.len() / 30;
+        let root_cap = tokens.len() / 10;
         Self {
             tokens,
             pos: 0,
