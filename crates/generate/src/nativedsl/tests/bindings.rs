@@ -554,7 +554,11 @@ fn macro_let_cycle_reported_as_circular() {
         rule prog { b }"#,
     );
     let e = assert_err!(err, Lower);
-    assert_eq!(e.kind, LowerErrorKind::CircularLet("b".into()));
+    assert!(
+        matches!(&e.kind, LowerErrorKind::CircularLet(s) if s == "b"),
+        "got {:?}",
+        e.kind
+    );
     assert_eq!(e.notes.len(), 1);
 }
 

@@ -74,6 +74,7 @@ use std::path::Path;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::IoError;
 use crate::rules::Rule;
 
 use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
@@ -275,11 +276,11 @@ pub(crate) fn collect_imported_rules(
 ///
 /// Returns [`DslError`] if any pipeline stage fails.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
-    let canonical = dunce::canonicalize(grammar_path).map_err(|e| {
-        LowerError::without_span(LowerErrorKind::ModuleResolveFailed {
-            path: grammar_path.to_path_buf(),
-            error: e.to_string(),
-        })
+    let canonical = dunce::canonicalize(grammar_path).map_err(|error| {
+        LowerError::without_span(LowerErrorKind::ModuleResolveFailed(IoError {
+            error,
+            path: Some(grammar_path.to_path_buf()),
+        }))
     })?;
     let cap = input.len() / 10;
     let mut shared = SharedAst::new(cap);

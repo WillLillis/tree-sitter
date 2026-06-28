@@ -95,7 +95,11 @@ fn error_import_disallowed_items() {
         let DslError::Lower(e) = outer.inner.as_ref() else {
             panic!("expected Lower error, got {:?}", outer.inner)
         };
-        assert_eq!(e.kind, LowerErrorKind::ModuleDisallowedItem(expected));
+        assert!(
+            matches!(&e.kind, LowerErrorKind::ModuleDisallowedItem(k) if *k == expected),
+            "got {:?}",
+            e.kind
+        );
     }
 }
 
@@ -182,7 +186,7 @@ fn error_import_bad_path() {
     "#,
     );
     let e = assert_err!(err, Lower);
-    assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
+    assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed(_)));
 }
 
 #[test]
@@ -496,9 +500,10 @@ fn helper_hole_unregistered_external_is_rejected() {
     )
     .unwrap_err();
     let e = assert_err!(err, Lower);
-    assert_eq!(
-        e.kind,
-        LowerErrorKind::UndefinedSymbols(vec!["_tok".into()])
+    assert!(
+        matches!(&e.kind, LowerErrorKind::UndefinedSymbols(names) if *names == ["_tok"]),
+        "got {:?}",
+        e.kind
     );
 }
 
@@ -649,9 +654,13 @@ fn override_reaching_helper_top_level_via_macro_is_rejected() {
     let DslError::Lower(e) = outer.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", outer.inner)
     };
-    assert_eq!(
-        e.kind,
-        LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::OverrideRule)
+    assert!(
+        matches!(
+            e.kind,
+            LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::OverrideRule)
+        ),
+        "got {:?}",
+        e.kind
     );
 }
 

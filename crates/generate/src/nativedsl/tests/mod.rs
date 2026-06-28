@@ -66,13 +66,30 @@ macro_rules! assert_err {
     };
 }
 
-/// Generate test functions that assert a specific error kind for a given input.
+/// Generate test functions asserting a specific error kind for a given input.
 /// `$variant` is the `DslError` variant to match (e.g. Parse, Resolve, Lower).
+///
+/// Two forms:
+/// - `error_tests! { Variant { name { input, EXPECTED } ... } }` compares the
+///   kind by value (`assert_eq!`); for kinds that derive `Eq`.
+/// - `error_tests! { match Variant { name { input, PATTERN [if GUARD] } ... } }`
+///   pattern-matches the kind (`matches!`); for kinds that can't derive `Eq`
+///   (e.g. holding a non-`Eq` `io::Error`). The optional guard keeps the payload
+///   assertion.
 macro_rules! error_tests {
     ($variant:ident { $($name:ident { $input:expr, $expected:expr })* }) => {
         $(#[test] fn $name() {
             let e = assert_err!(dsl_err($input), $variant);
             assert_eq!(e.kind, $expected);
+        })*
+    };
+    (match $variant:ident { $($name:ident { $input:expr, $expected:pat $(if $guard:expr)? })* }) => {
+        $(#[test] fn $name() {
+            let e = assert_err!(dsl_err($input), $variant);
+            assert!(
+                matches!(&e.kind, $expected $(if $guard)?),
+                "unexpected error kind: {:?}", e.kind
+            );
         })*
     };
 }

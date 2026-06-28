@@ -1,13 +1,13 @@
 use super::super::*;
 
-error_tests! { Lower {
+error_tests! { match Lower {
     // obj_t<X> carries the value type, not the key set, so a missing field on a
     // computed object can't be caught at typecheck - lower reports it with the keys.
     error_field_not_found_on_computed_object {
         r#"grammar { language: "test" }
         macro mk() obj_t<rule_t> { { a: program } }
         rule program { seq(mk().b) }"#,
-        LowerErrorKind::FieldNotFound { field: "b".into(), available: vec!["a".into()] }
+        LowerErrorKind::FieldNotFound { field, available } if field == "b" && *available == ["a"]
     }
     // A str_t widened to rule_t (via let/append/mixed list) into a name-only config
     // field can't be caught at typecheck, so lower reports it instead of panicking.
@@ -49,7 +49,7 @@ error_tests! { Lower {
     error_external_as_start_rule {
         r#"grammar { language: "test", externals: [tok], start: tok }
         rule program { "x" }"#,
-        LowerErrorKind::ExternalCannotBeStart("tok".into())
+        LowerErrorKind::ExternalCannotBeStart(name) if name == "tok"
     }
     error_multiple_inherits {
         r#"let a = inherit("inherit_base/grammar.tsg")
@@ -66,13 +66,13 @@ error_tests! { Lower {
     }
     error_override_without_target {
         r#"grammar { language: "test" } override rule foo { "bar" }"#,
-        LowerErrorKind::OverrideRuleNotFound(vec!["foo".into()])
+        LowerErrorKind::OverrideRuleNotFound(names) if *names == ["foo"]
     }
     error_override_rule_not_found {
         r#"let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule nonexistent { "oops" }"#,
-        LowerErrorKind::OverrideRuleNotFound(vec!["nonexistent".into()])
+        LowerErrorKind::OverrideRuleNotFound(names) if *names == ["nonexistent"]
     }
     error_missing_grammar_block {
         r#"rule program { "x" }"#,
@@ -137,7 +137,7 @@ error_tests! { Lower {
         override rule zzz { "z" }
         override rule aaa { "a" }
         override rule mmm { "m" }"#,
-        LowerErrorKind::OverrideRuleNotFound(vec!["aaa".into(), "mmm".into(), "zzz".into()])
+        LowerErrorKind::OverrideRuleNotFound(names) if *names == ["aaa", "mmm", "zzz"]
     }
     // A variable holding a non-name rule (e.g. seq) passed as alias target
     // should produce a proper error, not panic.
@@ -196,7 +196,7 @@ fn error_inherit_bad_path() {
         ),
         Lower
     );
-    assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed { .. }));
+    assert!(matches!(e.kind, LowerErrorKind::ModuleResolveFailed(_)));
 }
 
 #[test]
@@ -212,9 +212,9 @@ fn error_module_read_failure_renders_without_panic() {
         dsl_path(&subdir)
     );
     std::fs::write(&parent_path, &parent_src).unwrap();
-    let err = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
+    let error = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
     let wrapped = NativeDslError {
-        error: err,
+        error,
         src: parent_src,
         path: parent_path,
     };
@@ -239,7 +239,11 @@ fn helper_lower_error_carries_helper_source() {
     )
     .unwrap_err();
     let e = assert_err!(err, Lower);
-    assert_eq!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000));
+    assert!(
+        matches!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000)),
+        "got {:?}",
+        e.kind
+    );
     let (src, path) = e
         .src
         .as_deref()
@@ -261,7 +265,7 @@ inherit_error_tests! { Resolve {
     }
 }}
 
-inherit_error_tests! { Lower {
+inherit_error_tests! { match Lower {
     error_inherited_missing_language {
         "grammar { extras: [] }\nrule program { \"x\" }\n",
         LowerErrorKind::MissingLanguageField
