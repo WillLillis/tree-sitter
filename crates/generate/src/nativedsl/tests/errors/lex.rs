@@ -35,7 +35,7 @@ error_tests! { Lex {
     }
     error_too_many_raw_string_hashes {
         &format!("let x = r{}\"test\"", "#".repeat(256)),
-        LexErrorKind::TooManyHashes
+        LexErrorKind::TooManyHashes(256)
     }
     error_unexpected_char {
         r#"grammar { language: "test" } rule program { $ }"#,
