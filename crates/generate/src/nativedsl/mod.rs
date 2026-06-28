@@ -154,13 +154,8 @@ pub enum LoweredRef<'a> {
     Helper(&'a [(String, Rule)]),
 }
 
-// TODO: questionable wording, precedence?
-/// Build a module's export table.
-///
-/// The table maps each name a module exposes to `mod::name` references onto an
-/// ID-based [`Export`], built once when the module is constructed. Insertion
-/// order encodes precedence (first wins): AST-level let/macro, then top-level
-/// externals, then lowered rules/externals.
+/// Build a module's export table: each name this module exposes to `mod::name` refs,
+/// mapped to an ID-based [`Export`]. Built once, when the [`Module`] is constructed.
 #[must_use]
 pub fn build_exports(
     arena: &NodeArena,
@@ -169,7 +164,9 @@ pub fn build_exports(
     lowered: LoweredRef,
 ) -> FxHashMap<Box<str>, Export> {
     let mut exports: FxHashMap<Box<str>, Export> = FxHashMap::default();
-    // First insertion wins, so this runs highest-precedence first.
+    // First-wins. User names share one namespace that collect_decls already
+    // deduped. The only name added twice is a symbol that is both a rule and an
+    // external (rules iterated first below, so it resolves to the rule).
     let mut add = |name: &str, export| {
         exports.entry(name.into()).or_insert(export);
     };
