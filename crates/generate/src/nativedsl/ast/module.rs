@@ -164,8 +164,7 @@ pub struct GrammarConfig {
 }
 
 impl GrammarConfig {
-    // TODO: Don't skip language here, and instead filter out caller side?
-    /// Iterate all node-valued config fields with their kind (excludes `language`).
+    /// All node-valued config fields with their `ConfigField` kind.
     pub fn node_fields(&self) -> impl Iterator<Item = (ConfigField, NodeId)> + '_ {
         use ConfigField as C;
         #[rustfmt::skip]
