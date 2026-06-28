@@ -73,6 +73,7 @@ pub use typecheck::{
 use std::path::Path;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
 
 use crate::IoError;
 use crate::rules::Rule;
@@ -82,7 +83,24 @@ use loader::Loader;
 use typecheck::TypeEnv;
 
 /// Global module index. Every loaded module gets a unique `ModuleId`.
-pub type ModuleId = u8;
+///
+/// A newtype over the module-table index, distinct from the other `u8`/`u32`
+/// indices in the pipeline so they can't be confused at a use site.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModuleId(u8);
+
+impl From<u8> for ModuleId {
+    fn from(value: u8) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ModuleId> for usize {
+    fn from(id: ModuleId) -> Self {
+        Self::from(id.0)
+    }
+}
 
 /// A loaded and resolved module.
 #[derive(Debug)]
@@ -230,9 +248,9 @@ pub(crate) fn collect_imported_rules(
 ) -> Vec<ImportedRule> {
     let mut rules = Vec::new();
     let mut visited = FxHashSet::default();
-    let mut stack: Vec<(u8, Span)> = Vec::new();
+    let mut stack: Vec<(ModuleId, Span)> = Vec::new();
 
-    let seed = |stack: &mut Vec<(u8, Span)>, refs: &[ast::NodeId]| {
+    let seed = |stack: &mut Vec<(ModuleId, Span)>, refs: &[ast::NodeId]| {
         // Reverse so the LIFO stack pops imports in source order (a pre-order
         // DFS visits siblings left-to-right when pushed right-to-left).
         for &mref_id in refs.iter().rev() {

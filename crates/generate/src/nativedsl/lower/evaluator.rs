@@ -47,7 +47,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         previous: &'a [Module],
         root_ctx: &'a ModuleContext,
     ) -> Self {
-        let root_id = previous.len() as ModuleId;
+        let root_id = ModuleId::from(previous.len() as u8);
         state.reset_per_grammar();
         Self {
             state,
