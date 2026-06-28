@@ -144,7 +144,7 @@ pub fn lower_with_base(
 ) -> LowerResult<InputGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
-        .and_then(|(idx, _)| previous[idx as usize].lowered());
+        .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
     let result = evaluate(state, strings, shared, previous, current)?;
     let grammar = build_grammar(current, result, base_grammar, previous, imported_rules)?;
     check_symbol_completeness(shared, current, previous, &grammar)?;
@@ -507,7 +507,7 @@ fn build_grammar(
     for ir in imported_rules {
         expect_pat!(
             Module::Helper { lowered_rules, .. },
-            &previous[ir.module as usize]
+            &previous[usize::from(ir.module)]
         );
         let (name, rule) = &lowered_rules[ir.index as usize];
         let final_rule = overrides

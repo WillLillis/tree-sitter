@@ -224,7 +224,7 @@ fn collect_decls<'a>(
     for ir in imported_rules {
         expect_pat!(
             Module::Helper { lowered_rules, .. },
-            &modules[ir.module as usize]
+            &modules[usize::from(ir.module)]
         );
         let name = &lowered_rules[ir.index as usize].0;
         // First source of an overridden name claims the override. A later

@@ -112,7 +112,7 @@ impl Loader<'_> {
         // Resolve identifiers
         let base = ctx
             .inherit_module(&self.shared.arena)
-            .and_then(|(idx, span)| self.modules[idx as usize].lowered().map(|g| (g, span)));
+            .and_then(|(idx, span)| self.modules[usize::from(idx)].lowered().map(|g| (g, span)));
         resolve::resolve(
             self.shared,
             &ctx,
@@ -164,6 +164,7 @@ impl Loader<'_> {
             }
         };
         let global_id = u8::try_from(self.modules.len())
+            .map(ModuleId::from)
             .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
         self.modules.push(module);
 
