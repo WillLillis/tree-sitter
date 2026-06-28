@@ -3,9 +3,7 @@
 
 use memchr::memchr;
 
-use super::{LexErrorKind, LexResult};
-use crate::nativedsl::LexError;
-use crate::nativedsl::ast::Span;
+use crate::nativedsl::{LexError, LexErrorKind, LexResult, ast::Span};
 
 /// Decode the escape sequences in a quote-stripped string literal's text.
 /// Assumes [`lex_string`](super::Lexer) already validated every escape is

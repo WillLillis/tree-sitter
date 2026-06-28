@@ -14,8 +14,7 @@ pub use token::{Token, TokenKind};
 
 use memchr::{memchr, memchr2};
 
-use crate::nativedsl::LexError;
-use crate::nativedsl::ast::Span;
+use crate::nativedsl::{LexError, ast::Span};
 
 use escape::{validate_hex_escape, validate_unicode_escape};
 
