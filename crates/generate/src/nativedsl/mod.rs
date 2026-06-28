@@ -200,11 +200,8 @@ pub fn build_exports(
         };
         add(name, Export::Local(kind));
     }
-    // `expect` forward-decls are NOT exported: a symbol is referenced across
-    // modules through the lowered output below (a rule or registered external),
-    // by flat name. A bare forward-decl names something defined elsewhere and so
-    // has nothing to export on its own.
-    // Lowered output.
+
+    // Rules and externals
     match lowered {
         LoweredRef::Grammar(g) => {
             for (i, v) in g.variables.iter().enumerate() {
@@ -318,13 +315,13 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     // Root is the last-pushed module by construction.
     expect_pat!(Some(Module::Grammar { ctx, lowered, .. }), modules.pop());
     if lowered.variables.is_empty() {
-        let span = ctx
+        let g_span = ctx
             .root_items
             .iter()
             .find(|&&id| matches!(shared.arena.get(id), Node::Grammar))
             .map(|&id| shared.arena.span(id))
             .unwrap();
-        Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, span))?;
+        Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, g_span))?;
     }
     Ok(*lowered)
 }
