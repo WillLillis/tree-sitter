@@ -352,9 +352,10 @@ fn expect_referenced_but_not_defined_is_rejected() {
     "#,
     );
     let e = assert_err!(err, Lower);
-    assert_eq!(
-        e.kind,
-        LowerErrorKind::UndefinedSymbols(vec!["_foo".into()])
+    assert!(
+        matches!(&e.kind, LowerErrorKind::UndefinedSymbols(names) if *names == ["_foo"]),
+        "got {:?}",
+        e.kind
     );
 }
 

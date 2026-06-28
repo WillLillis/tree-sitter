@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::IoError;
 use crate::nativedsl::{
     DisallowedItemKind, DslError, DslResult, LexError, LexErrorKind, LowerError, LowerErrorKind,
     LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
@@ -217,12 +218,12 @@ impl Loader<'_> {
             return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
         }
 
-        let content = std::fs::read_to_string(module_path).map_err(|e| {
+        let content = std::fs::read_to_string(module_path).map_err(|error| {
             LowerError::new(
-                LowerErrorKind::ModuleReadFailed {
-                    path: module_path.to_path_buf(),
-                    error: e.to_string(),
-                },
+                LowerErrorKind::ModuleReadFailed(IoError {
+                    error,
+                    path: Some(module_path.to_path_buf()),
+                }),
                 span,
             )
         })?;
@@ -369,14 +370,12 @@ impl Loader<'_> {
 }
 
 fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
-    dunce::canonicalize(path).map_err(|e| {
+    dunce::canonicalize(path).map_err(|error| {
         LowerError::new(
-            LowerErrorKind::ModuleResolveFailed {
-                path: path.to_path_buf(),
-                // TODO: Pull custom deserializer from upstream
-                // so we store the error as a value
-                error: e.to_string(),
-            },
+            LowerErrorKind::ModuleResolveFailed(IoError {
+                error,
+                path: Some(path.to_path_buf()),
+            }),
             span,
         )
         .into()
