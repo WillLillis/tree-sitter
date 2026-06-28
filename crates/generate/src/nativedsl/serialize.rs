@@ -1,9 +1,10 @@
 //! JSON serialization for [`InputGrammar`] - produces `grammar.json` format.
 
 use crate::grammars::{InputGrammar, PrecedenceEntry};
+use crate::parse_grammar::{PrecedenceValueJSON, RuleJSON};
 use crate::rules::{Alias, Associativity, Precedence, Rule};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 /// Convert an [`InputGrammar`] to `grammar.json` format.
 pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
@@ -43,9 +44,16 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
                 .map(|g| {
                     Value::Array(
                         g.iter()
-                            .map(|e| match e {
-                                PrecedenceEntry::Name(s) => json!({"type": "STRING", "value": s}),
-                                PrecedenceEntry::Symbol(s) => json!({"type": "SYMBOL", "name": s}),
+                            .map(|e| {
+                                let node = match e {
+                                    PrecedenceEntry::Name(s) => {
+                                        RuleJSON::STRING { value: s.clone() }
+                                    }
+                                    PrecedenceEntry::Symbol(s) => {
+                                        RuleJSON::SYMBOL { name: s.clone() }
+                                    }
+                                };
+                                node_to_value(node)
                             })
                             .collect(),
                     )
@@ -75,56 +83,94 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
     Value::Object(obj)
 }
 
-fn rule_to_json(rule: &Rule) -> serde_json::Value {
+/// Serialize a typed `grammar.json` node to a JSON value.
+fn node_to_value(node: RuleJSON) -> Value {
+    serde_json::to_value(node).expect("RuleJSON serialization cannot fail")
+}
+
+fn rule_to_json(rule: &Rule) -> Value {
+    node_to_value(build_rule(rule))
+}
+
+/// Lower the internal [`Rule`] representation into the typed `grammar.json`
+/// schema ([`RuleJSON`]).
+fn build_rule(rule: &Rule) -> RuleJSON {
     match rule {
-        Rule::Blank => json!({"type": "BLANK"}),
-        Rule::String(s) => json!({"type": "STRING", "value": s}),
-        Rule::Pattern(p, f) if f.is_empty() => json!({"type": "PATTERN", "value": p}),
-        Rule::Pattern(p, f) => json!({"type": "PATTERN", "value": p, "flags": f}),
-        Rule::NamedSymbol(n) => json!({"type": "SYMBOL", "name": n}),
-        Rule::Symbol(s) => json!({"type": "SYMBOL", "name": format!("__symbol_{}", s.index)}),
-        Rule::Choice(ms) => {
-            json!({"type": "CHOICE", "members": ms.iter().map(rule_to_json).collect::<Vec<_>>()})
-        }
-        Rule::Seq(ms) => {
-            json!({"type": "SEQ", "members": ms.iter().map(rule_to_json).collect::<Vec<_>>()})
-        }
-        Rule::Repeat(inner) => json!({"type": "REPEAT1", "content": rule_to_json(inner)}),
+        Rule::Blank => RuleJSON::BLANK,
+        Rule::String(s) => RuleJSON::STRING { value: s.clone() },
+        Rule::Pattern(p, f) => RuleJSON::PATTERN {
+            value: p.clone(),
+            flags: (!f.is_empty()).then(|| f.clone()),
+        },
+        Rule::NamedSymbol(n) => RuleJSON::SYMBOL { name: n.clone() },
+        Rule::Symbol(s) => RuleJSON::SYMBOL {
+            name: format!("__symbol_{}", s.index),
+        },
+        Rule::Choice(ms) => RuleJSON::CHOICE {
+            members: ms.iter().map(build_rule).collect(),
+        },
+        Rule::Seq(ms) => RuleJSON::SEQ {
+            members: ms.iter().map(build_rule).collect(),
+        },
+        Rule::Repeat(inner) => RuleJSON::REPEAT1 {
+            content: Box::new(build_rule(inner)),
+        },
         Rule::Metadata { params, rule } => {
-            let mut c = rule_to_json(rule);
+            let mut c = build_rule(rule);
             if params.dynamic_precedence != 0 {
-                c = json!({"type": "PREC_DYNAMIC", "value": params.dynamic_precedence, "content": c});
+                c = RuleJSON::PREC_DYNAMIC {
+                    value: params.dynamic_precedence,
+                    content: Box::new(c),
+                };
             }
-            if let Some(pv) = match &params.precedence {
+            let pv = match &params.precedence {
                 Precedence::None => None,
-                Precedence::Integer(n) => Some(serde_json::Value::Number((*n).into())),
-                Precedence::Name(s) => Some(serde_json::Value::String(s.clone())),
-            } {
+                Precedence::Integer(n) => Some(PrecedenceValueJSON::Integer(*n)),
+                Precedence::Name(s) => Some(PrecedenceValueJSON::Name(s.clone())),
+            };
+            if let Some(pv) = pv {
                 c = match params.associativity {
-                    Some(Associativity::Left) => {
-                        json!({"type": "PREC_LEFT", "value": pv, "content": c})
-                    }
-                    Some(Associativity::Right) => {
-                        json!({"type": "PREC_RIGHT", "value": pv, "content": c})
-                    }
-                    None => json!({"type": "PREC", "value": pv, "content": c}),
+                    Some(Associativity::Left) => RuleJSON::PREC_LEFT {
+                        value: pv,
+                        content: Box::new(c),
+                    },
+                    Some(Associativity::Right) => RuleJSON::PREC_RIGHT {
+                        value: pv,
+                        content: Box::new(c),
+                    },
+                    None => RuleJSON::PREC {
+                        value: pv,
+                        content: Box::new(c),
+                    },
                 };
             }
             if let Some(Alias { value, is_named }) = &params.alias {
-                c = json!({"type": "ALIAS", "content": c, "named": is_named, "value": value});
+                c = RuleJSON::ALIAS {
+                    content: Box::new(c),
+                    named: *is_named,
+                    value: value.clone(),
+                };
             }
             if let Some(field_name) = &params.field_name {
-                c = json!({"type": "FIELD", "name": field_name, "content": c});
+                c = RuleJSON::FIELD {
+                    name: field_name.clone(),
+                    content: Box::new(c),
+                };
             }
             if params.is_token && params.is_main_token {
-                c = json!({"type": "IMMEDIATE_TOKEN", "content": c});
+                c = RuleJSON::IMMEDIATE_TOKEN {
+                    content: Box::new(c),
+                };
             } else if params.is_token {
-                c = json!({"type": "TOKEN", "content": c});
+                c = RuleJSON::TOKEN {
+                    content: Box::new(c),
+                };
             }
             c
         }
-        Rule::Reserved { rule, context_name } => {
-            json!({"type": "RESERVED", "context_name": context_name, "content": rule_to_json(rule)})
-        }
+        Rule::Reserved { rule, context_name } => RuleJSON::RESERVED {
+            context_name: context_name.clone(),
+            content: Box::new(build_rule(rule)),
+        },
     }
 }
