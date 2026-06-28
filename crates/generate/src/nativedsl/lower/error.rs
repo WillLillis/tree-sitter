@@ -1,11 +1,12 @@
 //! Lower-stage error taxonomy.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{MAX_CALL_DEPTH, MAX_EVAL_DEPTH};
+use crate::IoError;
 use crate::nativedsl::LowerError;
 
 pub type LowerResult<T> = Result<T, LowerError>;
@@ -17,7 +18,7 @@ pub enum DisallowedItemKind {
     Inherit,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[derive(Debug, Serialize, Deserialize, Error)]
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
@@ -29,10 +30,10 @@ pub enum LowerErrorKind {
     MultipleInherits,
     #[error("override rule(s) not found in base grammar or imported helpers: {}", .0.join(", "))]
     OverrideRuleNotFound(Vec<String>),
-    #[error("failed to resolve '{}': {error}", path.display())]
-    ModuleResolveFailed { path: PathBuf, error: String },
-    #[error("failed to read '{}': {error}", path.display())]
-    ModuleReadFailed { path: PathBuf, error: String },
+    #[error("failed to resolve '{}': {}", .0.path.as_deref().unwrap_or_else(|| Path::new("<unknown>")).display(), .0.error)]
+    ModuleResolveFailed(IoError),
+    #[error("failed to read '{}': {}", .0.path.as_deref().unwrap_or_else(|| Path::new("<unknown>")).display(), .0.error)]
+    ModuleReadFailed(IoError),
     #[error("too many modules (max 256)")]
     ModuleTooMany,
     #[error("module import chain too deep (max 256)")]

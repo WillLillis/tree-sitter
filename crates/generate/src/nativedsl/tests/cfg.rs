@@ -770,7 +770,7 @@ error_tests! { Resolve {
     }
 }}
 
-error_tests! { Lower {
+error_tests! { match Lower {
     cfg_disabled_definition_with_expect_is_undefined_symbol {
         // An `expect` keeps the symbol past resolve; cfg then drops its only
         // definition, so the completeness check catches the dangling symbol at lower.
@@ -781,7 +781,7 @@ error_tests! { Lower {
         #[cfg(GFM)]
         rule strikethrough { "~~" }
     "#,
-        LowerErrorKind::UndefinedSymbols(vec!["strikethrough".into()])
+        LowerErrorKind::UndefinedSymbols(names) if *names == ["strikethrough"]
     }
 }}
 
