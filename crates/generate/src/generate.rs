@@ -404,13 +404,14 @@ where
         .map_err(|e| GenerateError::IO(IoError::new(e, Some(src_path.as_path()))))?;
 
     let (input_grammar, grammar_json) = match grammar_source {
-        GrammarSource::Json(json) => (parse_grammar(&json)?, json),
+        GrammarSource::Json(json) => (parse_grammar(&json, diagnostics)?, json),
         #[cfg(feature = "nativedsl")]
         GrammarSource::Grammar(grammar) => {
+            let grammar = (*grammar).normalize(diagnostics);
             let json =
                 serde_json::to_string_pretty(&nativedsl::serialize::grammar_to_json(&grammar))
                     .unwrap();
-            (*grammar, json)
+            (grammar, json)
         }
     };
 
@@ -418,9 +419,6 @@ where
         fs::write(src_path.join("grammar.json"), &grammar_json)
             .map_err(|e| GenerateError::IO(IoError::new(e, Some(src_path.as_path()))))?;
     }
-
-    // If our job is only to generate `grammar.json` and not `parser.c`, stop here.
-    let input_grammar = parse_grammar(&grammar_json, diagnostics)?;
 
     if !generate_parser {
         let node_types_json =
@@ -637,7 +635,7 @@ pub fn load_grammar_file(
                     src,
                     path: grammar_path.to_owned(),
                 }))
-            })?.normalize();
+            })?;
             Ok(GrammarSource::Grammar(Box::new(grammar)))
         }
         _ => Err(LoadGrammarError::FileExtension(grammar_path.to_owned()))?,

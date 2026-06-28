@@ -990,16 +990,14 @@ impl Generate {
             }
             if let Err(err) = result {
                 // Removes extra context associated with the error
-                Err(anyhow!(err.to_string())).with_context(|| "Error when generating parser")?;
+                #[cfg(feature = "nativedsl")]
+                if let GenerateError::LoadGrammarFile(LoadGrammarError::NativeDsl(_)) = err {
+                    // Native DSL errors are rendered by themselves
+                    return Err(err)?;
+                }
+                // Removes extra context associated with the error
+                Err(anyhow!(err.to_string())).context("Error when generating parser")?;
             }
-            #[cfg(feature = "nativedsl")]
-            if let GenerateError::LoadGrammarFile(LoadGrammarError::NativeDsl(_)) = err {
-                // Native DSL errors are rendered by themselves
-                return Err(err)?;
-            }
-
-            // Removes extra context associated with the error
-            Err(anyhow!(err.to_string())).context("Error when generating parser")?;
         }
 
         if self.build {
