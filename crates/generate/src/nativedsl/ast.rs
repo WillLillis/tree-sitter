@@ -331,17 +331,12 @@ pub struct ObjectField {
 
 /// Shared AST data across all modules in a grammar. All `NodeId`, `MacroId`,
 /// `ForId`, and `ChildRange` values are globally valid within this structure.
-///
-/// The `arena` and `pools` fields are separate to allow split borrowing:
-/// resolve functions can mutate `arena` while reading `pools`.
 pub struct SharedAst {
     pub arena: NodeArena,
     pub pools: AstPools,
 }
 
 /// Indexed pool data backing `MacroId`, `ForId`, and `ChildRange`.
-/// Separated from `NodeArena` so that name resolution can hold
-/// `&mut arena` and `&pools` simultaneously.
 pub struct AstPools {
     pub children: Vec<NodeId>,
     pub macro_configs: Vec<MacroConfig>,

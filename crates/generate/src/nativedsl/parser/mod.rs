@@ -37,8 +37,7 @@ pub struct Parser<'tok, 'shared> {
     /// Stack of local bindings (macro params and for-loop bindings).
     locals: Vec<(Span, LocalBinding)>,
     depth: u16,
-    /// `Some` while parsing a `rules` macro body, containing the
-    /// `SymRef` node ids created.
+    /// `Some` while parsing a `rules` macro def, holding the `SymRef` node ids created.
     pending_sym_refs: Option<Vec<NodeId>>,
 }
 
@@ -109,11 +108,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         Ok(self.ctx)
     }
 
-    /// Current token. Eof terminates the stream and the parser never
-    /// advances past it, so `pos` is always in bounds.
     #[inline]
     fn current(&self) -> &Token {
         debug_assert!(self.pos < self.tokens.len());
+        // SAFETY: Eof terminates the stream and the parser never advances past it,
+        // so `self.pos` is always in bounds
         unsafe { self.tokens.get_unchecked(self.pos) }
     }
 
@@ -141,8 +140,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
         let mut i = self.pos + 1;
         // SAFETY: token stream is terminated by Eof. Since pos is not at Eof,
-        // `pos + 1` is at most the Eof position, and the loop stops when it hits
-        // any non-Comment (including Eof).
+        // `pos + 1` is at most the Eof position.
         while unsafe { self.tokens.get_unchecked(i) }.kind == TokenKind::Comment {
             i += 1;
         }
@@ -339,8 +337,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let mut seen = [None::<Span>; ConfigField::COUNT];
         loop {
             if let Some(end) = self.eat(TokenKind::RBrace) {
-                // A missing `language` field is checked in validate_grammar
-                // (well-formed AST, semantic check).
                 self.ctx.grammar_config = Some(config);
                 return Ok(self.shared.arena.push(Node::Grammar, start.merge(end)));
             }
@@ -447,8 +443,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.parse_macro_like(start, /* rule_set */ false)
     }
 
-    /// `rules NAME(params) { rule decls... }` expanded at each top-level
-    /// `@NAME(args)` call site by `expand_macro_calls`.
+    /// `rules NAME(params) { rule decls... }`
     fn parse_rule_set_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwRules)?;
         self.parse_macro_like(start, true)
@@ -489,8 +484,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let params = self.shared.pools.push_params(&params);
         // `@` refs are only created inside rule-set bodies (and don't nest), so
         // pending_sym_refs holds exactly this body's refs (empty otherwise).
-        // Pushed after the body, so the range sits past every body pool entry -
-        // apply_cfg relies on that to compact it in place.
+        // Pushed after the body, so the range sits past every body pool entry.
         let sym_ref_ids = self.pending_sym_refs.take().unwrap_or_default();
         let sym_refs = self
             .shared
@@ -561,7 +555,6 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     /// A rule-set member: a `rule`/`override rule` decl, optionally preceded by
     /// one or more `#[cfg(NAME)]` attributes (mirrors `parse_expr_with_cfg`).
-    /// cfg-gated decls are dropped from the set by `apply_cfg` before expansion.
     fn parse_rule_set_decl(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
             return depth_scope!(self, {
@@ -779,9 +772,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         }
     }
 
-    /// Parse a builtin call (`seq(...)`, `prec(...)`, etc.). Only reached when
-    /// `kw` is a keyword immediately followed by `(`; a keyword + `(` that is not
-    /// a builtin is treated as an identifier (a rule named after the keyword).
+    /// Parse a builtin call (`seq(...)`, `prec(...)`, etc.). Only reached for a keyword
+    /// immediately followed by `(`. A keyword + `(` that isn't a builtin falls through
+    /// to the identifier path, parsing as a macro call named after the keyword.
     fn parse_builtin_call(&mut self, start: Span, kw: TokenKind) -> ParseResult<NodeId> {
         match kw {
             TokenKind::KwSeq | TokenKind::KwChoice => {
@@ -838,7 +831,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             TokenKind::KwAppend => self.parse_append(start),
             TokenKind::KwGrammarConfig => self.parse_grammar_config(start),
             TokenKind::KwFor => self.parse_for(start),
-            // A keyword followed by `(` that isn't a builtin is just an identifier.
+            // Not a builtin: a keyword + `(` parses as a macro call named after it.
             _ => self.parse_ident_expr(start),
         }
     }
