@@ -467,16 +467,17 @@ impl<'src> Lexer<'src> {
     /// Called when we've already consumed `r` and peeked `"` or `#`.
     fn lex_raw_string(&mut self, start: usize) -> LexResult<TokenKind> {
         let source = self.source;
-        let mut hash_count: u8 = 0;
+        let hash_start = self.pos;
         while self.peek() == Some(b'#') {
             self.advance();
-            hash_count = hash_count.checked_add(1).ok_or_else(|| {
-                LexError::new(
-                    LexErrorKind::TooManyHashes,
-                    Span::from_usize(start, self.pos),
-                )
-            })?;
         }
+        let hash_count = self.pos - hash_start;
+        let Ok(hash_count) = u8::try_from(hash_count) else {
+            return Err(LexError::new(
+                LexErrorKind::TooManyHashes(hash_count as u32),
+                Span::from_usize(start, self.pos),
+            ));
+        };
         if self.peek() != Some(b'"') {
             Err(LexError::new(
                 LexErrorKind::ExpectedRawStringQuote,
@@ -595,9 +596,9 @@ pub enum LexErrorKind {
     ExpectedRawStringQuote,
     #[error("integer literal out of range (maximum {})", u32::MAX)]
     IntegerOverflow,
-    #[error("raw string has too many '#' delimiters (maximum 255)")]
-    TooManyHashes,
-    #[error("input exceeds maximum size")]
+    #[error("raw string has {0} '#' delimiters (maximum 255)")]
+    TooManyHashes(u32),
+    #[error("input exceeds the maximum size ({} bytes)", u32::MAX)]
     InputTooLarge,
 }
 
