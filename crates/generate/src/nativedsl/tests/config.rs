@@ -151,11 +151,13 @@ fn json_roundtrip() {
         rule identifier { regexp(r#"[a-z]+"#) }
     "##;
     let path = test_fixtures_dir().join("grammar.tsg");
-    let grammar = parse_native_dsl(input, &path).unwrap().normalize();
+    let grammar = parse_native_dsl(input, &path)
+        .unwrap()
+        .normalize(&mut Vec::new());
     let json_str =
         serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
             .expect("grammar JSON serialization should not fail");
-    let reparsed = crate::parse_grammar::parse_grammar(&json_str).unwrap();
+    let reparsed = crate::parse_grammar::parse_grammar(&json_str, &mut Vec::new()).unwrap();
     assert_eq!(grammar, reparsed);
 }
 
