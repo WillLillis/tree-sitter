@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::nativedsl::ModuleId;
+
 /// Top-level type of any DSL expression. Every `Ty` is a value that can be
 /// bound to a let, returned from a macro, or passed as an argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,10 +188,10 @@ impl std::fmt::Display for ElemTy {
 /// `module_t` annotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleTy {
-    /// Result of `import(...)`. The `u8` indexes into the module list.
-    Import(u8),
-    /// Result of `inherit(...)`. The `u8` indexes into the module list.
-    Grammar(u8),
+    /// Result of `import(...)`. Carries the module-list index.
+    Import(ModuleId),
+    /// Result of `inherit(...)`. Carries the module-list index.
+    Grammar(ModuleId),
     /// User-facing `module_t` annotation. Matches any concrete module via
     /// [`Ty::is_compatible`].
     Any,
