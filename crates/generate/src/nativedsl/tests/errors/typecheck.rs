@@ -372,3 +372,21 @@ fn error_grammar_config_on_import_module() {
     let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::GrammarConfigRequiresInherit);
 }
+
+#[test]
+fn deep_let_chain_type_checks_without_overflow() {
+    // A long, acyclic `let` chain once overflowed the stack: type_of_let recursed
+    // one frame per hop with no parse-depth bound. typecheck now resolves let
+    // dependencies with an explicit stack, so a chain of any length type-checks.
+    // The chain is unused by any rule, so it also lowers cleanly.
+    use std::fmt::Write as _;
+    let n = 4000;
+    let mut src = String::from("grammar { language: \"test\" }\n");
+    for i in 0..n {
+        writeln!(src, "let l{i} = l{}", i + 1).unwrap();
+    }
+    writeln!(src, "let l{n} = \"x\"").unwrap();
+    src.push_str("rule program { \"literal\" }\n");
+    // Must not overflow the stack; `dsl` unwraps, so any error fails the test too.
+    let _ = dsl(&src);
+}

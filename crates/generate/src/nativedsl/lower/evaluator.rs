@@ -60,17 +60,56 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    /// Evaluate a let binding's value and memoize it under `let_id`.
+    /// Evaluate a let binding's value and memoize it under `let_id`, resolving the
+    /// lets it transitively references first.
+    ///
+    /// Dependencies are walked with an explicit stack instead of native recursion,
+    /// so an arbitrarily long `let` chain cannot overflow; a reference back into a
+    /// let still being evaluated is a cycle. A cycle routed through a macro body is
+    /// caught by [`eval_expr_inner`](Self::eval_expr_inner)'s `Var` arm instead,
+    /// since the dependency scan does not descend into macro bodies.
     pub fn eval_let(&mut self, let_id: NodeId) -> LowerResult<ValueId> {
         if let Some(&val) = self.state.let_values.get(&let_id) {
             return Ok(val);
         }
         self.state.scratch.lets_in_progress.insert(let_id);
-        expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(let_id));
-        let val = self.eval_expr(value)?;
-        self.state.scratch.lets_in_progress.remove(&let_id);
-        self.state.let_values.insert(let_id, val);
-        Ok(val)
+        let mut stack = vec![let_id];
+        while let Some(&cur) = stack.last() {
+            expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(cur));
+            let dep = {
+                let resolved = &self.state.let_values;
+                self.shared
+                    .first_unresolved_let_dep(value, |id| resolved.contains_key(&id))
+            };
+            if let Some((dep, reference)) = dep {
+                if !self.state.scratch.lets_in_progress.insert(dep) {
+                    let span = self.shared.arena.span(reference);
+                    return Err(self.circular_let_error(dep, span));
+                }
+                stack.push(dep);
+                continue;
+            }
+            let val = self.eval_expr(value)?;
+            self.state.let_values.insert(cur, val);
+            self.state.scratch.lets_in_progress.remove(&cur);
+            stack.pop();
+        }
+        Ok(self.state.let_values[&let_id])
+    }
+
+    /// Build a `CircularLet` error for `let_id`, with a self-reference note at
+    /// `reference`.
+    fn circular_let_error(&self, let_id: NodeId, reference: Span) -> LowerError {
+        expect_pat!(Node::Let { name, .. }, *self.shared.arena.get(let_id));
+        let mut err = self.err(
+            LowerErrorKind::CircularLet(self.module_ctx(self.current_module).text(name).to_owned()),
+            self.shared.arena.span(let_id),
+        );
+        err.add_note(
+            self.module_ctx(self.current_module)
+                .note(NoteMessage::SelfReferenceHere, reference),
+        );
+        err
     }
 
     fn module_ctx(&self, idx: ModuleId) -> &'a ModuleContext {
@@ -656,18 +695,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             // reachable only through a macro since resolve rejects direct ones.
             &Node::Ident(IdentKind::Var(let_id)) => {
                 if self.state.scratch.lets_in_progress.contains(&let_id) {
-                    expect_pat!(Node::Let { name, .. }, *self.shared.arena.get(let_id));
-                    let mut err = self.err(
-                        LowerErrorKind::CircularLet(
-                            self.module_ctx(self.current_module).text(name).to_owned(),
-                        ),
-                        self.shared.arena.span(let_id),
-                    );
-                    err.add_note(
-                        self.module_ctx(self.current_module)
-                            .note(NoteMessage::SelfReferenceHere, span),
-                    );
-                    Err(err)
+                    Err(self.circular_let_error(let_id, span))
                 } else {
                     self.eval_let(let_id)
                 }
