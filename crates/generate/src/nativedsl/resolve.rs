@@ -90,6 +90,10 @@ pub fn resolve(
         }
     }
 
+    // The resolve work-stack holds at most one item's branch frontier (measured
+    // ~20-80% of root_items across the corpus); root_items.len() is a cheap seed
+    // that covers the realistic worst case and avoids the growth reallocs.
+    let mut stack = Vec::with_capacity(ctx.root_items.len());
     for &item_id in &ctx.root_items {
         let rcx = ResolveCtx {
             pools: &shared.pools,
@@ -97,7 +101,7 @@ pub fn resolve(
             decls: &decls,
             modules,
         };
-        resolve_item(&mut shared.arena, &rcx, item_id)?;
+        resolve_item(&mut shared.arena, &rcx, item_id, &mut stack)?;
     }
 
     Ok(())
@@ -266,25 +270,30 @@ fn collect_decls<'a>(
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
-fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> ResolveResult<()> {
+fn resolve_item(
+    arena: &mut NodeArena,
+    rcx: &ResolveCtx,
+    item_id: NodeId,
+    stack: &mut Vec<Resolve>,
+) -> ResolveResult<()> {
     match arena.get(item_id) {
         Node::Grammar => {
             // INVARIANT: set during grammar block parsing, always present here
             let grammar_config = rcx.ctx.grammar_config.as_ref().unwrap();
             for (_, id) in grammar_config.node_fields() {
-                resolve_expr(arena, rcx, id)?;
+                resolve_expr(arena, rcx, id, stack)?;
             }
             Ok(())
         }
         &Node::Rule { body: inner, .. } | &Node::Let { value: inner, .. } => {
-            resolve_expr(arena, rcx, inner)
+            resolve_expr(arena, rcx, inner, stack)
         }
         // The template body is shared and resolved once via the Macro item,
         // here we only resolve the call's args (module-scope expressions).
         &Node::ExpandedRule(expand_id) => {
             let args = rcx.pools.get_expansion(expand_id).args;
             for &arg in rcx.pools.child_slice(args) {
-                resolve_expr(arena, rcx, arg)?;
+                resolve_expr(arena, rcx, arg, stack)?;
             }
             Ok(())
         }
@@ -308,111 +317,150 @@ fn resolve_item(arena: &mut NodeArena, rcx: &ResolveCtx, item_id: NodeId) -> Res
             }
             // Resolve the body once: an expression body directly, a rule-set body
             // through resolve_children -> each Rule/ComputedRule decl.
-            resolve_expr(arena, rcx, body)
+            resolve_expr(arena, rcx, body, stack)
         }
         _ => Ok(()),
     }
 }
 
-/// Resolve identifiers within a single expression.
-fn resolve_expr(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
-    // Local bindings are emitted as MacroParam/ForBinding by the parser,
-    // so any remaining `Ident(Unresolved)` is a top-level reference.
-    if matches!(arena.get(id), Node::Ident(IdentKind::Unresolved)) {
-        let span = arena.span(id);
-        let name = rcx.ctx.text(span);
-        if let Some(&Spanned { value: kind, .. }) = rcx.decls.get(name) {
-            arena.resolve_as(id, kind);
-        } else {
-            return Err(unknown_ident_error(rcx.ctx, rcx.decls, name, span));
-        }
-        return Ok(());
-    }
-
-    // Alias target: resolve a bare identifier against `decls` like any other
-    // (a `let` resolves to its value, a rule to a named-symbol reference). Only
-    // an UNDECLARED bare identifier becomes a named-alias rule reference,
-    // mirroring grammar.js `alias($.x, $.undeclared)`.
-    if let &Node::Alias { content, target } = arena.get(id) {
-        resolve_expr(arena, rcx, content)?;
-        if matches!(arena.get(target), Node::Ident(IdentKind::Unresolved)) {
-            let span = arena.span(target);
-            let kind = rcx
-                .decls
-                .get(rcx.ctx.text(span))
-                .map_or(IdentKind::Rule, |s| s.value);
-            arena.resolve_as(target, kind);
-        } else {
-            resolve_expr(arena, rcx, target)?;
-        }
-        return Ok(());
-    }
-
-    if let &Node::For { for_id, body } = arena.get(id) {
-        let iterable = rcx.pools.get_for(for_id).iterable;
-        resolve_expr(arena, rcx, iterable)?;
-        return resolve_expr(arena, rcx, body);
-    }
-
-    resolve_children(arena, rcx, id)
+/// Work item for the iterative [`resolve_expr`] traversal.
+#[derive(Clone, Copy)]
+enum Resolve {
+    /// Resolve this node: rewrite an ident, or schedule its children.
+    Node(NodeId),
+    /// Resolve a `::` access's member/macro name, once its object subtree is
+    /// resolved (so the object's module is known).
+    Member(NodeId),
 }
 
-/// Resolve identifiers in children of a node.
-fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
-    // Variadic nodes: Seq, Choice, List, Tuple, Concat
-    if let Some(range) = arena.get(id).child_range() {
-        for child in rcx.pools.child_slice(range) {
-            resolve_expr(arena, rcx, *child)?;
+/// Resolve identifiers within an expression. Uses an explicit stack rather than
+/// recursion so a deeply nested expression cannot overflow the native stack. The
+/// `stack` scratch is reused across calls; single-child / first-child links are
+/// followed directly, so only branch children take a stack round-trip.
+fn resolve_expr(
+    arena: &mut NodeArena,
+    rcx: &ResolveCtx,
+    root: NodeId,
+    stack: &mut Vec<Resolve>,
+) -> ResolveResult<()> {
+    stack.clear();
+    stack.push(Resolve::Node(root));
+    while let Some(work) = stack.pop() {
+        match work {
+            Resolve::Node(mut id) => {
+                while let Some(next) = resolve_node(arena, rcx, id, stack)? {
+                    id = next;
+                }
+            }
+            Resolve::Member(id) => resolve_member(arena, rcx, id)?,
         }
-        return Ok(());
     }
+    Ok(())
+}
 
-    match arena.get(id) {
-        &Node::Call { name, args } => {
-            resolve_expr(arena, rcx, name)?;
-            for arg in rcx.pools.child_slice(args) {
-                resolve_expr(arena, rcx, *arg)?;
-            }
-            Ok(())
+/// Resolve one node in place (rewriting an ident), push its branch children onto
+/// `stack` (reversed, to pop in source order), and return its first child to
+/// descend into directly (no stack round-trip). The node is read once; an alias
+/// target and a `::` member/name are resolved specially.
+#[inline]
+fn resolve_node(
+    arena: &mut NodeArena,
+    rcx: &ResolveCtx,
+    id: NodeId,
+    stack: &mut Vec<Resolve>,
+) -> ResolveResult<Option<NodeId>> {
+    // Push children after the first (reversed) and return the first to descend into.
+    fn descend(stack: &mut Vec<Resolve>, children: &[NodeId]) -> Option<NodeId> {
+        let (&first, rest) = children.split_first()?;
+        stack.extend(rest.iter().rev().map(|&c| Resolve::Node(c)));
+        Some(first)
+    }
+    // SAFETY: every id comes from a child slice or the root, all valid arena ids.
+    Ok(match unsafe { *arena.get_unchecked(id) } {
+        // Local bindings are emitted as MacroParam/ForBinding by the parser, so
+        // any remaining `Ident(Unresolved)` is a top-level reference.
+        Node::Ident(IdentKind::Unresolved) => {
+            let span = arena.span(id);
+            let name = rcx.ctx.text(span);
+            let Some(&Spanned { value: kind, .. }) = rcx.decls.get(name) else {
+                return Err(unknown_ident_error(rcx.ctx, rcx.decls, name, span));
+            };
+            arena.resolve_as(id, kind);
+            None
         }
-        Node::Object(range) => {
-            for field in rcx.pools.get_object(*range) {
-                resolve_expr(arena, rcx, field.value)?;
+        // Alias target: a bare identifier resolves against `decls` like any other
+        // (a `let` to its value, a rule to a named-symbol reference). Only an
+        // UNDECLARED bare identifier becomes a named-alias rule reference,
+        // mirroring grammar.js `alias($.x, $.undeclared)`.
+        Node::Alias { content, target } => {
+            if matches!(arena.get(target), Node::Ident(IdentKind::Unresolved)) {
+                let kind = rcx
+                    .decls
+                    .get(rcx.ctx.text(arena.span(target)))
+                    .map_or(IdentKind::Rule, |s| s.value);
+                arena.resolve_as(target, kind);
+            } else {
+                stack.push(Resolve::Node(target));
             }
-            Ok(())
+            Some(content)
+        }
+        // `::` access: the member/macro name resolves after the object subtree,
+        // so push `Member` below the object and descend into the object.
+        Node::QualifiedAccess { obj, .. } => {
+            stack.push(Resolve::Member(id));
+            Some(obj)
+        }
+        Node::QualifiedCall(range) => {
+            let (obj, _name, args) = rcx.pools.get_qualified_call(range);
+            stack.push(Resolve::Member(id));
+            stack.extend(args.iter().rev().map(|&c| Resolve::Node(c)));
+            Some(obj)
+        }
+        // Variadic: Seq, Choice, List, Tuple, Concat, RuleSet.
+        #[rustfmt::skip]
+        Node::SeqOrChoice { range, .. } | Node::List(range) | Node::Tuple(range)
+        | Node::Concat(range) | Node::RuleSet(range) => descend(stack, rcx.pools.child_slice(range)),
+        Node::Call { name, args } => {
+            stack.extend(rcx.pools.child_slice(args).iter().rev().map(|&c| Resolve::Node(c)));
+            Some(name)
+        }
+        Node::Object(range) => match rcx.pools.get_object(range).split_first() {
+            Some((first, rest)) => {
+                stack.extend(rest.iter().rev().map(|f| Resolve::Node(f.value)));
+                Some(first.value)
+            }
+            None => None,
+        },
+        Node::For { for_id, body } => {
+            stack.push(Resolve::Node(body));
+            Some(rcx.pools.get_for(for_id).iterable)
+        }
+        #[rustfmt::skip]
+        Node::ComputedRule { name_expr: a, body: b, .. } | Node::Append { left: a, right: b }
+        | Node::BinOp { lhs: a, rhs: b, .. } | Node::Prec { value: a, content: b, .. } => {
+            stack.push(Resolve::Node(b));
+            Some(a)
+        }
+        Node::DynRegex { pattern, flags } => {
+            if let Some(f) = flags {
+                stack.push(Resolve::Node(f));
+            }
+            Some(pattern)
         }
         #[rustfmt::skip]
         Node::Repeat { inner: c, .. } | Node::Token { inner: c, .. } | Node::Neg(c)
         | Node::GrammarConfig { module: c, .. } | Node::Field { content: c, .. }
-        | Node::Reserved { content: c, .. }
-        | Node::Rule { body: c, .. } => resolve_expr(arena, rcx, *c),
-        &Node::Append { left: a, right: b }
-        | &Node::BinOp { lhs: a, rhs: b, .. }
-        | &Node::Prec {
-            value: a,
-            content: b,
-            ..
-        }
-        | &Node::ComputedRule {
-            name_expr: a,
-            body: b,
-            ..
-        } => {
-            resolve_expr(arena, rcx, a)?;
-            resolve_expr(arena, rcx, b)
-        }
-        &Node::DynRegex { pattern, flags } => {
-            resolve_expr(arena, rcx, pattern)?;
-            if let Some(flags) = flags {
-                resolve_expr(arena, rcx, flags)?;
-            }
-            Ok(())
-        }
-        &Node::SymRef { expr } => resolve_expr(arena, rcx, expr),
-        &Node::FieldAccess { obj, .. } => resolve_expr(arena, rcx, obj),
-        &Node::QualifiedAccess { obj, member } => {
-            resolve_expr(arena, rcx, obj)?;
-            // None when obj isn't a module ref, let type checker reports the error
+        | Node::Reserved { content: c, .. } | Node::Rule { body: c, .. }
+        | Node::SymRef { expr: c } | Node::FieldAccess { obj: c, .. } => Some(c),
+        _ => None,
+    })
+}
+
+/// Resolve the member/macro name of a `::` access whose object is now resolved.
+fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
+    // None when obj isn't a module ref; the type checker reports the error.
+    match *arena.get(id) {
+        Node::QualifiedAccess { obj, member } => {
             if let Some(idx) = resolve_module_id(arena, obj) {
                 let member_name = rcx.ctx.text(member);
                 resolve_qualified_member(
@@ -428,9 +476,7 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
             Ok(())
         }
         Node::QualifiedCall(range) => {
-            let (obj, name, args) = rcx.pools.get_qualified_call(*range);
-            resolve_expr(arena, rcx, obj)?;
-            // None when obj isn't a module ref, let type checker reports the error
+            let (obj, name, _args) = rcx.pools.get_qualified_call(range);
             if let Some(idx) = resolve_module_id(arena, obj) {
                 let macro_name = rcx.ctx.text(arena.span(name));
                 resolve_qualified_call_name(
@@ -441,12 +487,9 @@ fn resolve_children(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Reso
                     macro_name,
                 )?;
             }
-            for &arg in args {
-                resolve_expr(arena, rcx, arg)?;
-            }
             Ok(())
         }
-        _ => Ok(()),
+        _ => unreachable!(),
     }
 }
 
