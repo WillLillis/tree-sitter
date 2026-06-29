@@ -8,8 +8,6 @@ use super::{IdentKind, Node, Span};
 pub struct NodeId(NonZeroU32);
 
 impl NodeId {
-    pub const FIRST: Self = Self(NonZeroU32::new(1).unwrap());
-
     #[must_use]
     pub const fn index(self) -> usize {
         self.0.get() as usize
@@ -85,10 +83,6 @@ impl NodeArena {
         self.nodes[id.index()] = node;
     }
 
-    pub fn set_span(&mut self, id: NodeId, span: Span) {
-        self.spans[id.index()] = span;
-    }
-
     #[inline]
     pub fn resolve_as(&mut self, id: NodeId, kind: IdentKind) {
         debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
@@ -113,17 +107,6 @@ impl NodeArena {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.nodes.len() == 1
-    }
-
-    pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        (1..self.nodes.len()).map(|i| {
-            // SAFETY: i starts at 1, always non-zero.
-            NodeId(unsafe { NonZeroU32::new_unchecked(i as u32) })
-        })
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &Node)> {
-        self.node_ids().map(|id| (id, &self.nodes[id.index()]))
     }
 
     /// Iterate a half-open `[start, end)` slice of `NodeId`s and their nodes.
