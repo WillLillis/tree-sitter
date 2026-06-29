@@ -529,11 +529,18 @@ fn resolve_module_id(arena: &NodeArena, obj: NodeId) -> Option<ModuleId> {
     }
 }
 
-/// Walk `Ident(Var) -> Let.value` chains to find the underlying `ModuleRef` node
+/// Walk `Ident(Var) -> Let.value` chains to find the underlying `ModuleRef` node.
+/// A self-referential or mutually-recursive `let` (e.g. `let a = a`) would loop
+/// forever, so visited lets are tracked and re-entry bails with `None`; the cycle
+/// is then reported gracefully by typecheck (`CircularLet`).
 pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<NodeId> {
+    let mut visited = FxHashSet::default();
     loop {
         match arena.get(obj) {
             Node::Ident(IdentKind::Var(let_id)) => {
+                if !visited.insert(*let_id) {
+                    return None;
+                }
                 let Node::Let { value, .. } = arena.get(*let_id) else {
                     return None;
                 };
