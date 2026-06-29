@@ -112,6 +112,41 @@ fn error_self_ref_in_container_reports_cycle() {
 }
 
 #[test]
+fn error_self_ref_let_via_qualified_access_does_not_hang() {
+    // `let a = a` then a `::` access on `a` once looped forever in
+    // resolve_module_ref: the module-ref walk followed Var -> Let.value with no
+    // cycle guard (unlike collect_external_names). It must terminate and surface
+    // the self-reference as a typecheck CircularLet.
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            let a = a
+            let b = a::x
+            rule program { "x" }"#
+        ),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::CircularLet("a".into()));
+}
+
+#[test]
+fn error_mutual_let_via_qualified_access_does_not_hang() {
+    // The mutual-recursion variant (`let a = b; let b = a`) used through `::`
+    // looped identically; the visited-set guard breaks it the same way.
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            let a = b
+            let b = a
+            let c = a::x
+            rule program { "x" }"#
+        ),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::CircularLet("a".into()));
+}
+
+#[test]
 fn error_duplicate_declaration_has_note() {
     let e = assert_err!(
         dsl_err(r#"grammar { language: "test" } rule foo { "a" } rule foo { "b" }"#),
