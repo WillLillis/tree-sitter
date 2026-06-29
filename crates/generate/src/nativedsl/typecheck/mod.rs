@@ -22,6 +22,12 @@ pub struct TypeEnv {
     pub object_fields: FxHashMap<NodeId, Vec<String>>,
     /// Lets currently being typed; reentry is a self-reference cycle.
     lets_in_progress: FxHashSet<NodeId>,
+    /// Shared work and results stacks for the iterative `type_of` walk. They
+    /// live here (rather than per-call) so every walk - including re-entrant
+    /// ones - reuses the same capacity-retaining buffers via base-offset
+    /// tracking, keeping the traversal off the allocator's hot path.
+    work: Vec<check::Work>,
+    results: Vec<Ty>,
 }
 
 /// Walks root items and type-checks the now-resolved AST.
