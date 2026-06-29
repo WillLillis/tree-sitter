@@ -201,8 +201,10 @@ fn error_inherit_bad_path() {
 
 #[test]
 fn error_module_read_failure_renders_without_panic() {
-    // When read_to_string fails (a directory) the inner ModuleError has empty
-    // source_text plus the parent's import-path span; rendering must not slice OOB.
+    // The import path is a directory, so read_to_string fails before any
+    // ModuleError wrapping: this is a DslError::Lower(ModuleReadFailed) directly,
+    // carrying the offending path. Assert the variant + path, then check that
+    // rendering does not slice OOB on the (empty) module source.
     let dir = tempfile::tempdir().unwrap();
     let subdir = dir.path().join("not_a_file");
     std::fs::create_dir(&subdir).unwrap();
@@ -213,6 +215,14 @@ fn error_module_read_failure_renders_without_panic() {
     );
     std::fs::write(&parent_path, &parent_src).unwrap();
     let error = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            DslError::Lower(e)
+                if matches!(&e.kind, LowerErrorKind::ModuleReadFailed(io) if io.path.is_some())
+        ),
+        "expected ModuleReadFailed carrying a path, got {error:?}"
+    );
     let wrapped = NativeDslError {
         error,
         src: parent_src,
