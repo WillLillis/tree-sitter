@@ -2,7 +2,7 @@
 //! (`MacroId`/`ForId`/`ExpandId`, `ChildRange`), the [`SharedAst`]/[`AstPools`]
 //! containers, and the element types they store.
 
-use super::{NodeArena, NodeId, Span};
+use super::{IdentKind, Node, NodeArena, NodeId, Span};
 use crate::nativedsl::string_pool::Str;
 use crate::nativedsl::typecheck::Ty;
 
@@ -121,6 +121,92 @@ impl SharedAst {
                 params: Vec::new(),
                 expansions: Vec::new(),
             },
+        }
+    }
+
+    /// Find the first `let` referenced in `root`'s expression subtree that is not
+    /// yet resolved (per `is_resolved`, keyed by the let's `NodeId`), returning
+    /// that let and the referencing node (for a self-reference note). Walks with
+    /// an explicit stack so a deep expression tree cannot overflow; returns `None`
+    /// once every referenced `let` is resolved. Used by typecheck and lower to
+    /// resolve `let` chains iteratively rather than recursively.
+    #[must_use]
+    pub fn first_unresolved_let_dep(
+        &self,
+        root: NodeId,
+        is_resolved: impl Fn(NodeId) -> bool,
+    ) -> Option<(NodeId, NodeId)> {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            match *self.arena.get(id) {
+                Node::Ident(IdentKind::Var(let_id)) if !is_resolved(let_id) => {
+                    return Some((let_id, id));
+                }
+                node => self.push_expr_children(node, &mut stack),
+            }
+        }
+        None
+    }
+
+    /// Push the child node ids of an expression node onto `stack`. Mirrors the
+    /// expression children walked by [`resolve_expr`](crate::nativedsl::resolve);
+    /// keep the two in sync.
+    fn push_expr_children(&self, node: Node, stack: &mut Vec<NodeId>) {
+        if let Some(range) = node.child_range() {
+            stack.extend(self.pools.child_slice(range).iter().copied());
+            return;
+        }
+        match node {
+            Node::Call { name, args } => {
+                stack.push(name);
+                stack.extend(self.pools.child_slice(args).iter().copied());
+            }
+            Node::QualifiedCall(range) => {
+                stack.extend(self.pools.child_slice(range).iter().copied());
+            }
+            Node::Object(range) => {
+                stack.extend(self.pools.get_object(range).iter().map(|f| f.value));
+            }
+            Node::For { for_id, body } => {
+                stack.push(self.pools.get_for(for_id).iterable);
+                stack.push(body);
+            }
+            Node::Alias { content, target } => {
+                stack.push(content);
+                stack.push(target);
+            }
+            Node::Append { left: a, right: b }
+            | Node::BinOp { lhs: a, rhs: b, .. }
+            | Node::Prec {
+                value: a,
+                content: b,
+                ..
+            }
+            | Node::ComputedRule {
+                name_expr: a,
+                body: b,
+                ..
+            } => {
+                stack.push(a);
+                stack.push(b);
+            }
+            Node::DynRegex { pattern, flags } => {
+                stack.push(pattern);
+                stack.extend(flags);
+            }
+            Node::Repeat { inner: c, .. }
+            | Node::Token { inner: c, .. }
+            | Node::Neg(c)
+            | Node::GrammarConfig { module: c, .. }
+            | Node::Field { content: c, .. }
+            | Node::Reserved { content: c, .. }
+            | Node::Rule { body: c, .. }
+            | Node::SymRef { expr: c }
+            | Node::FieldAccess { obj: c, .. }
+            | Node::QualifiedAccess { obj: c, .. }
+            | Node::Let { value: c, .. }
+            | Node::Cfg { child: c, .. } => stack.push(c),
+            _ => {}
         }
     }
 }

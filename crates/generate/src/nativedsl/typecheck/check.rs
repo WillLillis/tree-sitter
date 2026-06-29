@@ -106,9 +106,15 @@ pub(super) fn check_item(
     }
 }
 
-/// Type a `let` on demand and memoize it. Lets can reference one another, so
-/// types are computed lazily rather than strictly in source order; reentering
-/// a let that is still being typed is a self-reference cycle.
+/// Type a `let` and any `let`s it transitively references, memoizing each.
+///
+/// Lets can reference one another in any order, so types are computed lazily
+/// rather than strictly in source order. Dependencies are resolved with an
+/// explicit stack instead of native recursion, so an arbitrarily long `let`
+/// chain cannot overflow the stack; a reference back into a `let` still being
+/// resolved is a self-reference cycle. Once a `let`'s dependencies are all
+/// memoized, typing its value recurses only through expression nesting, which
+/// the parser bounds.
 fn type_of_let(
     shared: &SharedAst,
     ctx: &ModuleContext,
@@ -118,28 +124,51 @@ fn type_of_let(
     if let Some(&ty) = env.vars.get(&let_id) {
         return Ok(ty);
     }
-    let Node::Let { value, .. } = *shared.arena.get(let_id) else {
-        unreachable!()
-    };
     env.lets_in_progress.insert(let_id);
-    let constraint = ctx
-        .let_types
-        .get(&let_id)
-        .copied()
-        .map_or(Constraint::None, Constraint::Exact);
-    let inferred = type_of(shared, ctx, value, env, constraint)?;
-    if let Node::Object(range) = *shared.arena.get(value) {
-        let fields: Vec<String> = shared
-            .pools
-            .get_object(range)
-            .iter()
-            .map(|f| ctx.text(f.name).to_string())
-            .collect();
-        env.object_fields.insert(let_id, fields);
+    let mut stack = vec![let_id];
+    while let Some(&cur) = stack.last() {
+        let Node::Let { value, .. } = *shared.arena.get(cur) else {
+            unreachable!()
+        };
+        // Resolve one not-yet-typed dependency at a time; revisiting `cur` once
+        // it is on the stack would re-find an earlier dependency, so we only
+        // type `cur` once the scan reports none remain.
+        if let Some((dep, reference)) =
+            shared.first_unresolved_let_dep(value, |id| env.vars.contains_key(&id))
+        {
+            if !env.lets_in_progress.insert(dep) {
+                let Node::Let { name, .. } = *shared.arena.get(dep) else {
+                    unreachable!()
+                };
+                return Err(TypeError::with_note(
+                    TypeErrorKind::CircularLet(ctx.text(name).to_string()),
+                    shared.arena.span(dep),
+                    ctx.note(NoteMessage::SelfReferenceHere, shared.arena.span(reference)),
+                ));
+            }
+            stack.push(dep);
+            continue;
+        }
+        let constraint = ctx
+            .let_types
+            .get(&cur)
+            .copied()
+            .map_or(Constraint::None, Constraint::Exact);
+        let inferred = type_of(shared, ctx, value, env, constraint)?;
+        if let Node::Object(range) = *shared.arena.get(value) {
+            let fields: Vec<String> = shared
+                .pools
+                .get_object(range)
+                .iter()
+                .map(|f| ctx.text(f.name).to_string())
+                .collect();
+            env.object_fields.insert(cur, fields);
+        }
+        env.vars.insert(cur, inferred);
+        env.lets_in_progress.remove(&cur);
+        stack.pop();
     }
-    env.lets_in_progress.remove(&let_id);
-    env.vars.insert(let_id, inferred);
-    Ok(inferred)
+    Ok(env.vars[&let_id])
 }
 
 /// Typecheck rule decls inside a rule-set macro body at definition time.
@@ -343,21 +372,9 @@ fn type_of(
             span,
         )),
         // Type the referenced let on demand (it may be defined later or chain
-        // through other lets). Reentering an in-progress let is a cycle.
-        Node::Ident(IdentKind::Var(let_id)) => {
-            if env.lets_in_progress.contains(let_id) {
-                let Node::Let { name, .. } = *shared.arena.get(*let_id) else {
-                    unreachable!()
-                };
-                Err(TypeError::with_note(
-                    TypeErrorKind::CircularLet(ctx.text(name).to_string()),
-                    shared.arena.span(*let_id),
-                    ctx.note(NoteMessage::SelfReferenceHere, span),
-                ))
-            } else {
-                type_of_let(shared, ctx, *let_id, env)
-            }
-        }
+        // through other lets). type_of_let resolves chains iteratively and
+        // reports any self-reference cycle.
+        Node::Ident(IdentKind::Var(let_id)) => type_of_let(shared, ctx, *let_id, env),
         Node::Neg(inner) => {
             type_of(shared, ctx, *inner, env, Constraint::Exact(Ty::INT))?;
             Ok(Ty::INT)
