@@ -103,6 +103,17 @@ error_tests! { Lex {
         r#"grammar { language: "x\u{110000}" } rule program { "x" }"#,
         LexErrorKind::InvalidUnicodeEscape
     }
+    // 7 hex digits in braces hits the length cap (1..=6), a distinct branch from
+    // the codepoint-range reject above.
+    error_unicode_escape_braced_too_long {
+        r#"grammar { language: "x\u{1234567}" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
+    // A surrogate in braced form: distinct code path from the 4-digit \uD800.
+    error_unicode_escape_braced_surrogate {
+        r#"grammar { language: "x\u{D800}" } rule program { "x" }"#,
+        LexErrorKind::InvalidUnicodeEscape
+    }
 }}
 
 inherit_error_tests! { Lex {
