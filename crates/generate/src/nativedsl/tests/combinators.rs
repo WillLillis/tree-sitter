@@ -136,6 +136,21 @@ rule_tests! {
         r#"grammar { language: "test" } rule program { "\u{1F389}" }"#,
         Rule::String("\u{1F389}".into())
     }
+    string_unicode_escape_max {
+        // \u{10FFFF} is the maximum valid scalar value (the accept edge of the range check).
+        r#"grammar { language: "test" } rule program { "\u{10FFFF}" }"#,
+        Rule::String("\u{10FFFF}".into())
+    }
+    string_hex_escape_max_ascii {
+        // \x7F is the maximum allowed \x value (the accept edge of the <= 0x7F check).
+        r#"grammar { language: "test" } rule program { "\x7F" }"#,
+        Rule::String("\x7f".into())
+    }
+    string_simple_escapes {
+        // \r, \0, and \" decode to CR, NUL, and a double quote.
+        r#"grammar { language: "test" } rule program { "a\rb\0c\"d" }"#,
+        Rule::String("a\rb\0c\"d".into())
+    }
     int_arith_add_literals {
         r#"grammar { language: "test" } rule program { prec(1 + 2, "x") }"#,
         Rule::prec(Precedence::Integer(3), Rule::String("x".into()))
