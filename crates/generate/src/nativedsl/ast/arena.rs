@@ -65,6 +65,7 @@ impl NodeArena {
         id
     }
 
+    #[inline]
     #[must_use]
     pub fn get(&self, id: NodeId) -> &Node {
         &self.nodes[id.index()]
@@ -72,6 +73,15 @@ impl NodeArena {
 
     pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
         &mut self.nodes[id.index()]
+    }
+
+    /// # Safety
+    ///
+    /// Caller must pass a valid `id`
+    #[inline]
+    #[must_use]
+    pub unsafe fn get_unchecked(&self, id: NodeId) -> &Node {
+        unsafe { self.nodes.get_unchecked(id.index()) }
     }
 
     #[must_use]
