@@ -173,16 +173,18 @@ error_tests! { Resolve {
 #[test]
 fn error_recursive_macro_combinator_product() {
     // A self-recursive macro nesting combinators deeply: the macro-recursion x
-    // combinator-depth product once overflowed the stack before MAX_CALL_DEPTH;
-    // the eval-depth guard now reports it cleanly.
+    // combinator-depth product once overflowed the stack before MAX_CALL_DEPTH.
+    // The combinator nesting is now evaluated iteratively (heap work stack), so
+    // it can't overflow; the genuinely unbounded axis - the macro calling itself
+    // forever - is caught cleanly by the MAX_CALL_DEPTH guard instead.
     let body = format!("{}seq(x, m(x)){}", "seq(".repeat(90), ")".repeat(90));
     let src = format!(
         "grammar {{ language: \"test\" }}\nmacro m(x: rule_t) rule_t {{ {body} }}\nrule prog {{ m(\"a\") }}"
     );
     let e = assert_err!(dsl_err(&src), Lower);
     assert!(
-        matches!(e.kind, LowerErrorKind::RecursionTooDeep(_)),
-        "expected RecursionTooDeep, got {:?}",
+        matches!(e.kind, LowerErrorKind::CallDepthExceeded(_)),
+        "expected CallDepthExceeded, got {:?}",
         e.kind
     );
 }
