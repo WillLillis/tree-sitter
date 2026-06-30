@@ -36,19 +36,18 @@ enum NameSource {
     Str(Str),   // Node::ExpandedRule
 }
 
-use evaluator::Evaluator;
+use evaluator::{BuildStep, Evaluator, Task};
 use repr::{IrPools, RuleId, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
-/// Cap on the evaluator's own recursion depth (`eval_expr`/`lower_to_rule` frames).
-/// Macro recursion (`MAX_CALL_DEPTH`) and per-expression combinator nesting
-/// (`MAX_PARSE_DEPTH` = 192) are each bounded alone, but their product is not: a
-/// macro recursing N deep with an M-deep combinator body stacks N*M native eval
-/// frames. This bounds that product so deep expansion errors cleanly instead of
-/// overflowing the stack. Sized above any real grammar's eval depth (the 127-
-/// grammar corpus stays well under) and a single max-depth rule (<=192), yet low
-/// enough that the guard trips before a small (2 MB test-thread) stack overflows.
-const MAX_EVAL_DEPTH: u16 = 256;
+/// Maximum nesting depth of a materialized [`Rule`] tree. The evaluator builds
+/// rules iteratively (no native-stack bound), but the resulting tree is consumed
+/// by the *recursive* shared grammar backend (`crate::prepare_grammar`, also used
+/// by the grammar.js front-end). This bounds the tree depth so a pathologically
+/// deep rule - reachable via macro expansion, whose product of `MAX_CALL_DEPTH`
+/// and per-body nesting far exceeds this - is rejected with a clean error here
+/// rather than overflowing the backend. Lift it once that backend is iterative.
+const MAX_RULE_DEPTH: u16 = 256;
 
 /// One stack frame for the macro-call trace.
 #[derive(Clone, Copy)]
@@ -83,8 +82,10 @@ pub struct LoweringState {
 #[derive(Default)]
 struct Scratch {
     call_stack: Vec<CallFrame>,
-    /// Current evaluator recursion depth, guarded against `MAX_EVAL_DEPTH`.
-    eval_depth: u16,
+    /// Work stack driving the iterative expression/rule evaluation in
+    /// [`evaluator`]; shared across walks (re-entrant macro/for/let evaluation
+    /// nests on it via base offsets) so its capacity is retained.
+    work: Vec<Task>,
     /// Let bindings whose value is mid-evaluation; reentry signals a cycle.
     lets_in_progress: FxHashSet<NodeId>,
     macro_args: Vec<ValueId>,
@@ -93,12 +94,20 @@ struct Scratch {
     for_binding_frames: Vec<(ForId, usize)>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
+    /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
+    /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
+    /// this is a plain stack.
+    combine_bases: Vec<u32>,
+    /// Reused work + output stacks for [`Evaluator::build_rule`]'s iterative
+    /// materialization, so it doesn't allocate fresh buffers per top-level rule.
+    build_work: Vec<BuildStep>,
+    build_out: Vec<Rule>,
 }
 
 impl Scratch {
     fn clear(&mut self) {
         self.call_stack.clear();
-        self.eval_depth = 0;
+        self.work.clear();
         self.lets_in_progress.clear();
         self.macro_args.clear();
         self.macro_arg_bases.clear();
@@ -106,6 +115,9 @@ impl Scratch {
         self.for_binding_frames.clear();
         self.val_scratch.clear();
         self.rule_scratch.clear();
+        self.combine_bases.clear();
+        self.build_work.clear();
+        self.build_out.clear();
     }
 }
 
@@ -151,6 +163,25 @@ pub fn lower_with_base(
     Ok(grammar)
 }
 
+/// Benchmark hook: run only the eval walk (AST -> `ARule`/value IR pool) over the
+/// root items, skipping the `build_rule` (`ARule` -> [`Rule`]) materialization.
+/// Isolates the permanent lowering pass from the transitional `Rule`-building
+/// bridge, so the iterative eval engine can be timed against the recursive one
+/// without the `Rule`-box allocation noise. Not part of the real pipeline.
+#[doc(hidden)]
+pub fn eval_only_for_bench(
+    state: &mut LoweringState,
+    strings: &mut StringPool,
+    shared: &SharedAst,
+    previous: &[Module],
+    current: &ModuleContext,
+) -> LowerResult<()> {
+    let mut eval = Evaluator::new(state, strings, shared, previous, current);
+    let items = lower_items(&mut eval, shared, current)?;
+    std::hint::black_box(&items);
+    Ok(())
+}
+
 /// Every `NamedSymbol` a grammar references must resolve to a definition.
 /// An `expect` forward-decl makes a name *referenceable* without defining it,
 /// so an unfulfilled `expect` must be caught.
@@ -181,23 +212,24 @@ fn check_symbol_completeness(
     ))
 }
 
-/// Push every `NamedSymbol` in `rule` whose name is absent from `defined` into `out`.
-fn collect_undefined<'a>(rule: &'a Rule, defined: &FxHashSet<&str>, out: &mut Vec<&'a str>) {
-    match rule {
-        Rule::NamedSymbol(name) if !defined.contains(name.as_str()) => out.push(name.as_str()),
-        Rule::Seq(rules) | Rule::Choice(rules) => {
-            for r in rules {
-                collect_undefined(r, defined, out);
+/// Push every `NamedSymbol` in `root` whose name is absent from `defined` into
+/// `out`. Walks with an explicit stack (order is irrelevant - `out` is sorted and
+/// deduped by the caller) so a deeply nested rule cannot overflow the native stack.
+fn collect_undefined<'a>(root: &'a Rule, defined: &FxHashSet<&str>, out: &mut Vec<&'a str>) {
+    let mut stack = vec![root];
+    while let Some(rule) = stack.pop() {
+        match rule {
+            Rule::NamedSymbol(name) if !defined.contains(name.as_str()) => out.push(name.as_str()),
+            Rule::Seq(rules) | Rule::Choice(rules) => stack.extend(rules.iter()),
+            Rule::Metadata { rule, .. } | Rule::Repeat(rule) | Rule::Reserved { rule, .. } => {
+                stack.push(rule);
             }
+            Rule::NamedSymbol(_)
+            | Rule::Blank
+            | Rule::String(_)
+            | Rule::Pattern(..)
+            | Rule::Symbol(_) => {}
         }
-        Rule::Metadata { rule, .. } | Rule::Repeat(rule) | Rule::Reserved { rule, .. } => {
-            collect_undefined(rule, defined, out);
-        }
-        Rule::NamedSymbol(_)
-        | Rule::Blank
-        | Rule::String(_)
-        | Rule::Pattern(..)
-        | Rule::Symbol(_) => {}
     }
 }
 
@@ -349,7 +381,7 @@ pub fn lower_helper(
         }
         rules.push((
             resolve_name(it.src, &eval, current),
-            eval.build_rule(it.rule_id),
+            eval.build_rule(it.rule_id)?,
         ));
     }
     Ok(rules)
@@ -386,12 +418,12 @@ fn evaluate(
 
     let rules: Vec<(String, Rule)> = rule_entries
         .into_iter()
-        .map(|(src, rid)| (resolve_name(src, &eval, ctx), eval.build_rule(rid)))
-        .collect();
+        .map(|(src, rid)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?)))
+        .collect::<LowerResult<_>>()?;
     let overrides: Vec<(String, Rule, Span)> = override_entries
         .into_iter()
-        .map(|(src, rid, span)| (resolve_name(src, &eval, ctx), eval.build_rule(rid), span))
-        .collect();
+        .map(|(src, rid, span)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?, span)))
+        .collect::<LowerResult<_>>()?;
 
     Ok(EvalResult {
         language: language.clone(),
