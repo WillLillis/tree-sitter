@@ -84,6 +84,30 @@ set_target_properties(tree-sitter
 
 target_compile_definitions(tree-sitter PRIVATE _POSIX_C_SOURCE=200112L _DEFAULT_SOURCE _BSD_SOURCE _DARWIN_C_SOURCE)
 
+# On Windows a DLL exports nothing unless its symbols are listed explicitly: the
+# `#pragma GCC visibility` directives in the public headers are no-ops under
+# MSVC (yielding an empty export table, #5190), while under MinGW the GNU linker
+# instead auto-exports *every* symbol, internals included. An explicit module-
+# definition file fixes both, giving the curated, hidden-by-default surface used
+# on other platforms. tree_sitter.def is the canonical export list (meant to be
+# shared with the Make and Zig builds too). The Wasm store entry points only
+# exist when the Wasm feature is enabled, so append them to a generated copy
+# when needed -- naming an undefined symbol in a .def is a hard link error under
+# both MSVC and GNU ld.
+if(WIN32 AND BUILD_SHARED_LIBS)
+  set(TS_DEF_FILE "${PROJECT_SOURCE_DIR}/lib/src/tree_sitter.def")
+  if(TREE_SITTER_FEATURE_WASM)
+    file(READ "${TS_DEF_FILE}" TS_DEF_BASE)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/tree_sitter.def"
+"${TS_DEF_BASE}    ts_wasm_store_language_count
+    ts_wasm_store_load_language
+    ts_wasm_store_new
+")
+    set(TS_DEF_FILE "${CMAKE_CURRENT_BINARY_DIR}/tree_sitter.def")
+  endif()
+  target_sources(tree-sitter PRIVATE "${TS_DEF_FILE}")
+endif()
+
 include(GNUInstallDirs)
 
 configure_file(lib/tree-sitter.pc.in "${CMAKE_CURRENT_BINARY_DIR}/tree-sitter.pc" @ONLY)
@@ -93,4 +117,6 @@ install(FILES lib/include/tree_sitter/api.h
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tree-sitter.pc"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig")
 install(TARGETS tree-sitter
-        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
