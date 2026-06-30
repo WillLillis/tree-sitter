@@ -3,10 +3,13 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{ExtractedLexicalGrammar, ExtractedSyntaxGrammar, InternedGrammar};
+use super::flat_rule::{FlatRule, FlatRules, RuleId};
+use super::{
+    FlatExtractedLexicalGrammar, FlatExtractedSyntaxGrammar, FlatInternedGrammar, FlatVariable,
+};
 use crate::{
-    grammars::{ExternalToken, ReservedWordContext, Variable, VariableType},
-    rules::{MetadataParams, Rule, Symbol, SymbolType},
+    grammars::{ExternalToken, ReservedWordContext, VariableType},
+    rules::{MetadataParams, Symbol, SymbolType},
 };
 
 pub type ExtractTokensResult<T> = Result<T, ExtractTokensError>;
@@ -58,8 +61,9 @@ impl std::fmt::Display for NonTerminalWordTokenError {
 }
 
 pub(super) fn extract_tokens(
-    mut grammar: InternedGrammar,
-) -> ExtractTokensResult<(ExtractedSyntaxGrammar, ExtractedLexicalGrammar)> {
+    mut grammar: FlatInternedGrammar,
+    pool: &mut FlatRules,
+) -> ExtractTokensResult<(FlatExtractedSyntaxGrammar, FlatExtractedLexicalGrammar)> {
     let mut extractor = TokenExtractor {
         current_variable_name: String::new(),
         current_variable_token_count: 0,
@@ -69,17 +73,14 @@ pub(super) fn extract_tokens(
     };
 
     for (i, variable) in &mut grammar.variables.iter_mut().enumerate() {
-        extractor.extract_tokens_in_variable(i == 0, variable)?;
+        extractor.extract_tokens_in_variable(pool, i == 0, variable)?;
     }
 
     for variable in &mut grammar.external_tokens {
-        extractor.extract_tokens_in_variable(false, variable)?;
+        extractor.extract_tokens_in_variable(pool, false, variable)?;
     }
 
-    let mut lexical_variables = Vec::with_capacity(extractor.extracted_variables.len());
-    for variable in extractor.extracted_variables {
-        lexical_variables.push(variable);
-    }
+    let mut lexical_variables = extractor.extracted_variables;
 
     // If a variable's entire rule was extracted as a token and that token didn't
     // appear within any other rule, then remove that variable from the syntax
@@ -92,10 +93,10 @@ pub(super) fn extract_tokens(
         replacements: FxHashMap::default(),
     };
     for (i, variable) in grammar.variables.into_iter().enumerate() {
-        if let Rule::Symbol(Symbol {
+        if let FlatRule::Symbol(Symbol {
             kind: SymbolType::Terminal,
             index,
-        }) = variable.rule
+        }) = *pool.get(variable.rule)
             && i > 0
             && extractor.extracted_usage_counts[index] == 1
         {
@@ -113,7 +114,7 @@ pub(super) fn extract_tokens(
     }
 
     for variable in &mut variables {
-        variable.rule = symbol_replacer.replace_symbols_in_rule(&variable.rule);
+        variable.rule = symbol_replacer.replace_symbols_in_rule(pool, variable.rule);
     }
 
     let expected_conflicts = grammar
@@ -152,7 +153,7 @@ pub(super) fn extract_tokens(
     let mut separators = Vec::new();
     let mut extra_symbols = Vec::new();
     for rule in grammar.extra_symbols {
-        if let Rule::Symbol(symbol) = rule {
+        if let FlatRule::Symbol(symbol) = *pool.get(rule) {
             extra_symbols.push(symbol_replacer.replace_symbol(symbol));
         } else if let Some(index) = lexical_variables.iter().position(|v| v.rule == rule) {
             extra_symbols.push(Symbol::terminal(index));
@@ -163,8 +164,8 @@ pub(super) fn extract_tokens(
 
     let mut external_tokens = Vec::with_capacity(grammar.external_tokens.len());
     for external_token in grammar.external_tokens {
-        let rule = symbol_replacer.replace_symbols_in_rule(&external_token.rule);
-        if let Rule::Symbol(symbol) = rule {
+        let rule = symbol_replacer.replace_symbols_in_rule(pool, external_token.rule);
+        if let FlatRule::Symbol(symbol) = *pool.get(rule) {
             if symbol.is_non_terminal() {
                 Err(ExtractTokensError::ExternalTokenNonTerminal(
                     variables[symbol.index].name.clone(),
@@ -213,25 +214,15 @@ pub(super) fn extract_tokens(
     for reserved_word_context in grammar.reserved_word_sets {
         let mut reserved_words = Vec::with_capacity(reserved_word_contexts.len());
         for reserved_rule in reserved_word_context.reserved_words {
-            if let Rule::Symbol(symbol) = reserved_rule {
+            if let FlatRule::Symbol(symbol) = *pool.get(reserved_rule) {
                 reserved_words.push(symbol_replacer.replace_symbol(symbol));
-            } else if let Some(index) = lexical_variables
-                .iter()
-                .position(|v| v.rule == reserved_rule)
+            } else if let Some(index) = lexical_variables.iter().position(|v| v.rule == reserved_rule)
             {
                 reserved_words.push(Symbol::terminal(index));
             } else {
-                let rule = if let Rule::Metadata { rule, .. } = &reserved_rule {
-                    rule.as_ref()
-                } else {
-                    &reserved_rule
-                };
-                let token_name = match rule {
-                    Rule::String(s) => s.clone(),
-                    Rule::Pattern(p, _) => p.clone(),
-                    _ => "unknown".to_string(),
-                };
-                Err(ExtractTokensError::NonTokenReservedWord(token_name))?;
+                Err(ExtractTokensError::NonTokenReservedWord(
+                    reserved_token_name(pool, reserved_rule),
+                ))?;
             }
         }
         reserved_word_contexts.push(ReservedWordContext {
@@ -241,7 +232,7 @@ pub(super) fn extract_tokens(
     }
 
     Ok((
-        ExtractedSyntaxGrammar {
+        FlatExtractedSyntaxGrammar {
             variables,
             expected_conflicts,
             extra_symbols,
@@ -252,18 +243,96 @@ pub(super) fn extract_tokens(
             precedence_orderings: grammar.precedence_orderings,
             reserved_word_sets: reserved_word_contexts,
         },
-        ExtractedLexicalGrammar {
+        FlatExtractedLexicalGrammar {
             variables: lexical_variables,
             separators,
         },
     ))
 }
 
+/// The token name reported in a [`NonTokenReservedWord`](ExtractTokensError) error:
+/// the underlying string/pattern (unwrapping a metadata wrapper), else `unknown`.
+fn reserved_token_name(pool: &FlatRules, id: RuleId) -> String {
+    let inner = if let FlatRule::Metadata { rule, .. } = pool.get(id) {
+        *rule
+    } else {
+        id
+    };
+    match pool.get(inner) {
+        FlatRule::String(s) => s.clone(),
+        FlatRule::Pattern(p, _) => p.clone(),
+        _ => "unknown".to_string(),
+    }
+}
+
+/// One step of an iterative post-order rewrite over the pool: `Visit` descends,
+/// `Build` re-interns a compound node from its rewritten children.
+enum Step {
+    Visit(RuleId),
+    Build(RuleId),
+}
+
+/// Enqueue `id`'s children (reversed, so they finish on the output stack in source
+/// order) plus a `Build` for `id`. Only called on compound nodes.
+fn descend(pool: &FlatRules, id: RuleId, work: &mut Vec<Step>) {
+    work.push(Step::Build(id));
+    match pool.get(id) {
+        FlatRule::Seq(range) | FlatRule::Choice(range) => {
+            for &child in pool.children(*range).iter().rev() {
+                work.push(Step::Visit(child));
+            }
+        }
+        FlatRule::Metadata { rule, .. } | FlatRule::Repeat(rule) | FlatRule::Reserved { rule, .. } => {
+            work.push(Step::Visit(*rule));
+        }
+        _ => unreachable!("descend on a leaf"),
+    }
+}
+
+/// Re-intern compound `id` from its rewritten children, which sit at the top of
+/// `out`; push the new id. Inverse half of [`descend`].
+fn rebuild(pool: &mut FlatRules, id: RuleId, out: &mut Vec<RuleId>) {
+    enum Combine {
+        SeqOrChoice(bool, usize),
+        Repeat,
+        Metadata(MetadataParams),
+        Reserved(String),
+    }
+    let combine = match pool.get(id) {
+        FlatRule::Seq(range) => Combine::SeqOrChoice(true, range.len as usize),
+        FlatRule::Choice(range) => Combine::SeqOrChoice(false, range.len as usize),
+        FlatRule::Repeat(_) => Combine::Repeat,
+        FlatRule::Metadata { params, .. } => Combine::Metadata(params.clone()),
+        FlatRule::Reserved { context_name, .. } => Combine::Reserved(context_name.clone()),
+        _ => unreachable!("rebuild on a leaf"),
+    };
+    let new = match combine {
+        Combine::SeqOrChoice(is_seq, n) => {
+            let base = out.len() - n;
+            let children = out.split_off(base);
+            pool.intern_seq_or_choice(is_seq, &children)
+        }
+        Combine::Repeat => {
+            let inner = out.pop().unwrap();
+            pool.intern_repeat(inner)
+        }
+        Combine::Metadata(params) => {
+            let inner = out.pop().unwrap();
+            pool.intern_metadata(params, inner)
+        }
+        Combine::Reserved(context_name) => {
+            let inner = out.pop().unwrap();
+            pool.intern_reserved(&context_name, inner)
+        }
+    };
+    out.push(new);
+}
+
 struct TokenExtractor {
     current_variable_name: String,
     current_variable_token_count: usize,
     is_first_rule: bool,
-    extracted_variables: Vec<Variable>,
+    extracted_variables: Vec<FlatVariable>,
     extracted_usage_counts: Vec<usize>,
 }
 
@@ -274,76 +343,92 @@ struct SymbolReplacer {
 impl TokenExtractor {
     fn extract_tokens_in_variable(
         &mut self,
+        pool: &mut FlatRules,
         is_first: bool,
-        variable: &mut Variable,
+        variable: &mut FlatVariable,
     ) -> ExtractTokensResult<()> {
         self.current_variable_name.clear();
         self.current_variable_name.push_str(&variable.name);
         self.current_variable_token_count = 0;
         self.is_first_rule = is_first;
-        variable.rule = self.extract_tokens_in_rule(&variable.rule)?;
+        variable.rule = self.extract_tokens_in_rule(pool, variable.rule)?;
         Ok(())
     }
 
-    fn extract_tokens_in_rule(&mut self, input: &Rule) -> ExtractTokensResult<Rule> {
-        match input {
-            Rule::String(name) => Ok(self.extract_token(input, Some(name))?.into()),
-            Rule::Pattern(..) => Ok(self.extract_token(input, None)?.into()),
-            Rule::Metadata { params, rule } => {
-                if params.is_token {
-                    let mut params = params.clone();
-                    params.is_token = false;
-
-                    let string_value = if let Rule::String(value) = rule.as_ref() {
-                        Some(value)
-                    } else {
-                        None
-                    };
-
-                    let rule_to_extract = if params == MetadataParams::default() {
-                        rule.as_ref()
-                    } else {
-                        input
-                    };
-
-                    Ok(self.extract_token(rule_to_extract, string_value)?.into())
-                } else {
-                    Ok(Rule::Metadata {
-                        params: params.clone(),
-                        rule: Box::new(self.extract_tokens_in_rule(rule)?),
-                    })
-                }
-            }
-            Rule::Repeat(content) => Ok(Rule::Repeat(Box::new(
-                self.extract_tokens_in_rule(content)?,
-            ))),
-            Rule::Seq(elements) => Ok(Rule::Seq(
-                elements
-                    .iter()
-                    .map(|e| self.extract_tokens_in_rule(e))
-                    .collect::<ExtractTokensResult<Vec<_>>>()?,
-            )),
-            Rule::Choice(elements) => Ok(Rule::Choice(
-                elements
-                    .iter()
-                    .map(|e| self.extract_tokens_in_rule(e))
-                    .collect::<ExtractTokensResult<Vec<_>>>()?,
-            )),
-            Rule::Reserved { rule, context_name } => Ok(Rule::Reserved {
-                rule: Box::new(self.extract_tokens_in_rule(rule)?),
-                context_name: context_name.clone(),
-            }),
-            _ => Ok(input.clone()),
+    /// Replace each extracted token (a string, pattern, or `token(...)`) with a
+    /// `Symbol(terminal)` and descend through the rest. Iterative post-order, so a
+    /// deeply nested rule cannot overflow the native stack.
+    fn extract_tokens_in_rule(
+        &mut self,
+        pool: &mut FlatRules,
+        root: RuleId,
+    ) -> ExtractTokensResult<RuleId> {
+        // What to do with a visited node: extract it as a token (with the rule to
+        // store and the token's string value, if any), descend, or keep as-is.
+        enum Visit {
+            Token(RuleId, Option<String>),
+            Descend,
+            Reuse,
         }
+        let mut work = vec![Step::Visit(root)];
+        let mut out: Vec<RuleId> = Vec::new();
+        while let Some(step) = work.pop() {
+            match step {
+                Step::Visit(id) => {
+                    let action = match pool.get(id) {
+                        FlatRule::String(value) => Visit::Token(id, Some(value.clone())),
+                        FlatRule::Pattern(..) => Visit::Token(id, None),
+                        FlatRule::Metadata { params, rule } if params.is_token => {
+                            // `token(...)`: extract the whole subtree as one token.
+                            // If the only metadata was `is_token`, store the inner
+                            // rule; otherwise store the metadata-wrapped rule.
+                            let mut bare = params.clone();
+                            bare.is_token = false;
+                            let inner = *rule;
+                            let string_value = match pool.get(inner) {
+                                FlatRule::String(value) => Some(value.clone()),
+                                _ => None,
+                            };
+                            let to_store = if bare == MetadataParams::default() {
+                                inner
+                            } else {
+                                id
+                            };
+                            Visit::Token(to_store, string_value)
+                        }
+                        FlatRule::Metadata { .. }
+                        | FlatRule::Repeat(_)
+                        | FlatRule::Seq(_)
+                        | FlatRule::Choice(_)
+                        | FlatRule::Reserved { .. } => Visit::Descend,
+                        FlatRule::Blank | FlatRule::Symbol(_) | FlatRule::NamedSymbol(_) => {
+                            Visit::Reuse
+                        }
+                    };
+                    match action {
+                        Visit::Token(to_store, string_value) => {
+                            let symbol = self.extract_token(to_store, string_value.as_deref())?;
+                            out.push(pool.intern_symbol(symbol));
+                        }
+                        Visit::Reuse => out.push(id),
+                        Visit::Descend => descend(pool, id, &mut work),
+                    }
+                }
+                Step::Build(id) => rebuild(pool, id, &mut out),
+            }
+        }
+        Ok(out.pop().unwrap())
     }
 
     fn extract_token(
         &mut self,
-        rule: &Rule,
-        string_value: Option<&String>,
+        rule: RuleId,
+        string_value: Option<&str>,
     ) -> ExtractTokensResult<Symbol> {
+        // Dedup by id: the pool is hash-consed, so structurally identical token
+        // rules share one RuleId.
         for (i, variable) in self.extracted_variables.iter_mut().enumerate() {
-            if variable.rule == *rule {
+            if variable.rule == rule {
                 self.extracted_usage_counts[i] += 1;
                 return Ok(Symbol::terminal(i));
             }
@@ -356,20 +441,20 @@ impl TokenExtractor {
                     self.current_variable_name.clone(),
                 ))?;
             }
-            Variable {
-                name: string_value.clone(),
+            FlatVariable {
+                name: string_value.to_owned(),
                 kind: VariableType::Anonymous,
-                rule: rule.clone(),
+                rule,
             }
         } else {
             self.current_variable_token_count += 1;
-            Variable {
+            FlatVariable {
                 name: format!(
                     "{}_token{}",
                     self.current_variable_name, self.current_variable_token_count
                 ),
                 kind: VariableType::Auxiliary,
-                rule: rule.clone(),
+                rule,
             }
         };
 
@@ -380,32 +465,32 @@ impl TokenExtractor {
 }
 
 impl SymbolReplacer {
-    fn replace_symbols_in_rule(&mut self, rule: &Rule) -> Rule {
-        match rule {
-            Rule::Symbol(symbol) => self.replace_symbol(*symbol).into(),
-            Rule::Choice(elements) => Rule::Choice(
-                elements
-                    .iter()
-                    .map(|e| self.replace_symbols_in_rule(e))
-                    .collect(),
-            ),
-            Rule::Seq(elements) => Rule::Seq(
-                elements
-                    .iter()
-                    .map(|e| self.replace_symbols_in_rule(e))
-                    .collect(),
-            ),
-            Rule::Repeat(content) => Rule::Repeat(Box::new(self.replace_symbols_in_rule(content))),
-            Rule::Metadata { rule, params } => Rule::Metadata {
-                params: params.clone(),
-                rule: Box::new(self.replace_symbols_in_rule(rule)),
-            },
-            Rule::Reserved { rule, context_name } => Rule::Reserved {
-                rule: Box::new(self.replace_symbols_in_rule(rule)),
-                context_name: context_name.clone(),
-            },
-            _ => rule.clone(),
+    /// Rewrite every `Symbol` in the rule via [`replace_symbol`](Self::replace_symbol),
+    /// re-interning the structure. Iterative post-order.
+    fn replace_symbols_in_rule(&self, pool: &mut FlatRules, root: RuleId) -> RuleId {
+        let mut work = vec![Step::Visit(root)];
+        let mut out: Vec<RuleId> = Vec::new();
+        while let Some(step) = work.pop() {
+            match step {
+                Step::Visit(id) => match *pool.get(id) {
+                    FlatRule::Symbol(symbol) => {
+                        let replaced = self.replace_symbol(symbol);
+                        out.push(pool.intern_symbol(replaced));
+                    }
+                    FlatRule::Metadata { .. }
+                    | FlatRule::Repeat(_)
+                    | FlatRule::Seq(_)
+                    | FlatRule::Choice(_)
+                    | FlatRule::Reserved { .. } => descend(pool, id, &mut work),
+                    FlatRule::Blank
+                    | FlatRule::String(_)
+                    | FlatRule::Pattern(..)
+                    | FlatRule::NamedSymbol(_) => out.push(id),
+                },
+                Step::Build(id) => rebuild(pool, id, &mut out),
+            }
         }
+        out.pop().unwrap()
     }
 
     fn replace_symbol(&self, symbol: Symbol) -> Symbol {
@@ -431,10 +516,64 @@ impl SymbolReplacer {
 #[cfg(test)]
 mod test {
     use super::*;
+    use super::super::{
+        InternedGrammar, materialize_extracted_lexical, materialize_extracted_syntax,
+    };
+    use crate::grammars::Variable;
+    use crate::rules::Rule;
+
+    /// Intern an `InternedGrammar` into a fresh pool, run `extract_tokens`, and
+    /// materialize the outputs, so the assertions can compare against `Rule` trees.
+    fn extract(
+        grammar: InternedGrammar,
+    ) -> ExtractTokensResult<(
+        crate::prepare_grammar::ExtractedSyntaxGrammar,
+        crate::prepare_grammar::ExtractedLexicalGrammar,
+    )> {
+        let mut pool = FlatRules::default();
+        let flat = FlatInternedGrammar {
+            variables: import_variables(grammar.variables, &mut pool),
+            extra_symbols: grammar
+                .extra_symbols
+                .iter()
+                .map(|r| pool.intern_import(r))
+                .collect(),
+            expected_conflicts: grammar.expected_conflicts,
+            precedence_orderings: grammar.precedence_orderings,
+            external_tokens: import_variables(grammar.external_tokens, &mut pool),
+            variables_to_inline: grammar.variables_to_inline,
+            supertype_symbols: grammar.supertype_symbols,
+            word_token: grammar.word_token,
+            reserved_word_sets: grammar
+                .reserved_word_sets
+                .into_iter()
+                .map(|s| ReservedWordContext {
+                    name: s.name,
+                    reserved_words: s.reserved_words.iter().map(|r| pool.intern_import(r)).collect(),
+                })
+                .collect(),
+        };
+        let (syntax, lexical) = extract_tokens(flat, &mut pool)?;
+        Ok((
+            materialize_extracted_syntax(syntax, &pool),
+            materialize_extracted_lexical(lexical, &pool),
+        ))
+    }
+
+    fn import_variables(variables: Vec<Variable>, pool: &mut FlatRules) -> Vec<FlatVariable> {
+        variables
+            .into_iter()
+            .map(|v| FlatVariable {
+                name: v.name,
+                kind: v.kind,
+                rule: pool.intern_import(&v.rule),
+            })
+            .collect()
+    }
 
     #[test]
     fn test_extraction() {
-        let (syntax_grammar, lexical_grammar) = extract_tokens(build_grammar(vec![
+        let (syntax_grammar, lexical_grammar) = extract(build_grammar(vec![
             Variable::named(
                 "rule_0",
                 Rule::repeat(Rule::seq(vec![
@@ -510,7 +649,7 @@ mod test {
     #[test]
     fn test_start_rule_is_token() {
         let (syntax_grammar, lexical_grammar) =
-            extract_tokens(build_grammar(vec![Variable::named(
+            extract(build_grammar(vec![Variable::named(
                 "rule_0",
                 Rule::string("hello"),
             )]))
@@ -534,7 +673,7 @@ mod test {
         ]);
         grammar.extra_symbols = vec![Rule::string(" "), Rule::non_terminal(1)];
 
-        let (syntax_grammar, lexical_grammar) = extract_tokens(grammar).unwrap();
+        let (syntax_grammar, lexical_grammar) = extract(grammar).unwrap();
         assert_eq!(syntax_grammar.extra_symbols, vec![Symbol::terminal(1),]);
         assert_eq!(lexical_grammar.separators, vec![Rule::string(" "),]);
     }
@@ -560,7 +699,7 @@ mod test {
             Variable::named("rule_2", Rule::non_terminal(2)),
         ];
 
-        let (syntax_grammar, _) = extract_tokens(grammar).unwrap();
+        let (syntax_grammar, _) = extract(grammar).unwrap();
 
         assert_eq!(
             syntax_grammar.external_tokens,
@@ -599,7 +738,7 @@ mod test {
         ]);
         grammar.external_tokens = vec![Variable::named("rule_1", Rule::non_terminal(1))];
 
-        let result = extract_tokens(grammar);
+        let result = extract(grammar);
         assert!(result.is_err(), "Expected an error but got no error");
         let err = result.err().unwrap();
         assert_eq!(
@@ -610,7 +749,7 @@ mod test {
 
     #[test]
     fn test_extraction_on_hidden_terminal() {
-        let (syntax_grammar, lexical_grammar) = extract_tokens(build_grammar(vec![
+        let (syntax_grammar, lexical_grammar) = extract(build_grammar(vec![
             Variable::named("rule_0", Rule::non_terminal(1)),
             Variable::hidden("_rule_1", Rule::string("a")),
         ]))
@@ -637,7 +776,7 @@ mod test {
     #[test]
     fn test_extraction_with_empty_string() {
         assert!(
-            extract_tokens(build_grammar(vec![
+            extract(build_grammar(vec![
                 Variable::named("rule_0", Rule::non_terminal(1)),
                 Variable::hidden("_rule_1", Rule::string("")),
             ]))
