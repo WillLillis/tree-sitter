@@ -88,98 +88,14 @@ impl FlatRules {
         &self.nodes[id.0 as usize]
     }
 
-    pub fn get_mut(&mut self, id: RuleId) -> &mut FlatRule {
-        &mut self.nodes[id.0 as usize]
-    }
-
     pub fn children(&self, range: ChildRange) -> &[RuleId] {
         &self.children[range.as_range()]
     }
 
-    /// Import a recursive [`Rule`] into the pool, returning the root [`RuleId`].
-    ///
-    /// Two-phase post-order walk over an explicit stack (`Visit` descends, `Build`
-    /// assembles from already-imported children) so a deeply nested rule cannot
-    /// overflow the native stack. Children are pushed reversed so they land on the
-    /// output stack in source order.
-    pub fn import(&mut self, root: &Rule) -> RuleId {
-        enum Step<'r> {
-            Visit(&'r Rule),
-            Build(&'r Rule),
-        }
-        let mut work = vec![Step::Visit(root)];
-        let mut out: Vec<RuleId> = Vec::new();
-        while let Some(step) = work.pop() {
-            match step {
-                Step::Visit(rule) => match rule {
-                    Rule::Blank => out.push(self.alloc(FlatRule::Blank)),
-                    Rule::String(s) => out.push(self.alloc(FlatRule::String(s.clone()))),
-                    Rule::Pattern(p, f) => {
-                        out.push(self.alloc(FlatRule::Pattern(p.clone(), f.clone())));
-                    }
-                    Rule::NamedSymbol(n) => out.push(self.alloc(FlatRule::NamedSymbol(n.clone()))),
-                    Rule::Symbol(sym) => out.push(self.alloc(FlatRule::Symbol(*sym))),
-                    Rule::Choice(elems) | Rule::Seq(elems) => {
-                        work.push(Step::Build(rule));
-                        for e in elems.iter().rev() {
-                            work.push(Step::Visit(e));
-                        }
-                    }
-                    Rule::Repeat(inner)
-                    | Rule::Metadata { rule: inner, .. }
-                    | Rule::Reserved { rule: inner, .. } => {
-                        work.push(Step::Build(rule));
-                        work.push(Step::Visit(inner));
-                    }
-                },
-                Step::Build(rule) => match rule {
-                    Rule::Choice(elems) | Rule::Seq(elems) => {
-                        let n = elems.len();
-                        let start = self.children.len() as u32;
-                        let base = out.len() - n;
-                        self.children.extend_from_slice(&out[base..]);
-                        out.truncate(base);
-                        let range = ChildRange {
-                            start,
-                            len: n as u32,
-                        };
-                        let node = if matches!(rule, Rule::Seq(_)) {
-                            FlatRule::Seq(range)
-                        } else {
-                            FlatRule::Choice(range)
-                        };
-                        out.push(self.alloc(node));
-                    }
-                    Rule::Repeat(_) => {
-                        let inner = out.pop().unwrap();
-                        out.push(self.alloc(FlatRule::Repeat(inner)));
-                    }
-                    Rule::Metadata { params, .. } => {
-                        let inner = out.pop().unwrap();
-                        out.push(self.alloc(FlatRule::Metadata {
-                            params: params.clone(),
-                            rule: inner,
-                        }));
-                    }
-                    Rule::Reserved { context_name, .. } => {
-                        let inner = out.pop().unwrap();
-                        out.push(self.alloc(FlatRule::Reserved {
-                            rule: inner,
-                            context_name: context_name.clone(),
-                        }));
-                    }
-                    // Leaves never enqueue a Build step.
-                    _ => unreachable!(),
-                },
-            }
-        }
-        out.pop().unwrap()
-    }
-
-    /// Materialize a pooled rule back into a recursive [`Rule`]. Inverse of
-    /// [`import`](Self::import); iterative post-order, so it cannot overflow on
-    /// the pool side. Uses the raw `Seq`/`Choice` variants (not the flattening
-    /// constructors) so the result is byte-identical to the imported rule.
+    /// Materialize a pooled rule back into a recursive [`Rule`]. Inverse of the
+    /// interning import ([`intern_import`](Self::intern_import)); iterative
+    /// post-order, so it cannot overflow on the pool side. Uses the raw
+    /// `Seq`/`Choice` variants, so a pooled rule round-trips to an identical `Rule`.
     pub fn materialize(&self, root: RuleId) -> Rule {
         enum Step {
             Visit(RuleId),
@@ -257,7 +173,7 @@ impl FlatRules {
 
     /// Intern a `Seq`/`Choice` over already-interned `children`; on a miss the
     /// children are appended to the child pool and a fresh node allocated.
-    fn intern_seq_or_choice(&mut self, is_seq: bool, children: &[RuleId]) -> RuleId {
+    pub fn intern_seq_or_choice(&mut self, is_seq: bool, children: &[RuleId]) -> RuleId {
         let key = NodeKey::SeqOrChoice(is_seq, children.to_vec());
         if let Some(&id) = self.table.get(&key) {
             return id;
@@ -275,6 +191,52 @@ impl FlatRules {
         });
         self.table.insert(key, id);
         id
+    }
+
+    // Interning constructors, one per single-child / leaf variant. Each computes
+    // its NodeKey internally (so NodeKey stays private) and hash-conses. Passes
+    // build flat rules through these and `intern_seq_or_choice`.
+    pub fn intern_blank(&mut self) -> RuleId {
+        self.intern(NodeKey::Blank, FlatRule::Blank)
+    }
+
+    pub fn intern_string(&mut self, value: &str) -> RuleId {
+        self.intern(
+            NodeKey::String(value.to_owned()),
+            FlatRule::String(value.to_owned()),
+        )
+    }
+
+    pub fn intern_pattern(&mut self, pattern: &str, flags: &str) -> RuleId {
+        self.intern(
+            NodeKey::Pattern(pattern.to_owned(), flags.to_owned()),
+            FlatRule::Pattern(pattern.to_owned(), flags.to_owned()),
+        )
+    }
+
+    pub fn intern_symbol(&mut self, symbol: Symbol) -> RuleId {
+        self.intern(NodeKey::Symbol(symbol), FlatRule::Symbol(symbol))
+    }
+
+    pub fn intern_repeat(&mut self, inner: RuleId) -> RuleId {
+        self.intern(NodeKey::Repeat(inner), FlatRule::Repeat(inner))
+    }
+
+    pub fn intern_metadata(&mut self, params: MetadataParams, inner: RuleId) -> RuleId {
+        self.intern(
+            NodeKey::Metadata(params.clone(), inner),
+            FlatRule::Metadata { params, rule: inner },
+        )
+    }
+
+    pub fn intern_reserved(&mut self, context_name: &str, inner: RuleId) -> RuleId {
+        self.intern(
+            NodeKey::Reserved(inner, context_name.to_owned()),
+            FlatRule::Reserved {
+                rule: inner,
+                context_name: context_name.to_owned(),
+            },
+        )
     }
 
     /// Import a [`Rule`] into the pool with hash-consing: structurally identical
@@ -383,7 +345,7 @@ mod tests {
             },
         ]);
         let mut pool = FlatRules::default();
-        let id = pool.import(&rule);
+        let id = pool.intern_import(&rule);
         assert_eq!(pool.materialize(id), rule);
     }
 
