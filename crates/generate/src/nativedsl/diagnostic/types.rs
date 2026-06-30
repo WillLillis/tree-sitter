@@ -192,8 +192,7 @@ impl DslError {
     #[must_use]
     pub fn call_trace(&self) -> Option<&[(String, PathBuf, usize, usize)]> {
         if let Self::Lower(e) = self
-            && let LowerErrorKind::CallDepthExceeded(trace)
-            | LowerErrorKind::RecursionTooDeep(trace) = &e.kind
+            && let LowerErrorKind::CallDepthExceeded(trace) = &e.kind
         {
             Some(trace)
         } else {
