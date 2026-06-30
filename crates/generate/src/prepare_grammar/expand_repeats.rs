@@ -3,6 +3,7 @@ use std::mem;
 use rustc_hash::FxHashMap;
 
 use super::ExtractedSyntaxGrammar;
+use super::flat_rule::{FlatRules, RuleId};
 use crate::{
     grammars::{Variable, VariableType},
     rules::{Rule, Symbol},
@@ -13,7 +14,11 @@ struct Expander {
     repeat_count_in_variable: usize,
     preceding_symbol_count: usize,
     auxiliary_variables: Vec<Variable>,
-    existing_repeats: FxHashMap<Rule, Symbol>,
+    /// Hash-cons pool: an expanded repeat's content is interned here, and its
+    /// canonical `RuleId` keys `existing_repeats`, so structurally identical
+    /// repeated content (anywhere in the grammar) reuses one auxiliary rule.
+    pool: FlatRules,
+    existing_repeats: FxHashMap<RuleId, Symbol>,
 }
 
 impl Expander {
@@ -66,7 +71,11 @@ impl Expander {
             Rule::Repeat(content) => {
                 let inner_rule = self.expand_rule(content);
 
-                if let Some(existing_symbol) = self.existing_repeats.get(&inner_rule) {
+                // Dedup by the content's canonical id: hash-consing makes RuleId
+                // equality structural equality, so identical repeated content seen
+                // anywhere in the grammar reuses one auxiliary rule.
+                let key = self.pool.intern_import(&inner_rule);
+                if let Some(existing_symbol) = self.existing_repeats.get(&key) {
                     return Rule::Symbol(*existing_symbol);
                 }
 
@@ -78,8 +87,7 @@ impl Expander {
                 let repeat_symbol = Symbol::non_terminal(
                     self.preceding_symbol_count + self.auxiliary_variables.len(),
                 );
-                self.existing_repeats
-                    .insert(inner_rule.clone(), repeat_symbol);
+                self.existing_repeats.insert(key, repeat_symbol);
                 self.auxiliary_variables.push(Variable {
                     name: rule_name,
                     kind: VariableType::Auxiliary,
@@ -108,6 +116,7 @@ pub(super) fn expand_repeats(mut grammar: ExtractedSyntaxGrammar) -> ExtractedSy
         repeat_count_in_variable: 0,
         preceding_symbol_count: grammar.variables.len(),
         auxiliary_variables: Vec::new(),
+        pool: FlatRules::default(),
         existing_repeats: FxHashMap::default(),
     };
 
