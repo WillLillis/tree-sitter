@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{MAX_CALL_DEPTH, MAX_EVAL_DEPTH};
+use super::{MAX_CALL_DEPTH, MAX_RULE_DEPTH};
 use crate::IoError;
 use crate::nativedsl::LowerError;
 
@@ -65,8 +65,8 @@ pub enum LowerErrorKind {
     TooManyChildren(usize),
     #[error("maximum macro call depth ({MAX_CALL_DEPTH}) exceeded")]
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
-    #[error("expression nesting too deep while expanding macros (maximum depth {MAX_EVAL_DEPTH})")]
-    RecursionTooDeep(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
+    #[error("rule nesting too deep (maximum {MAX_RULE_DEPTH})")]
+    RuleNestingTooDeep,
     #[error("integer overflow: {0} does not fit in i32")]
     IntegerOverflow(i64),
     #[error("let '{0}' is defined in terms of itself")]
