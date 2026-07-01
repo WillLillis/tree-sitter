@@ -19,6 +19,7 @@ use thiserror::Error;
 mod bitvec;
 mod build_tables;
 mod dedup;
+mod flat_rule;
 mod grammars;
 #[cfg(feature = "nativedsl")]
 pub mod nativedsl;
