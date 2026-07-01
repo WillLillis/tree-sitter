@@ -30,11 +30,11 @@ use self::{
     extract_tokens::extract_tokens, flatten_grammar::flatten_grammar,
     intern_symbols::intern_symbols, process_inlines::process_inlines,
 };
-use crate::flat_rule::{FlatRules, RuleId};
+use crate::flat_rule::{FlatRule, FlatRules, RuleId};
 use super::{
     grammars::{
-        ExternalToken, InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry,
-        SyntaxGrammar, VariableType,
+        ExternalToken, FlatVariable, InlinedProductionMap, InputGrammar, LexicalGrammar,
+        PrecedenceEntry, SyntaxGrammar, VariableType,
     },
     rules::{AliasMap, Precedence, Rule, Symbol},
 };
@@ -76,20 +76,10 @@ pub struct ExtractedLexicalGrammar {
     pub separators: Vec<Rule>,
 }
 
-/// Flat-IR analogue of [`Variable`]: the rule is a [`RuleId`] into the shared
-/// [`FlatRules`] pool rather than an owned [`Rule`].
-struct FlatVariable {
-    name: String,
-    kind: VariableType,
-    rule: RuleId,
-}
-
-/// Flat-IR analogue of [`InternedGrammar`]: rule-bearing fields hold [`RuleId`]s
-/// into the shared pool threaded through `prepare_grammar`. Produced by
-/// [`intern_symbols`]; for now [`materialize_interned`] turns it back into an
-/// [`InternedGrammar`] for the not-yet-converted [`extract_tokens`], an adapter
-/// that goes away as the rollout converts later passes.
+/// Flat-IR analogue of [`InternedGrammar`], produced by [`intern_symbols`]. Owns
+/// the hash-consed `pool` its `RuleId`s index; rule-bearing fields hold `RuleId`s.
 struct FlatInternedGrammar {
+    pool: FlatRules,
     variables: Vec<FlatVariable>,
     extra_symbols: Vec<RuleId>,
     expected_conflicts: Vec<Vec<Symbol>>,
@@ -101,10 +91,20 @@ struct FlatInternedGrammar {
     reserved_word_sets: Vec<ReservedWordContext<RuleId>>,
 }
 
+/// Output of [`extract_tokens`]: the interned grammar split into a syntax grammar
+/// and a lexical grammar, plus the `pool` both index (threaded `&mut` through the
+/// remaining passes).
+struct ExtractedGrammars {
+    pool: FlatRules,
+    syntax: FlatExtractedSyntaxGrammar,
+    lexical: FlatExtractedLexicalGrammar,
+}
+
 /// Materialize a [`FlatInternedGrammar`] back to an [`InternedGrammar`]. Now only
 /// used by `intern_symbols`' tests to assert against `Rule` trees.
 #[cfg(test)]
-fn materialize_interned(g: FlatInternedGrammar, pool: &FlatRules) -> InternedGrammar {
+fn materialize_interned(g: FlatInternedGrammar) -> InternedGrammar {
+    let pool = &g.pool;
     InternedGrammar {
         variables: g
             .variables
@@ -304,7 +304,7 @@ impl std::fmt::Display for ConflictingPrecedenceOrderingError {
 /// Transform an input grammar into separate components that are ready
 /// for parse table construction.
 pub fn prepare_grammar(
-    input_grammar: &InputGrammar,
+    input_grammar: InputGrammar,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> PrepareGrammarResult<(
     SyntaxGrammar,
@@ -312,12 +312,17 @@ pub fn prepare_grammar(
     InlinedProductionMap,
     AliasMap,
 )> {
-    validate_precedences(input_grammar)?;
-    validate_indirect_recursion(input_grammar)?;
+    validate_precedences(&input_grammar)?;
+    validate_indirect_recursion(&input_grammar)?;
 
-    let mut pool = FlatRules::default();
-    let interned_grammar = intern_symbols(input_grammar, &mut pool, diagnostics)?;
-    let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar, &mut pool)?;
+    // intern_symbols consumes the grammar and hands back the pool inside the
+    // interned grammar; extract_tokens splits it and the pool is threaded onward.
+    let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
+    let ExtractedGrammars {
+        mut pool,
+        syntax: syntax_grammar,
+        lexical: lexical_grammar,
+    } = extract_tokens(interned_grammar)?;
     let syntax_grammar = expand_repeats(syntax_grammar, &mut pool);
     let mut syntax_grammar = flatten_grammar(syntax_grammar, &mut pool)?;
     let lexical_grammar = expand_tokens(lexical_grammar, &mut pool)?;
@@ -333,7 +338,7 @@ fn validate_indirect_recursion(grammar: &InputGrammar) -> Result<(), IndirectRec
     let mut epsilon_transitions: IndexMap<&str, BTreeSet<String>> = IndexMap::new();
 
     for variable in &grammar.variables {
-        let productions = get_single_symbol_productions(&variable.rule);
+        let productions = get_single_symbol_productions(&grammar.pool, variable.rule);
         // Filter out rules that *directly* reference themselves, as this doesn't
         // cause a parsing loop.
         let filtered: BTreeSet<String> = productions
@@ -360,16 +365,20 @@ fn validate_indirect_recursion(grammar: &InputGrammar) -> Result<(), IndirectRec
     Ok(())
 }
 
-fn get_single_symbol_productions(rule: &Rule) -> BTreeSet<String> {
-    match rule {
-        Rule::NamedSymbol(name) => BTreeSet::from([name.clone()]),
-        Rule::Choice(choices) => choices
-            .iter()
-            .flat_map(get_single_symbol_productions)
-            .collect(),
-        Rule::Metadata { rule, .. } => get_single_symbol_productions(rule),
-        _ => BTreeSet::new(),
+fn get_single_symbol_productions(pool: &FlatRules, root: RuleId) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        match pool.get(id) {
+            FlatRule::NamedSymbol(name) => {
+                out.insert(name.clone());
+            }
+            FlatRule::Choice(range) => stack.extend_from_slice(pool.children(*range)),
+            FlatRule::Metadata { rule, .. } => stack.push(*rule),
+            _ => {}
+        }
     }
+    out
 }
 
 /// Perform a depth-first search to detect cycles in single state transitions.
@@ -410,29 +419,37 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
     // Check that no rule contains a named precedence that is not present in
     // any of the `precedences` lists.
     fn validate(
+        pool: &FlatRules,
         rule_name: &str,
-        rule: &Rule,
+        root: RuleId,
         names: &FxHashSet<&String>,
     ) -> ValidatePrecedenceResult<()> {
-        match rule {
-            Rule::Repeat(rule) => validate(rule_name, rule, names),
-            Rule::Seq(elements) | Rule::Choice(elements) => elements
-                .iter()
-                .try_for_each(|e| validate(rule_name, e, names)),
-            Rule::Metadata { rule, params } => {
-                if let Precedence::Name(n) = &params.precedence
-                    && !names.contains(n)
-                {
-                    Err(UndeclaredPrecedenceError {
-                        precedence: n.clone(),
-                        rule: rule_name.to_string(),
-                    })?;
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            match pool.get(id) {
+                FlatRule::Repeat(rule) => stack.push(*rule),
+                FlatRule::Seq(range) | FlatRule::Choice(range) => {
+                    // Reversed so children are visited left-to-right, so the first
+                    // undeclared precedence is reported (matching the recursion).
+                    for &child in pool.children(*range).iter().rev() {
+                        stack.push(child);
+                    }
                 }
-                validate(rule_name, rule, names)?;
-                Ok(())
+                FlatRule::Metadata { rule, params } => {
+                    if let Precedence::Name(n) = &params.precedence
+                        && !names.contains(n)
+                    {
+                        Err(UndeclaredPrecedenceError {
+                            precedence: n.clone(),
+                            rule: rule_name.to_string(),
+                        })?;
+                    }
+                    stack.push(*rule);
+                }
+                _ => {}
             }
-            _ => Ok(()),
         }
+        Ok(())
     }
 
     // For any two precedence names `a` and `b`, if `a` comes before `b`
@@ -479,7 +496,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
         })
         .collect::<FxHashSet<&String>>();
     for variable in &grammar.variables {
-        validate(&variable.name, &variable.rule, &precedence_names)?;
+        validate(&grammar.pool, &variable.name, variable.rule, &precedence_names)?;
     }
 
     Ok(())
@@ -488,11 +505,11 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grammars::VariableType;
+    use crate::grammars::{RuleGrammar, VariableType};
 
     #[test]
     fn test_validate_precedences_with_undeclared_precedence() {
-        let grammar = InputGrammar {
+        let grammar = RuleGrammar {
             precedence_orderings: vec![
                 vec![
                     PrecedenceEntry::Name("a".to_string()),
@@ -523,7 +540,8 @@ mod tests {
                 },
             ],
             ..Default::default()
-        };
+        }
+        .intern();
 
         let result = validate_precedences(&grammar);
         assert_eq!(
@@ -534,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_validate_precedences_with_conflicting_order() {
-        let grammar = InputGrammar {
+        let grammar = RuleGrammar {
             precedence_orderings: vec![
                 vec![
                     PrecedenceEntry::Name("a".to_string()),
@@ -565,7 +583,8 @@ mod tests {
                 },
             ],
             ..Default::default()
-        };
+        }
+        .intern();
 
         let result = validate_precedences(&grammar);
         assert_eq!(

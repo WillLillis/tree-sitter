@@ -4,6 +4,7 @@ use super::{
     nfa::Nfa,
     rules::{Alias, Associativity, Precedence, Rule, Symbol, TokenSet},
 };
+use crate::flat_rule::{FlatRules, RuleId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VariableType {
@@ -22,14 +23,46 @@ pub struct Variable {
     pub rule: Rule,
 }
 
+/// Flat-pool analogue of [`Variable`]: the rule is a [`RuleId`] into the owning
+/// [`InputGrammar`]'s pool rather than an inline [`Rule`].
+#[derive(Clone, Debug)]
+pub struct FlatVariable {
+    pub name: String,
+    pub kind: VariableType,
+    pub rule: RuleId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PrecedenceEntry {
     Name(String),
     Symbol(String),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// Rule-bearing fields hold `RuleId`s into `pool`. `PartialEq`/`Eq` are dropped
+// (pool equality is meaningless); tests use a dedicated comparator if needed.
+#[derive(Clone, Debug, Default)]
 pub struct InputGrammar {
+    pub pool: FlatRules,
+    pub name: String,
+    pub variables: Vec<FlatVariable>,
+    pub extra_symbols: Vec<RuleId>,
+    pub expected_conflicts: Vec<Vec<String>>,
+    pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
+    pub external_tokens: Vec<RuleId>,
+    pub variables_to_inline: Vec<String>,
+    pub supertype_symbols: Vec<String>,
+    pub word_token: Option<String>,
+    pub reserved_words: Vec<ReservedWordContext<RuleId>>,
+}
+
+/// Test-only `Rule`-based mirror of [`InputGrammar`]. Tests build one of these with
+/// `..Default::default()` (as they used to build `InputGrammar`) and call
+/// [`RuleGrammar::intern`] to get a flat `InputGrammar`. [`InputGrammar::to_rule_grammar`]
+/// is the inverse, letting tests compare two grammars structurally now that
+/// `InputGrammar` itself is not `PartialEq` (pool equality is meaningless).
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq)]
+pub struct RuleGrammar {
     pub name: String,
     pub variables: Vec<Variable>,
     pub extra_symbols: Vec<Rule>,
@@ -40,6 +73,82 @@ pub struct InputGrammar {
     pub supertype_symbols: Vec<String>,
     pub word_token: Option<String>,
     pub reserved_words: Vec<ReservedWordContext<Rule>>,
+}
+
+#[cfg(test)]
+impl RuleGrammar {
+    pub fn intern(self) -> InputGrammar {
+        let mut pool = FlatRules::default();
+        let variables = self
+            .variables
+            .into_iter()
+            .map(|v| FlatVariable {
+                name: v.name,
+                kind: v.kind,
+                rule: pool.intern_import(&v.rule),
+            })
+            .collect();
+        let extra_symbols = self.extra_symbols.iter().map(|r| pool.intern_import(r)).collect();
+        let external_tokens = self.external_tokens.iter().map(|r| pool.intern_import(r)).collect();
+        let reserved_words = self
+            .reserved_words
+            .into_iter()
+            .map(|c| ReservedWordContext {
+                name: c.name,
+                reserved_words: c.reserved_words.iter().map(|r| pool.intern_import(r)).collect(),
+            })
+            .collect();
+        InputGrammar {
+            pool,
+            name: self.name,
+            variables,
+            extra_symbols,
+            expected_conflicts: self.expected_conflicts,
+            precedence_orderings: self.precedence_orderings,
+            external_tokens,
+            variables_to_inline: self.variables_to_inline,
+            supertype_symbols: self.supertype_symbols,
+            word_token: self.word_token,
+            reserved_words,
+        }
+    }
+}
+
+#[cfg(test)]
+impl InputGrammar {
+    /// Materialize every pooled rule back into a `Rule` tree, producing the
+    /// `RuleGrammar` mirror. Inverse of [`RuleGrammar::intern`]; used by tests to
+    /// compare two grammars structurally (`InputGrammar` is not `PartialEq`).
+    pub fn to_rule_grammar(&self) -> RuleGrammar {
+        let mat = |id: RuleId| self.pool.materialize(id);
+        RuleGrammar {
+            name: self.name.clone(),
+            variables: self
+                .variables
+                .iter()
+                .map(|v| Variable {
+                    name: v.name.clone(),
+                    kind: v.kind,
+                    rule: mat(v.rule),
+                })
+                .collect(),
+            extra_symbols: self.extra_symbols.iter().map(|&r| mat(r)).collect(),
+            expected_conflicts: self.expected_conflicts.clone(),
+            precedence_orderings: self.precedence_orderings.clone(),
+            external_tokens: self.external_tokens.iter().map(|&r| mat(r)).collect(),
+            variables_to_inline: self.variables_to_inline.clone(),
+            supertype_symbols: self.supertype_symbols.clone(),
+            word_token: self.word_token.clone(),
+            reserved_words: self
+                .reserved_words
+                .iter()
+                .map(|c| ReservedWordContext {
+                    name: c.name.clone(),
+                    reserved_words: c.reserved_words.iter().map(|&r| mat(r)).collect(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

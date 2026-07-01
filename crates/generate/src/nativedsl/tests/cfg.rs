@@ -156,7 +156,7 @@ fn cfg_dropped_macro_keeps_same_named_survivor() {
         @dup()
     "#);
     assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("stable".into()));
+    assert_eq!(mat(&g, g.variables[0].rule), Rule::String("stable".into()));
 }
 
 #[test]
@@ -216,7 +216,7 @@ fn helper_module_inherits_cfg_from_importer() {
     // GFM is enabled in the importer; the helper's cfg branch survives.
     assert_eq!(
         find_rule(&g, "program"),
-        &Rule::choice(vec![
+        Rule::choice(vec![
             Rule::String("a".into()),
             Rule::String("b".into()),
             Rule::String("c".into()),

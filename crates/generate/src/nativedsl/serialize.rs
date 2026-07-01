@@ -1,5 +1,6 @@
 //! JSON serialization for [`InputGrammar`] - produces `grammar.json` format.
 
+use crate::flat_rule::{FlatRules, RuleId};
 use crate::grammars::{InputGrammar, PrecedenceEntry};
 use crate::parse_grammar::{PrecedenceValueJSON, RuleJSON};
 use crate::rules::{Alias, Associativity, Precedence, Rule};
@@ -13,7 +14,7 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
 
     let mut rules = Map::new();
     for var in &grammar.variables {
-        rules.insert(var.name.clone(), rule_to_json(&var.rule));
+        rules.insert(var.name.clone(), rule_to_json(&grammar.pool, var.rule));
     }
     obj.insert("rules".into(), Value::Object(rules));
 
@@ -23,7 +24,13 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
 
     obj.insert(
         "extras".into(),
-        Value::Array(grammar.extra_symbols.iter().map(rule_to_json).collect()),
+        Value::Array(
+            grammar
+                .extra_symbols
+                .iter()
+                .map(|&id| rule_to_json(&grammar.pool, id))
+                .collect(),
+        ),
     );
     obj.insert(
         "conflicts".into(),
@@ -63,7 +70,13 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
     );
     obj.insert(
         "externals".into(),
-        Value::Array(grammar.external_tokens.iter().map(rule_to_json).collect()),
+        Value::Array(
+            grammar
+                .external_tokens
+                .iter()
+                .map(|&id| rule_to_json(&grammar.pool, id))
+                .collect(),
+        ),
     );
     obj.insert("inline".into(), str_array(&grammar.variables_to_inline));
     obj.insert("supertypes".into(), str_array(&grammar.supertype_symbols));
@@ -75,7 +88,12 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
         for ctx in &grammar.reserved_words {
             reserved.insert(
                 ctx.name.clone(),
-                Value::Array(ctx.reserved_words.iter().map(rule_to_json).collect()),
+                Value::Array(
+                    ctx.reserved_words
+                        .iter()
+                        .map(|&id| rule_to_json(&grammar.pool, id))
+                        .collect(),
+                ),
             );
         }
         obj.insert("reserved".into(), Value::Object(reserved));
@@ -88,8 +106,8 @@ fn node_to_value(node: RuleJSON) -> Value {
     serde_json::to_value(node).expect("RuleJSON serialization cannot fail")
 }
 
-fn rule_to_json(rule: &Rule) -> Value {
-    node_to_value(build_rule(rule))
+fn rule_to_json(pool: &FlatRules, id: RuleId) -> Value {
+    node_to_value(build_rule(&pool.materialize(id)))
 }
 
 /// Lower the internal [`Rule`] representation into the typed `grammar.json`

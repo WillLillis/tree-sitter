@@ -21,7 +21,7 @@ macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
     "#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
+    assert_eq!(find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
 }
 
 #[test]
@@ -236,7 +236,7 @@ fn import_function_receives_complex_expr() {
     let id = || Rule::NamedSymbol("identifier".into());
     let pair = Rule::seq(vec![id(), Rule::String(":".into()), id()]);
     assert_eq!(
-        *find_rule(&g, "program"),
+        find_rule(&g, "program"),
         Rule::seq(vec![
             pair.clone(),
             Rule::choice(vec![
@@ -271,7 +271,7 @@ fn import_diamond() {
     )
     .unwrap();
     assert_eq!(
-        *find_rule(&g, "program"),
+        find_rule(&g, "program"),
         Rule::choice(vec![
             Rule::prec(Precedence::Integer(10), Rule::String("a".into())),
             Rule::prec(Precedence::Integer(10), Rule::String("b".into())),
@@ -344,7 +344,7 @@ fn override_helper_rule() {
     .unwrap();
     // Final `digit` is the override body, with h::digit inlined to the original.
     assert_eq!(
-        *find_rule(&g, "digit"),
+        find_rule(&g, "digit"),
         Rule::choice(vec![
             Rule::Pattern(r"[0-9]".into(), String::new()),
             Rule::String("x".into()),
@@ -370,7 +370,7 @@ fn helper_rule_transitive_promotion() {
     .unwrap();
     assert!(rule_names(&g).contains(&"inner"));
     assert!(rule_names(&g).contains(&"middle"));
-    assert_eq!(*find_rule(&g, "inner"), Rule::String("leaf".into()));
+    assert_eq!(find_rule(&g, "inner"), Rule::String("leaf".into()));
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn helper_rule_qualified_inlines() {
     // h::greeting inlined - program body has the literal "hello", not a
     // NamedSymbol reference.
     assert_eq!(
-        *find_rule(&g, "program"),
+        find_rule(&g, "program"),
         Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
     );
 }
@@ -409,11 +409,11 @@ fn helper_rule_materialized_into_grammar() {
     .unwrap();
     assert_eq!(rule_names(&g), vec!["program", "digit"]);
     assert_eq!(
-        *find_rule(&g, "program"),
+        find_rule(&g, "program"),
         Rule::repeat(Rule::NamedSymbol("digit".into()))
     );
     assert_eq!(
-        *find_rule(&g, "digit"),
+        find_rule(&g, "digit"),
         Rule::Pattern(r"[0-9]".into(), String::new())
     );
 }
@@ -477,7 +477,7 @@ fn helper_rule_uses_grammar_registered_external() {
     .unwrap();
     assert_eq!(g.external_tokens.len(), 1);
     assert_eq!(
-        *find_rule(&g, "wrapped"),
+        find_rule(&g, "wrapped"),
         Rule::seq(vec![
             Rule::NamedSymbol("_tok".into()),
             Rule::NamedSymbol("_tok".into()),
@@ -518,7 +518,7 @@ fn import_empty_module() {
     "#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "program"), Rule::String("x".into()));
+    assert_eq!(find_rule(&g, "program"), Rule::String("x".into()));
 }
 
 #[test]
@@ -534,11 +534,11 @@ fn import_value_in_config_extras() {
     .unwrap();
     assert_eq!(g.extra_symbols.len(), 2);
     assert_eq!(
-        g.extra_symbols[0],
+        mat(&g, g.extra_symbols[0]),
         Rule::Pattern(r"\s".into(), String::new())
     );
     assert_eq!(
-        g.extra_symbols[1],
+        mat(&g, g.extra_symbols[1]),
         Rule::Pattern(r"//[^\n]*".into(), String::new())
     );
 }
@@ -565,8 +565,8 @@ fn import_helper_rule_set_macro_expands_locally() {
     let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
     assert!(names.contains(&"a_helper"), "missing a_helper in {names:?}");
     assert!(names.contains(&"b_helper"), "missing b_helper in {names:?}");
-    assert_eq!(*find_rule(&g, "a_helper"), Rule::String("x".into()));
-    assert_eq!(*find_rule(&g, "b_helper"), Rule::String("y".into()));
+    assert_eq!(find_rule(&g, "a_helper"), Rule::String("x".into()));
+    assert_eq!(find_rule(&g, "b_helper"), Rule::String("y".into()));
 }
 
 #[test]

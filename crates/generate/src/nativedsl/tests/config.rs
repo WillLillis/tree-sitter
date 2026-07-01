@@ -116,7 +116,7 @@ fn raw_string_literal() {
         grammar { language: "test" }
         rule program { regexp(r#""[^"]*""#) }
     "##);
-    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == r#""[^"]*""#));
+    assert!(matches!(&mat(&g, g.variables[0].rule), Rule::Pattern(p, _) if p == r#""[^"]*""#));
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn string_with_escapes() {
         grammar { language: "test" }
         rule program { "\n\t\\" }
     "#);
-    assert_eq!(g.variables[0].rule, Rule::String("\n\t\\".into()));
+    assert_eq!(mat(&g, g.variables[0].rule), Rule::String("\n\t\\".into()));
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn json_roundtrip() {
         serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
             .expect("grammar JSON serialization should not fail");
     let reparsed = crate::parse_grammar::parse_grammar(&json_str, &mut Vec::new()).unwrap();
-    assert_eq!(grammar, reparsed);
+    assert_eq!(grammar.to_rule_grammar(), reparsed.to_rule_grammar());
 }
 
 #[test]
@@ -260,8 +260,9 @@ fn externals_via_let_bindings() {
         grammar { language: "test", externals: b }
         rule program { "x" }"#,
     ] {
+        let g = dsl(src);
         assert_eq!(
-            dsl(src).external_tokens,
+            mat_all(&g, &g.external_tokens),
             vec![Rule::NamedSymbol("heredoc".into())]
         );
     }
@@ -291,7 +292,7 @@ fn external_and_rule_same_name_is_valid() {
         rule program { "x" }
         rule foo { "y" }
     "#);
-    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("foo".into())]);
+    assert_eq!(mat_all(&g, &g.external_tokens), vec![Rule::NamedSymbol("foo".into())]);
     assert_eq!(g.variables.len(), 2);
 }
 
@@ -320,7 +321,7 @@ fn expect_decl_in_grammar_file() {
         rule program { _foo }
     "#);
     assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(*find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
+    assert_eq!(find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
 }
 
 #[test]
@@ -334,10 +335,10 @@ fn expect_fulfilled_by_same_file_rule() {
         rule helper { "x" }
     "#);
     assert_eq!(
-        *find_rule(&g, "program"),
+        find_rule(&g, "program"),
         Rule::NamedSymbol("helper".into())
     );
-    assert_eq!(*find_rule(&g, "helper"), Rule::String("x".into()));
+    assert_eq!(find_rule(&g, "helper"), Rule::String("x".into()));
 }
 
 #[test]
@@ -370,7 +371,7 @@ fn expect_decl_repeated_is_idempotent() {
         rule program { _foo }
     "#);
     assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(*find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
+    assert_eq!(find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
 }
 
 #[test]

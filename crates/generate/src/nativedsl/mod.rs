@@ -76,6 +76,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::IoError;
+use crate::flat_rule::FlatRule;
 use crate::rules::Rule;
 
 use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
@@ -207,8 +208,8 @@ pub fn build_exports(
             for (i, v) in g.variables.iter().enumerate() {
                 add(&v.name, Export::Rule(RuleTarget::GrammarRule(i as u32)));
             }
-            for (i, r) in g.external_tokens.iter().enumerate() {
-                if let Rule::NamedSymbol(n) = r {
+            for (i, &r) in g.external_tokens.iter().enumerate() {
+                if let FlatRule::NamedSymbol(n) = g.pool.get(r) {
                     add(n, Export::Rule(RuleTarget::GrammarExternal(i as u32)));
                 }
             }

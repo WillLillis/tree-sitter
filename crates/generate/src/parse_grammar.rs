@@ -7,7 +7,10 @@ use thiserror::Error;
 
 use crate::{
     Diagnostic,
-    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
+    flat_rule::{FlatRule, FlatRules, RuleId},
+    grammars::{
+        FlatVariable, InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType,
+    },
     rules::{Precedence, Rule},
 };
 
@@ -142,18 +145,31 @@ impl From<serde_json::Error> for ParseGrammarError {
 ///
 /// For example, if we have an external rule **and** a normal rule both called `foo`,
 /// `foo` should not be thought of as directly used unless it's used within another rule.
-fn rule_is_referenced(rule: &Rule, target: &str, is_external: bool) -> bool {
-    match rule {
-        Rule::NamedSymbol(name) => name == target && !is_external,
-        Rule::Choice(rules) | Rule::Seq(rules) => {
-            rules.iter().any(|r| rule_is_referenced(r, target, false))
+fn rule_is_referenced(pool: &FlatRules, root: RuleId, target: &str, is_external: bool) -> bool {
+    // `is_external` is only meaningful at a top-level `NamedSymbol` (an externals
+    // entry names itself); it passes through Metadata/Reserved but resets under a
+    // Seq/Choice/Repeat.
+    let mut stack = vec![(root, is_external)];
+    while let Some((id, ext)) = stack.pop() {
+        match pool.get(id) {
+            FlatRule::NamedSymbol(name) => {
+                if name == target && !ext {
+                    return true;
+                }
+            }
+            FlatRule::Choice(range) | FlatRule::Seq(range) => {
+                for &child in pool.children(*range) {
+                    stack.push((child, false));
+                }
+            }
+            FlatRule::Metadata { rule, .. } | FlatRule::Reserved { rule, .. } => {
+                stack.push((*rule, ext));
+            }
+            FlatRule::Repeat(inner) => stack.push((*inner, false)),
+            _ => {}
         }
-        Rule::Metadata { rule, .. } | Rule::Reserved { rule, .. } => {
-            rule_is_referenced(rule, target, is_external)
-        }
-        Rule::Repeat(inner) => rule_is_referenced(inner, target, false),
-        Rule::Blank | Rule::String(_) | Rule::Pattern(_, _) | Rule::Symbol(_) => false,
     }
+    false
 }
 
 impl InputGrammar {
@@ -173,10 +189,10 @@ impl InputGrammar {
         // a rule directly in `extras` keeps it), but externals do not (the
         // external entry is the rule itself, not a reference to one).
         let used: FxHashSet<String> = {
-            let by_name: FxHashMap<&str, &Rule> = self
+            let by_name: FxHashMap<&str, RuleId> = self
                 .variables
                 .iter()
-                .map(|v| (v.name.as_str(), &v.rule))
+                .map(|v| (v.name.as_str(), v.rule))
                 .collect();
             let mut visited: FxHashSet<&str> = FxHashSet::default();
             let mut stack: Vec<&str> = Vec::new();
@@ -186,26 +202,26 @@ impl InputGrammar {
             if let Some(word) = self.word_token.as_deref() {
                 stack.push(word);
             }
-            for rule in &self.extra_symbols {
-                collect_referenced_names(rule, false, &mut stack);
+            for &rule in &self.extra_symbols {
+                collect_referenced_names(&self.pool, rule, false, &mut stack);
             }
-            for rule in &self.external_tokens {
-                collect_referenced_names(rule, true, &mut stack);
+            for &rule in &self.external_tokens {
+                collect_referenced_names(&self.pool, rule, true, &mut stack);
             }
             // Reserved-word entries are uses of the named rule (the entry
             // names a token to reserve in some context). Top-level
             // `NamedSymbol` counts, same as for extras.
             for ctx in &self.reserved_words {
-                for rule in &ctx.reserved_words {
-                    collect_referenced_names(rule, false, &mut stack);
+                for &rule in &ctx.reserved_words {
+                    collect_referenced_names(&self.pool, rule, false, &mut stack);
                 }
             }
             while let Some(name) = stack.pop() {
                 if !visited.insert(name) {
                     continue;
                 }
-                if let Some(rule) = by_name.get(name) {
-                    collect_referenced_names(rule, false, &mut stack);
+                if let Some(&rule) = by_name.get(name) {
+                    collect_referenced_names(&self.pool, rule, false, &mut stack);
                 }
             }
             visited.into_iter().map(String::from).collect()
@@ -218,17 +234,20 @@ impl InputGrammar {
             if !self
                 .extra_symbols
                 .iter()
-                .any(|r| rule_is_referenced(r, &v.name, false))
+                .any(|&r| rule_is_referenced(&self.pool, r, &v.name, false))
             {
                 continue;
             }
-            let inner_rule = match &v.rule {
-                Rule::Metadata { rule, .. } => rule.as_ref(),
-                other => other,
+            let inner = if let FlatRule::Metadata { rule, .. } = self.pool.get(v.rule) {
+                *rule
+            } else {
+                v.rule
             };
-            let matches_empty = match inner_rule {
-                Rule::String(s) => s.is_empty(),
-                Rule::Pattern(value, _) => Regex::new(value).is_ok_and(|reg| reg.is_match("")),
+            let matches_empty = match self.pool.get(inner) {
+                FlatRule::String(s) => s.is_empty(),
+                FlatRule::Pattern(value, _) => {
+                    Regex::new(value).is_ok_and(|reg| reg.is_match(""))
+                }
                 _ => false,
             };
             if matches_empty {
@@ -250,9 +269,9 @@ impl InputGrammar {
             self.supertype_symbols.retain(|r| r != name);
             self.variables_to_inline.retain(|r| r != name);
             self.extra_symbols
-                .retain(|r| !rule_is_referenced(r, name, true));
+                .retain(|&r| !rule_is_referenced(&self.pool, r, name, true));
             self.external_tokens
-                .retain(|r| !rule_is_referenced(r, name, true));
+                .retain(|&r| !rule_is_referenced(&self.pool, r, name, true));
             self.precedence_orderings.retain(|r| {
                 !r.iter()
                     .any(|e| matches!(e, PrecedenceEntry::Symbol(s) if s == name))
@@ -262,7 +281,7 @@ impl InputGrammar {
             // may reference by name.
             for ctx in &mut self.reserved_words {
                 ctx.reserved_words
-                    .retain(|r| !rule_is_referenced(r, name, false));
+                    .retain(|&r| !rule_is_referenced(&self.pool, r, name, false));
             }
         }
 
@@ -273,23 +292,31 @@ impl InputGrammar {
 /// Append every `NamedSymbol` name reachable in `rule` to `out`. If
 /// `skip_top_level` is true, a `NamedSymbol` at the root of `rule` is
 /// ignored (used for externals entries, which name themselves).
-fn collect_referenced_names<'a>(rule: &'a Rule, skip_top_level: bool, out: &mut Vec<&'a str>) {
-    match rule {
-        Rule::NamedSymbol(name) => {
-            if !skip_top_level {
-                out.push(name.as_str());
+fn collect_referenced_names<'a>(
+    pool: &'a FlatRules,
+    root: RuleId,
+    skip_top_level: bool,
+    out: &mut Vec<&'a str>,
+) {
+    let mut stack = vec![(root, skip_top_level)];
+    while let Some((id, skip)) = stack.pop() {
+        match pool.get(id) {
+            FlatRule::NamedSymbol(name) => {
+                if !skip {
+                    out.push(name.as_str());
+                }
             }
-        }
-        Rule::Choice(rules) | Rule::Seq(rules) => {
-            for r in rules {
-                collect_referenced_names(r, false, out);
+            FlatRule::Choice(range) | FlatRule::Seq(range) => {
+                for &child in pool.children(*range) {
+                    stack.push((child, false));
+                }
             }
+            FlatRule::Metadata { rule, .. } | FlatRule::Reserved { rule, .. } => {
+                stack.push((*rule, skip));
+            }
+            FlatRule::Repeat(inner) => stack.push((*inner, false)),
+            _ => {}
         }
-        Rule::Metadata { rule, .. } | Rule::Reserved { rule, .. } => {
-            collect_referenced_names(rule, skip_top_level, out);
-        }
-        Rule::Repeat(inner) => collect_referenced_names(inner, false, out),
-        Rule::Blank | Rule::String(_) | Rule::Pattern(_, _) | Rule::Symbol(_) => {}
     }
 }
 
@@ -368,7 +395,28 @@ pub fn parse_grammar(
         })
         .collect::<ParseGrammarResult<Vec<_>>>()?;
 
+    // Intern all rules into a shared pool so the grammar is flat (RuleId-based).
+    let mut pool = FlatRules::default();
+    let variables = variables
+        .into_iter()
+        .map(|v| FlatVariable {
+            name: v.name,
+            kind: v.kind,
+            rule: pool.intern_import(&v.rule),
+        })
+        .collect();
+    let extra_symbols = extra_symbols.iter().map(|r| pool.intern_import(r)).collect();
+    let external_tokens = external_tokens.iter().map(|r| pool.intern_import(r)).collect();
+    let reserved_words = reserved_words
+        .into_iter()
+        .map(|ctx| ReservedWordContext {
+            name: ctx.name,
+            reserved_words: ctx.reserved_words.iter().map(|r| pool.intern_import(r)).collect(),
+        })
+        .collect();
+
     let grammar = InputGrammar {
+        pool,
         name: grammar_json.name,
         word_token: grammar_json.word,
         expected_conflicts: grammar_json.conflicts,
@@ -505,8 +553,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(grammar.name, "my_lang");
+        let variables = grammar
+            .variables
+            .iter()
+            .map(|v| Variable {
+                name: v.name.clone(),
+                kind: v.kind,
+                rule: grammar.pool.materialize(v.rule),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            grammar.variables,
+            variables,
             vec![
                 Variable {
                     name: "file".to_string(),

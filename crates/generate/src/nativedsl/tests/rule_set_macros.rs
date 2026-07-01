@@ -11,7 +11,7 @@ fn rule_set_macro_single_rule() {
         "#);
     assert_eq!(g.variables.len(), 1);
     assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+    assert_eq!(mat(&g, g.variables[0].rule), Rule::String("x".into()));
 }
 
 #[test]
@@ -24,7 +24,7 @@ fn rule_set_macro_str_param_substitution() {
         @lit("hello")
         "#);
     assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("hello".into()));
+    assert_eq!(mat(&g, g.variables[0].rule), Rule::String("hello".into()));
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn rule_set_macro_symref_in_expr_position() {
     assert_eq!(names, vec!["a_foo", "b_foo"]);
     let b = g.variables.iter().find(|v| v.name == "b_foo").unwrap();
     assert_eq!(
-        b.rule,
+        mat(&g, b.rule),
         Rule::seq(vec![
             Rule::NamedSymbol("a_foo".into()),
             Rule::String("y".into()),
@@ -63,7 +63,7 @@ fn rule_set_macro_literal_name_via_at_string() {
         @emit()
     "#);
     assert_eq!(g.variables[0].name, "foo");
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+    assert_eq!(mat(&g, g.variables[0].rule), Rule::String("x".into()));
 }
 
 #[test]
