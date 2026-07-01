@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use crate::flat_rule::RuleId;
 use crate::grammars::InputGrammar;
 use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Precedence, Rule};
@@ -16,7 +15,7 @@ macro_rules! rule_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
             let g = dsl($input);
-            assert_eq!(g.pool.materialize(g.variables[0].rule), $expected);
+            assert_eq!(g.variables[0].rule, $expected);
         })*
     };
 }
@@ -33,7 +32,7 @@ macro_rules! find_rule_tests {
     ($($name:ident { $input:expr, $rule:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
             let g = dsl($input);
-            assert_eq!(find_rule(&g, $rule), $expected);
+            assert_eq!(*find_rule(&g, $rule), $expected);
         })*
     };
 }
@@ -53,9 +52,7 @@ macro_rules! externals_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
             let g = dsl($input);
-            let externals: Vec<Rule> =
-                g.external_tokens.iter().map(|&id| g.pool.materialize(id)).collect();
-            assert_eq!(externals, $expected);
+            assert_eq!(g.external_tokens, $expected);
         })*
     };
 }
@@ -194,23 +191,10 @@ pub(super) fn rule_names(g: &InputGrammar) -> Vec<&str> {
     g.variables.iter().map(|v| v.name.as_str()).collect()
 }
 
-pub(super) fn find_rule(g: &InputGrammar, name: &str) -> Rule {
-    let id = g
-        .variables
+pub(super) fn find_rule<'a>(g: &'a InputGrammar, name: &str) -> &'a Rule {
+    &g.variables
         .iter()
         .find(|v| v.name == name)
         .unwrap_or_else(|| panic!("rule '{name}' not found"))
-        .rule;
-    g.pool.materialize(id)
-}
-
-/// Materialize a single pooled rule id back into a `Rule` for positional assertions.
-pub(super) fn mat(g: &InputGrammar, id: RuleId) -> Rule {
-    g.pool.materialize(id)
-}
-
-/// Materialize a slice of pooled rule ids (e.g. `extra_symbols`, `external_tokens`,
-/// or a reserved-word set) back into `Rule`s for list assertions.
-pub(super) fn mat_all(g: &InputGrammar, ids: &[RuleId]) -> Vec<Rule> {
-    ids.iter().map(|&id| g.pool.materialize(id)).collect()
+        .rule
 }

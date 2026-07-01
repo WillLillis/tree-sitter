@@ -36,7 +36,7 @@ impl ChildRange {
 /// A [`Rule`] with pooled children. One variant per `Rule` variant; the payload
 /// is identical except that child rules are referenced by [`RuleId`] /
 /// [`ChildRange`] into the owning [`FlatRules`] instead of being owned inline.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum FlatRule {
     Blank,
     String(String),
@@ -54,7 +54,7 @@ pub enum FlatRule {
 /// so within a pool `RuleId` equality becomes structural equality. Variadic nodes
 /// key on their child *ids*, not their [`ChildRange`] (which varies with pool
 /// offset).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash)]
 enum NodeKey {
     Blank,
     String(String),
@@ -70,7 +70,7 @@ enum NodeKey {
 /// The node + child pools backing a set of [`FlatRule`]s. `table` hash-conses nodes
 /// built through the `intern_*` path ([`intern_import`](FlatRules::intern_import));
 /// the plain [`import`](FlatRules::import) path leaves it empty.
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct FlatRules {
     nodes: Vec<FlatRule>,
     children: Vec<RuleId>,

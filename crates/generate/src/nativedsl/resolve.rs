@@ -20,7 +20,7 @@ use crate::{
         diagnostic::suggest_name,
         string_pool::StringPool,
     },
-    flat_rule::FlatRule,
+    rules::Rule,
 };
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
@@ -213,8 +213,8 @@ fn collect_decls<'a>(
         // `externals` (an external-scanner token with a grammar-rule fallback),
         // putting the name in both lists; it's one symbol, already registered by
         // the rule loop, so skip it rather than colliding with ourselves.
-        for &ext in &base_grammar.external_tokens {
-            if let FlatRule::NamedSymbol(name) = base_grammar.pool.get(ext)
+        for ext in &base_grammar.external_tokens {
+            if let Rule::NamedSymbol(name) = ext
                 && !override_names.contains(name.as_str())
                 && !base_grammar.variables.iter().any(|v| v.name == *name)
             {

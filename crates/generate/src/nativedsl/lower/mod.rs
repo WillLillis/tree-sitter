@@ -14,10 +14,7 @@ mod repr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    // `RuleId` here is the flat-pool id; the nativedsl IR's own `RuleId` (from
-    // `repr`) is the unqualified one used elsewhere in this module.
-    flat_rule::{FlatRule, FlatRules, RuleId as FlatRuleId},
-    grammars::{FlatVariable, InputGrammar, PrecedenceEntry, ReservedWordContext, VariableType},
+    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
     nativedsl::{ImportedRule, Module, ast::ModuleContext},
     rules::Rule,
 };
@@ -198,14 +195,14 @@ fn check_symbol_completeness(
         return Ok(());
     }
     let mut defined: FxHashSet<&str> = grammar.variables.iter().map(|v| v.name.as_str()).collect();
-    for &ext in &grammar.external_tokens {
-        if let FlatRule::NamedSymbol(name) = grammar.pool.get(ext) {
+    for ext in &grammar.external_tokens {
+        if let Rule::NamedSymbol(name) = ext {
             defined.insert(name.as_str());
         }
     }
     let mut undefined: Vec<&str> = Vec::new();
     for v in &grammar.variables {
-        collect_undefined(&grammar.pool, v.rule, &defined, &mut undefined);
+        collect_undefined(&v.rule, &defined, &mut undefined);
     }
     if undefined.is_empty() {
         return Ok(());
@@ -218,25 +215,20 @@ fn check_symbol_completeness(
 /// Push every `NamedSymbol` in `root` whose name is absent from `defined` into
 /// `out`. Walks with an explicit stack (order is irrelevant - `out` is sorted and
 /// deduped by the caller) so a deeply nested rule cannot overflow the native stack.
-fn collect_undefined<'a>(
-    pool: &'a FlatRules,
-    root: FlatRuleId,
-    defined: &FxHashSet<&str>,
-    out: &mut Vec<&'a str>,
-) {
+fn collect_undefined<'a>(root: &'a Rule, defined: &FxHashSet<&str>, out: &mut Vec<&'a str>) {
     let mut stack = vec![root];
-    while let Some(id) = stack.pop() {
-        match pool.get(id) {
-            FlatRule::NamedSymbol(name) if !defined.contains(name.as_str()) => {
-                out.push(name.as_str());
+    while let Some(rule) = stack.pop() {
+        match rule {
+            Rule::NamedSymbol(name) if !defined.contains(name.as_str()) => out.push(name.as_str()),
+            Rule::Seq(rules) | Rule::Choice(rules) => stack.extend(rules.iter()),
+            Rule::Metadata { rule, .. } | Rule::Repeat(rule) | Rule::Reserved { rule, .. } => {
+                stack.push(rule);
             }
-            FlatRule::Seq(range) | FlatRule::Choice(range) => {
-                stack.extend_from_slice(pool.children(*range));
-            }
-            FlatRule::Metadata { rule, .. }
-            | FlatRule::Repeat(rule)
-            | FlatRule::Reserved { rule, .. } => stack.push(*rule),
-            _ => {}
+            Rule::NamedSymbol(_)
+            | Rule::Blank
+            | Rule::String(_)
+            | Rule::Pattern(..)
+            | Rule::Symbol(_) => {}
         }
     }
 }
@@ -490,18 +482,11 @@ fn inherit<T: Clone>(
 /// child's new sets. Matches dsl.js, which assigns `reserved[name] = ...` over a
 /// copy of the base's reserved object.
 fn merge_reserved(
-    pool: &mut FlatRules,
     overridden: Option<Vec<ReservedWordContext<Rule>>>,
-    base: Option<&[ReservedWordContext<FlatRuleId>]>,
-) -> Vec<ReservedWordContext<FlatRuleId>> {
-    // Base sets keep their `RuleId`s (valid in the cloned base pool); the child's
-    // freshly-lowered rules are interned into the same pool.
-    let mut merged: Vec<ReservedWordContext<FlatRuleId>> = base.unwrap_or(&[]).to_vec();
+    base: Option<&[ReservedWordContext<Rule>]>,
+) -> Vec<ReservedWordContext<Rule>> {
+    let mut merged = base.unwrap_or(&[]).to_vec();
     for child in overridden.into_iter().flatten() {
-        let child = ReservedWordContext {
-            name: child.name,
-            reserved_words: child.reserved_words.iter().map(|r| pool.intern_import(r)).collect(),
-        };
         if let Some(existing) = merged.iter_mut().find(|c| c.name == child.name) {
             *existing = child;
         } else {
@@ -523,20 +508,17 @@ fn build_grammar(
         overrides.insert(name, Spanned::new(rule, span));
     }
 
-    // Seed the pool with the base grammar's pool so inherited RuleIds stay valid;
-    // the current grammar's freshly-lowered rules are interned on top.
-    let mut pool = base.map_or_else(FlatRules::default, |b| b.pool.clone());
-    let mut variables: Vec<FlatVariable> = Vec::new();
+    let mut variables = Vec::new();
 
     // Base rules first - preserves the inherited grammar's start rule.
     if let Some(base) = base {
         variables.reserve(base.variables.len());
         for v in &base.variables {
             if let Some(Spanned { value: rule, .. }) = overrides.remove(v.name.as_str()) {
-                variables.push(FlatVariable {
+                variables.push(Variable {
                     name: v.name.clone(),
                     kind: v.kind,
-                    rule: pool.intern_import(&rule),
+                    rule,
                 });
             } else {
                 variables.push(v.clone());
@@ -545,10 +527,10 @@ fn build_grammar(
     }
 
     for (name, rule) in result.rules {
-        variables.push(FlatVariable {
+        variables.push(Variable {
             name,
             kind: VariableType::Named,
-            rule: pool.intern_import(&rule),
+            rule,
         });
     }
 
@@ -563,10 +545,10 @@ fn build_grammar(
         let final_rule = overrides
             .remove(name)
             .map_or_else(|| rule.clone(), |s| s.value);
-        variables.push(FlatVariable {
+        variables.push(Variable {
             name: name.clone(),
             kind: VariableType::Named,
-            rule: pool.intern_import(&final_rule),
+            rule: final_rule,
         });
     }
 
@@ -606,40 +588,25 @@ fn build_grammar(
         }
     }
 
-    // Rule-bearing config fields: intern the child's rules, else inherit the base's
-    // (whose RuleIds are already valid in the cloned pool). Non-rule fields still
-    // use `inherit`. Default extras matches grammar.js (dsl.js:254): `[/\s/]` when
-    // neither the grammar nor its base specifies extras.
-    let extra_symbols = if let Some(rules) = result.extras {
-        rules.iter().map(|r| pool.intern_import(r)).collect()
-    } else if let Some(b) = base {
-        b.extra_symbols.clone()
-    } else {
-        vec![pool.intern_import(&Rule::Pattern("\\s".into(), String::new()))]
-    };
-    let external_tokens = if let Some(rules) = result.externals {
-        rules.iter().map(|r| pool.intern_import(r)).collect()
-    } else if let Some(b) = base {
-        b.external_tokens.clone()
-    } else {
-        Vec::new()
-    };
-    let reserved_words =
-        merge_reserved(&mut pool, result.reserved, base.map(|b| b.reserved_words.as_slice()));
-
     Ok(InputGrammar {
-        pool,
         name: result.language,
         variables,
-        extra_symbols,
+        // Default extras matches grammar.js (dsl.js:254): `[/\s/]` applied
+        // when neither the grammar nor its base specifies extras.
+        extra_symbols: result.extras.unwrap_or_else(|| {
+            base.map_or_else(
+                || vec![Rule::Pattern("\\s".into(), String::new())],
+                |b| b.extra_symbols.clone(),
+            )
+        }),
         expected_conflicts: inherit(result.conflicts, base, |b| &b.expected_conflicts),
         precedence_orderings: inherit(result.precedences, base, |b| &b.precedence_orderings),
-        external_tokens,
+        external_tokens: inherit(result.externals, base, |b| &b.external_tokens),
         variables_to_inline: inherit(result.inline, base, |b| &b.variables_to_inline),
         supertype_symbols: inherit(result.supertypes, base, |b| &b.supertype_symbols),
         word_token: result
             .word
             .or_else(|| base.and_then(|b| b.word_token.clone())),
-        reserved_words,
+        reserved_words: merge_reserved(result.reserved, base.map(|b| b.reserved_words.as_slice())),
     })
 }

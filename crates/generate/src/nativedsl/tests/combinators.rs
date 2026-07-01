@@ -254,12 +254,11 @@ fn prec_inside_token_immediate() {
         grammar { language: "test" }
         rule program { token_immediate(prec(1, regexp("[a-z]+"))) }
     "#);
-    let rule = mat(&g, g.variables[0].rule);
-    if let Rule::Metadata { params, .. } = &rule {
+    if let Rule::Metadata { params, .. } = &g.variables[0].rule {
         assert_eq!(params.precedence, Precedence::Integer(1));
         assert!(params.is_token && params.is_main_token);
     } else {
-        panic!("expected Metadata, got {rule:?}");
+        panic!("expected Metadata, got {:?}", g.variables[0].rule);
     }
 }
 
@@ -271,7 +270,7 @@ fn reserved_combinator() {
     rule program { reserved("default", identifier) }
     rule identifier { regexp("[a-z]+") }"#);
     assert!(
-        matches!(&mat(&g, g.variables[0].rule), Rule::Reserved { context_name, .. } if context_name == "default")
+        matches!(&g.variables[0].rule, Rule::Reserved { context_name, .. } if context_name == "default")
     );
 }
 
@@ -300,7 +299,7 @@ fn reserved_inherited() {
     assert_eq!(g.reserved_words.len(), 2);
     assert_eq!(g.reserved_words[0].name, "global");
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![
             Rule::String("if".into()),
             Rule::String("else".into()),
@@ -309,7 +308,7 @@ fn reserved_inherited() {
     );
     assert_eq!(g.reserved_words[1].name, "properties");
     assert_eq!(
-        mat_all(&g, &g.reserved_words[1].reserved_words),
+        g.reserved_words[1].reserved_words,
         vec![Rule::String("get".into()), Rule::String("set".into())]
     );
 }
@@ -330,7 +329,7 @@ fn reserved_child_merges_with_base() {
     // Base "global" stays first (default), with the child's overriding words.
     assert_eq!(g.reserved_words[0].name, "global");
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![Rule::String("if".into())]
     );
     // Base "properties" kept (not redefined by the child).

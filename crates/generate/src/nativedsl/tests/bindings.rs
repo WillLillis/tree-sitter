@@ -344,7 +344,7 @@ fn for_in_list_str_body_via_let() {
     rule program { "x" }"#);
     assert_eq!(g.reserved_words.len(), 1);
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![
             Rule::String("if".into()),
             Rule::String("else".into()),
@@ -363,7 +363,7 @@ fn for_in_list_rule_body() {
     }
     rule program { "x" }"#);
     assert_eq!(
-        mat_all(&g, &g.extra_symbols),
+        g.extra_symbols,
         vec![Rule::pattern("if", "i"), Rule::pattern("else", "i"),],
     );
 }
@@ -382,7 +382,7 @@ fn for_in_list_tuple_destructure() {
     }
     rule program { "x" }"#);
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![Rule::String("if".into()), Rule::String("else".into())],
     );
 }
@@ -399,7 +399,7 @@ fn for_in_list_mixed_with_concrete_elements() {
     }
     rule program { "x" }"#);
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![
             Rule::String("alpha".into()),
             Rule::String("mid1".into()),
@@ -421,7 +421,7 @@ fn for_in_list_empty_iterable() {
     }
     rule program { "x" }"#);
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![Rule::String("only".into())],
     );
 }
@@ -444,7 +444,7 @@ fn for_in_list_nested() {
         rule program { "x" }
     "#);
     assert_eq!(
-        mat_all(&g, &g.reserved_words[0].reserved_words),
+        g.reserved_words[0].reserved_words,
         vec![
             Rule::String("a1".into()),
             Rule::String("a2".into()),
@@ -477,7 +477,7 @@ fn function_multiple_calls() {
         rule _statement { "stmt" }
         rule _block_item { "item" }"##);
     assert_eq!(
-        mat(&g, g.variables[0].rule),
+        g.variables[0].rule,
         Rule::seq(vec![
             Rule::String("#if".into()),
             Rule::NamedSymbol("_statement".into()),
@@ -485,7 +485,7 @@ fn function_multiple_calls() {
         ])
     );
     assert_eq!(
-        mat(&g, g.variables[1].rule),
+        g.variables[1].rule,
         Rule::seq(vec![
             Rule::String("#if".into()),
             Rule::NamedSymbol("_block_item".into()),

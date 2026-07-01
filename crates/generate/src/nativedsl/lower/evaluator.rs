@@ -20,8 +20,6 @@ use super::{
 };
 
 use crate::{
-    // `RuleId` here is the IR id (from `repr`); the flat-pool id is aliased.
-    flat_rule::{FlatRules, RuleId as FlatRuleId},
     grammars::{PrecedenceEntry, ReservedWordContext},
     rules::{Associativity, Precedence, Rule},
 };
@@ -538,10 +536,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let sid = self.strings.intern_owned(&grammar.name);
                 Ok(self.alloc_val(Value::Str(sid)))
             }
-            C::Extras => self.import_rules_as_list(&grammar.extra_symbols, &grammar.pool, span),
-            C::Externals => {
-                self.import_rules_as_list(&grammar.external_tokens, &grammar.pool, span)
-            }
+            C::Extras => self.import_rules_as_list(&grammar.extra_symbols, span),
+            C::Externals => self.import_rules_as_list(&grammar.external_tokens, span),
             C::Inline => self.import_names_as_list(&grammar.variables_to_inline, span),
             C::Supertypes => self.import_names_as_list(&grammar.supertype_symbols, span),
             C::Conflicts => {
@@ -591,7 +587,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let n = grammar.reserved_words.len();
                 let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
                 for rwc in &grammar.reserved_words {
-                    let words_vid = self.import_rules_as_list(&rwc.reserved_words, &grammar.pool, span)?;
+                    let words_vid = self.import_rules_as_list(&rwc.reserved_words, span)?;
                     map.insert(rwc.name.clone(), words_vid);
                 }
                 Ok(self.alloc_object(map))
@@ -600,18 +596,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    fn import_rules_as_list(
-        &mut self,
-        rules_data: &[FlatRuleId],
-        pool: &FlatRules,
-        span: Span,
-    ) -> LowerResult<ValueId> {
+    fn import_rules_as_list(&mut self, rules_data: &[Rule], span: Span) -> LowerResult<ValueId> {
         let start = self.state.ir.value_children.len() as u32;
         self.state.ir.value_children.reserve(rules_data.len());
-        for &id in rules_data {
-            // Interim: materialize the base's pooled rule, then import into the IR.
-            // At SP4 this imports from the pool directly (materialize deleted).
-            let rid = self.import_rule(&pool.materialize(id));
+        for r in rules_data {
+            let rid = self.import_rule(r);
             let vid = self.alloc_val(Value::Rule(rid));
             self.state.ir.value_children.push(vid);
         }
@@ -922,11 +911,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             RuleTarget::GrammarRule(i) => {
                 expect_pat!(Module::Grammar { lowered, .. }, target_module);
-                self.import_rule(&lowered.pool.materialize(lowered.variables[i as usize].rule))
+                self.import_rule(&lowered.variables[i as usize].rule)
             }
             RuleTarget::GrammarExternal(i) => {
                 expect_pat!(Module::Grammar { lowered, .. }, target_module);
-                self.import_rule(&lowered.pool.materialize(lowered.external_tokens[i as usize]))
+                self.import_rule(&lowered.external_tokens[i as usize])
             }
         }
     }

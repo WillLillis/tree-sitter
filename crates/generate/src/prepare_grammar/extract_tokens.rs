@@ -5,8 +5,7 @@ use thiserror::Error;
 
 use crate::flat_rule::{FlatRule, FlatRules, RuleId, Step};
 use super::{
-    ExtractedGrammars, FlatExtractedLexicalGrammar, FlatExtractedSyntaxGrammar, FlatInternedGrammar,
-    FlatVariable,
+    FlatExtractedLexicalGrammar, FlatExtractedSyntaxGrammar, FlatInternedGrammar, FlatVariable,
 };
 use crate::{
     grammars::{ExternalToken, ReservedWordContext, VariableType},
@@ -63,10 +62,8 @@ impl std::fmt::Display for NonTerminalWordTokenError {
 
 pub(super) fn extract_tokens(
     mut grammar: FlatInternedGrammar,
-) -> ExtractTokensResult<ExtractedGrammars> {
-    // The interned grammar owns its pool; borrow it here (a field borrow, disjoint
-    // from the grammar fields the body reads) and move it into the result at the end.
-    let pool = &mut grammar.pool;
+    pool: &mut FlatRules,
+) -> ExtractTokensResult<(FlatExtractedSyntaxGrammar, FlatExtractedLexicalGrammar)> {
     let mut extractor = TokenExtractor {
         current_variable_name: String::new(),
         current_variable_token_count: 0,
@@ -234,9 +231,8 @@ pub(super) fn extract_tokens(
         });
     }
 
-    Ok(ExtractedGrammars {
-        pool: grammar.pool,
-        syntax: FlatExtractedSyntaxGrammar {
+    Ok((
+        FlatExtractedSyntaxGrammar {
             variables,
             expected_conflicts,
             extra_symbols,
@@ -247,11 +243,11 @@ pub(super) fn extract_tokens(
             precedence_orderings: grammar.precedence_orderings,
             reserved_word_sets: reserved_word_contexts,
         },
-        lexical: FlatExtractedLexicalGrammar {
+        FlatExtractedLexicalGrammar {
             variables: lexical_variables,
             separators,
         },
-    })
+    ))
 }
 
 /// The token name reported in a [`NonTokenReservedWord`](ExtractTokensError) error:
@@ -458,8 +454,7 @@ impl SymbolReplacer {
 mod test {
     use super::*;
     use super::super::{
-        ExtractedGrammars, InternedGrammar, materialize_extracted_lexical,
-        materialize_extracted_syntax,
+        InternedGrammar, materialize_extracted_lexical, materialize_extracted_syntax,
     };
     use crate::grammars::Variable;
     use crate::rules::Rule;
@@ -494,9 +489,8 @@ mod test {
                     reserved_words: s.reserved_words.iter().map(|r| pool.intern_import(r)).collect(),
                 })
                 .collect(),
-            pool,
         };
-        let ExtractedGrammars { pool, syntax, lexical } = extract_tokens(flat)?;
+        let (syntax, lexical) = extract_tokens(flat, &mut pool)?;
         Ok((
             materialize_extracted_syntax(syntax, &pool),
             materialize_extracted_lexical(lexical, &pool),
