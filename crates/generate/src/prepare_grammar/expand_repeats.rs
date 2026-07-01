@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use super::{FlatExtractedSyntaxGrammar, FlatVariable};
-use crate::flat_rule::{FlatRule, FlatRules, RuleId, Step};
+use super::flat_rule::{FlatRule, FlatRules, RuleId, Step};
 use crate::{grammars::VariableType, rules::Symbol};
 
 struct Expander<'a> {

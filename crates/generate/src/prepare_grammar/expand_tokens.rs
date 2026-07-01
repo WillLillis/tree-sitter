@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::FlatExtractedLexicalGrammar;
-use crate::flat_rule::{ChildRange, FlatRule, FlatRules, RuleId};
+use super::flat_rule::{ChildRange, FlatRule, FlatRules, RuleId};
 use crate::{
     grammars::{LexicalGrammar, LexicalVariable},
     nfa::{CharacterSet, Nfa, NfaState},

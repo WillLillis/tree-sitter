@@ -2,6 +2,7 @@ mod expand_repeats;
 mod expand_tokens;
 mod extract_default_aliases;
 mod extract_tokens;
+mod flat_rule;
 mod flatten_grammar;
 mod intern_symbols;
 mod process_inlines;
@@ -30,7 +31,7 @@ use self::{
     extract_tokens::extract_tokens, flatten_grammar::flatten_grammar,
     intern_symbols::intern_symbols, process_inlines::process_inlines,
 };
-use crate::flat_rule::{FlatRules, RuleId};
+use self::flat_rule::{FlatRules, RuleId};
 use super::{
     grammars::{
         ExternalToken, InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry,

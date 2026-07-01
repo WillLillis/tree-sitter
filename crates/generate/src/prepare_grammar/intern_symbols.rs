@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{FlatInternedGrammar, FlatVariable};
-use crate::flat_rule::{ChildRange, FlatRule, FlatRules, RuleId, Step};
+use super::flat_rule::{ChildRange, FlatRule, FlatRules, RuleId, Step};
 use crate::{
     Diagnostic,
     grammars::{InputGrammar, ReservedWordContext, VariableType},

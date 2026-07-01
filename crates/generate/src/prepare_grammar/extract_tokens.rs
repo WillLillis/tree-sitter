@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::flat_rule::{FlatRule, FlatRules, RuleId, Step};
+use super::flat_rule::{FlatRule, FlatRules, RuleId, Step};
 use super::{
     FlatExtractedLexicalGrammar, FlatExtractedSyntaxGrammar, FlatInternedGrammar, FlatVariable,
 };
