@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{FlatInternedGrammar, FlatVariable};
-use super::flat_rule::{FlatRules, RuleId};
+use super::flat_rule::{ChildRange, FlatRule, FlatRules, RuleId, Step};
 use crate::{
     Diagnostic,
     grammars::{InputGrammar, ReservedWordContext, VariableType},
@@ -135,11 +135,9 @@ struct Interner<'a> {
 
 impl Interner<'_> {
     /// Resolve every `NamedSymbol` in `rule` to a `Symbol`, returning the rule's
-    /// `RuleId` in the shared, hash-consed `pool`. An explicit-stack post-order
-    /// walk interns each node as it is built (so deep nesting cannot overflow the
-    /// native stack); `Seq`/`Choice` emit unary diagnostics on entry, and an
-    /// undefined `NamedSymbol` errors in source order - matching the recursive
-    /// interner. Materialization back to a `Rule` is deferred to the caller.
+    /// `RuleId` in the shared, hash-consed `pool`: import the rule into the pool,
+    /// then resolve it flat-to-flat. Both walks are iterative, so deep nesting
+    /// cannot overflow. Materialization back to a `Rule` is deferred to the caller.
     fn intern_rule(
         &self,
         pool: &mut FlatRules,
@@ -147,65 +145,59 @@ impl Interner<'_> {
         name: Option<&str>,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> InternSymbolsResult<RuleId> {
-        enum Step<'r> {
-            Visit(&'r Rule),
-            Build(&'r Rule),
-        }
-        let mut work = vec![Step::Visit(rule)];
+        let imported = pool.intern_import(rule);
+        self.resolve(pool, imported, name, diagnostics)
+    }
+
+    /// Rewrite each `NamedSymbol` in the pooled rule to its resolved `Symbol`,
+    /// emitting unary seq/choice diagnostics. Iterative post-order; an undefined
+    /// symbol errors in source order, matching the previous recursive interner.
+    fn resolve(
+        &self,
+        pool: &mut FlatRules,
+        root: RuleId,
+        name: Option<&str>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> InternSymbolsResult<RuleId> {
+        let mut work = vec![Step::Visit(root)];
         let mut out: Vec<RuleId> = Vec::new();
         while let Some(step) = work.pop() {
             match step {
-                Step::Visit(rule) => match rule {
-                    Rule::Blank => out.push(pool.intern_blank()),
-                    Rule::String(s) => out.push(pool.intern_string(s)),
-                    Rule::Pattern(p, f) => out.push(pool.intern_pattern(p, f)),
-                    Rule::NamedSymbol(symbol_name) => {
-                        let symbol = self.intern_name(symbol_name).ok_or_else(|| {
-                            InternSymbolsError::Undefined(symbol_name.clone())
-                        })?;
-                        out.push(pool.intern_symbol(symbol));
-                    }
-                    Rule::Symbol(symbol) => out.push(pool.intern_symbol(*symbol)),
-                    Rule::Choice(elements) | Rule::Seq(elements) => {
-                        Self::check_single(
-                            elements,
-                            name,
-                            matches!(rule, Rule::Choice(_)),
-                            diagnostics,
-                        );
-                        work.push(Step::Build(rule));
-                        for element in elements.iter().rev() {
-                            work.push(Step::Visit(element));
+                Step::Visit(id) => {
+                    match pool.get(id) {
+                        FlatRule::Seq(range) | FlatRule::Choice(range) => {
+                            let range = *range;
+                            let is_choice = matches!(pool.get(id), FlatRule::Choice(_));
+                            Self::check_single(pool, range, name, is_choice, diagnostics);
+                            pool.descend(id, &mut work);
+                            continue;
+                        }
+                        FlatRule::Metadata { .. }
+                        | FlatRule::Repeat(_)
+                        | FlatRule::Reserved { .. } => {
+                            pool.descend(id, &mut work);
+                            continue;
+                        }
+                        // Resolved below, once the shared borrow on `pool` ends.
+                        FlatRule::NamedSymbol(_) => {}
+                        FlatRule::Blank
+                        | FlatRule::String(_)
+                        | FlatRule::Pattern(..)
+                        | FlatRule::Symbol(_) => {
+                            out.push(id);
+                            continue;
                         }
                     }
-                    Rule::Repeat(inner)
-                    | Rule::Metadata { rule: inner, .. }
-                    | Rule::Reserved { rule: inner, .. } => {
-                        work.push(Step::Build(rule));
-                        work.push(Step::Visit(inner));
-                    }
-                },
-                Step::Build(rule) => match rule {
-                    Rule::Choice(elements) | Rule::Seq(elements) => {
-                        let base = out.len() - elements.len();
-                        let children = out.split_off(base);
-                        out.push(pool.intern_seq_or_choice(matches!(rule, Rule::Seq(_)), &children));
-                    }
-                    Rule::Repeat(_) => {
-                        let inner = out.pop().unwrap();
-                        out.push(pool.intern_repeat(inner));
-                    }
-                    Rule::Metadata { params, .. } => {
-                        let inner = out.pop().unwrap();
-                        out.push(pool.intern_metadata(params.clone(), inner));
-                    }
-                    Rule::Reserved { context_name, .. } => {
-                        let inner = out.pop().unwrap();
-                        out.push(pool.intern_reserved(context_name, inner));
-                    }
-                    // Leaves never enqueue a Build step.
-                    _ => unreachable!(),
-                },
+                    let FlatRule::NamedSymbol(symbol_name) = pool.get(id) else {
+                        unreachable!()
+                    };
+                    let symbol_name = symbol_name.clone();
+                    let symbol = self
+                        .intern_name(&symbol_name)
+                        .ok_or(InternSymbolsError::Undefined(symbol_name))?;
+                    out.push(pool.intern_symbol(symbol));
+                }
+                Step::Build(id) => pool.rebuild(id, &mut out),
             }
         }
         Ok(out.pop().unwrap())
@@ -232,12 +224,16 @@ impl Interner<'_> {
     // In the case of a seq or choice rule of 1 element in a hidden rule, weird
     // inconsistent behavior with queries can occur. So we should warn the user about it.
     fn check_single(
-        elements: &[Rule],
+        pool: &FlatRules,
+        range: ChildRange,
         name: Option<&str>,
         is_choice: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        if elements.len() == 1 && matches!(elements[0], Rule::String(_) | Rule::Pattern(..)) {
+        let children = pool.children(range);
+        if children.len() == 1
+            && matches!(pool.get(children[0]), FlatRule::String(_) | FlatRule::Pattern(..))
+        {
             let name = name.map(str::to_string);
             diagnostics.push(if is_choice {
                 Diagnostic::UnaryChoice { name }

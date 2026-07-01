@@ -302,9 +302,9 @@ pub fn prepare_grammar(
     let mut pool = FlatRules::default();
     let interned_grammar = intern_symbols(input_grammar, &mut pool, diagnostics)?;
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar, &mut pool)?;
+    let syntax_grammar = expand_repeats(syntax_grammar, &mut pool);
     let syntax_grammar = materialize_extracted_syntax(syntax_grammar, &pool);
     let lexical_grammar = materialize_extracted_lexical(lexical_grammar, &pool);
-    let syntax_grammar = expand_repeats(syntax_grammar);
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
     let lexical_grammar = expand_tokens(lexical_grammar)?;
     let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);

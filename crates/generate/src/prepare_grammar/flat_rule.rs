@@ -77,6 +77,14 @@ pub struct FlatRules {
     table: FxHashMap<NodeKey, RuleId>,
 }
 
+/// One step of an iterative post-order rewrite over the pool: `Visit` descends,
+/// `Build` re-interns a compound node from its rewritten children. Used with
+/// [`FlatRules::descend`] / [`FlatRules::rebuild`] by the transform passes.
+pub(super) enum Step {
+    Visit(RuleId),
+    Build(RuleId),
+}
+
 impl FlatRules {
     fn alloc(&mut self, node: FlatRule) -> RuleId {
         let id = RuleId(self.nodes.len() as u32);
@@ -193,27 +201,9 @@ impl FlatRules {
         id
     }
 
-    // Interning constructors, one per single-child / leaf variant. Each computes
-    // its NodeKey internally (so NodeKey stays private) and hash-conses. Passes
-    // build flat rules through these and `intern_seq_or_choice`.
-    pub fn intern_blank(&mut self) -> RuleId {
-        self.intern(NodeKey::Blank, FlatRule::Blank)
-    }
-
-    pub fn intern_string(&mut self, value: &str) -> RuleId {
-        self.intern(
-            NodeKey::String(value.to_owned()),
-            FlatRule::String(value.to_owned()),
-        )
-    }
-
-    pub fn intern_pattern(&mut self, pattern: &str, flags: &str) -> RuleId {
-        self.intern(
-            NodeKey::Pattern(pattern.to_owned(), flags.to_owned()),
-            FlatRule::Pattern(pattern.to_owned(), flags.to_owned()),
-        )
-    }
-
+    // Interning constructors used by the transform passes to build new nodes (the
+    // passes reuse existing leaf ids rather than re-interning literals). Each
+    // computes its NodeKey internally, so NodeKey stays private.
     pub fn intern_symbol(&mut self, symbol: Symbol) -> RuleId {
         self.intern(NodeKey::Symbol(symbol), FlatRule::Symbol(symbol))
     }
@@ -318,6 +308,79 @@ impl FlatRules {
             }
         }
         out.pop().unwrap()
+    }
+
+    /// Intern a `Choice`, replicating `Rule::choice`: flatten nested `Choice`
+    /// children and drop duplicates (by `RuleId`, which the hash-consed pool makes
+    /// structural), preserving order.
+    pub fn intern_choice_flattened(&mut self, children: &[RuleId]) -> RuleId {
+        let mut flat: Vec<RuleId> = Vec::new();
+        let mut stack: Vec<RuleId> = children.iter().rev().copied().collect();
+        while let Some(id) = stack.pop() {
+            if let FlatRule::Choice(range) = self.get(id) {
+                let range = *range;
+                for &child in self.children(range).iter().rev() {
+                    stack.push(child);
+                }
+            } else if !flat.contains(&id) {
+                flat.push(id);
+            }
+        }
+        self.intern_seq_or_choice(false, &flat)
+    }
+
+    /// Enqueue `id`'s children (reversed, so they finish on the output stack in
+    /// source order) plus a `Build` for `id`. Only valid on a compound node.
+    pub(super) fn descend(&self, id: RuleId, work: &mut Vec<Step>) {
+        work.push(Step::Build(id));
+        match self.get(id) {
+            FlatRule::Seq(range) | FlatRule::Choice(range) => {
+                for &child in self.children(*range).iter().rev() {
+                    work.push(Step::Visit(child));
+                }
+            }
+            FlatRule::Metadata { rule, .. }
+            | FlatRule::Repeat(rule)
+            | FlatRule::Reserved { rule, .. } => work.push(Step::Visit(*rule)),
+            _ => unreachable!("descend on a leaf"),
+        }
+    }
+
+    /// Re-intern compound `id` from its rewritten children at the top of `out`,
+    /// pushing the new id. Inverse half of [`descend`](Self::descend). Each arm
+    /// copies what it needs from the node before interning, so the `self.get(id)`
+    /// borrow ends before the `&mut self` intern call.
+    pub(super) fn rebuild(&mut self, id: RuleId, out: &mut Vec<RuleId>) {
+        let new = match self.get(id) {
+            FlatRule::Seq(range) => {
+                let base = out.len() - range.len as usize;
+                let new = self.intern_seq_or_choice(true, &out[base..]);
+                out.truncate(base);
+                new
+            }
+            FlatRule::Choice(range) => {
+                let base = out.len() - range.len as usize;
+                let new = self.intern_seq_or_choice(false, &out[base..]);
+                out.truncate(base);
+                new
+            }
+            FlatRule::Repeat(_) => {
+                let inner = out.pop().unwrap();
+                self.intern_repeat(inner)
+            }
+            FlatRule::Metadata { params, .. } => {
+                let params = params.clone();
+                let inner = out.pop().unwrap();
+                self.intern_metadata(params, inner)
+            }
+            FlatRule::Reserved { context_name, .. } => {
+                let context_name = context_name.clone();
+                let inner = out.pop().unwrap();
+                self.intern_reserved(&context_name, inner)
+            }
+            _ => unreachable!("rebuild on a leaf"),
+        };
+        out.push(new);
     }
 }
 
