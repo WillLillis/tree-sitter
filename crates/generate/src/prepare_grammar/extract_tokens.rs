@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::flat_rule::{FlatRule, FlatRules, RuleId, Step};
+use super::flat_rule::{FlatRule, FlatRules, RuleId};
 use super::{
     FlatExtractedLexicalGrammar, FlatExtractedSyntaxGrammar, FlatInternedGrammar, FlatVariable,
 };
@@ -265,6 +265,69 @@ fn reserved_token_name(pool: &FlatRules, id: RuleId) -> String {
     }
 }
 
+/// One step of an iterative post-order rewrite over the pool: `Visit` descends,
+/// `Build` re-interns a compound node from its rewritten children.
+enum Step {
+    Visit(RuleId),
+    Build(RuleId),
+}
+
+/// Enqueue `id`'s children (reversed, so they finish on the output stack in source
+/// order) plus a `Build` for `id`. Only called on compound nodes.
+fn descend(pool: &FlatRules, id: RuleId, work: &mut Vec<Step>) {
+    work.push(Step::Build(id));
+    match pool.get(id) {
+        FlatRule::Seq(range) | FlatRule::Choice(range) => {
+            for &child in pool.children(*range).iter().rev() {
+                work.push(Step::Visit(child));
+            }
+        }
+        FlatRule::Metadata { rule, .. } | FlatRule::Repeat(rule) | FlatRule::Reserved { rule, .. } => {
+            work.push(Step::Visit(*rule));
+        }
+        _ => unreachable!("descend on a leaf"),
+    }
+}
+
+/// Re-intern compound `id` from its rewritten children, which sit at the top of
+/// `out`; push the new id. Inverse half of [`descend`].
+fn rebuild(pool: &mut FlatRules, id: RuleId, out: &mut Vec<RuleId>) {
+    enum Combine {
+        SeqOrChoice(bool, usize),
+        Repeat,
+        Metadata(MetadataParams),
+        Reserved(String),
+    }
+    let combine = match pool.get(id) {
+        FlatRule::Seq(range) => Combine::SeqOrChoice(true, range.len as usize),
+        FlatRule::Choice(range) => Combine::SeqOrChoice(false, range.len as usize),
+        FlatRule::Repeat(_) => Combine::Repeat,
+        FlatRule::Metadata { params, .. } => Combine::Metadata(params.clone()),
+        FlatRule::Reserved { context_name, .. } => Combine::Reserved(context_name.clone()),
+        _ => unreachable!("rebuild on a leaf"),
+    };
+    let new = match combine {
+        Combine::SeqOrChoice(is_seq, n) => {
+            let base = out.len() - n;
+            let children = out.split_off(base);
+            pool.intern_seq_or_choice(is_seq, &children)
+        }
+        Combine::Repeat => {
+            let inner = out.pop().unwrap();
+            pool.intern_repeat(inner)
+        }
+        Combine::Metadata(params) => {
+            let inner = out.pop().unwrap();
+            pool.intern_metadata(params, inner)
+        }
+        Combine::Reserved(context_name) => {
+            let inner = out.pop().unwrap();
+            pool.intern_reserved(&context_name, inner)
+        }
+    };
+    out.push(new);
+}
+
 struct TokenExtractor {
     current_variable_name: String,
     current_variable_token_count: usize,
@@ -348,10 +411,10 @@ impl TokenExtractor {
                             out.push(pool.intern_symbol(symbol));
                         }
                         Visit::Reuse => out.push(id),
-                        Visit::Descend => pool.descend(id, &mut work),
+                        Visit::Descend => descend(pool, id, &mut work),
                     }
                 }
-                Step::Build(id) => pool.rebuild(id, &mut out),
+                Step::Build(id) => rebuild(pool, id, &mut out),
             }
         }
         Ok(out.pop().unwrap())
@@ -418,13 +481,13 @@ impl SymbolReplacer {
                     | FlatRule::Repeat(_)
                     | FlatRule::Seq(_)
                     | FlatRule::Choice(_)
-                    | FlatRule::Reserved { .. } => pool.descend(id, &mut work),
+                    | FlatRule::Reserved { .. } => descend(pool, id, &mut work),
                     FlatRule::Blank
                     | FlatRule::String(_)
                     | FlatRule::Pattern(..)
                     | FlatRule::NamedSymbol(_) => out.push(id),
                 },
-                Step::Build(id) => pool.rebuild(id, &mut out),
+                Step::Build(id) => rebuild(pool, id, &mut out),
             }
         }
         out.pop().unwrap()
