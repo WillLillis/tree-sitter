@@ -204,10 +204,6 @@ impl FlatRules {
     // Interning constructors used by the transform passes to build new nodes (the
     // passes reuse existing leaf ids rather than re-interning literals). Each
     // computes its NodeKey internally, so NodeKey stays private.
-    pub fn intern_blank(&mut self) -> RuleId {
-        self.intern(NodeKey::Blank, FlatRule::Blank)
-    }
-
     pub fn intern_symbol(&mut self, symbol: Symbol) -> RuleId {
         self.intern(NodeKey::Symbol(symbol), FlatRule::Symbol(symbol))
     }

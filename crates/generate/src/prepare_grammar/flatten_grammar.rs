@@ -3,11 +3,12 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::flat_rule::{FlatRule, FlatRules, RuleId, Step};
-use super::{FlatExtractedSyntaxGrammar, FlatVariable};
+use super::ExtractedSyntaxGrammar;
 use crate::{
-    grammars::{Production, ProductionStep, ReservedWordSetId, SyntaxGrammar, SyntaxVariable},
-    rules::{Alias, Associativity, Precedence, Symbol, TokenSet},
+    grammars::{
+        Production, ProductionStep, ReservedWordSetId, SyntaxGrammar, SyntaxVariable, Variable,
+    },
+    rules::{Alias, Associativity, Precedence, Rule, Symbol, TokenSet},
 };
 
 pub type FlattenGrammarResult<T> = Result<T, FlattenGrammarError>;
@@ -38,20 +39,6 @@ struct RuleFlattener {
     field_name_stack: Vec<String>,
 }
 
-/// One step of [`RuleFlattener::apply`]'s iterative walk over a choice-free rule.
-/// `Enter` does a node's pre-order work; the `Exit*` variants do its post-order
-/// work once its children are done. `ExitSeq` folds the children's "did-push"
-/// flags; `ExitMetadata`/`ExitReserved` pop the context a matching `Enter` pushed.
-/// The `bool` carried by `Enter`/`ExitMetadata` is `at_end`: whether the node is
-/// the final position of the production, where a wrapping precedence is not
-/// overridden by the enclosing one.
-enum Task {
-    Enter(RuleId, bool),
-    ExitSeq(usize),
-    ExitMetadata(RuleId, bool),
-    ExitReserved,
-}
-
 impl RuleFlattener {
     const fn new(reserved_word_set_ids: FxHashMap<String, ReservedWordSetId>) -> Self {
         Self {
@@ -68,15 +55,11 @@ impl RuleFlattener {
         }
     }
 
-    fn flatten_variable(
-        &mut self,
-        pool: &mut FlatRules,
-        variable: FlatVariable,
-    ) -> FlattenGrammarResult<SyntaxVariable> {
-        let choices = extract_choices(pool, variable.rule);
+    fn flatten_variable(&mut self, variable: Variable) -> FlattenGrammarResult<SyntaxVariable> {
+        let choices = extract_choices(variable.rule);
         let mut productions = Vec::with_capacity(choices.len());
         for rule in choices {
-            let production = self.flatten_rule(pool, rule)?;
+            let production = self.flatten_rule(rule)?;
             if !productions.contains(&production) {
                 productions.push(production);
             }
@@ -88,217 +71,165 @@ impl RuleFlattener {
         })
     }
 
-    fn flatten_rule(&mut self, pool: &FlatRules, rule: RuleId) -> FlattenGrammarResult<Production> {
+    fn flatten_rule(&mut self, rule: Rule) -> FlattenGrammarResult<Production> {
         self.production = Production::default();
         self.alias_stack.clear();
         self.reserved_word_stack.clear();
         self.precedence_stack.clear();
         self.associativity_stack.clear();
         self.field_name_stack.clear();
-        self.apply(pool, rule)?;
+        self.apply(rule, true)?;
         Ok(self.production.clone())
     }
 
-    /// Walk a choice-free rule, appending its steps to `self.production`. Iterative
-    /// post-order: `Enter` pushes metadata context (precedence/associativity/alias/
-    /// field/reserved) and appends a step for each `Symbol`; the `Exit*` tasks pop
-    /// that context and apply the trailing-precedence fixup. The `did_push` stack
-    /// stands in for the recursive version's `bool` return - the fixup only fires
-    /// when a metadata subtree actually pushed a step and is not at the end.
-    fn apply(&mut self, pool: &FlatRules, root: RuleId) -> FlattenGrammarResult<()> {
-        let mut work = vec![Task::Enter(root, true)];
-        let mut did_push: Vec<bool> = Vec::new();
-        while let Some(task) = work.pop() {
-            match task {
-                Task::Enter(id, at_end) => match pool.get(id) {
-                    FlatRule::Seq(range) => {
-                        let range = *range;
-                        let children = pool.children(range);
-                        let last = children.len().wrapping_sub(1);
-                        work.push(Task::ExitSeq(children.len()));
-                        // Reversed so child 0 is processed first; only the last
-                        // child inherits `at_end`.
-                        for (i, &child) in children.iter().enumerate().rev() {
-                            work.push(Task::Enter(child, i == last && at_end));
-                        }
-                    }
-                    FlatRule::Metadata { params, rule } => {
-                        let inner = *rule;
-                        if !params.precedence.is_none() {
-                            self.precedence_stack.push(params.precedence.clone());
-                        }
-                        if let Some(associativity) = params.associativity {
-                            self.associativity_stack.push(associativity);
-                        }
-                        if let Some(alias) = &params.alias {
-                            self.alias_stack.push(alias.clone());
-                        }
-                        if let Some(field_name) = &params.field_name {
-                            self.field_name_stack.push(field_name.clone());
-                        }
-                        if params.dynamic_precedence.abs()
-                            > self.production.dynamic_precedence.abs()
-                        {
-                            self.production.dynamic_precedence = params.dynamic_precedence;
-                        }
-                        work.push(Task::ExitMetadata(id, at_end));
-                        work.push(Task::Enter(inner, at_end));
-                    }
-                    FlatRule::Reserved { rule, context_name } => {
-                        let inner = *rule;
-                        let set_id = self
-                            .reserved_word_set_ids
-                            .get(context_name)
-                            .copied()
-                            .ok_or_else(|| {
-                                FlattenGrammarError::NoReservedWordSet(context_name.clone())
-                            })?;
-                        self.reserved_word_stack.push(set_id);
-                        work.push(Task::ExitReserved);
-                        work.push(Task::Enter(inner, at_end));
-                    }
-                    FlatRule::Symbol(symbol) => {
-                        let symbol = *symbol;
-                        self.production.steps.push(ProductionStep {
-                            symbol,
-                            precedence: self
-                                .precedence_stack
-                                .last()
-                                .cloned()
-                                .unwrap_or(Precedence::None),
-                            associativity: self.associativity_stack.last().copied(),
-                            reserved_word_set_id: self
-                                .reserved_word_stack
-                                .last()
-                                .copied()
-                                .unwrap_or_default(),
-                            alias: self.alias_stack.last().cloned(),
-                            field_name: self.field_name_stack.last().cloned(),
-                        });
-                        did_push.push(true);
-                    }
-                    // Blank (and, defensively, any other leaf) contributes no step.
-                    _ => did_push.push(false),
-                },
-                Task::ExitSeq(n) => {
-                    let mut any = false;
-                    for _ in 0..n {
-                        any |= did_push.pop().unwrap();
-                    }
-                    did_push.push(any);
+    fn apply(&mut self, rule: Rule, at_end: bool) -> FlattenGrammarResult<bool> {
+        match rule {
+            Rule::Seq(members) => {
+                let mut result = false;
+                let last_index = members.len() - 1;
+                for (i, member) in members.into_iter().enumerate() {
+                    result |= self.apply(member, i == last_index && at_end)?;
                 }
-                Task::ExitMetadata(id, at_end) => {
-                    let FlatRule::Metadata { params, .. } = pool.get(id) else {
-                        unreachable!("ExitMetadata on a non-metadata node")
-                    };
-                    // A metadata subtree passes its inner's `did_push` straight
-                    // through, so peek (don't pop) it for the fixup.
-                    let pushed = *did_push.last().unwrap();
-                    if !params.precedence.is_none() {
-                        self.precedence_stack.pop();
-                        if pushed && !at_end {
-                            self.production.steps.last_mut().unwrap().precedence = self
-                                .precedence_stack
-                                .last()
-                                .cloned()
-                                .unwrap_or(Precedence::None);
-                        }
-                    }
-                    if params.associativity.is_some() {
-                        self.associativity_stack.pop();
-                        if pushed && !at_end {
-                            self.production.steps.last_mut().unwrap().associativity =
-                                self.associativity_stack.last().copied();
-                        }
-                    }
-                    if params.alias.is_some() {
-                        self.alias_stack.pop();
-                    }
-                    if params.field_name.is_some() {
-                        self.field_name_stack.pop();
-                    }
-                }
-                Task::ExitReserved => {
-                    self.reserved_word_stack.pop();
-                }
+                Ok(result)
             }
+            Rule::Metadata { rule, params } => {
+                let mut has_precedence = false;
+                if !params.precedence.is_none() {
+                    has_precedence = true;
+                    self.precedence_stack.push(params.precedence);
+                }
+
+                let mut has_associativity = false;
+                if let Some(associativity) = params.associativity {
+                    has_associativity = true;
+                    self.associativity_stack.push(associativity);
+                }
+
+                let mut has_alias = false;
+                if let Some(alias) = params.alias {
+                    has_alias = true;
+                    self.alias_stack.push(alias);
+                }
+
+                let mut has_field_name = false;
+                if let Some(field_name) = params.field_name {
+                    has_field_name = true;
+                    self.field_name_stack.push(field_name);
+                }
+
+                if params.dynamic_precedence.abs() > self.production.dynamic_precedence.abs() {
+                    self.production.dynamic_precedence = params.dynamic_precedence;
+                }
+
+                let did_push = self.apply(*rule, at_end)?;
+
+                if has_precedence {
+                    self.precedence_stack.pop();
+                    if did_push && !at_end {
+                        self.production.steps.last_mut().unwrap().precedence = self
+                            .precedence_stack
+                            .last()
+                            .cloned()
+                            .unwrap_or(Precedence::None);
+                    }
+                }
+
+                if has_associativity {
+                    self.associativity_stack.pop();
+                    if did_push && !at_end {
+                        self.production.steps.last_mut().unwrap().associativity =
+                            self.associativity_stack.last().copied();
+                    }
+                }
+
+                if has_alias {
+                    self.alias_stack.pop();
+                }
+
+                if has_field_name {
+                    self.field_name_stack.pop();
+                }
+
+                Ok(did_push)
+            }
+            Rule::Reserved { rule, context_name } => {
+                self.reserved_word_stack.push(
+                    self.reserved_word_set_ids
+                        .get(&context_name)
+                        .copied()
+                        .ok_or_else(|| {
+                            FlattenGrammarError::NoReservedWordSet(context_name.clone())
+                        })?,
+                );
+                let did_push = self.apply(*rule, at_end)?;
+                self.reserved_word_stack.pop();
+                Ok(did_push)
+            }
+            Rule::Symbol(symbol) => {
+                self.production.steps.push(ProductionStep {
+                    symbol,
+                    precedence: self
+                        .precedence_stack
+                        .last()
+                        .cloned()
+                        .unwrap_or(Precedence::None),
+                    associativity: self.associativity_stack.last().copied(),
+                    reserved_word_set_id: self
+                        .reserved_word_stack
+                        .last()
+                        .copied()
+                        .unwrap_or_default(),
+                    alias: self.alias_stack.last().cloned(),
+                    field_name: self.field_name_stack.last().cloned(),
+                });
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        Ok(())
     }
 }
 
-/// Expand every `Choice` in `root` into the flat list of choice-free rules it
-/// stands for (the cartesian product of the choices), interning each into `pool`
-/// and returning their `RuleId`s. Iterative post-order over the pool via
-/// [`Step`]: a `Seq` takes the product of its members' expansions, a `Choice`
-/// their concatenation, and `Metadata`/`Reserved` distribute over each
-/// alternative. The `out` stack holds one expansion list per visited node.
-fn extract_choices(pool: &mut FlatRules, root: RuleId) -> Vec<RuleId> {
-    let mut work = vec![Step::Visit(root)];
-    let mut out: Vec<Vec<RuleId>> = Vec::new();
-    while let Some(step) = work.pop() {
-        match step {
-            Step::Visit(id) => match pool.get(id) {
-                FlatRule::Seq(_)
-                | FlatRule::Choice(_)
-                | FlatRule::Metadata { .. }
-                | FlatRule::Reserved { .. } => pool.descend(id, &mut work),
-                // A leaf stands for a single choice-free alternative: itself.
-                _ => out.push(vec![id]),
-            },
-            Step::Build(id) => match pool.get(id) {
-                FlatRule::Seq(range) => {
-                    let n = range.len as usize;
-                    let base = out.len() - n;
-                    let child_lists = out.split_off(base);
-                    // Cartesian product of the members, in source order, with the
-                    // last member varying fastest (matching the recursive fold).
-                    // Seed with the first member's alternatives, so a single-member
-                    // seq needs no wrapping.
-                    let mut lists = child_lists.into_iter();
-                    let mut result = lists.next().unwrap_or_else(|| vec![pool.intern_blank()]);
-                    for extraction in lists {
-                        let mut next = Vec::with_capacity(result.len() * extraction.len());
-                        for &entry in &result {
-                            for &ext in &extraction {
-                                next.push(pool.intern_seq_or_choice(true, &[entry, ext]));
-                            }
-                        }
-                        result = next;
+fn extract_choices(rule: Rule) -> Vec<Rule> {
+    match rule {
+        Rule::Seq(elements) => {
+            let mut result = vec![Rule::Blank];
+            for element in elements {
+                let extraction = extract_choices(element);
+                let mut next_result = Vec::with_capacity(result.len());
+                for entry in result {
+                    for extraction_entry in &extraction {
+                        next_result.push(Rule::Seq(vec![entry.clone(), extraction_entry.clone()]));
                     }
-                    out.push(result);
                 }
-                FlatRule::Choice(range) => {
-                    let n = range.len as usize;
-                    let base = out.len() - n;
-                    let child_lists = out.split_off(base);
-                    out.push(child_lists.into_iter().flatten().collect());
-                }
-                FlatRule::Metadata { params, .. } => {
-                    let params = params.clone();
-                    let inner = out.pop().unwrap();
-                    out.push(
-                        inner
-                            .into_iter()
-                            .map(|rule| pool.intern_metadata(params.clone(), rule))
-                            .collect(),
-                    );
-                }
-                FlatRule::Reserved { context_name, .. } => {
-                    let context_name = context_name.clone();
-                    let inner = out.pop().unwrap();
-                    out.push(
-                        inner
-                            .into_iter()
-                            .map(|rule| pool.intern_reserved(&context_name, rule))
-                            .collect(),
-                    );
-                }
-                _ => unreachable!("Build on a leaf"),
-            },
+                result = next_result;
+            }
+            result
         }
+        Rule::Choice(elements) => {
+            let mut result = Vec::with_capacity(elements.len());
+            for element in elements {
+                for rule in extract_choices(element) {
+                    result.push(rule);
+                }
+            }
+            result
+        }
+        Rule::Metadata { rule, params } => extract_choices(*rule)
+            .into_iter()
+            .map(|rule| Rule::Metadata {
+                rule: Box::new(rule),
+                params: params.clone(),
+            })
+            .collect(),
+        Rule::Reserved { rule, context_name } => extract_choices(*rule)
+            .into_iter()
+            .map(|rule| Rule::Reserved {
+                rule: Box::new(rule),
+                context_name: context_name.clone(),
+            })
+            .collect(),
+        _ => vec![rule],
     }
-    out.pop().unwrap()
 }
 
 fn symbol_is_used(variables: &[SyntaxVariable], symbol: Symbol) -> bool {
@@ -315,8 +246,7 @@ fn symbol_is_used(variables: &[SyntaxVariable], symbol: Symbol) -> bool {
 }
 
 pub(super) fn flatten_grammar(
-    grammar: FlatExtractedSyntaxGrammar,
-    pool: &mut FlatRules,
+    grammar: ExtractedSyntaxGrammar,
 ) -> FlattenGrammarResult<SyntaxGrammar> {
     let mut reserved_word_set_ids_by_name = FxHashMap::default();
     for (ix, set) in grammar.reserved_word_sets.iter().enumerate() {
@@ -324,10 +254,11 @@ pub(super) fn flatten_grammar(
     }
 
     let mut flattener = RuleFlattener::new(reserved_word_set_ids_by_name);
-    let mut variables = Vec::with_capacity(grammar.variables.len());
-    for variable in grammar.variables {
-        variables.push(flattener.flatten_variable(pool, variable)?);
-    }
+    let variables = grammar
+        .variables
+        .into_iter()
+        .map(|variable| flattener.flatten_variable(variable))
+        .collect::<FlattenGrammarResult<Vec<_>>>()?;
 
     for (i, variable) in variables.iter().enumerate() {
         let symbol = Symbol::non_terminal(i);
@@ -371,79 +302,39 @@ pub(super) fn flatten_grammar(
 
 #[cfg(test)]
 mod tests {
-    use super::super::ExtractedSyntaxGrammar;
     use super::*;
-    use crate::grammars::{Variable, VariableType};
-    use crate::rules::Rule;
-
-    /// Flatten a single rule (interned into a fresh pool) into its productions, so
-    /// the assertions below can stay written against `Rule`.
-    fn productions_of(rule: &Rule) -> Vec<Production> {
-        let mut pool = FlatRules::default();
-        let rule = pool.intern_import(rule);
-        let mut flattener = RuleFlattener::new(FxHashMap::default());
-        flattener
-            .flatten_variable(
-                &mut pool,
-                FlatVariable {
-                    name: "test".to_string(),
-                    kind: VariableType::Named,
-                    rule,
-                },
-            )
-            .unwrap()
-            .productions
-    }
-
-    /// Run `flatten_grammar` on an `ExtractedSyntaxGrammar` by interning its rules
-    /// into a fresh pool first.
-    fn flatten(grammar: ExtractedSyntaxGrammar) -> FlattenGrammarResult<SyntaxGrammar> {
-        let mut pool = FlatRules::default();
-        let flat = FlatExtractedSyntaxGrammar {
-            variables: grammar
-                .variables
-                .into_iter()
-                .map(|v| FlatVariable {
-                    name: v.name,
-                    kind: v.kind,
-                    rule: pool.intern_import(&v.rule),
-                })
-                .collect(),
-            extra_symbols: grammar.extra_symbols,
-            expected_conflicts: grammar.expected_conflicts,
-            precedence_orderings: grammar.precedence_orderings,
-            external_tokens: grammar.external_tokens,
-            variables_to_inline: grammar.variables_to_inline,
-            supertype_symbols: grammar.supertype_symbols,
-            word_token: grammar.word_token,
-            reserved_word_sets: grammar.reserved_word_sets,
-        };
-        flatten_grammar(flat, &mut pool)
-    }
+    use crate::grammars::VariableType;
 
     #[test]
     fn test_flatten_grammar() {
-        let productions = productions_of(&Rule::seq(vec![
-            Rule::non_terminal(1),
-            Rule::prec_left(
-                Precedence::Integer(101),
-                Rule::seq(vec![
-                    Rule::non_terminal(2),
-                    Rule::choice(vec![
-                        Rule::prec_right(
-                            Precedence::Integer(102),
-                            Rule::seq(vec![Rule::non_terminal(3), Rule::non_terminal(4)]),
-                        ),
-                        Rule::non_terminal(5),
-                    ]),
-                    Rule::non_terminal(6),
+        let mut flattener = RuleFlattener::new(FxHashMap::default());
+        let result = flattener
+            .flatten_variable(Variable {
+                name: "test".to_string(),
+                kind: VariableType::Named,
+                rule: Rule::seq(vec![
+                    Rule::non_terminal(1),
+                    Rule::prec_left(
+                        Precedence::Integer(101),
+                        Rule::seq(vec![
+                            Rule::non_terminal(2),
+                            Rule::choice(vec![
+                                Rule::prec_right(
+                                    Precedence::Integer(102),
+                                    Rule::seq(vec![Rule::non_terminal(3), Rule::non_terminal(4)]),
+                                ),
+                                Rule::non_terminal(5),
+                            ]),
+                            Rule::non_terminal(6),
+                        ]),
+                    ),
+                    Rule::non_terminal(7),
                 ]),
-            ),
-            Rule::non_terminal(7),
-        ]));
+            })
+            .unwrap();
 
         assert_eq!(
-            productions,
+            result.productions,
             vec![
                 Production {
                     dynamic_precedence: 0,
@@ -477,27 +368,34 @@ mod tests {
 
     #[test]
     fn test_flatten_grammar_with_maximum_dynamic_precedence() {
-        let productions = productions_of(&Rule::seq(vec![
-            Rule::non_terminal(1),
-            Rule::prec_dynamic(
-                101,
-                Rule::seq(vec![
-                    Rule::non_terminal(2),
-                    Rule::choice(vec![
-                        Rule::prec_dynamic(
-                            102,
-                            Rule::seq(vec![Rule::non_terminal(3), Rule::non_terminal(4)]),
-                        ),
-                        Rule::non_terminal(5),
-                    ]),
-                    Rule::non_terminal(6),
+        let mut flattener = RuleFlattener::new(FxHashMap::default());
+        let result = flattener
+            .flatten_variable(Variable {
+                name: "test".to_string(),
+                kind: VariableType::Named,
+                rule: Rule::seq(vec![
+                    Rule::non_terminal(1),
+                    Rule::prec_dynamic(
+                        101,
+                        Rule::seq(vec![
+                            Rule::non_terminal(2),
+                            Rule::choice(vec![
+                                Rule::prec_dynamic(
+                                    102,
+                                    Rule::seq(vec![Rule::non_terminal(3), Rule::non_terminal(4)]),
+                                ),
+                                Rule::non_terminal(5),
+                            ]),
+                            Rule::non_terminal(6),
+                        ]),
+                    ),
+                    Rule::non_terminal(7),
                 ]),
-            ),
-            Rule::non_terminal(7),
-        ]));
+            })
+            .unwrap();
 
         assert_eq!(
-            productions,
+            result.productions,
             vec![
                 Production {
                     dynamic_precedence: 102,
@@ -526,13 +424,20 @@ mod tests {
 
     #[test]
     fn test_flatten_grammar_with_final_precedence() {
-        let productions = productions_of(&Rule::prec_left(
-            Precedence::Integer(101),
-            Rule::seq(vec![Rule::non_terminal(1), Rule::non_terminal(2)]),
-        ));
+        let mut flattener = RuleFlattener::new(FxHashMap::default());
+        let result = flattener
+            .flatten_variable(Variable {
+                name: "test".to_string(),
+                kind: VariableType::Named,
+                rule: Rule::prec_left(
+                    Precedence::Integer(101),
+                    Rule::seq(vec![Rule::non_terminal(1), Rule::non_terminal(2)]),
+                ),
+            })
+            .unwrap();
 
         assert_eq!(
-            productions,
+            result.productions,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![
@@ -544,13 +449,19 @@ mod tests {
             }]
         );
 
-        let productions = productions_of(&Rule::prec_left(
-            Precedence::Integer(101),
-            Rule::seq(vec![Rule::non_terminal(1)]),
-        ));
+        let result = flattener
+            .flatten_variable(Variable {
+                name: "test".to_string(),
+                kind: VariableType::Named,
+                rule: Rule::prec_left(
+                    Precedence::Integer(101),
+                    Rule::seq(vec![Rule::non_terminal(1)]),
+                ),
+            })
+            .unwrap();
 
         assert_eq!(
-            productions,
+            result.productions,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![
@@ -563,17 +474,24 @@ mod tests {
 
     #[test]
     fn test_flatten_grammar_with_field_names() {
-        let productions = productions_of(&Rule::seq(vec![
-            Rule::field("first-thing".to_string(), Rule::terminal(1)),
-            Rule::terminal(2),
-            Rule::choice(vec![
-                Rule::Blank,
-                Rule::field("second-thing".to_string(), Rule::terminal(3)),
-            ]),
-        ]));
+        let mut flattener = RuleFlattener::new(FxHashMap::default());
+        let result = flattener
+            .flatten_variable(Variable {
+                name: "test".to_string(),
+                kind: VariableType::Named,
+                rule: Rule::seq(vec![
+                    Rule::field("first-thing".to_string(), Rule::terminal(1)),
+                    Rule::terminal(2),
+                    Rule::choice(vec![
+                        Rule::Blank,
+                        Rule::field("second-thing".to_string(), Rule::terminal(3)),
+                    ]),
+                ]),
+            })
+            .unwrap();
 
         assert_eq!(
-            productions,
+            result.productions,
             vec![
                 Production {
                     dynamic_precedence: 0,
@@ -596,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_flatten_grammar_with_recursive_inline_variable() {
-        let result = flatten(ExtractedSyntaxGrammar {
+        let result = flatten_grammar(ExtractedSyntaxGrammar {
             extra_symbols: Vec::new(),
             expected_conflicts: Vec::new(),
             variables_to_inline: vec![Symbol::non_terminal(0)],
