@@ -51,9 +51,6 @@ pub struct IntermediateGrammar<T, U> {
     reserved_word_sets: Vec<ReservedWordContext<T>>,
 }
 
-// Now only constructed by tests (the pipeline produces the flat variant); kept as
-// the materialized form those tests assert against.
-#[cfg(test)]
 pub type InternedGrammar = IntermediateGrammar<Rule, Variable>;
 
 pub type ExtractedSyntaxGrammar = IntermediateGrammar<Symbol, ExternalToken>;
@@ -89,9 +86,9 @@ struct FlatInternedGrammar {
     reserved_word_sets: Vec<ReservedWordContext<RuleId>>,
 }
 
-/// Materialize a [`FlatInternedGrammar`] back to an [`InternedGrammar`]. Now only
-/// used by `intern_symbols`' tests to assert against `Rule` trees.
-#[cfg(test)]
+/// Transitional adapter: materialize a [`FlatInternedGrammar`] back to an
+/// [`InternedGrammar`] for passes not yet reading the pool directly. Removed
+/// once [`extract_tokens`] consumes the flat form.
 fn materialize_interned(g: FlatInternedGrammar, pool: &FlatRules) -> InternedGrammar {
     InternedGrammar {
         variables: g
@@ -126,73 +123,6 @@ fn materialize_interned(g: FlatInternedGrammar, pool: &FlatRules) -> InternedGra
                 reserved_words: s.reserved_words.iter().map(|&id| pool.materialize(id)).collect(),
             })
             .collect(),
-    }
-}
-
-/// Flat-IR analogue of [`ExtractedSyntaxGrammar`]: only `variables` is rule-bearing
-/// (its rules are `RuleId`s); the rest are already symbol-based.
-struct FlatExtractedSyntaxGrammar {
-    variables: Vec<FlatVariable>,
-    extra_symbols: Vec<Symbol>,
-    expected_conflicts: Vec<Vec<Symbol>>,
-    precedence_orderings: Vec<Vec<PrecedenceEntry>>,
-    external_tokens: Vec<ExternalToken>,
-    variables_to_inline: Vec<Symbol>,
-    supertype_symbols: Vec<Symbol>,
-    word_token: Option<Symbol>,
-    reserved_word_sets: Vec<ReservedWordContext<Symbol>>,
-}
-
-/// Flat-IR analogue of [`ExtractedLexicalGrammar`].
-struct FlatExtractedLexicalGrammar {
-    variables: Vec<FlatVariable>,
-    separators: Vec<RuleId>,
-}
-
-/// Transitional adapter: materialize a [`FlatExtractedSyntaxGrammar`] for the
-/// not-yet-converted [`expand_repeats`]. Removed once that pass reads the pool.
-fn materialize_extracted_syntax(
-    g: FlatExtractedSyntaxGrammar,
-    pool: &FlatRules,
-) -> ExtractedSyntaxGrammar {
-    ExtractedSyntaxGrammar {
-        variables: g
-            .variables
-            .into_iter()
-            .map(|v| Variable {
-                name: v.name,
-                kind: v.kind,
-                rule: pool.materialize(v.rule),
-            })
-            .collect(),
-        extra_symbols: g.extra_symbols,
-        expected_conflicts: g.expected_conflicts,
-        precedence_orderings: g.precedence_orderings,
-        external_tokens: g.external_tokens,
-        variables_to_inline: g.variables_to_inline,
-        supertype_symbols: g.supertype_symbols,
-        word_token: g.word_token,
-        reserved_word_sets: g.reserved_word_sets,
-    }
-}
-
-/// Transitional adapter: materialize a [`FlatExtractedLexicalGrammar`] for the
-/// not-yet-converted [`expand_tokens`]. Removed once that pass reads the pool.
-fn materialize_extracted_lexical(
-    g: FlatExtractedLexicalGrammar,
-    pool: &FlatRules,
-) -> ExtractedLexicalGrammar {
-    ExtractedLexicalGrammar {
-        variables: g
-            .variables
-            .into_iter()
-            .map(|v| Variable {
-                name: v.name,
-                kind: v.kind,
-                rule: pool.materialize(v.rule),
-            })
-            .collect(),
-        separators: g.separators.iter().map(|&id| pool.materialize(id)).collect(),
     }
 }
 
@@ -301,9 +231,8 @@ pub fn prepare_grammar(
 
     let mut pool = FlatRules::default();
     let interned_grammar = intern_symbols(input_grammar, &mut pool, diagnostics)?;
-    let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar, &mut pool)?;
-    let syntax_grammar = materialize_extracted_syntax(syntax_grammar, &pool);
-    let lexical_grammar = materialize_extracted_lexical(lexical_grammar, &pool);
+    let interned_grammar = materialize_interned(interned_grammar, &pool);
+    let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
     let syntax_grammar = expand_repeats(syntax_grammar);
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
     let lexical_grammar = expand_tokens(lexical_grammar)?;
