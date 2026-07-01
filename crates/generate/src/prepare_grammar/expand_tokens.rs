@@ -5,17 +5,37 @@ use regex_syntax::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::ExtractedLexicalGrammar;
+use super::FlatExtractedLexicalGrammar;
+use super::flat_rule::{ChildRange, FlatRule, FlatRules, RuleId};
 use crate::{
     grammars::{LexicalGrammar, LexicalVariable},
     nfa::{CharacterSet, Nfa, NfaState},
     rules::{Precedence, Rule},
 };
 
+#[cfg(test)]
+use super::{ExtractedLexicalGrammar, FlatVariable};
+
 struct NfaBuilder {
     nfa: Nfa,
     is_sep: bool,
     precedence_stack: Vec<i32>,
+}
+
+/// One step of [`NfaBuilder::expand_rule`]'s iterative walk. `Expand` builds the
+/// NFA states for a rule that should flow to `next`; the `Resume*` variants finish
+/// a compound node once its children are done. Unlike the other passes' post-order
+/// rewrites, this threads `next` sequentially: each Seq child targets the state the
+/// previous child produced, so children can't be enqueued all at once - a `Resume`
+/// task advances to the next child after reading the NFA's new last state. A stack
+/// of `bool`s (did the subtree add advancing states) stands in for the recursive
+/// return value.
+enum Task {
+    Expand { rule: RuleId, next: u32 },
+    ResumeSeq { range: ChildRange, idx: usize, result: bool },
+    ResumeChoice { range: ChildRange, idx: usize, next: u32, alts: Vec<u32> },
+    ResumeRepeat { split: u32, next: u32 },
+    ResumePrecedence,
 }
 
 pub type ExpandTokensResult<T> = Result<T, ExpandTokensError>;
@@ -52,22 +72,26 @@ impl std::fmt::Display for ExpandTokensProcessingError {
     }
 }
 
-fn get_implicit_precedence(rule: &Rule) -> i32 {
-    match rule {
-        Rule::String(_) => 2,
-        Rule::Metadata { rule, params } => {
-            if params.is_main_token {
-                get_implicit_precedence(rule) + 1
-            } else {
-                get_implicit_precedence(rule)
+fn get_implicit_precedence(pool: &FlatRules, mut id: RuleId) -> i32 {
+    // Walk the metadata chain, adding one per main-token wrapper; a string base is
+    // 2, anything else 0. A plain loop, since only `Metadata` recurses (one child).
+    let mut bonus = 0;
+    loop {
+        match pool.get(id) {
+            FlatRule::String(_) => return bonus + 2,
+            FlatRule::Metadata { params, rule } => {
+                if params.is_main_token {
+                    bonus += 1;
+                }
+                id = *rule;
             }
+            _ => return bonus,
         }
-        _ => 0,
     }
 }
 
-const fn get_completion_precedence(rule: &Rule) -> i32 {
-    if let Rule::Metadata { params, .. } = rule
+fn get_completion_precedence(pool: &FlatRules, id: RuleId) -> i32 {
+    if let FlatRule::Metadata { params, .. } = pool.get(id)
         && let Precedence::Integer(p) = params.precedence
     {
         return p;
@@ -75,7 +99,73 @@ const fn get_completion_precedence(rule: &Rule) -> i32 {
     0
 }
 
-pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult<LexicalGrammar> {
+/// Whether `root` can match the empty string. Mirrors the previous recursive
+/// `Rule::is_empty` (`Choice` empty if any alternative is, `Seq` if all members
+/// are, `Metadata`/`Repeat`/`Reserved` deferring to their inner rule), but as a
+/// short-circuiting walk over a single stack of in-progress groups: a group's
+/// verdict is settled the moment a child decides it (a `Seq` by a non-empty child,
+/// a `Choice` by an empty one), so we never evaluate more children, or hold more
+/// sibling results, than needed. Transparent wrappers descend without a frame.
+fn rule_is_empty(pool: &FlatRules, root: RuleId) -> bool {
+    struct Group {
+        is_seq: bool,
+        range: ChildRange,
+        next: u32,
+    }
+    let mut stack: Vec<Group> = Vec::new();
+    let mut id = root;
+    loop {
+        // Descend through transparent wrappers to a verdict, opening a group per
+        // Seq/Choice (an empty one settles immediately: all([]) is true, any([]) false).
+        let mut verdict = loop {
+            match pool.get(id) {
+                FlatRule::Metadata { rule, .. }
+                | FlatRule::Repeat(rule)
+                | FlatRule::Reserved { rule, .. } => id = *rule,
+                FlatRule::String(s) => break s.is_empty(),
+                FlatRule::Seq(range) => {
+                    let range = *range;
+                    let Some(&first) = pool.children(range).first() else {
+                        break true;
+                    };
+                    stack.push(Group { is_seq: true, range, next: 1 });
+                    id = first;
+                }
+                FlatRule::Choice(range) => {
+                    let range = *range;
+                    let Some(&first) = pool.children(range).first() else {
+                        break false;
+                    };
+                    stack.push(Group { is_seq: false, range, next: 1 });
+                    id = first;
+                }
+                // Blank/Pattern/NamedSymbol/Symbol never match the empty string.
+                _ => break false,
+            }
+        };
+        // Fold the verdict into enclosing groups: a child short-circuits its group
+        // when `verdict != is_seq` (and then already holds the group's result);
+        // otherwise advance, and an exhausted group settles to `is_seq`.
+        loop {
+            let Some(group) = stack.last_mut() else { return verdict };
+            if verdict != group.is_seq {
+                stack.pop();
+            } else if group.next == group.range.len {
+                verdict = group.is_seq;
+                stack.pop();
+            } else {
+                id = pool.children(group.range)[group.next as usize];
+                group.next += 1;
+                break;
+            }
+        }
+    }
+}
+
+pub fn expand_tokens(
+    grammar: FlatExtractedLexicalGrammar,
+    pool: &mut FlatRules,
+) -> ExpandTokensResult<LexicalGrammar> {
     let mut builder = NfaBuilder {
         nfa: Nfa::new(),
         is_sep: true,
@@ -83,31 +173,33 @@ pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult
     };
 
     let separator_rule = if grammar.separators.is_empty() {
-        Rule::Blank
+        pool.intern_blank()
     } else {
-        grammar.separators.push(Rule::Blank);
-        Rule::repeat(Rule::choice(grammar.separators))
+        let mut separators = grammar.separators;
+        separators.push(pool.intern_blank());
+        let choice = pool.intern_choice_flattened(&separators);
+        pool.intern_repeat(choice)
     };
 
     let mut variables = Vec::with_capacity(grammar.variables.len());
     for (i, variable) in grammar.variables.into_iter().enumerate() {
-        if variable.rule.is_empty() {
+        if rule_is_empty(pool, variable.rule) {
             Err(ExpandTokensError::EmptyString(variable.name.clone()))?;
         }
 
-        let is_immediate_token = match &variable.rule {
-            Rule::Metadata { params, .. } => params.is_main_token,
+        let is_immediate_token = match pool.get(variable.rule) {
+            FlatRule::Metadata { params, .. } => params.is_main_token,
             _ => false,
         };
 
         builder.is_sep = false;
         builder.nfa.states.push(NfaState::Accept {
             variable_index: i,
-            precedence: get_completion_precedence(&variable.rule),
+            precedence: get_completion_precedence(pool, variable.rule),
         });
         let last_state_id = builder.nfa.last_state_id();
         builder
-            .expand_rule(&variable.rule, last_state_id)
+            .expand_rule(pool, variable.rule, last_state_id)
             .map_err(|e| {
                 ExpandTokensError::Processing(ExpandTokensProcessingError {
                     rule: variable.name.clone(),
@@ -119,14 +211,15 @@ pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult
             builder.is_sep = true;
             let last_state_id = builder.nfa.last_state_id();
             builder
-                .expand_rule(&separator_rule, last_state_id)
+                .expand_rule(pool, separator_rule, last_state_id)
                 .map_err(ExpandTokensError::ExpandRule)?;
         }
 
+        let implicit_precedence = get_implicit_precedence(pool, variable.rule);
         variables.push(LexicalVariable {
             name: variable.name,
             kind: variable.kind,
-            implicit_precedence: get_implicit_precedence(&variable.rule),
+            implicit_precedence,
             start_state: builder.nfa.last_state_id(),
         });
     }
@@ -160,96 +253,179 @@ pub enum ExpandRegexError {
 }
 
 impl NfaBuilder {
-    fn expand_rule(&mut self, rule: &Rule, mut next_state_id: u32) -> ExpandRuleResult<bool> {
-        match rule {
-            Rule::Pattern(s, f) => {
-                // With unicode enabled, `\w`, `\s` and `\d` expand to character sets that are much
-                // larger than intended, so we replace them with the actual
-                // character sets they should represent. If the full unicode range
-                // of `\w`, `\s` or `\d` are needed then `\p{L}`, `\p{Z}` and `\p{N}` should be
-                // used.
-                let s = s
-                    .replace(r"\w", r"[0-9A-Za-z_]")
-                    .replace(r"\s", r"[\t-\r ]")
-                    .replace(r"\d", r"[0-9]")
-                    .replace(r"\W", r"[^0-9A-Za-z_]")
-                    .replace(r"\S", r"[^\t-\r ]")
-                    .replace(r"\D", r"[^0-9]");
-                let mut parser = ParserBuilder::new()
-                    .case_insensitive(f.contains('i'))
-                    .unicode(true)
-                    .utf8(false)
-                    .build();
-                let hir = parser
-                    .parse(&s)
-                    .map_err(|e| ExpandRuleError::Parse(e.to_string()))?;
-                self.expand_regex(&hir, next_state_id)
-                    .map_err(ExpandRuleError::ExpandRegex)
-            }
-            Rule::String(s) => {
-                for c in s.chars().rev() {
-                    self.push_advance(CharacterSet::from_char(c), next_state_id);
-                    next_state_id = self.nfa.last_state_id();
-                }
-                Ok(!s.is_empty())
-            }
-            Rule::Choice(elements) => {
-                let mut alternative_state_ids = Vec::with_capacity(elements.len());
-                for element in elements {
-                    if self.expand_rule(element, next_state_id)? {
-                        alternative_state_ids.push(self.nfa.last_state_id());
+    fn expand_rule(
+        &mut self,
+        pool: &FlatRules,
+        root: RuleId,
+        next: u32,
+    ) -> ExpandRuleResult<bool> {
+        // Walk the rule with an explicit work stack. `result` carries the most
+        // recently finished subtree's return value (did it add advancing states);
+        // only one is ever live, since each child is expanded and then immediately
+        // consumed by its parent's `Resume` task, which holds any running accumulator.
+        let mut work = vec![Task::Expand { rule: root, next }];
+        let mut result = false;
+        while let Some(task) = work.pop() {
+            match task {
+                Task::Expand { rule, next } => match pool.get(rule) {
+                    FlatRule::Pattern(s, f) => {
+                        // With unicode enabled, `\w`, `\s` and `\d` expand to character sets that are
+                        // much larger than intended, so we replace them with the actual character
+                        // sets they should represent. If the full unicode range of `\w`, `\s` or `\d`
+                        // are needed then `\p{L}`, `\p{Z}` and `\p{N}` should be used.
+                        let s = s
+                            .replace(r"\w", r"[0-9A-Za-z_]")
+                            .replace(r"\s", r"[\t-\r ]")
+                            .replace(r"\d", r"[0-9]")
+                            .replace(r"\W", r"[^0-9A-Za-z_]")
+                            .replace(r"\S", r"[^\t-\r ]")
+                            .replace(r"\D", r"[^0-9]");
+                        let mut parser = ParserBuilder::new()
+                            .case_insensitive(f.contains('i'))
+                            .unicode(true)
+                            .utf8(false)
+                            .build();
+                        let hir = parser
+                            .parse(&s)
+                            .map_err(|e| ExpandRuleError::Parse(e.to_string()))?;
+                        result = self
+                            .expand_regex(&hir, next)
+                            .map_err(ExpandRuleError::ExpandRegex)?;
+                    }
+                    FlatRule::String(s) => {
+                        let mut next = next;
+                        for c in s.chars().rev() {
+                            self.push_advance(CharacterSet::from_char(c), next);
+                            next = self.nfa.last_state_id();
+                        }
+                        result = !s.is_empty();
+                    }
+                    FlatRule::Choice(range) => {
+                        let range = *range;
+                        if let Some(&first) = pool.children(range).first() {
+                            work.push(Task::ResumeChoice {
+                                range,
+                                idx: 0,
+                                next,
+                                alts: Vec::with_capacity(range.len as usize),
+                            });
+                            work.push(Task::Expand { rule: first, next });
+                        } else {
+                            result = true;
+                        }
+                    }
+                    FlatRule::Seq(range) => {
+                        let range = *range;
+                        if let Some(last) = (range.len as usize).checked_sub(1) {
+                            let child = pool.children(range)[last];
+                            work.push(Task::ResumeSeq {
+                                range,
+                                idx: last,
+                                result: false,
+                            });
+                            work.push(Task::Expand { rule: child, next });
+                        } else {
+                            result = false;
+                        }
+                    }
+                    FlatRule::Repeat(inner) => {
+                        let inner = *inner;
+                        // Placeholder, patched to a Split once the body is expanded.
+                        self.nfa.states.push(NfaState::Accept {
+                            variable_index: 0,
+                            precedence: 0,
+                        });
+                        let split = self.nfa.last_state_id();
+                        work.push(Task::ResumeRepeat { split, next });
+                        work.push(Task::Expand {
+                            rule: inner,
+                            next: split,
+                        });
+                    }
+                    FlatRule::Metadata {
+                        params,
+                        rule: inner,
+                    } => {
+                        let inner = *inner;
+                        if let Precedence::Integer(p) = &params.precedence {
+                            self.precedence_stack.push(*p);
+                            work.push(Task::ResumePrecedence);
+                        }
+                        work.push(Task::Expand { rule: inner, next });
+                    }
+                    FlatRule::Blank => result = false,
+                    FlatRule::NamedSymbol(_) | FlatRule::Symbol(_) | FlatRule::Reserved { .. } => {
+                        return Err(ExpandRuleError::UnexpectedRule(pool.materialize(rule)));
+                    }
+                },
+                // Seq members thread right-to-left: each targets the state the
+                // previous produced. `result` accumulates whether any consumed input.
+                Task::ResumeSeq {
+                    range,
+                    idx,
+                    result: acc,
+                } => {
+                    let combined = acc || result;
+                    if idx == 0 {
+                        result = combined;
                     } else {
-                        alternative_state_ids.push(next_state_id);
+                        let next = self.nfa.last_state_id();
+                        let child = pool.children(range)[idx - 1];
+                        work.push(Task::ResumeSeq {
+                            range,
+                            idx: idx - 1,
+                            result: combined,
+                        });
+                        work.push(Task::Expand { rule: child, next });
                     }
                 }
-                alternative_state_ids.sort_unstable();
-                alternative_state_ids.dedup();
-                alternative_state_ids.retain(|i| *i != self.nfa.last_state_id());
-                for alternative_state_id in alternative_state_ids {
-                    self.push_split(alternative_state_id);
-                }
-                Ok(true)
-            }
-            Rule::Seq(elements) => {
-                let mut result = false;
-                for element in elements.iter().rev() {
-                    if self.expand_rule(element, next_state_id)? {
+                // Every alternative targets the same `next`; `alts` collects each
+                // one's end state, then they are split together after the last.
+                Task::ResumeChoice {
+                    range,
+                    idx,
+                    next,
+                    mut alts,
+                } => {
+                    alts.push(if result {
+                        self.nfa.last_state_id()
+                    } else {
+                        next
+                    });
+                    if idx + 1 < range.len as usize {
+                        let child = pool.children(range)[idx + 1];
+                        work.push(Task::ResumeChoice {
+                            range,
+                            idx: idx + 1,
+                            next,
+                            alts,
+                        });
+                        work.push(Task::Expand { rule: child, next });
+                    } else {
+                        alts.sort_unstable();
+                        alts.dedup();
+                        let last = self.nfa.last_state_id();
+                        alts.retain(|i| *i != last);
+                        for alt in alts {
+                            self.push_split(alt);
+                        }
                         result = true;
                     }
-                    next_state_id = self.nfa.last_state_id();
                 }
-                Ok(result)
-            }
-            Rule::Repeat(rule) => {
-                self.nfa.states.push(NfaState::Accept {
-                    variable_index: 0,
-                    precedence: 0,
-                }); // Placeholder for split
-                let split_state_id = self.nfa.last_state_id();
-                if self.expand_rule(rule, split_state_id)? {
-                    self.nfa.states[split_state_id as usize] =
-                        NfaState::Split(self.nfa.last_state_id(), next_state_id);
-                    Ok(true)
-                } else {
-                    Ok(false)
+                Task::ResumeRepeat { split, next } => {
+                    if result {
+                        self.nfa.states[split as usize] =
+                            NfaState::Split(self.nfa.last_state_id(), next);
+                    }
+                    // On an empty body the placeholder is left unpatched and `result`
+                    // stays false, matching the previous recursive behavior.
                 }
-            }
-            Rule::Metadata { rule, params } => {
-                let has_precedence = if let Precedence::Integer(precedence) = &params.precedence {
-                    self.precedence_stack.push(*precedence);
-                    true
-                } else {
-                    false
-                };
-                let result = self.expand_rule(rule, next_state_id);
-                if has_precedence {
+                Task::ResumePrecedence => {
                     self.precedence_stack.pop();
                 }
-                result
             }
-            Rule::Blank => Ok(false),
-            _ => Err(ExpandRuleError::UnexpectedRule(rule.clone()))?,
         }
+        Ok(result)
     }
 
     fn expand_regex(&mut self, hir: &Hir, mut next_state_id: u32) -> ExpandRegexResult<bool> {
@@ -422,6 +598,33 @@ impl NfaBuilder {
             .states
             .push(NfaState::Split(state_id, last_state_id));
     }
+}
+
+/// Test helper: intern a `Rule`-based [`ExtractedLexicalGrammar`] into a fresh pool
+/// and run [`expand_tokens`], so tests can keep building `Rule` trees. Shared with
+/// `build_tables::token_conflicts`' tests.
+#[cfg(test)]
+pub fn expand_tokens_from_rules(
+    grammar: ExtractedLexicalGrammar,
+) -> ExpandTokensResult<LexicalGrammar> {
+    let mut pool = FlatRules::default();
+    let flat = FlatExtractedLexicalGrammar {
+        variables: grammar
+            .variables
+            .into_iter()
+            .map(|v| FlatVariable {
+                name: v.name,
+                kind: v.kind,
+                rule: pool.intern_import(&v.rule),
+            })
+            .collect(),
+        separators: grammar
+            .separators
+            .iter()
+            .map(|r| pool.intern_import(r))
+            .collect(),
+    };
+    expand_tokens(flat, &mut pool)
 }
 
 #[cfg(test)]
@@ -808,7 +1011,7 @@ mod tests {
             examples,
         } in &table
         {
-            let grammar = expand_tokens(ExtractedLexicalGrammar {
+            let grammar = expand_tokens_from_rules(ExtractedLexicalGrammar {
                 separators: separators.clone(),
                 variables: rules
                     .iter()
