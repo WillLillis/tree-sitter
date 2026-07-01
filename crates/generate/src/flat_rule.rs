@@ -233,6 +233,40 @@ impl FlatRules {
         )
     }
 
+    pub fn intern_string(&mut self, value: String) -> RuleId {
+        self.intern(NodeKey::String(value.clone()), FlatRule::String(value))
+    }
+
+    pub fn intern_pattern(&mut self, pattern: String, flags: String) -> RuleId {
+        self.intern(
+            NodeKey::Pattern(pattern.clone(), flags.clone()),
+            FlatRule::Pattern(pattern, flags),
+        )
+    }
+
+    pub fn intern_named_symbol(&mut self, name: String) -> RuleId {
+        self.intern(NodeKey::NamedSymbol(name.clone()), FlatRule::NamedSymbol(name))
+    }
+
+    /// Apply one metadata attribute to `inner`, mirroring `Rule::add_metadata`
+    /// (rules.rs): if `inner` is a non-token `Metadata` node, merge the attribute
+    /// into its params; otherwise wrap `inner` in a fresh `Metadata`. Hash-consed
+    /// like the other interners, so equal results collapse to one id. Lets the
+    /// direct-emission walk bundle unbundled metadata wrappers without going
+    /// through `Rule`'s constructors.
+    pub fn intern_metadata_merged(
+        &mut self,
+        inner: RuleId,
+        f: impl FnOnce(&mut MetadataParams),
+    ) -> RuleId {
+        let (mut params, rule) = match self.get(inner) {
+            FlatRule::Metadata { params, rule } if !params.is_token => (params.clone(), *rule),
+            _ => (MetadataParams::default(), inner),
+        };
+        f(&mut params);
+        self.intern_metadata(params, rule)
+    }
+
     /// Import a [`Rule`] into the pool with hash-consing: structurally identical
     /// subtrees collapse to one [`RuleId`], so within this pool `RuleId` equality
     /// *is* structural equality. Same iterative post-order shape as
