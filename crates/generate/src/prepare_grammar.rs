@@ -29,11 +29,10 @@ use self::{
     extract_tokens::extract_tokens, flatten_grammar::flatten_grammar,
     intern_symbols::intern_symbols, process_inlines::process_inlines,
 };
-use self::flat_rule::{FlatRules, RuleId};
 use super::{
     grammars::{
         ExternalToken, InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry,
-        SyntaxGrammar, Variable, VariableType,
+        SyntaxGrammar, Variable,
     },
     rules::{AliasMap, Precedence, Rule, Symbol},
 };
@@ -59,71 +58,6 @@ pub type ExtractedSyntaxGrammar = IntermediateGrammar<Symbol, ExternalToken>;
 pub struct ExtractedLexicalGrammar {
     pub variables: Vec<Variable>,
     pub separators: Vec<Rule>,
-}
-
-/// Flat-IR analogue of [`Variable`]: the rule is a [`RuleId`] into the shared
-/// [`FlatRules`] pool rather than an owned [`Rule`].
-struct FlatVariable {
-    name: String,
-    kind: VariableType,
-    rule: RuleId,
-}
-
-/// Flat-IR analogue of [`InternedGrammar`]: rule-bearing fields hold [`RuleId`]s
-/// into the shared pool threaded through `prepare_grammar`. Produced by
-/// [`intern_symbols`]; for now [`materialize_interned`] turns it back into an
-/// [`InternedGrammar`] for the not-yet-converted [`extract_tokens`], an adapter
-/// that goes away as the rollout converts later passes.
-struct FlatInternedGrammar {
-    variables: Vec<FlatVariable>,
-    extra_symbols: Vec<RuleId>,
-    expected_conflicts: Vec<Vec<Symbol>>,
-    precedence_orderings: Vec<Vec<PrecedenceEntry>>,
-    external_tokens: Vec<FlatVariable>,
-    variables_to_inline: Vec<Symbol>,
-    supertype_symbols: Vec<Symbol>,
-    word_token: Option<Symbol>,
-    reserved_word_sets: Vec<ReservedWordContext<RuleId>>,
-}
-
-/// Transitional adapter: materialize a [`FlatInternedGrammar`] back to an
-/// [`InternedGrammar`] for passes not yet reading the pool directly. Removed
-/// once [`extract_tokens`] consumes the flat form.
-fn materialize_interned(g: FlatInternedGrammar, pool: &FlatRules) -> InternedGrammar {
-    InternedGrammar {
-        variables: g
-            .variables
-            .into_iter()
-            .map(|v| Variable {
-                name: v.name,
-                kind: v.kind,
-                rule: pool.materialize(v.rule),
-            })
-            .collect(),
-        extra_symbols: g.extra_symbols.iter().map(|&id| pool.materialize(id)).collect(),
-        expected_conflicts: g.expected_conflicts,
-        precedence_orderings: g.precedence_orderings,
-        external_tokens: g
-            .external_tokens
-            .into_iter()
-            .map(|v| Variable {
-                name: v.name,
-                kind: v.kind,
-                rule: pool.materialize(v.rule),
-            })
-            .collect(),
-        variables_to_inline: g.variables_to_inline,
-        supertype_symbols: g.supertype_symbols,
-        word_token: g.word_token,
-        reserved_word_sets: g
-            .reserved_word_sets
-            .into_iter()
-            .map(|s| ReservedWordContext {
-                name: s.name,
-                reserved_words: s.reserved_words.iter().map(|&id| pool.materialize(id)).collect(),
-            })
-            .collect(),
-    }
 }
 
 impl<T, U> Default for IntermediateGrammar<T, U> {
@@ -229,9 +163,7 @@ pub fn prepare_grammar(
     validate_precedences(input_grammar)?;
     validate_indirect_recursion(input_grammar)?;
 
-    let mut pool = FlatRules::default();
-    let interned_grammar = intern_symbols(input_grammar, &mut pool, diagnostics)?;
-    let interned_grammar = materialize_interned(interned_grammar, &pool);
+    let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
     let syntax_grammar = expand_repeats(syntax_grammar);
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
