@@ -132,17 +132,17 @@ impl LoweringState {
 
 struct EvalResult {
     language: String,
-    rules: Vec<(String, FlatRuleId)>,
-    overrides: Vec<(String, FlatRuleId, Span)>,
-    extras: Option<Vec<FlatRuleId>>,
-    externals: Option<Vec<FlatRuleId>>,
+    rules: Vec<(String, Rule)>,
+    overrides: Vec<(String, Rule, Span)>,
+    extras: Option<Vec<Rule>>,
+    externals: Option<Vec<Rule>>,
     inline: Option<Vec<String>>,
     supertypes: Option<Vec<String>>,
     word: Option<String>,
     start: Option<(String, Span)>,
     conflicts: Option<Vec<Vec<String>>>,
     precedences: Option<Vec<Vec<PrecedenceEntry>>>,
-    reserved: Option<Vec<ReservedWordContext<FlatRuleId>>>,
+    reserved: Option<Vec<ReservedWordContext<Rule>>>,
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
@@ -160,11 +160,8 @@ pub fn lower_with_base(
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
-    // Seed the pool with the base grammar's pool so inherited RuleIds stay valid;
-    // the current grammar's rules are interned on top during eval and assembly.
-    let mut pool = base_grammar.map_or_else(FlatRules::default, |b| b.pool.clone());
-    let result = evaluate(state, strings, shared, previous, current, &mut pool)?;
-    let grammar = build_grammar(current, result, base_grammar, previous, imported_rules, pool)?;
+    let result = evaluate(state, strings, shared, previous, current)?;
+    let grammar = build_grammar(current, result, base_grammar, previous, imported_rules)?;
     check_symbol_completeness(shared, current, previous, &grammar)?;
     Ok(grammar)
 }
@@ -411,7 +408,6 @@ fn evaluate(
     shared: &SharedAst,
     previous: &[super::Module],
     ctx: &super::ModuleContext,
-    pool: &mut FlatRules,
 ) -> LowerResult<EvalResult> {
     let mut eval = Evaluator::new(state, strings, shared, previous, ctx);
     let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::new();
@@ -428,15 +424,13 @@ fn evaluate(
     let config = ctx.grammar_config.as_ref().unwrap();
     let language = config.language.as_ref().unwrap();
 
-    let rules: Vec<(String, FlatRuleId)> = rule_entries
+    let rules: Vec<(String, Rule)> = rule_entries
         .into_iter()
-        .map(|(src, rid)| Ok((resolve_name(src, &eval, ctx), eval.intern_arule(pool, rid)?)))
+        .map(|(src, rid)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?)))
         .collect::<LowerResult<_>>()?;
-    let overrides: Vec<(String, FlatRuleId, Span)> = override_entries
+    let overrides: Vec<(String, Rule, Span)> = override_entries
         .into_iter()
-        .map(|(src, rid, span)| {
-            Ok((resolve_name(src, &eval, ctx), eval.intern_arule(pool, rid)?, span))
-        })
+        .map(|(src, rid, span)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?, span)))
         .collect::<LowerResult<_>>()?;
 
     Ok(EvalResult {
@@ -445,11 +439,11 @@ fn evaluate(
         overrides,
         extras: config
             .extras
-            .map(|id| eval.eval_rule_list(pool, id))
+            .map(|id| eval.eval_rule_list(id))
             .transpose()?,
         externals: config
             .externals
-            .map(|id| eval.eval_rule_list(pool, id))
+            .map(|id| eval.eval_rule_list(id))
             .transpose()?,
         inline: config
             .inline
@@ -474,7 +468,7 @@ fn evaluate(
             .transpose()?,
         reserved: config
             .reserved
-            .map(|id| eval.eval_reserved(pool, id))
+            .map(|id| eval.eval_reserved(id))
             .transpose()?,
     })
 }
@@ -496,14 +490,18 @@ fn inherit<T: Clone>(
 /// child's new sets. Matches dsl.js, which assigns `reserved[name] = ...` over a
 /// copy of the base's reserved object.
 fn merge_reserved(
-    overridden: Option<Vec<ReservedWordContext<FlatRuleId>>>,
+    pool: &mut FlatRules,
+    overridden: Option<Vec<ReservedWordContext<Rule>>>,
     base: Option<&[ReservedWordContext<FlatRuleId>]>,
 ) -> Vec<ReservedWordContext<FlatRuleId>> {
-    // Base sets keep their `RuleId`s (valid in the seeded pool); the child's sets
-    // were interned during eval into the same pool. Both index one pool, so this
-    // is a plain merge with no interning.
+    // Base sets keep their `RuleId`s (valid in the cloned base pool); the child's
+    // freshly-lowered rules are interned into the same pool.
     let mut merged: Vec<ReservedWordContext<FlatRuleId>> = base.unwrap_or(&[]).to_vec();
     for child in overridden.into_iter().flatten() {
+        let child = ReservedWordContext {
+            name: child.name,
+            reserved_words: child.reserved_words.iter().map(|r| pool.intern_import(r)).collect(),
+        };
         if let Some(existing) = merged.iter_mut().find(|c| c.name == child.name) {
             *existing = child;
         } else {
@@ -519,16 +517,15 @@ fn build_grammar(
     base: Option<&InputGrammar>,
     previous: &[Module],
     imported_rules: &[ImportedRule],
-    mut pool: FlatRules,
 ) -> LowerResult<InputGrammar> {
-    // `pool` arrives seeded with the base's pool and already holding the current
-    // grammar's own rules (interned during eval via `intern_arule`). Override and
-    // helper rules are interned/merged in below.
-    let mut overrides: FxHashMap<String, Spanned<FlatRuleId>> = FxHashMap::default();
+    let mut overrides: FxHashMap<String, Spanned<Rule>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
         overrides.insert(name, Spanned::new(rule, span));
     }
 
+    // Seed the pool with the base grammar's pool so inherited RuleIds stay valid;
+    // the current grammar's freshly-lowered rules are interned on top.
+    let mut pool = base.map_or_else(FlatRules::default, |b| b.pool.clone());
     let mut variables: Vec<FlatVariable> = Vec::new();
 
     // Base rules first - preserves the inherited grammar's start rule.
@@ -539,7 +536,7 @@ fn build_grammar(
                 variables.push(FlatVariable {
                     name: v.name.clone(),
                     kind: v.kind,
-                    rule,
+                    rule: pool.intern_import(&rule),
                 });
             } else {
                 variables.push(v.clone());
@@ -551,13 +548,12 @@ fn build_grammar(
         variables.push(FlatVariable {
             name,
             kind: VariableType::Named,
-            rule,
+            rule: pool.intern_import(&rule),
         });
     }
 
-    // Helper rules can also be override targets: an override (already interned)
-    // wins, else the helper's `Rule` is interned into the pool. (Once helpers emit
-    // pooled rules too, the `intern_import` here becomes a pool-to-pool copy.)
+    // Helper rules (materialized from the shared imported-rule list) can also be
+    // override targets. The clone happens here, once, at final assembly.
     for ir in imported_rules {
         expect_pat!(
             Module::Helper { lowered_rules, .. },
@@ -566,11 +562,11 @@ fn build_grammar(
         let (name, rule) = &lowered_rules[ir.index as usize];
         let final_rule = overrides
             .remove(name)
-            .map_or_else(|| pool.intern_import(rule), |s| s.value);
+            .map_or_else(|| rule.clone(), |s| s.value);
         variables.push(FlatVariable {
             name: name.clone(),
             kind: VariableType::Named,
-            rule: final_rule,
+            rule: pool.intern_import(&final_rule),
         });
     }
 
@@ -610,26 +606,26 @@ fn build_grammar(
         }
     }
 
-    // Rule-bearing config fields: the child's rules are already interned (during
-    // eval); else inherit the base's (whose RuleIds are valid in the seeded pool).
-    // Non-rule fields still use `inherit`. Default extras matches grammar.js
-    // (dsl.js:254): `[/\s/]` when neither the grammar nor its base specifies extras.
+    // Rule-bearing config fields: intern the child's rules, else inherit the base's
+    // (whose RuleIds are already valid in the cloned pool). Non-rule fields still
+    // use `inherit`. Default extras matches grammar.js (dsl.js:254): `[/\s/]` when
+    // neither the grammar nor its base specifies extras.
     let extra_symbols = if let Some(rules) = result.extras {
-        rules
+        rules.iter().map(|r| pool.intern_import(r)).collect()
     } else if let Some(b) = base {
         b.extra_symbols.clone()
     } else {
-        vec![pool.intern_pattern("\\s".into(), String::new())]
+        vec![pool.intern_import(&Rule::Pattern("\\s".into(), String::new()))]
     };
     let external_tokens = if let Some(rules) = result.externals {
-        rules
+        rules.iter().map(|r| pool.intern_import(r)).collect()
     } else if let Some(b) = base {
         b.external_tokens.clone()
     } else {
         Vec::new()
     };
     let reserved_words =
-        merge_reserved(result.reserved, base.map(|b| b.reserved_words.as_slice()));
+        merge_reserved(&mut pool, result.reserved, base.map(|b| b.reserved_words.as_slice()));
 
     Ok(InputGrammar {
         pool,

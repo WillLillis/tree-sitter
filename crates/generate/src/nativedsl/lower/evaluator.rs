@@ -10,7 +10,7 @@ use super::{
         LowerError, Module, ModuleId, NoteMessage,
         ast::{
             BinOp, ChildRange, ConfigField, ExpandId, ForId, IdentKind, MacroId, ModuleContext,
-            Node, NodeId, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
+            Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
         lexer::unescape_string,
         string_pool::{Str, StrEntry, StringPool},
@@ -23,7 +23,7 @@ use crate::{
     // `RuleId` here is the IR id (from `repr`); the flat-pool id is aliased.
     flat_rule::{FlatRules, RuleId as FlatRuleId},
     grammars::{PrecedenceEntry, ReservedWordContext},
-    rules::{Alias, Associativity, Precedence, Rule},
+    rules::{Associativity, Precedence, Rule},
 };
 
 /// One item on the lowering work stack. Expression and combinator nesting is
@@ -391,138 +391,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         Ok(result)
     }
 
-    /// Direct-emission counterpart of [`build_rule`](Self::build_rule): the same
-    /// post-order walk over the eval IR, but each finished node is interned into
-    /// `pool` (returning a [`FlatRuleId`]) instead of boxed into a `Rule`. This
-    /// skips the intermediate `Rule` box tree that `build_rule` + `intern_import`
-    /// would allocate (the malloc win). Metadata wrappers, which the IR keeps
-    /// unbundled, are merged into a single `MetadataParams` exactly as `Rule`'s
-    /// constructors do (via [`FlatRules::intern_metadata_merged`]), and choices are
-    /// flattened/deduped ([`FlatRules::intern_choice_flattened`]), so the interned
-    /// result is structurally identical to interning the built `Rule`.
-    pub fn intern_arule(&mut self, pool: &mut FlatRules, root: RuleId) -> LowerResult<FlatRuleId> {
-        let mut work = std::mem::take(&mut self.state.scratch.build_work);
-        let mut out: Vec<FlatRuleId> = Vec::new();
-        work.push(BuildStep::Visit(root, 0));
-        while let Some(step) = work.pop() {
-            match step {
-                BuildStep::Visit(id, depth) => {
-                    if depth > MAX_RULE_DEPTH {
-                        return Err(LowerError::without_span(LowerErrorKind::RuleNestingTooDeep));
-                    }
-                    match self.get_rule(id) {
-                        ARule::Blank => out.push(pool.intern_blank()),
-                        ARule::String(sid) => {
-                            let s = self.str_to_string(*sid);
-                            out.push(pool.intern_string(s));
-                        }
-                        ARule::Pattern(p, f) => {
-                            let pat = self.str_to_string(*p);
-                            let flags = f.map_or_else(String::new, |f| self.str_to_string(f));
-                            out.push(pool.intern_pattern(pat, flags));
-                        }
-                        ARule::NamedSymbol(sid) => {
-                            let n = self.str_to_string(*sid);
-                            out.push(pool.intern_named_symbol(n));
-                        }
-                        ARule::SeqOrChoice(_, range) => {
-                            work.push(BuildStep::Build(id));
-                            // Safety: as in `build_rule`, `range` comes from
-                            // children_start/children_range over `rule_children`.
-                            let children = unsafe {
-                                self.state.ir.rule_children.get_unchecked(range.as_range())
-                            };
-                            for &child in children.iter().rev() {
-                                work.push(BuildStep::Visit(child, depth + 1));
-                            }
-                        }
-                        ARule::Repeat(r)
-                        | ARule::Prec(_, r)
-                        | ARule::PrecLeft(_, r)
-                        | ARule::PrecRight(_, r)
-                        | ARule::PrecDynamic(_, r)
-                        | ARule::Field(_, r)
-                        | ARule::Alias(_, _, r)
-                        | ARule::Token(_, r)
-                        | ARule::Reserved(_, r) => {
-                            work.push(BuildStep::Build(id));
-                            work.push(BuildStep::Visit(*r, depth + 1));
-                        }
-                    }
-                }
-                BuildStep::Build(id) => {
-                    let rule = self.get_rule(id);
-                    if let ARule::SeqOrChoice(is_seq, range) = rule {
-                        let is_seq = *is_seq;
-                        let children = out.split_off(out.len() - range.len as usize);
-                        out.push(if is_seq {
-                            pool.intern_seq_or_choice(true, &children)
-                        } else {
-                            pool.intern_choice_flattened(&children)
-                        });
-                        continue;
-                    }
-                    let inner = out.pop().unwrap();
-                    let interned = match rule {
-                        ARule::Repeat(_) => pool.intern_repeat(inner),
-                        ARule::Prec(p, _) => {
-                            let prec = self.build_prec(*p);
-                            pool.intern_metadata_merged(inner, |m| m.precedence = prec)
-                        }
-                        ARule::PrecLeft(p, _) => {
-                            let prec = self.build_prec(*p);
-                            pool.intern_metadata_merged(inner, |m| {
-                                m.associativity = Some(Associativity::Left);
-                                m.precedence = prec;
-                            })
-                        }
-                        ARule::PrecRight(p, _) => {
-                            let prec = self.build_prec(*p);
-                            pool.intern_metadata_merged(inner, |m| {
-                                m.associativity = Some(Associativity::Right);
-                                m.precedence = prec;
-                            })
-                        }
-                        ARule::PrecDynamic(v, _) => {
-                            let v = *v;
-                            pool.intern_metadata_merged(inner, |m| m.dynamic_precedence = v)
-                        }
-                        ARule::Field(n, _) => {
-                            let name = self.str_to_string(*n);
-                            pool.intern_metadata_merged(inner, |m| m.field_name = Some(name))
-                        }
-                        ARule::Alias(v, named, _) => {
-                            let value = self.str_to_string(*v);
-                            let is_named = *named;
-                            pool.intern_metadata_merged(inner, |m| {
-                                m.alias = Some(Alias { value, is_named });
-                            })
-                        }
-                        ARule::Token(imm, _) => {
-                            let imm = *imm;
-                            pool.intern_metadata_merged(inner, |m| {
-                                m.is_token = true;
-                                if imm {
-                                    m.is_main_token = true;
-                                }
-                            })
-                        }
-                        ARule::Reserved(ctx, _) => {
-                            let ctx = self.str_to_string(*ctx);
-                            pool.intern_reserved(&ctx, inner)
-                        }
-                        // Leaves never enqueue a Build step.
-                        _ => unreachable!(),
-                    };
-                    out.push(interned);
-                }
-            }
-        }
-        let result = out.pop().unwrap();
-        self.state.scratch.build_work = work;
-        Ok(result)
-    }
-
     fn build_prec(&self, prec: APrec) -> Precedence {
         match prec {
             APrec::Integer(n) => Precedence::Integer(n),
@@ -530,31 +398,24 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    fn value_to_owned_rule(&mut self, pool: &mut FlatRules, id: ValueId) -> LowerResult<FlatRuleId> {
+    fn value_to_owned_rule(&mut self, id: ValueId) -> LowerResult<Rule> {
         match *self.get_val(id) {
-            Value::Rule(rid) => self.intern_arule(pool, rid),
-            Value::Str(sid) => {
-                let s = self.str_to_string(sid);
-                Ok(pool.intern_string(s))
-            }
+            Value::Rule(rid) => self.build_rule(rid),
+            Value::Str(sid) => Ok(Rule::String(self.str_to_string(sid))),
             // Guarded by super::typecheck - only rule-like values reach here
             _ => unreachable!(),
         }
     }
 
-    pub fn eval_rule_list(
-        &mut self,
-        pool: &mut FlatRules,
-        id: NodeId,
-    ) -> LowerResult<Vec<FlatRuleId>> {
+    pub fn eval_rule_list(&mut self, id: NodeId) -> LowerResult<Vec<Rule>> {
         let vid = self.eval_expr(id)?;
-        // Read each item by index: `value_to_owned_rule` needs `&mut self`, so we
-        // can't hold a borrow of the value_children slice.
+        // Read each item by index: `build_rule` (via value_to_owned_rule) needs
+        // `&mut self`, so we can't hold a borrow of the value_children slice.
         let range = self.list_range(vid);
         let mut rules = Vec::with_capacity(range.len as usize);
         for i in range.as_range() {
             let v = self.state.ir.value_children[i];
-            rules.push(self.value_to_owned_rule(pool, v)?);
+            rules.push(self.value_to_owned_rule(v)?);
         }
         Ok(rules)
     }
@@ -637,31 +498,29 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     /// Evaluate the `reserved` config expression into `Vec<ReservedWordContext<Rule>>`.
     /// Accepts either an object literal `{ name: [words] }` or an expression
     /// evaluating to a list of `{name: str, words: list<rule>}` objects.
-    pub fn eval_reserved(
-        &mut self,
-        pool: &mut FlatRules,
-        id: NodeId,
-    ) -> LowerResult<Vec<ReservedWordContext<FlatRuleId>>> {
+    pub fn eval_reserved(&mut self, id: NodeId) -> LowerResult<Vec<ReservedWordContext<Rule>>> {
+        let ctx = self.module_ctx(self.current_module);
         // typecheck guarantees `reserved` is an object literal (its first set is
         // the default, so order must be explicit), so the source-order AST node
         // is here. Inheritance merges the base's reserved at build time.
         expect_pat!(Node::Object(range), self.shared.arena.get(id));
-        // Copy out (name, value) pairs so the `shared.pools` borrow drops before
-        // the `&mut self` calls below (`eval_rule_list`, `module_ctx`).
-        let fields: Vec<(Span, NodeId)> = self
-            .shared
+        self.shared
             .pools
             .get_object(*range)
             .iter()
-            .map(|f| (f.name, f.value))
-            .collect();
-        let mut out = Vec::with_capacity(fields.len());
-        for (name_span, val_id) in fields {
-            let reserved_words = self.eval_rule_list(pool, val_id)?;
-            let name = self.module_ctx(self.current_module).text(name_span).to_string();
-            out.push(ReservedWordContext { name, reserved_words });
-        }
-        Ok(out)
+            .map(
+                |&ObjectField {
+                     name: name_span,
+                     value: val_id,
+                 }| {
+                    let words = self.eval_rule_list(val_id)?;
+                    Ok(ReservedWordContext {
+                        name: ctx.text(name_span).to_string(),
+                        reserved_words: words,
+                    })
+                },
+            )
+            .collect()
     }
 
     fn eval_grammar_config(
