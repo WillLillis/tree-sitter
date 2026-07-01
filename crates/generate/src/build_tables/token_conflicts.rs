@@ -491,13 +491,13 @@ mod tests {
     use super::*;
     use crate::{
         grammars::{Variable, VariableType},
-        prepare_grammar::{ExtractedLexicalGrammar, expand_tokens_from_rules},
+        prepare_grammar::{ExtractedLexicalGrammar, expand_tokens},
         rules::{Precedence, Rule, Symbol},
     };
 
     #[test]
     fn test_starting_characters() {
-        let grammar = expand_tokens_from_rules(ExtractedLexicalGrammar {
+        let grammar = expand_tokens(ExtractedLexicalGrammar {
             separators: Vec::new(),
             variables: vec![
                 Variable {
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_token_conflicts() {
-        let grammar = expand_tokens_from_rules(ExtractedLexicalGrammar {
+        let grammar = expand_tokens(ExtractedLexicalGrammar {
             separators: Vec::new(),
             variables: vec![
                 Variable {
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_token_conflicts_with_separators() {
-        let grammar = expand_tokens_from_rules(ExtractedLexicalGrammar {
+        let grammar = expand_tokens(ExtractedLexicalGrammar {
             separators: vec![Rule::pattern("\\s", "")],
             variables: vec![
                 Variable {
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_token_conflicts_with_open_ended_tokens() {
-        let grammar = expand_tokens_from_rules(ExtractedLexicalGrammar {
+        let grammar = expand_tokens(ExtractedLexicalGrammar {
             separators: vec![Rule::pattern("\\s", "")],
             variables: vec![
                 Variable {

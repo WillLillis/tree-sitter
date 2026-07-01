@@ -24,8 +24,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use self::expand_tokens::expand_tokens;
-#[cfg(test)]
-pub use self::expand_tokens::expand_tokens_from_rules;
 use self::{
     expand_repeats::expand_repeats, extract_default_aliases::extract_default_aliases,
     extract_tokens::extract_tokens, flatten_grammar::flatten_grammar,
@@ -35,13 +33,10 @@ use self::flat_rule::{FlatRules, RuleId};
 use super::{
     grammars::{
         ExternalToken, InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry,
-        SyntaxGrammar, VariableType,
+        SyntaxGrammar, Variable, VariableType,
     },
     rules::{AliasMap, Precedence, Rule, Symbol},
 };
-// Only the `#[cfg(test)]` materialize helpers build `Rule`-based `Variable`s now.
-#[cfg(test)]
-use super::grammars::Variable;
 use crate::{Diagnostic, grammars::ReservedWordContext};
 
 // Rule-bearing intermediate grammar shape. Only produced by tests now (the pipeline
@@ -68,9 +63,6 @@ pub type InternedGrammar = IntermediateGrammar<Rule, Variable>;
 #[cfg(test)]
 pub type ExtractedSyntaxGrammar = IntermediateGrammar<Symbol, ExternalToken>;
 
-// Rule-based lexical grammar, now only produced/asserted by tests (the pipeline
-// threads the flat variant).
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExtractedLexicalGrammar {
     pub variables: Vec<Variable>,
@@ -156,9 +148,8 @@ struct FlatExtractedSyntaxGrammar {
     reserved_word_sets: Vec<ReservedWordContext<Symbol>>,
 }
 
-/// Flat-IR analogue of [`ExtractedLexicalGrammar`]. `pub` only so the public
-/// `expand_tokens` can take it during the migration; the fields stay private.
-pub struct FlatExtractedLexicalGrammar {
+/// Flat-IR analogue of [`ExtractedLexicalGrammar`].
+struct FlatExtractedLexicalGrammar {
     variables: Vec<FlatVariable>,
     separators: Vec<RuleId>,
 }
@@ -191,9 +182,8 @@ fn materialize_extracted_syntax(
     }
 }
 
-/// Materialize a [`FlatExtractedLexicalGrammar`] back to an [`ExtractedLexicalGrammar`].
-/// Now only used by `extract_tokens`' tests to assert against `Rule` trees.
-#[cfg(test)]
+/// Transitional adapter: materialize a [`FlatExtractedLexicalGrammar`] for the
+/// not-yet-converted [`expand_tokens`]. Removed once that pass reads the pool.
 fn materialize_extracted_lexical(
     g: FlatExtractedLexicalGrammar,
     pool: &FlatRules,
@@ -320,8 +310,9 @@ pub fn prepare_grammar(
     let interned_grammar = intern_symbols(input_grammar, &mut pool, diagnostics)?;
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar, &mut pool)?;
     let syntax_grammar = expand_repeats(syntax_grammar, &mut pool);
+    let lexical_grammar = materialize_extracted_lexical(lexical_grammar, &pool);
     let mut syntax_grammar = flatten_grammar(syntax_grammar, &mut pool)?;
-    let lexical_grammar = expand_tokens(lexical_grammar, &mut pool)?;
+    let lexical_grammar = expand_tokens(lexical_grammar)?;
     let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
     let inlines = process_inlines(&syntax_grammar, &lexical_grammar)?;
     Ok((syntax_grammar, lexical_grammar, inlines, default_aliases))
