@@ -39,6 +39,10 @@ use super::{
 };
 use crate::{Diagnostic, grammars::ReservedWordContext};
 
+// Rule-bearing intermediate grammar shape. Only produced by tests now (the pipeline
+// threads the flat `Flat*` variants); tests materialize back to this to assert
+// against `Rule` trees.
+#[cfg(test)]
 pub struct IntermediateGrammar<T, U> {
     variables: Vec<Variable>,
     extra_symbols: Vec<T>,
@@ -51,11 +55,12 @@ pub struct IntermediateGrammar<T, U> {
     reserved_word_sets: Vec<ReservedWordContext<T>>,
 }
 
-// Now only constructed by tests (the pipeline produces the flat variant); kept as
-// the materialized form those tests assert against.
+// Now only constructed by tests (the pipeline produces the flat variants); kept as
+// the materialized forms those tests assert against.
 #[cfg(test)]
 pub type InternedGrammar = IntermediateGrammar<Rule, Variable>;
 
+#[cfg(test)]
 pub type ExtractedSyntaxGrammar = IntermediateGrammar<Symbol, ExternalToken>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -149,8 +154,9 @@ struct FlatExtractedLexicalGrammar {
     separators: Vec<RuleId>,
 }
 
-/// Transitional adapter: materialize a [`FlatExtractedSyntaxGrammar`] for the
-/// not-yet-converted [`expand_repeats`]. Removed once that pass reads the pool.
+/// Materialize a [`FlatExtractedSyntaxGrammar`] back to an [`ExtractedSyntaxGrammar`].
+/// Now only used by `expand_repeats`' tests to assert against `Rule` trees.
+#[cfg(test)]
 fn materialize_extracted_syntax(
     g: FlatExtractedSyntaxGrammar,
     pool: &FlatRules,
@@ -196,6 +202,7 @@ fn materialize_extracted_lexical(
     }
 }
 
+#[cfg(test)]
 impl<T, U> Default for IntermediateGrammar<T, U> {
     fn default() -> Self {
         Self {
@@ -303,9 +310,8 @@ pub fn prepare_grammar(
     let interned_grammar = intern_symbols(input_grammar, &mut pool, diagnostics)?;
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar, &mut pool)?;
     let syntax_grammar = expand_repeats(syntax_grammar, &mut pool);
-    let syntax_grammar = materialize_extracted_syntax(syntax_grammar, &pool);
     let lexical_grammar = materialize_extracted_lexical(lexical_grammar, &pool);
-    let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
+    let mut syntax_grammar = flatten_grammar(syntax_grammar, &mut pool)?;
     let lexical_grammar = expand_tokens(lexical_grammar)?;
     let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
     let inlines = process_inlines(&syntax_grammar, &lexical_grammar)?;
