@@ -1,0 +1,185 @@
+# Flat-pool backend redesign - investigation handoff
+
+Status as of 2026-07-02. Branch `rule_ir` (main repo) + `rule_ir` (dsl-tests).
+This doc is a one-time planning artifact at the repo root; delete it before any PR.
+
+## TL;DR
+
+We want to replace the recursive `Rule` box-tree in the **shared** grammar backend
+(`crates/generate/src/prepare_grammar/*`, used by BOTH the `grammar.js` frontend and
+the native `.tsg` frontend) with a **flat, pool-indexed IR**, for two goals:
+- **Perf** (fewer/cheaper allocations, better cache).
+- **Depth-safety** (iterative pool walks -> drop `MAX_RULE_DEPTH`, kill the
+  stack-overflow class).
+
+**Attempt #1 failed and was reverted.** It used a hash-consed pool and regressed the
+shared backend ~15-20% vs master (see "Why #1 failed"). This is **attempt #2**:
+design the representation *around how the passes actually access rules*, with **no
+hash-consing**. We spiked `intern_symbols` on the new rep and it is **2-3x faster
+than master**. Next milestone is the `flatten_grammar` spike - the honest go/no-go.
+
+## Why attempt #1 failed (do NOT repeat)
+
+- The pool hash-consed **every node on every pass rebuild** (an FxHashMap probe +
+  insert per node, plus a throwaway `Vec` key for each `Seq`/`Choice`). Master only
+  dedups where a pass needs it (`expand_repeats`).
+- Dedup was real (~56% of nodes on cpp) but only saved **storage**, not the
+  per-reference **walk** work the passes do - so we paid the hash tax and got a net
+  loss for cache-resident grammars.
+- Measured regression on `prepare_grammar` (the shared backend, grammar.js pays it
+  too): cpp 3.72ms(master) -> 4.41ms; +14-25% across cpp/c/python/go/js.
+- Reverted to `d43966acc` ("nativedsl: convert lowering to iterative walks") via 10
+  revert commits on `native_dsl` (history preserved). dsl-tests reverted `00e5b0f`.
+- Full writeup: memory `nativedsl_pool_reverted_lesson.md`.
+
+Key realization: **depth-safety does NOT need a pool** (iterative-over-`Rule` gets
+it with zero perf change). The pool must justify itself on **perf**, or it is not
+worth the `Rule`-deletion churn.
+
+## The design (attempt #2)
+
+Principles, derived from the backend's access patterns:
+
+| pass | reads | writes | dedup? |
+|---|---|---|---|
+| intern_symbols | walk tree | `NamedSymbol`->`Symbol` (leaf rewrite, in place) | none |
+| extract_tokens | walk tree | hoist token subtrees to lexical, replace w/ `Symbol` | token dedup (local) |
+| expand_repeats | walk tree | `Repeat`->aux `Symbol` + new aux rules | aux dedup (local) |
+| flatten_grammar | walk tree | `Vec<Production>` (flat step lists) - tree ends here | production dedup (local) |
+| expand_tokens | walk token trees | NFA | none |
+
+1. **Flat arena, no hash-consing.** `nodes: Vec<FNode>`; a child holds a `NodeId`
+   into it. Build = plain `push` (O(1), no hashing). Dedup ONLY locally in the ~3
+   passes that need it, structurally, exactly like master.
+2. **Children as ranges.** `Seq`/`Choice` hold `(offset,len)` into ONE backing
+   `children: Vec<NodeId>`. Never a per-node `Vec`. Aspiration: "never add, only
+   subtract" - build the backing store once, rewrite in place / shrink.
+3. **In-place mutation is the win.** No hash-consing => no node sharing => it's a
+   tree => leaf rewrites (`NamedSymbol`->`Symbol`, `Repeat`->`Symbol`,
+   token->`Symbol`) are `nodes[id] = ...`, O(1), zero alloc. Master rebuilds the
+   whole enclosing tree for these. THIS is how the pool beats master.
+4. **String interning.** Payloads (`String`/`Pattern`/`NamedSymbol` text) intern to
+   a `StrId` (u32) in a per-pool interner. Hash once at build; every later use is a
+   cheap `u32`. Amortizes across passes (this is why interning pays off across the
+   backend, NOT within a single pass).
+   - `str -> StrId` is a content lookup => must be a hashmap (`FxHashMap<Box<str>,
+     StrId>`). `StrId`s being dense does NOT help this direction.
+   - `StrId -> str` (reverse, for serialize/errors) is dense => a `Vec` when needed.
+     The spike drops it (intern_symbols never resolves text). Real design: use
+     `Rc<str>` or a blob+ranges to avoid double-allocating each string (do NOT keep
+     both a `Vec<Box<str>>` and a `Box<str>`-keyed map - that double-stores).
+5. **Name resolution via a dense `Vec`.** Names are interned first, so name `StrId`s
+   are `0..k`; `name_of_symbol: Vec<Symbol>` indexed by `StrId` (NOT a map, NOT
+   `Option` - every `0..k` slot is a name; an undefined symbol's `StrId` is `>= k`,
+   caught by the `.get()` bounds check).
+6. **Two id-spaces** (confirmed with the user): the dense `Symbol` index (`0..num_rules`,
+   what parse tables need) and the arena `NodeId` (structure). A named rule maps
+   `name -> Symbol` and lives at some arena node.
+
+## Measurements so far (`intern_symbols` only)
+
+Release, driven by `target/release/tree-sitter generate <grammar>/grammar.js`, which
+prints `[SPIKE intern_symbols] master <A>  flat <B>` (300 iters, pass only; the
+`Rule->pool` conversion is excluded setup, flat pools pre-cloned so only the in-place
+rewrite is timed). us/iter:
+
+| grammar | master (scan) | master + name map | flat (in-place, StrId) |
+|---|---|---|---|
+| cpp | 253.8 | ~152 | **53** |
+| c | 86.9 | ~72 | 27 |
+| python | 55.0 | ~43 | 19 |
+| go | 54.6 | ~48 | 26 |
+| javascript | 57.5 | ~51 | 21 |
+
+Decomposition (cpp), each isolated:
+- **scan -> map: 254 -> 152us.** Master's `intern_name` is an O(V) linear scan; an
+  O(1) map fixes it. This is a `Rule`-only win, NO pool needed - **landable on master
+  today** (see next steps).
+- **Rule -> flat pool + in-place: 152 -> 75us (~2x).** The real backing-type payoff
+  (no new-tree allocation).
+- **String -> StrId: 75 -> 53us (~1.4x).** Real, but amortizes across passes; a
+  single pass under-credits it (interning cost sits in setup).
+
+`name_of_symbol` structure (hashmap vs dense `Vec<Symbol>`): **perf-neutral at the
+current 16-byte `Symbol`** (~53us either way for cpp). The dense `Vec` is the right,
+clean choice and will pull ahead once `Symbol` shrinks, but it's not the lever here.
+
+### CAVEATS on these numbers (read before trusting them)
+
+- **`intern_symbols` is the BEST case for in-place** - it's a pure leaf rewrite, so
+  master needlessly rebuilds a whole tree. `flatten_grammar` (tree -> productions)
+  CANNOT be done in place. **Do not extrapolate 2-3x to the whole backend.** The
+  flatten spike is the honest test.
+- The flat timing excludes `Rule->pool` conversion (legit: a real frontend would
+  build the pool directly) and pre-clones pools (legit: measures per-invocation cost;
+  in the real pipeline the pass runs once, no clone).
+
+## `Symbol` shrink (investigated, not done)
+
+`Symbol { kind: SymbolType, index: usize }` today: 16 B; `Option<Symbol>` 16 B
+(rides `SymbolType`'s niche).
+- Runtime `TSSymbol` is `uint16_t` -> a valid parser has <= 65535 symbols, so
+  `index: u32` is **free** (4-billion headroom, `as u32` never truncates, no overflow
+  checks). Shrinks `Symbol` to 8 B, `Option<Symbol>` to 8 B.
+- `u16` would be 4 B but needs `try_from` overflow guards at every construction (the
+  65535 ceiling is reachable for huge grammars; `as u16` truncates silently). Not
+  worth it. **Recommendation: u32.**
+- Blast radius: ~119 `.index` array-index sites need `as usize`; constructors
+  (`Symbol::{non_terminal,terminal,external}`) take `usize` -> take/cast `u32`.
+- **Do this as its OWN general optimization**, measured against `build_tables` /
+  `render` (the symbol-heavy phases that actually benefit), NOT judged by this spike.
+
+## Next steps (priority order)
+
+1. **`flatten_grammar` spike** = the go/no-go. Build a flat flatten (tree -> productions)
+   and A/B vs master's. If the flat arena wins where in-place can't help, green-light
+   the full redesign. If it only ties/loses, the pool's value is just the in-place
+   passes - reassess scope.
+2. **Land the name-map win on master independently** (`intern_name` O(V) scan -> O(1)
+   map). It cut cpp `intern_symbols` 254 -> 152us with zero pool. Cheap, standalone.
+3. **`Symbol` usize -> u32** shrink, standalone, measured vs `build_tables`.
+4. If flatten validates: write the real design doc first (all pass access patterns),
+   THEN implement pass-by-pass keeping green + measuring each. Do NOT
+   implement-before-measuring (the attempt-#1 mistake).
+
+## How to run the spike
+
+```
+cargo build --release -p tree-sitter-cli
+for g in cpp c python go javascript; do
+  ( cd ~/projects/grammars/tree-sitter-$g \
+    && /path/to/tree-sitter/target/release/tree-sitter generate grammar.js 2>&1 ) \
+    | grep '\[SPIKE'
+done
+```
+`generate` runs `prepare_grammar` once; the temp bench block there prints the A/B and
+then generation continues to `build_tables` (slow for cpp - the number is already
+printed, Ctrl-C or wait). Grammars live at `~/projects/grammars/tree-sitter-<lang>/`.
+
+## Temp code inventory (all on `rule_ir`, remove/relocate before landing)
+
+- `crates/generate/src/prepare_grammar/flat_spike.rs` - the whole spike module
+  (flat `Pool` + `Rule->pool` converter + flat `intern_symbols`). Plus
+  `mod flat_spike;` in `prepare_grammar.rs`.
+- The `[SPIKE intern_symbols] ...` bench block at the top of `prepare_grammar`
+  (`prepare_grammar.rs`).
+- `intern_symbols.rs`: the temp O(1) `name_map` (Interner field + `FxHashMap` import +
+  `intern_name` rewrite). **This one is a genuine independent win** - consider KEEPING
+  it / landing it on master rather than reverting (see next-step 2).
+
+## Git state
+
+- Main repo: branch `rule_ir` (this doc + spike committed here). Base = `native_dsl`
+  @ `63e862ec1` (the last of 10 revert commits undoing pool attempt #1; tree ==
+  `d43966acc`).
+- `native_dsl`: the reverted feature branch (pool #1 undone, iterative-passes work
+  kept). Do not confuse with `rule_ir`.
+- dsl-tests repo: branch `rule_ir`; reverted `00e5b0f` (its pool adaptation).
+- master baseline: `aec288f83`.
+
+## Relevant memory files (`~/.config/chud/.../memory/`)
+
+- `nativedsl_pool_reverted_lesson.md` - why attempt #1 failed (READ FIRST re: pool).
+- `nativedsl_iterative_passes_followup.md` - the KEPT depth-safety work + recursive
+  `bench_lower_only` baselines (C++ ~272-290us).
+- `nativedsl_rule_elimination_feasibility.md` - attempt #1's approach (what NOT to do).
