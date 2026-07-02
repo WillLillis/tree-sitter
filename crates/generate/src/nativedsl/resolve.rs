@@ -421,7 +421,13 @@ fn resolve_node(
         Node::SeqOrChoice { range, .. } | Node::List(range) | Node::Tuple(range)
         | Node::Concat(range) | Node::RuleSet(range) => descend(stack, rcx.pools.child_slice(range)),
         Node::Call { name, args } => {
-            stack.extend(rcx.pools.child_slice(args).iter().rev().map(|&c| Resolve::Node(c)));
+            stack.extend(
+                rcx.pools
+                    .child_slice(args)
+                    .iter()
+                    .rev()
+                    .map(|&c| Resolve::Node(c)),
+            );
             Some(name)
         }
         Node::Object(range) => match rcx.pools.get_object(range).split_first() {
