@@ -2,6 +2,7 @@ mod expand_repeats;
 mod expand_tokens;
 mod extract_default_aliases;
 mod extract_tokens;
+mod flat_spike; // TEMP: perf spike, remove after the pool decision
 mod flatten_grammar;
 mod intern_symbols;
 mod process_inlines;
@@ -159,6 +160,31 @@ pub fn prepare_grammar(
     InlinedProductionMap,
     AliasMap,
 )> {
+    // TEMP SPIKE A/B (remove after the pool decision): master intern_symbols
+    // (Rule, produces a new tree incl. alloc) vs flat-pool intern_symbols
+    // (in-place, no hash-cons, O(1) name map). The Rule->pool conversion is done
+    // up front (setup) and excluded from timing; the flat pool is pre-cloned per
+    // iteration so we time only the in-place rewrite.
+    {
+        use std::hint::black_box;
+        let n = 300u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(intern_symbols(input_grammar, &mut Vec::new()));
+        }
+        let master = t.elapsed() / n;
+
+        let base = flat_spike::Pool::from_grammar(input_grammar);
+        let mut pools: Vec<_> = (0..n).map(|_| base.clone()).collect();
+        let t = std::time::Instant::now();
+        for p in &mut pools {
+            p.intern_symbols();
+            black_box(&*p);
+        }
+        let flat = t.elapsed() / n;
+        eprintln!("[SPIKE intern_symbols] master {master:?}  flat {flat:?}");
+    }
+
     validate_precedences(input_grammar)?;
     validate_indirect_recursion(input_grammar)?;
 

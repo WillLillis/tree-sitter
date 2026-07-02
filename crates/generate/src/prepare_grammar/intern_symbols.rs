@@ -1,3 +1,4 @@
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,7 +29,18 @@ pub(super) fn intern_symbols(
     grammar: &InputGrammar,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> InternSymbolsResult<InternedGrammar> {
-    let interner = Interner { grammar };
+    // TEMP A/B: give master's name resolution the same O(1) map the flat spike
+    // uses, to isolate the map win from the backing-type/in-place win.
+    let mut name_map: FxHashMap<&str, Symbol> = FxHashMap::default();
+    for (i, v) in grammar.variables.iter().enumerate() {
+        name_map.entry(v.name.as_str()).or_insert_with(|| Symbol::non_terminal(i));
+    }
+    for (i, e) in grammar.external_tokens.iter().enumerate() {
+        if let Rule::NamedSymbol(name) = e {
+            name_map.entry(name.as_str()).or_insert_with(|| Symbol::external(i));
+        }
+    }
+    let interner = Interner { grammar, name_map };
 
     if variable_type_for_name(&grammar.variables[0].name) == VariableType::Hidden {
         Err(InternSymbolsError::HiddenStartRule)?;
@@ -129,6 +141,7 @@ pub(super) fn intern_symbols(
 
 struct Interner<'a> {
     grammar: &'a InputGrammar,
+    name_map: FxHashMap<&'a str, Symbol>,
 }
 
 impl Interner<'_> {
@@ -177,21 +190,9 @@ impl Interner<'_> {
     }
 
     fn intern_name(&self, symbol: &str) -> Option<Symbol> {
-        for (i, variable) in self.grammar.variables.iter().enumerate() {
-            if variable.name == symbol {
-                return Some(Symbol::non_terminal(i));
-            }
-        }
-
-        for (i, external_token) in self.grammar.external_tokens.iter().enumerate() {
-            if let Rule::NamedSymbol(name) = external_token
-                && name == symbol
-            {
-                return Some(Symbol::external(i));
-            }
-        }
-
-        None
+        // TEMP A/B: was an O(V) linear scan over variables + externals; now an O(1)
+        // map lookup, to isolate the map win in the spike comparison.
+        self.name_map.get(symbol).copied()
     }
 
     // In the case of a seq or choice rule of 1 element in a hidden rule, weird
