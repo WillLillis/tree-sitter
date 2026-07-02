@@ -24,27 +24,22 @@ use crate::{
     rules::{Associativity, Precedence, Rule},
 };
 
-/// One item on the lowering work stack. Expression and combinator nesting is
-/// driven through this stack instead of native recursion, so arbitrarily deep
-/// input cannot overflow the call stack. Macro / for-loop / let evaluation stays
+/// One item on the lowering work stack. Macro / for-loop / let evaluation stays
 /// recursive (bounded by `MAX_CALL_DEPTH` and for-nesting) and re-enters the
 /// engine, nesting on the shared stacks via base offsets.
-// Kept to 8 bytes (one `NodeId` payload): the work stack is the hottest memory in
-// lowering, so every variant carries at most a node id. A `For` member holds the
-// `For` node (its `for_id`/`body` are re-read on pop, both rare); a `Combine` of a
-// variable-arity node pushes its result-stack base to `Scratch::combine_bases`
-// rather than inline (popped when the combine runs - combines nest LIFO).
 #[derive(Clone, Copy)]
 pub(super) enum Task {
-    /// Evaluate a node to a value; result lands on `val_scratch`.
+    /// Evaluate a node to a value, result lands on `val_scratch`.
     Expr(NodeId),
-    /// Lower a node to a rule; result lands on `rule_scratch`.
+    /// Lower a node to a rule, result lands on `rule_scratch`.
     Rule(NodeId),
     /// A `For` node member of a list/tuple: expand to zero or more values.
     ForVal(NodeId),
     /// A `For` node member of a seq/choice: expand to zero or more rules.
     ForRule(NodeId),
-    /// Fold a compound node's evaluated children.
+    /// Fold a compound node's evaluated children. `Combine` of a variable-arity
+    /// node pushes its result-stack base to `Scratch::combine_bases` rather than
+    /// inline (popped when the combine runs, as combines nest LIFO).
     Combine(NodeId),
     /// Pop a rule off `rule_scratch` and wrap it as a `Value::Rule`.
     WrapRule,
@@ -99,12 +94,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Evaluate a let binding's value and memoize it under `let_id`, resolving the
     /// lets it transitively references first.
-    ///
-    /// Dependencies are walked with an explicit stack instead of native recursion,
-    /// so an arbitrarily long `let` chain cannot overflow; a reference back into a
-    /// let still being evaluated is a cycle. A cycle routed through a macro body is
-    /// caught by [`eval_expr_inner`](Self::eval_expr_inner)'s `Var` arm instead,
-    /// since the dependency scan does not descend into macro bodies.
     pub fn eval_let(&mut self, let_id: NodeId) -> LowerResult<ValueId> {
         if let Some(&val) = self.state.let_values.get(&let_id) {
             return Ok(val);
@@ -281,59 +270,76 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Materialize IR rule `root` into a [`Rule`] tree.
     ///
-    /// Walks the IR with an explicit stack rather than recursing, so a deeply
-    /// nested rule does not overflow the native stack here. The depth bound is
-    /// for the *consumer*: the resulting tree feeds the recursive shared backend
-    /// ([`MAX_RULE_DEPTH`]).
-    ///
     /// # Errors
+    ///
     /// [`LowerErrorKind::RuleNestingTooDeep`] if nesting exceeds [`MAX_RULE_DEPTH`].
     pub fn build_rule(&mut self, root: RuleId) -> LowerResult<Rule> {
         // Two-phase post-order walk: `Visit` descends (pushing a matching `Build`
         // plus its children), `Build` pops the children's finished `Rule`s off
         // `out` and assembles the parent. Children are pushed reversed so they
-        // land on `out` in source order. The two stacks are taken from scratch so
-        // their capacity is reused across the per-rule calls rather than reallocated;
-        // both are empty here (drained each call) and restored before returning.
-        let mut work = std::mem::take(&mut self.state.scratch.build_work);
-        let mut out = std::mem::take(&mut self.state.scratch.build_out);
+        // land on `out` in source order.
+        let Self {
+            state,
+            strings,
+            previous,
+            root_ctx,
+            root_id,
+            ..
+        } = self;
+        let ir = &state.ir;
+        let work = &mut state.scratch.build_work;
+        let out = &mut state.scratch.build_out;
+        debug_assert!(work.is_empty());
+        debug_assert!(out.is_empty());
+        let module_ctx = |idx| {
+            if idx == *root_id {
+                *root_ctx
+            } else {
+                previous[usize::from(idx)].ctx()
+            }
+        };
+        let str_to_string = |id| match strings.entry(id) {
+            &StrEntry::Source(span, mod_id) => span.resolve(&module_ctx(mod_id).source).to_string(),
+            StrEntry::Owned(s) => s.to_string(),
+            StrEntry::Unreachable => unreachable!(),
+        };
+        let build_prec = |prec| match prec {
+            APrec::Integer(n) => Precedence::Integer(n),
+            APrec::Name(sid) => Precedence::Name(str_to_string(sid)),
+        };
         work.push(BuildStep::Visit(root, 0));
         while let Some(step) = work.pop() {
             match step {
                 BuildStep::Visit(id, depth) => {
                     if depth > MAX_RULE_DEPTH {
+                        work.clear();
+                        out.clear();
                         return Err(LowerError::without_span(LowerErrorKind::RuleNestingTooDeep));
                     }
-                    match self.get_rule(id) {
+                    match unsafe { ir.rules.get_unchecked(id.0 as usize) } {
                         ARule::Blank => out.push(Rule::Blank),
-                        ARule::String(sid) => out.push(Rule::String(self.str_to_string(*sid))),
+                        ARule::String(sid) => out.push(Rule::String(str_to_string(*sid))),
                         ARule::Pattern(p, f) => out.push(Rule::Pattern(
-                            self.str_to_string(*p),
-                            f.map_or_else(String::new, |f| self.str_to_string(f)),
+                            str_to_string(*p),
+                            f.map_or_else(String::new, str_to_string),
                         )),
                         ARule::NamedSymbol(sid) => {
-                            out.push(Rule::NamedSymbol(self.str_to_string(*sid)));
+                            out.push(Rule::NamedSymbol(str_to_string(*sid)));
                         }
                         ARule::SeqOrChoice(_, range) => {
                             work.push(BuildStep::Build(id));
                             // Safety: range is produced by children_start/children_range
                             // which track rule_children indices.
-                            let children = unsafe {
-                                self.state.ir.rule_children.get_unchecked(range.as_range())
-                            };
+                            let children =
+                                unsafe { ir.rule_children.get_unchecked(range.as_range()) };
                             for &child in children.iter().rev() {
                                 work.push(BuildStep::Visit(child, depth + 1));
                             }
                         }
-                        ARule::Repeat(r)
-                        | ARule::Prec(_, r)
-                        | ARule::PrecLeft(_, r)
-                        | ARule::PrecRight(_, r)
-                        | ARule::PrecDynamic(_, r)
-                        | ARule::Field(_, r)
-                        | ARule::Alias(_, _, r)
-                        | ARule::Token(_, r)
-                        | ARule::Reserved(_, r) => {
+                        #[rustfmt::skip]
+                        ARule::Repeat(r) | ARule::Prec(_, r) | ARule::PrecLeft(_, r)
+                        | ARule::PrecRight(_, r) | ARule::PrecDynamic(_, r) | ARule::Field(_, r)
+                        | ARule::Alias(_, _, r) | ARule::Token(_, r) | ARule::Reserved(_, r) => {
                             work.push(BuildStep::Build(id));
                             work.push(BuildStep::Visit(*r, depth + 1));
                         }
@@ -343,7 +349,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 // SeqOrChoice consumes `range.len` of them; every other compound
                 // wraps exactly one, so they share a single pop site.
                 BuildStep::Build(id) => {
-                    let rule = self.get_rule(id);
+                    let rule = unsafe { ir.rules.get_unchecked(id.0 as usize) };
                     if let ARule::SeqOrChoice(is_seq, range) = rule {
                         let children = out.split_off(out.len() - range.len as usize);
                         out.push(if *is_seq {
@@ -356,14 +362,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let inner = out.pop().unwrap();
                     out.push(match rule {
                         ARule::Repeat(_) => Rule::repeat(inner),
-                        ARule::Prec(p, _) => Rule::prec(self.build_prec(*p), inner),
-                        ARule::PrecLeft(p, _) => Rule::prec_left(self.build_prec(*p), inner),
-                        ARule::PrecRight(p, _) => Rule::prec_right(self.build_prec(*p), inner),
+                        ARule::Prec(p, _) => Rule::prec(build_prec(*p), inner),
+                        ARule::PrecLeft(p, _) => Rule::prec_left(build_prec(*p), inner),
+                        ARule::PrecRight(p, _) => Rule::prec_right(build_prec(*p), inner),
                         ARule::PrecDynamic(v, _) => Rule::prec_dynamic(*v, inner),
-                        ARule::Field(n, _) => Rule::field(self.str_to_string(*n), inner),
-                        ARule::Alias(v, named, _) => {
-                            Rule::alias(inner, self.str_to_string(*v), *named)
-                        }
+                        ARule::Field(n, _) => Rule::field(str_to_string(*n), inner),
+                        ARule::Alias(v, named, _) => Rule::alias(inner, str_to_string(*v), *named),
                         ARule::Token(imm, _) => {
                             if *imm {
                                 Rule::immediate_token(inner)
@@ -373,7 +377,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         }
                         ARule::Reserved(ctx, _) => Rule::Reserved {
                             rule: Box::new(inner),
-                            context_name: self.str_to_string(*ctx),
+                            context_name: str_to_string(*ctx),
                         },
                         // Leaves never enqueue a Build step.
                         _ => unreachable!(),
@@ -381,19 +385,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 }
             }
         }
-        // Exactly the root's finished rule remains; return the now-empty buffers
-        // to scratch so the next call reuses their capacity.
         let result = out.pop().unwrap();
-        self.state.scratch.build_work = work;
-        self.state.scratch.build_out = out;
         Ok(result)
-    }
-
-    fn build_prec(&self, prec: APrec) -> Precedence {
-        match prec {
-            APrec::Integer(n) => Precedence::Integer(n),
-            APrec::Name(sid) => Precedence::Name(self.str_to_string(sid)),
-        }
     }
 
     fn value_to_owned_rule(&mut self, id: ValueId) -> LowerResult<Rule> {
@@ -675,7 +668,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         self.state.scratch.rule_scratch.truncate(scratch_base);
                         let count = self.state.ir.rule_children.len() as u32 - start;
                         debug_assert!(u16::try_from(count).is_ok());
-                        self.push_rule(ARule::SeqOrChoice(is_seq, ChildRange::new(start, count as u16)));
+                        self.push_rule(ARule::SeqOrChoice(
+                            is_seq,
+                            ChildRange::new(start, count as u16),
+                        ));
                     }
                     Rule::Repeat(_) => {
                         let inner = self.pop_rule();
@@ -684,7 +680,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     Rule::Metadata { params, .. } => {
                         let mut rid = self.pop_rule();
                         if params.dynamic_precedence != 0 {
-                            rid = self.alloc_rule(ARule::PrecDynamic(params.dynamic_precedence, rid));
+                            rid =
+                                self.alloc_rule(ARule::PrecDynamic(params.dynamic_precedence, rid));
                         }
                         if let Precedence::Integer(n) = &params.precedence {
                             let aprec = APrec::Integer(*n);

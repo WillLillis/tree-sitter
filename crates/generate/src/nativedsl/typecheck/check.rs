@@ -1,6 +1,3 @@
-use crate::nativedsl::typecheck::types::{
-    ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError,
-};
 use crate::nativedsl::{
     ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
     ast::{
@@ -9,7 +6,10 @@ use crate::nativedsl::{
     },
     diagnostic::suggest_name,
     resolve::resolve_module_ref,
-    typecheck::{Constraint, TypeEnv, TypeResult},
+    typecheck::{
+        Constraint, TypeEnv, TypeResult,
+        types::{ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError},
+    },
 };
 
 /// Function pointer type for element checkers passed to `expect_list`.
@@ -23,7 +23,7 @@ pub(super) fn check_item(
 ) -> TypeResult<()> {
     match shared.arena.get(id) {
         Node::Grammar => {
-            // INVARIANT: validate_grammar enforces grammar_config.is_some()
+            // INVARIANT: validate_grammar enforces `grammar_config.is_some()`
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
                 expect_list(shared, ctx, id, env, expect_rule, Ty::LIST_RULE)?;
@@ -58,7 +58,7 @@ pub(super) fn check_item(
             Ok(())
         }
         Node::Let { .. } => {
-            type_of_let(shared, ctx, id, env)?;
+            _ = type_of_let(shared, ctx, id, env)?;
             Ok(())
         }
         Node::Macro(macro_id) => {
@@ -88,9 +88,8 @@ pub(super) fn check_item(
             Ok(())
         }
         Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
-        // The template body is checked once via the Macro item; per instance we
-        // only check the call args against the macro's params (the arg count was
-        // validated at expand, so params and args line up).
+        // The template body is checked once via the Macro item. Per instance we
+        // only check the call args against the macro's params
         &Node::ExpandedRule(expand_id) => {
             let exp = *shared.pools.get_expansion(expand_id);
             let params = shared.pools.get_macro(exp.macro_id).params;
@@ -100,8 +99,7 @@ pub(super) fn check_item(
             }
             Ok(())
         }
-        // External decls have no body to typecheck.
-        Node::Forward { .. } => Ok(()),
+        Node::Forward { .. } => Ok(()), // External decls have no body to typecheck.
         _ => unreachable!(),
     }
 }
@@ -304,19 +302,15 @@ fn expect_rule(
     Ok(())
 }
 
-/// One step of the iterative `type_of` traversal. Pushed onto an explicit work
-/// stack (held on [`TypeEnv`]) so expression nesting is bounded by the heap,
-/// not the native stack.
+/// One step of the `type_of` traversal.
 ///
 /// `emit` marks whether a step contributes its type to the results stack. Only
 /// a *combining* parent (list/object/tuple/append/`::`-receiver, etc.) consumes
 /// a child's type; under any other parent a node's type is fixed and the child
-/// is type-checked purely for its own constraint, so it emits nothing. Keeping
-/// the bulk of nodes (rule/seq/token/field wrappers) off the results stack is
-/// what makes the iterative walk competitive with native recursion.
+/// is type-checked purely for its own constraint, so it emits nothing.
 #[derive(Clone, Copy)]
 pub(super) enum Work {
-    /// Type `id` under `expected`; push its `Ty` iff `emit`.
+    /// Type `id` under `expected`
     Eval {
         id: NodeId,
         expected: Constraint,
@@ -324,26 +318,22 @@ pub(super) enum Work {
     },
     /// Type a spread-position item (list element / seq-choice member). A
     /// `Node::For` is flattened into the surrounding sequence; otherwise the
-    /// item is typed under `leaf`. Pushes its `Ty` iff `emit`.
+    /// item is typed under `leaf`.
     Spread {
         id: NodeId,
         leaf: Constraint,
         emit: bool,
     },
     /// A `for`'s iterable type is on the results stack: match it against the
-    /// loop bindings, then type the body as a spread item under `leaf`. Stores
-    /// the `Node::For` id (which yields both the for-config and the body) rather
-    /// than both separately, so this variant does not widen `Work`.
+    /// loop bindings, then type the body as a spread item under `leaf`.
     ForBindings {
         node: NodeId,
         leaf: Constraint,
         emit: bool,
     },
     /// A combining node's children are typed (their `Ty`s are on the results
-    /// stack); re-read the node to fold them into its type, enforce `expected`,
-    /// and push the result iff `emit`. Only the node id is stored - how to fold
-    /// is recovered from the node in [`combine`] - so `Work` stays small (the
-    /// dominant cost of the walk is popping these items off the stack).
+    /// stack). Re-read the node to fold them into its type, enforce `expected`,
+    /// and push the result iff `emit`.
     Combine {
         id: NodeId,
         expected: Constraint,
@@ -351,18 +341,15 @@ pub(super) enum Work {
     },
 }
 
+const _: () = assert!(std::mem::size_of::<Work>() == 16);
+
 /// Type a node. `expected` propagates through structural nodes (lists, objects,
 /// append) so empty containers can infer from context, and the resulting type
 /// is verified to satisfy `expected` before returning. `Constraint::None`
 /// always satisfies, effectively skipping enforcement.
 ///
-/// The walk is iterative: an explicit `work` stack drives the traversal and a
-/// `results` stack carries the (few) child types a combining parent consumes
-/// up to its [`Work::Combine`] step. Native recursion would bound expression
-/// nesting by the call stack; the work stack bounds it only by the heap. The
-/// one re-entrant call, `type_of_let` for a not-yet-typed `let` reference, is
-/// depth-bounded: it pre-resolves a let's dependencies before typing its value,
-/// so the nested `type_of` only ever sees already-memoized lets.
+/// The explicit `work` stack drives the traversal and a `results` stack carries
+/// the child types a combining parent consumes up to its [`Work::Combine`] step.
 fn type_of(
     shared: &SharedAst,
     ctx: &ModuleContext,
@@ -373,13 +360,15 @@ fn type_of(
     // The work and results stacks live on `env` and are shared across all walks,
     // including re-entrant ones (a not-yet-typed `let`, or a `::` call's
     // receiver). Record the stack lengths at entry, push this walk's root, and
-    // drive until the work stack returns to that base; on success the walk
-    // leaves exactly one new result - the root's type - so no buffer is moved or
-    // reallocated per call. On error, unwind both stacks back to the base so an
-    // enclosing walk sees them intact.
+    // drive until the work stack returns to that base. On success the walk
+    // leaves exactly one new result (the root's type).
     let work_base = env.work.len();
     let results_base = env.results.len();
-    env.work.push(Work::Eval { id, expected, emit: true });
+    env.work.push(Work::Eval {
+        id,
+        expected,
+        emit: true,
+    });
     match drive(shared, ctx, env, work_base) {
         Ok(()) => Ok(pop_result(&mut env.results)),
         Err(e) => {
@@ -400,7 +389,11 @@ fn drive(
 ) -> TypeResult<()> {
     while env.work.len() > work_base {
         match env.work.pop().unwrap() {
-            Work::Eval { mut id, mut expected, mut emit } => {
+            Work::Eval {
+                mut id,
+                mut expected,
+                mut emit,
+            } => {
                 // Fast-path single-child descent: `eval` returns the next node to
                 // descend into directly, so a wrapper chain (token/field/repeat/
                 // prec/...) is walked without a work-stack round-trip per level.
@@ -412,8 +405,10 @@ fn drive(
                     emit = next_emit;
                 }
             }
-            // `push_spread_item` only defers a `Node::For`, so `id` is one here.
-            Work::Spread { id, leaf, emit } => enqueue_for(shared, ctx, id, leaf, emit, &mut env.work)?,
+            // `push_spread_item` only defers a `Node::For`, so `id` is `Node::For`
+            Work::Spread { id, leaf, emit } => {
+                enqueue_for(shared, ctx, id, leaf, emit, &mut env.work)?
+            }
             Work::ForBindings { node, leaf, emit } => {
                 let iter_ty = pop_result(&mut env.results);
                 expect_pat!(Node::For { for_id, body }, *shared.arena.get(node));
@@ -446,17 +441,17 @@ fn eval(
     let span = shared.arena.span(id);
     Ok(match *shared.arena.get(id) {
         Node::IntLit(_) => {
-            leaf(&mut env.results, expected, emit, Ty::INT, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::INT, span)?;
             None
         }
         Node::StringLit | Node::RawStringLit { .. } => {
-            leaf(&mut env.results, expected, emit, Ty::STR, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::STR, span)?;
             None
         }
         // `ModuleRule`: a cross-module reference resolve already validated as a
         // rule / external / inherited rule, so it is rule-typed.
         Node::Ident(IdentKind::Rule) | Node::Blank | Node::ModuleRule { .. } => {
-            leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
             None
         }
         Node::ModuleRef { import, module, .. } => {
@@ -466,11 +461,11 @@ fn eval(
             } else {
                 ModuleTy::Grammar(idx)
             });
-            leaf(&mut env.results, expected, emit, ty, span)?;
+            enforce_leaf(&mut env.results, expected, emit, ty, span)?;
             None
         }
         Node::MacroParam { ty, .. } | Node::ForBinding { ty, .. } => {
-            leaf(&mut env.results, expected, emit, ty, span)?;
+            enforce_leaf(&mut env.results, expected, emit, ty, span)?;
             None
         }
         Node::Ident(IdentKind::Macro(_)) => {
@@ -484,55 +479,75 @@ fn eval(
         // reports any self-reference cycle.
         Node::Ident(IdentKind::Var(let_id)) => {
             let ty = type_of_let(shared, ctx, let_id, env)?;
-            leaf(&mut env.results, expected, emit, ty, span)?;
+            enforce_leaf(&mut env.results, expected, emit, ty, span)?;
             None
         }
         // ---- fixed-result wrappers: enforce + emit now, then descend ----
         // `@<str_expr>` computed-name rule reference: the name must be str_t;
         // it resolves to a rule at lower time (validated there).
         Node::SymRef { expr } => {
-            leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
             Some((expr, Constraint::Exact(Ty::STR), false))
         }
         Node::Neg(inner) => {
-            leaf(&mut env.results, expected, emit, Ty::INT, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::INT, span)?;
             Some((inner, Constraint::Exact(Ty::INT), false))
         }
         Node::Repeat { inner, .. }
         | Node::Token { inner, .. }
         | Node::Field { content: inner, .. }
         | Node::Reserved { content: inner, .. } => {
-            leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
             Some((inner, Constraint::Exact(Ty::RULE), false))
         }
         Node::BinOp { lhs, rhs, .. } => {
-            leaf(&mut env.results, expected, emit, Ty::INT, span)?;
-            env.work.push(Work::Eval { id: rhs, expected: Constraint::Exact(Ty::INT), emit: false });
+            enforce_leaf(&mut env.results, expected, emit, Ty::INT, span)?;
+            env.work.push(Work::Eval {
+                id: rhs,
+                expected: Constraint::Exact(Ty::INT),
+                emit: false,
+            });
             Some((lhs, Constraint::Exact(Ty::INT), false))
         }
-        Node::Prec { kind, value, content } => {
+        Node::Prec {
+            kind,
+            value,
+            content,
+        } => {
             let value_expected = if kind == PrecKind::Dynamic {
                 Constraint::Exact(Ty::INT)
             } else {
                 Constraint::IntOrStr
             };
-            leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
-            env.work.push(Work::Eval { id: content, expected: Constraint::Exact(Ty::RULE), emit: false });
+            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            env.work.push(Work::Eval {
+                id: content,
+                expected: Constraint::Exact(Ty::RULE),
+                emit: false,
+            });
             Some((value, value_expected, false))
         }
         Node::DynRegex { pattern, flags } => {
-            leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
             if let Some(fid) = flags {
-                env.work.push(Work::Eval { id: fid, expected: Constraint::Exact(Ty::STR), emit: false });
+                env.work.push(Work::Eval {
+                    id: fid,
+                    expected: Constraint::Exact(Ty::STR),
+                    emit: false,
+                });
             }
             Some((pattern, Constraint::Exact(Ty::STR), false))
         }
         Node::Concat(range) => {
-            leaf(&mut env.results, expected, emit, Ty::STR, span)?;
-            descend_eval(shared.pools.child_slice(range), Constraint::Exact(Ty::STR), &mut env.work)
+            enforce_leaf(&mut env.results, expected, emit, Ty::STR, span)?;
+            descend_eval(
+                shared.pools.child_slice(range),
+                Constraint::Exact(Ty::STR),
+                &mut env.work,
+            )
         }
         Node::SeqOrChoice { range, .. } => {
-            leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
             for &member in shared.pools.child_slice(range).iter().rev() {
                 push_spread_item(shared, member, Constraint::RuleLike, false, &mut env.work);
             }
@@ -545,16 +560,28 @@ fn eval(
             let (left_evaled, right_evaled) = append_operands(shared, left, right, expected);
             push_combine(&mut env.work, id, expected, emit);
             if right_evaled {
-                env.work.push(Work::Eval { id: right, expected, emit: true });
+                env.work.push(Work::Eval {
+                    id: right,
+                    expected,
+                    emit: true,
+                });
             }
             if left_evaled {
-                env.work.push(Work::Eval { id: left, expected, emit: true });
+                env.work.push(Work::Eval {
+                    id: left,
+                    expected,
+                    emit: true,
+                });
             }
             None
         }
         Node::FieldAccess { obj, .. } => {
             push_combine(&mut env.work, id, expected, emit);
-            env.work.push(Work::Eval { id: obj, expected: Constraint::AnyObject, emit: true });
+            env.work.push(Work::Eval {
+                id: obj,
+                expected: Constraint::AnyObject,
+                emit: true,
+            });
             None
         }
         // `::` member access is valid only on a module bound by import()/inherit(),
@@ -565,18 +592,34 @@ fn eval(
         // error inside it and to name its type, then report the misuse.
         Node::QualifiedAccess { obj, .. } => {
             push_combine(&mut env.work, id, expected, emit);
-            env.work.push(Work::Eval { id: obj, expected: Constraint::None, emit: true });
+            env.work.push(Work::Eval {
+                id: obj,
+                expected: Constraint::None,
+                emit: true,
+            });
             None
         }
         Node::GrammarConfig { module, .. } => {
             push_combine(&mut env.work, id, expected, emit);
-            env.work.push(Work::Eval { id: module, expected: Constraint::Exact(Ty::ANY_MODULE), emit: true });
+            env.work.push(Work::Eval {
+                id: module,
+                expected: Constraint::Exact(Ty::ANY_MODULE),
+                emit: true,
+            });
             None
         }
         Node::Alias { content, target } => {
             push_combine(&mut env.work, id, expected, emit);
-            env.work.push(Work::Eval { id: target, expected: Constraint::None, emit: true });
-            env.work.push(Work::Eval { id: content, expected: Constraint::Exact(Ty::RULE), emit: false });
+            env.work.push(Work::Eval {
+                id: target,
+                expected: Constraint::None,
+                emit: true,
+            });
+            env.work.push(Work::Eval {
+                id: content,
+                expected: Constraint::Exact(Ty::RULE),
+                emit: false,
+            });
             None
         }
         Node::Object(range) => {
@@ -592,7 +635,11 @@ fn eval(
             let value_expected = expected.object_value();
             push_combine(&mut env.work, id, expected, emit);
             for f in fields.iter().rev() {
-                env.work.push(Work::Eval { id: f.value, expected: value_expected, emit: true });
+                env.work.push(Work::Eval {
+                    id: f.value,
+                    expected: value_expected,
+                    emit: true,
+                });
             }
             None
         }
@@ -623,14 +670,28 @@ fn eval(
             }
             push_combine(&mut env.work, id, expected, emit);
             for &item in items.iter().rev() {
-                env.work.push(Work::Eval { id: item, expected: Constraint::None, emit: true });
+                env.work.push(Work::Eval {
+                    id: item,
+                    expected: Constraint::None,
+                    emit: true,
+                });
             }
             None
         }
         Node::Call { name, args } => {
             let macro_id = resolve_macro_name(shared, ctx, name, span)?;
             let args = shared.pools.child_slice(args);
-            enqueue_macro_call(shared, ctx, macro_id, id, name, args, expected, emit, &mut env.work)?;
+            enqueue_macro_call(
+                shared,
+                ctx,
+                macro_id,
+                id,
+                name,
+                args,
+                expected,
+                emit,
+                &mut env.work,
+            )?;
             None
         }
         Node::QualifiedCall(range) => {
@@ -647,7 +708,17 @@ fn eval(
                     shared.arena.span(name),
                 ));
             };
-            enqueue_macro_call(shared, ctx, macro_id, id, name, args, expected, emit, &mut env.work)?;
+            enqueue_macro_call(
+                shared,
+                ctx,
+                macro_id,
+                id,
+                name,
+                args,
+                expected,
+                emit,
+                &mut env.work,
+            )?;
             None
         }
         // A for-loop in value position is invalid. Validate its internals first
@@ -656,7 +727,14 @@ fn eval(
         // `Work::Spread` intercepts them before this arm.
         Node::For { .. } => {
             push_combine(&mut env.work, id, expected, emit);
-            enqueue_for(shared, ctx, id, Constraint::Exact(Ty::RULE), false, &mut env.work)?;
+            enqueue_for(
+                shared,
+                ctx,
+                id,
+                Constraint::Exact(Ty::RULE),
+                false,
+                &mut env.work,
+            )?;
             None
         }
         // Top-level items (Grammar/Rule/Let/Macro/...) and Unreachable never
@@ -671,7 +749,11 @@ fn eval(
 fn descend_eval(children: &[NodeId], c: Constraint, work: &mut Vec<Work>) -> Descent {
     let (&first, rest) = children.split_first()?;
     for &child in rest.iter().rev() {
-        work.push(Work::Eval { id: child, expected: c, emit: false });
+        work.push(Work::Eval {
+            id: child,
+            expected: c,
+            emit: false,
+        });
     }
     Some((first, c, false))
 }
@@ -685,11 +767,12 @@ fn append_operands(
     right: NodeId,
     expected: Constraint,
 ) -> (bool, bool) {
-    let is_empty = |id| {
-        matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty())
-    };
+    let is_empty = |id| matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty());
     let is_list_anno = matches!(expected, Constraint::Exact(t) if t.is_list());
-    (!is_empty(left) || is_list_anno, !is_empty(right) || is_list_anno)
+    (
+        !is_empty(left) || is_list_anno,
+        !is_empty(right) || is_list_anno,
+    )
 }
 
 /// Handle a [`Work::Combine`]: re-read the node, pop its emitted child results,
@@ -726,6 +809,9 @@ fn combine(
             let fields = shared.pools.get_object(range);
             let base = env.results.len() - fields.len();
             let mut widest = env.results[base];
+            // `widest` starts from the first field, so compare only subsequent
+            // fields against it. This also keeps mismatch errors anchored at the
+            // later field that disagrees with the first.
             for (k, field) in fields.iter().enumerate().skip(1) {
                 let got = env.results[base + k];
                 widest = widest.widen(got).ok_or_else(|| {
@@ -947,11 +1033,10 @@ fn macro_call_result(
 }
 
 /// Queue a spread-position item (list element / seq-choice member / loop body).
-/// Only a `Node::For` needs the deferred [`Work::Spread`] step - it expands into
-/// the surrounding sequence once its iterable is typed - so a plain item is
+/// Only a `Node::For` needs the deferred [`Work::Spread`] step (it expands into
+/// the surrounding sequence once its iterable is typed) so a plain item is
 /// queued as a direct [`Work::Eval`], saving a work-stack round-trip on the
-/// common case. The For-ness check reads the node, which `eval` would read
-/// anyway, so it adds no extra arena access overall.
+/// common case.
 fn push_spread_item(
     shared: &SharedAst,
     id: NodeId,
@@ -962,7 +1047,11 @@ fn push_spread_item(
     if matches!(shared.arena.get(id), Node::For { .. }) {
         work.push(Work::Spread { id, leaf, emit });
     } else {
-        work.push(Work::Eval { id, expected: leaf, emit });
+        work.push(Work::Eval {
+            id,
+            expected: leaf,
+            emit,
+        });
     }
 }
 
@@ -985,16 +1074,23 @@ fn enqueue_for(
     if let Node::List(range) = shared.arena.get(iterable)
         && shared.pools.child_slice(*range).is_empty()
     {
+        // Empty literals have no element type to match against the bindings.
+        // The binding annotations stand in for the missing iteration value, and
+        // the body is still checked so dead spread bodies cannot hide type
+        // errors behind `for ... in []`.
         push_spread_item(shared, body, leaf, emit, work);
         return Ok(());
     }
     work.push(Work::ForBindings { node, leaf, emit });
-    work.push(Work::Eval { id: iterable, expected: Constraint::None, emit: true });
+    work.push(Work::Eval {
+        id: iterable,
+        expected: Constraint::None,
+        emit: true,
+    });
     Ok(())
 }
 
-/// Resolve a macro call's name to its id, or report an undefined macro (with a
-/// "did you mean" suggestion when a close name exists).
+/// Resolve a macro call's name to its id, or report an undefined macro
 fn resolve_macro_name(
     shared: &SharedAst,
     ctx: &ModuleContext,
@@ -1013,14 +1109,11 @@ fn resolve_macro_name(
             None
         }
     });
+    let mut err = TypeError::new(kind, span);
     if let Some(suggestion) = suggest_name(macro_name, macros) {
-        return Err(TypeError::with_note(
-            kind,
-            span,
-            ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span),
-        ));
+        err.add_note(ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span));
     }
-    Err(TypeError::new(kind, span))
+    Err(err)
 }
 
 /// Validate a macro call's arg count, then schedule a [`Work::Combine`] for the
@@ -1056,7 +1149,11 @@ fn enqueue_macro_call(
     // order: the first ill-typed argument is reported first).
     for (i, &arg) in args.iter().enumerate().rev() {
         let ty = shared.pools.param_slice(params)[i].ty;
-        work.push(Work::Eval { id: arg, expected: Constraint::Exact(ty), emit: false });
+        work.push(Work::Eval {
+            id: arg,
+            expected: Constraint::Exact(ty),
+            emit: false,
+        });
     }
     Ok(())
 }
@@ -1064,7 +1161,7 @@ fn enqueue_macro_call(
 /// Enforce a constraint on a computed type, mirroring the tail check every
 /// `type_of` node runs. `Constraint::None` always satisfies.
 fn enforce(expected: Constraint, ty: Ty, span: Span) -> TypeResult<()> {
-    if matches!(expected, Constraint::None) {
+    if expected == Constraint::None {
         return Ok(());
     }
     if !expected.satisfies(ty) {
@@ -1081,7 +1178,13 @@ fn enforce(expected: Constraint, ty: Ty, span: Span) -> TypeResult<()> {
 }
 
 /// Enforce `expected` on a leaf/fixed-result node's type and emit it iff `emit`.
-fn leaf(results: &mut Vec<Ty>, expected: Constraint, emit: bool, ty: Ty, span: Span) -> TypeResult<()> {
+fn enforce_leaf(
+    results: &mut Vec<Ty>,
+    expected: Constraint,
+    emit: bool,
+    ty: Ty,
+    span: Span,
+) -> TypeResult<()> {
     enforce(expected, ty, span)?;
     if emit {
         results.push(ty);
@@ -1089,13 +1192,11 @@ fn leaf(results: &mut Vec<Ty>, expected: Constraint, emit: bool, ty: Ty, span: S
     Ok(())
 }
 
-/// Pop the type a child emitted onto the results stack. A combine step is only
-/// queued behind its emitting children, so the walk's emit discipline
-/// guarantees the result is present - its absence is a bug in that discipline,
-/// not a runtime condition. Centralized so the invariant is asserted in one
-/// place rather than at every consuming site.
+/// Pop the type a child emitted onto the results stack.
 #[inline]
 fn pop_result(results: &mut Vec<Ty>) -> Ty {
+    // SAFETY:  A combine step is only queued behind its emitting children, so the walk
+    // the result is present.
     results.pop().unwrap()
 }
 
@@ -1108,8 +1209,7 @@ fn push_combine(work: &mut Vec<Work>, id: NodeId, expected: Constraint, emit: bo
 /// member, etc) for a config list. If the item is a `Node::For`, recursively
 /// flatMap into the surrounding sequence by re-applying `leaf` to the inner
 /// body. Otherwise dispatch to `leaf` directly. Used by `expect_list`, whose
-/// element checkers are bespoke (e.g. `expect_name_ref`); expression-position
-/// spreads go through [`Work::Spread`] instead.
+/// element checkers are bespoke (e.g. `expect_name_ref`).
 ///
 /// Returns the type of the deepest non-For body so the caller can widen against
 /// sibling items.
@@ -1267,8 +1367,7 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 }
 
 /// Reject `module_t` in a position where a module value can't be used (macro
-/// parameter / return type). A module is only usable where it is bound by
-/// `import()`/`inherit()`, which resolve rewrites; see [`MemberAccessRequiresModule`].
+/// parameter / return type).
 const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {
     if matches!(ty, Ty::Module(_)) {
         return Err(TypeError::new(TypeErrorKind::ModuleTypeNotAllowed, span));
