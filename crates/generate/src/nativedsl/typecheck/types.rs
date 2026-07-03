@@ -434,7 +434,7 @@ impl std::fmt::Display for InnerTy {
 /// a value is used in a position with a known shape constraint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Constraint {
-    /// No constraint; the typed value can be anything bindable.
+    /// No constraint, the typed value can be anything bindable.
     None,
     /// Must equal (or widen to) this exact type.
     Exact(Ty),
