@@ -157,23 +157,46 @@ fn error_import_cycle_three_levels() {
     assert!(has_cycle(&err), "expected cycle error, got {err:?}");
 }
 
+/// Parse a root importing 256 helpers (root would be the 257th module), with
+/// `tail` appended after the imports. Returns the error.
+fn too_many_modules_err(tail: &str) -> DslError {
+    let dir = tempfile::tempdir().unwrap();
+    let mut root = String::new();
+    for i in 0..256 {
+        let path = dir.path().join(format!("h{i}.tsg"));
+        std::fs::write(&path, format!("let v{i}: str_t = \"x\"")).unwrap();
+        let _ = writeln!(root, "let h{i} = import(\"{}\")", dsl_path(&path));
+    }
+    root.push_str(tail);
+    let root_path = dir.path().join("root.tsg");
+    std::fs::write(&root_path, &root).unwrap();
+    parse_native_dsl(&root, &root_path).unwrap_err()
+}
+
 #[test]
 fn error_too_many_modules() {
     // Loading 256 helpers + 1 root tips the loader's module-id counter past
     // u8::MAX, which should surface as `ModuleTooMany`.
-    let dir = tempfile::tempdir().unwrap();
-    let mut imports = String::new();
-    for i in 0..256 {
-        let path = dir.path().join(format!("h{i}.tsg"));
-        std::fs::write(&path, format!("let v{i}: str_t = \"x\"")).unwrap();
-        let _ = writeln!(imports, "let h{i} = import(\"{}\")", dsl_path(&path));
-    }
-    let root = format!("{imports}grammar {{ language: \"test\" }}\nrule program {{ \"x\" }}\n");
-    let root_path = dir.path().join("root.tsg");
-    std::fs::write(&root_path, &root).unwrap();
-    let err = parse_native_dsl(&root, &root_path).unwrap_err();
+    let err = too_many_modules_err("grammar { language: \"test\" }\nrule program { \"x\" }\n");
     let e = assert_err!(err, Lower);
     assert!(matches!(e.kind, LowerErrorKind::ModuleTooMany));
+}
+
+#[test]
+fn error_too_many_modules_fires_before_lowering() {
+    // The 257th module must be rejected before its lowering runs: the
+    // evaluator derives its root module id as `previous.len() as u8`, which
+    // wraps to 0 for module 257 and misattributes module-0 spans. If lowering
+    // ran, the overflowing prec below would error first.
+    let err = too_many_modules_err(
+        "grammar { language: \"test\" }\nrule program { prec(2147483647 + 1, \"x\") }\n",
+    );
+    let e = assert_err!(err, Lower);
+    assert!(
+        matches!(e.kind, LowerErrorKind::ModuleTooMany),
+        "expected ModuleTooMany, got {:?}",
+        e.kind
+    );
 }
 
 #[test]
