@@ -66,6 +66,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         previous: &'a [Module],
         root_ctx: &'a ModuleContext,
     ) -> Self {
+        // The loader bounds the module count to u8 before lowering runs.
+        debug_assert!(u8::try_from(previous.len()).is_ok());
         let root_id = ModuleId::from(previous.len() as u8);
         state.reset_per_grammar();
         Self {

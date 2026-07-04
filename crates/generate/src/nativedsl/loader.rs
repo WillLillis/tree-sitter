@@ -125,6 +125,11 @@ impl Loader<'_> {
 
         // Child modules already populated `env` during their own `load_module` calls.
         typecheck::check(self.shared, &ctx, self.env)?;
+        // This module's id. Checked before lowering: the evaluator derives its
+        // root id from `modules.len()`, which must fit u8.
+        let global_id = u8::try_from(self.modules.len())
+            .map(ModuleId::from)
+            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
         let module = match kind {
             ModuleKind::Grammar => {
                 let lowered = Box::new(lower::lower_with_base(
@@ -163,9 +168,8 @@ impl Loader<'_> {
                 }
             }
         };
-        let global_id = u8::try_from(self.modules.len())
-            .map(ModuleId::from)
-            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+        // The id is this module's final index; lowering must not grow the list.
+        debug_assert!(usize::from(global_id) == self.modules.len());
         self.modules.push(module);
 
         Ok(global_id)
