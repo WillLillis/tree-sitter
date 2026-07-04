@@ -127,7 +127,48 @@ fn computed_ref_to_macro_name_rejected() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("m".into()));
+    assert_eq!(e.kind, ResolveErrorKind::ComputedNameNotARule("m".into()));
+}
+
+#[test]
+fn computed_ref_to_let_name_rejected() {
+    let err = dsl_err(
+        r#"
+        let width = "w"
+        rules r() {
+            rule program { @"width" }
+        }
+        grammar { language: "test" }
+        @r()
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(e.kind, ResolveErrorKind::ComputedNameNotARule("width".into()));
+}
+
+#[test]
+fn computed_ref_unknown_gets_suggestion() {
+    // Truly-unknown computed names get the same DidYouMean treatment as
+    // ordinary identifiers.
+    let err = dsl_err(
+        r#"
+        rules r() {
+            rule extra { @"porgram" }
+        }
+        grammar { language: "test" }
+        @r()
+        rule program { "x" }
+    "#,
+    );
+    let e = assert_err!(err, Resolve);
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("porgram".into()));
+    assert!(
+        e.notes
+            .iter()
+            .any(|n| matches!(&n.message, NoteMessage::DidYouMean(s) if s == "program")),
+        "expected DidYouMean note, got {:?}",
+        e.notes
+    );
 }
 
 rule_names_tests! {
