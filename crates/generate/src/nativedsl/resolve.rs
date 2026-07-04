@@ -75,19 +75,15 @@ pub fn resolve(
     // args at expand, against the complete name table.
     for &Spanned { value: name, span } in &ctx.computed_refs {
         let text = strings.resolve_local(name, &ctx.source);
-        // Must resolve to a rule: decls already holds rules, macros, and lets
-        // here, and lower emits a NamedSymbol for whatever name this is.
-        if !matches!(
-            decls.get(text),
-            Some(Spanned {
-                value: IdentKind::Rule,
-                ..
-            })
-        ) {
-            return Err(ResolveError::new(
-                ResolveErrorKind::UnknownIdentifier(text.to_string()),
+        // Must resolve to a rule: lower emits a NamedSymbol for whatever name
+        // this is, so a let/macro match would lower a dangling symbol.
+        match decls.get(text).map(|d| d.value) {
+            Some(IdentKind::Rule) => {}
+            Some(_) => Err(ResolveError::new(
+                ResolveErrorKind::ComputedNameNotARule(text.to_string()),
                 span,
-            ));
+            ))?,
+            None => Err(unknown_ident_error(ctx, &decls, text, span))?,
         }
     }
 
@@ -673,6 +669,8 @@ pub enum ResolveErrorKind {
     DuplicateDeclaration(String),
     #[error("unknown identifier '{0}'")]
     UnknownIdentifier(String),
+    #[error("computed rule name '{0}' does not name a rule")]
+    ComputedNameNotARule(String),
     #[error("'{0}' shadows an existing declaration")]
     ShadowedBinding(String),
     #[error("externals must be a list literal, append(), or variable reference")]
