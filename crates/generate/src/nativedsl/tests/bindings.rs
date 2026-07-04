@@ -535,6 +535,55 @@ fn error_macro_param_shadows_let() {
 }
 
 #[test]
+fn error_for_binding_shadows_rule() {
+    // For bindings follow the same no-shadowing rule as macro params.
+    let e = assert_err!(
+        dsl_err(
+            r#"grammar { language: "test" }
+            rule item { "i" }
+            rule program { seq(for (item: rule_t) in ["a", "b"] { item }) }"#
+        ),
+        Resolve
+    );
+    assert_eq!(e.kind, ResolveErrorKind::ShadowedBinding("item".into()));
+}
+
+#[test]
+fn for_binding_shadows_macro_param() {
+    // Locals may shadow enclosing locals (only top-level declarations are
+    // protected); the innermost binding wins.
+    let g = dsl(r#"grammar { language: "test" }
+        rule a { "x" }
+        rule b { "y" }
+        macro wrap(item: rule_t) rule_t { seq(for (item: rule_t) in [a, b] { item }) }
+        rule program { wrap("z") }"#);
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            Rule::NamedSymbol("a".into()),
+            Rule::NamedSymbol("b".into()),
+        ])
+    );
+}
+
+#[test]
+fn nested_for_binding_shadows_outer() {
+    // Inner binding shadows the outer within the body; the inner iterable is
+    // parsed before the inner binding exists, so it still sees the outer one.
+    let g = dsl(r#"grammar { language: "test" }
+        rule a { "x" }
+        rule b { "y" }
+        rule program { seq(for (v: list_t<rule_t>) in [[a], [b]] { for (v: rule_t) in v { v } }) }"#);
+    assert_eq!(
+        *find_rule(&g, "program"),
+        Rule::seq(vec![
+            Rule::NamedSymbol("a".into()),
+            Rule::NamedSymbol("b".into()),
+        ])
+    );
+}
+
+#[test]
 fn recursive_fn_depth_limit() {
     let err = dsl_err(
         r#"grammar { language: "test" } macro f(x: rule_t) rule_t { f(x) } rule program { f("x") }"#,
