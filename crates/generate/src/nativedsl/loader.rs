@@ -122,6 +122,8 @@ impl Loader<'_> {
             &imported_rules,
         )
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
+        // Post-resolve: following `inherits` through its let binding needs resolved idents.
+        self.validate_inherits_binding(&ctx)?;
 
         // Child modules already populated `env` during their own `load_module` calls.
         typecheck::check(self.shared, &ctx, self.env)?;
@@ -345,6 +347,23 @@ impl Loader<'_> {
             ))?;
         }
 
+        Ok(())
+    }
+
+    /// `inherits` must resolve to this module's `inherit()` call. Presence
+    /// pairing alone (see [`Self::validate_grammar`]) would let a stray
+    /// inherit in a let be used while `inherits` points at an unrelated value.
+    fn validate_inherits_binding(&self, ctx: &ModuleContext) -> DslResult<()> {
+        let Some(inherits_id) = ctx.grammar_config.as_ref().and_then(|c| c.inherits) else {
+            return Ok(());
+        };
+        let arena = &self.shared.arena;
+        if resolve::resolve_module_ref(arena, inherits_id) != ctx.inherits(arena).next() {
+            Err(LowerError::new(
+                LowerErrorKind::InheritsWithoutInherit,
+                arena.span(inherits_id),
+            ))?;
+        }
         Ok(())
     }
 

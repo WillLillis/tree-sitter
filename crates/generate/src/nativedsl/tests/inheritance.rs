@@ -24,6 +24,18 @@ fn inherit_rules_and_config() {
 }
 
 #[test]
+fn inherit_inline_in_config() {
+    // `inherits: inherit(...)` directly, with no let binding.
+    let g = dsl(r#"
+        grammar { language: "derived", inherits: inherit("inherit_base/grammar.tsg") }
+        rule extra { "x" }
+    "#);
+    let names = rule_names(&g);
+    assert!(names.contains(&"program"));
+    assert!(names.contains(&"extra"));
+}
+
+#[test]
 fn inherit_config_append_inline() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
