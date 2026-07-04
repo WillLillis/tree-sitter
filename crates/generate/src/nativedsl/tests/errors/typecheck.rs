@@ -297,6 +297,13 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::ReservedMustBeLiteral
     }
+    error_reserved_duplicate_context {
+        // Without this check the second set would silently win (dsl.js object
+        // semantics); duplicate keys error like any other object literal.
+        r#"grammar { language: "test", reserved: { default: ["if"], default: ["else"] } }
+        rule program { "x" }"#,
+        TypeErrorKind::DuplicateObjectKey("default".into())
+    }
     error_empty_object_needs_annotation {
         r#"grammar { language: "test" }
         let x = {}
