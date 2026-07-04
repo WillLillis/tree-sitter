@@ -54,6 +54,15 @@ pub(super) fn check_item(
             if let Some(id) = config.reserved {
                 expect_reserved(shared, ctx, id, env)?;
             }
+            if let Some(id) = config.flags {
+                expect_pat!(Node::Object(range), shared.arena.get(id));
+                check_duplicate_names(
+                    ctx,
+                    shared.pools.get_object(*range),
+                    |f| f.name,
+                    TypeErrorKind::DuplicateObjectKey,
+                )?;
+            }
             Ok(())
         }
         Node::Let { .. } => {
@@ -263,7 +272,9 @@ fn expect_reserved(
             shared.arena.span(id),
         ));
     };
-    for &ObjectField { value: val_id, .. } in shared.pools.get_object(*range) {
+    let fields = shared.pools.get_object(*range);
+    check_duplicate_names(ctx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
+    for &ObjectField { value: val_id, .. } in fields {
         expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
     }
     Ok(())

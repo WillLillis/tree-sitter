@@ -770,6 +770,18 @@ error_tests! { Resolve {
     }
 }}
 
+error_tests! { Type {
+    cfg_flags_duplicate_key_errors {
+        // Duplicate keys in the flags object error like any other object
+        // literal (flags bypasses the generic object typecheck).
+        r#"
+        grammar { language: "t", flags: { enabled: ["A"], enabled: ["B"] } }
+        rule program { "x" }
+    "#,
+        TypeErrorKind::DuplicateObjectKey("enabled".into())
+    }
+}}
+
 error_tests! { match Lower {
     cfg_disabled_definition_with_expect_is_undefined_symbol {
         // An `expect` keeps the symbol past resolve; cfg then drops its only
