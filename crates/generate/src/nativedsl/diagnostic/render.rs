@@ -14,10 +14,16 @@ struct Paint<T>(Style, T);
 
 impl<T: std::fmt::Display> std::fmt::Display for Paint<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if color_enabled() {
-            write!(f, "{}{}{:#}", self.0, self.1, self.0)
+        if !color_enabled() {
+            return self.1.fmt(f);
+        }
+        // Forward an outer width spec to the value: `write!` args don't
+        // inherit it, so `{:>gutter$}` would otherwise be dropped here (all
+        // width'd call sites are right-aligned line numbers).
+        if let Some(width) = f.width() {
+            write!(f, "{}{:>width$}{:#}", self.0, self.1, self.0)
         } else {
-            self.1.fmt(f)
+            write!(f, "{}{}{:#}", self.0, self.1, self.0)
         }
     }
 }
