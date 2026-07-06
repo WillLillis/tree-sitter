@@ -368,6 +368,48 @@ fn error_duplicate_object_key_has_note() {
 }
 
 #[test]
+fn error_alias_to_module_rule_suggests_bare_name() {
+    let e = assert_err!(
+        dsl_err(
+            r#"let base = inherit("inherit_base/grammar.tsg")
+            grammar { language: "derived", inherits: base }
+            rule extra { alias("x", base::identifier) }"#
+        ),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::InvalidAliasTarget(Ty::RULE));
+    assert!(
+        matches!(
+            &e.notes[..],
+            [n] if matches!(&n.message, NoteMessage::UseBareName(s) if s == "identifier")
+        ),
+        "expected UseBareName note, got {:?}",
+        e.notes
+    );
+}
+
+#[test]
+fn error_module_rule_in_name_position_suggests_bare_name() {
+    let e = assert_err!(
+        dsl_err(
+            r#"let base = inherit("inherit_base/grammar.tsg")
+            grammar { language: "derived", inherits: base, inline: [base::_inline_rule] }
+            rule extra { "x" }"#
+        ),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::ExpectedRuleName);
+    assert!(
+        matches!(
+            &e.notes[..],
+            [n] if matches!(&n.message, NoteMessage::UseBareName(s) if s == "_inline_rule")
+        ),
+        "expected UseBareName note, got {:?}",
+        e.notes
+    );
+}
+
+#[test]
 fn error_grammar_config_on_import_module() {
     let err = parse_with_modules(
         &[("helper.tsg", "let X: int_t = 1")],
