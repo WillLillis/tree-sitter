@@ -132,7 +132,7 @@ fn error_self_ref_let_via_qualified_access_does_not_hang() {
 #[test]
 fn error_mutual_let_via_qualified_access_does_not_hang() {
     // The mutual-recursion variant (`let a = b; let b = a`) used through `::`
-    // looped identically; the visited-set guard breaks it the same way.
+    // looped identically; the chain-length bound breaks it the same way.
     let e = assert_err!(
         dsl_err(
             r#"grammar { language: "test" }
