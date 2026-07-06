@@ -237,6 +237,16 @@ fn expect_name_ref(
             type_of(shared, ctx, id, env, Constraint::Strict(Ty::RULE))?;
             Ok(())
         }
+        // A qualified ref names a rule but is not a name here; suggest the
+        // bare name, which is in scope.
+        Node::ModuleRule { .. } => {
+            let span = shared.arena.span(id);
+            Err(TypeError::with_note(
+                TypeErrorKind::ExpectedRuleName,
+                span,
+                ctx.note(NoteMessage::UseBareName(bare_name(ctx, span)), span),
+            ))
+        }
         _ => Err(TypeError::new(
             TypeErrorKind::ExpectedRuleName,
             shared.arena.span(id),
@@ -831,6 +841,17 @@ fn combine(
         }
         Node::Alias { target, .. } => {
             let target_ty = pop_result(&mut env.results);
+            if matches!(shared.arena.get(target), Node::ModuleRule { .. }) {
+                let target_span = shared.arena.span(target);
+                return Err(TypeError::with_note(
+                    TypeErrorKind::InvalidAliasTarget(target_ty),
+                    target_span,
+                    ctx.note(
+                        NoteMessage::UseBareName(bare_name(ctx, target_span)),
+                        target_span,
+                    ),
+                ));
+            }
             let is_valid = matches!(
                 shared.arena.get(target),
                 Node::Ident(IdentKind::Rule | IdentKind::Var(_))
@@ -1158,6 +1179,11 @@ fn empty_container_result(expected: Constraint, kind: ContainerKind, span: Span)
 
 const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
     TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
+}
+
+/// Bare member name of a module-qualified reference's source text.
+fn bare_name(ctx: &ModuleContext, span: Span) -> String {
+    ctx.text(span).rsplit("::").next().unwrap().trim().to_string()
 }
 
 const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {
