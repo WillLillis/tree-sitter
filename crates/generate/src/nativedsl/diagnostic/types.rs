@@ -141,6 +141,8 @@ pub enum NoteMessage {
     DidYouMean(String),
     /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the imported path string.
     SwitchImportToInherit(String),
+    /// A module-qualified reference in a name position. Carries the bare name.
+    UseBareName(String),
     SelfReferenceHere,
     PrecNeedsExplicitPrecedence {
         is_left: bool,
@@ -162,6 +164,12 @@ impl std::fmt::Display for NoteMessage {
             Self::DidYouMean(name) => write!(f, "did you mean `{name}`?"),
             Self::SwitchImportToInherit(path) => {
                 write!(f, "switch `import(\"{path}\")` to `inherit(\"{path}\")`")
+            }
+            Self::UseBareName(name) => {
+                write!(
+                    f,
+                    "inherited and imported rules are in scope by name, use `{name}`"
+                )
             }
             Self::SelfReferenceHere => write!(f, "self-reference here"),
             Self::PrecNeedsExplicitPrecedence { is_left, arg } => {
