@@ -122,11 +122,11 @@ impl Loader<'_> {
             &imported_rules,
         )
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
-        // Post-resolve: following `inherits` through its let binding needs resolved idents.
-        self.validate_inherits_binding(&ctx)?;
 
         // Child modules already populated `env` during their own `load_module` calls.
         typecheck::check(self.shared, &ctx, self.env)?;
+        // After typecheck so a cycling inherits chain reports CircularLet.
+        self.validate_inherits_binding(&ctx)?;
         // This module's id. Checked before lowering: the evaluator derives its
         // root id from `modules.len()`, which must fit u8.
         let global_id = u8::try_from(self.modules.len())
