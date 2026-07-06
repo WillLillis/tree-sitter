@@ -166,7 +166,7 @@ pub fn prepare_grammar(
     // (in-place, no hash-cons, O(1) name map). The Rule->pool conversion is done
     // up front (setup) and excluded from timing; the flat pool is pre-cloned per
     // iteration so we time only the in-place rewrite.
-    {
+    let (intern_master, intern_flat, pool_build) = {
         use std::hint::black_box;
         let n = 300u32;
         let t = std::time::Instant::now();
@@ -175,7 +175,9 @@ pub fn prepare_grammar(
         }
         let master = t.elapsed() / n;
 
+        let t = std::time::Instant::now();
         let base = flat_spike::Pool::from_grammar(input_grammar);
+        let pool_build = t.elapsed();
         let mut pools: Vec<_> = (0..n).map(|_| base.clone()).collect();
         let t = std::time::Instant::now();
         for p in &mut pools {
@@ -184,13 +186,49 @@ pub fn prepare_grammar(
         }
         let flat = t.elapsed() / n;
         eprintln!("[SPIKE intern_symbols] master {master:?}  flat {flat:?}");
-    }
+        (master, flat, pool_build)
+    };
 
     validate_precedences(input_grammar)?;
     validate_indirect_recursion(input_grammar)?;
 
     let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
+
+    // TEMP SPIKE: time the unconverted middle passes (net of the input clone
+    // each iteration needs) so the combined summary below can place the two
+    // converted passes in syntax-path context.
+    let extract_net = {
+        use std::hint::black_box;
+        let n = 300u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(interned_grammar.clone());
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(extract_tokens(interned_grammar.clone()));
+        }
+        (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
+    };
+
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
+
+    let expand_net = {
+        use std::hint::black_box;
+        let n = 300u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(syntax_grammar.clone());
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(expand_repeats(syntax_grammar.clone()));
+        }
+        (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
+    };
+
     let syntax_grammar = expand_repeats(syntax_grammar);
 
     // TEMP SPIKE A/B (remove after the pool decision): master flatten_grammar
@@ -214,7 +252,9 @@ pub fn prepare_grammar(
         }
         let master = t.elapsed() / n;
 
+        let t = std::time::Instant::now();
         let pool = flat_spike::Pool::from_extracted(&syntax_grammar);
+        let pool_build2 = t.elapsed();
         let mut st = flat_spike::FlattenState::default();
         let mut out = flat_spike::FlatOut::default();
         let t = std::time::Instant::now();
@@ -225,6 +265,22 @@ pub fn prepare_grammar(
         let flat = t.elapsed() / n;
         eprintln!(
             "[SPIKE flatten_grammar] master {master:?} (incl clone {clone_only:?})  flat {flat:?}"
+        );
+
+        // The two converted passes together, then in syntax-path context
+        // (intern -> extract -> expand -> flatten; the middle is unconverted
+        // and shared). Bridge costs (one-shot pool builds) shown for the
+        // with-adapters scenario; the end state has no bridges.
+        let master_net = master.checked_sub(clone_only).unwrap_or_default();
+        let two_m = intern_master + master_net;
+        let two_f = intern_flat + flat;
+        let mid = extract_net + expand_net;
+        let path_m = two_m + mid;
+        let path_f = two_f + mid;
+        eprintln!(
+            "[SPIKE combined] converted passes: master {two_m:?}  flat {two_f:?}  ({:.1}x) | middle (unconverted extract+expand): {mid:?} | syntax path: master {path_m:?} -> hybrid {path_f:?} ({:.1}x) | bridges: {pool_build:?} + {pool_build2:?}",
+            two_m.as_secs_f64() / two_f.as_secs_f64(),
+            path_m.as_secs_f64() / path_f.as_secs_f64(),
         );
 
         let master_out = flatten_grammar(syntax_grammar.clone()).unwrap();

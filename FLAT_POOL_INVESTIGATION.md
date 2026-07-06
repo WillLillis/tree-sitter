@@ -127,9 +127,38 @@ grammar. us/iter:
 | go | 556 | 43 | 13.1x |
 | javascript | 902 | 83 | 10.8x |
 | rust | 2600 | 355 | 7.3x |
+| cpp | 2778 | 383 | 7.3x |
 
-(cpp pending: the repo fixture's grammar.js requires `tree-sitter-c/grammar`,
-needs the corpus checkout.)
+(cpp runs from the repo fixture after `mkdir -p
+test/fixtures/grammars/cpp/node_modules && ln -sfn ../../c
+test/fixtures/grammars/cpp/node_modules/tree-sitter-c`; its grammar.js
+requires `tree-sitter-c/grammar` and the c fixture is already a sibling.)
+
+Side effect of the `FNode` 104->12 B shrink: cpp `intern_symbols` flat improved
+from the handoff's 53us to 22.9us (master 258.7us, 11.3x) - the in-place walk
+is pure node traversal, so it is footprint-bound.
+
+### Combined view (both converted passes in syntax-path context)
+
+`[SPIKE combined]` sums the two converted passes and places them against the
+unconverted middle (`extract_tokens` + `expand_repeats`, timed net of input
+clones). "Hybrid" = flat intern + unconverted middle + flat flatten, i.e. the
+end-state projection with no bridges; one-shot pool-build (bridge) costs are
+printed for the with-adapters scenario. us:
+
+| grammar | two passes master | two passes flat | x | middle | syntax path master -> hybrid | x | bridges |
+|---|---|---|---|---|---|---|---|
+| c | 1632 | 131 | 12.5 | 388 | 2020 -> 519 | 3.9 | 173+82 |
+| cpp | 3199 | 329 | 9.7 | 802 | 4002 -> 1131 | 3.5 | 211+157 |
+| go | 638 | 51 | 12.5 | 225 | 863 -> 276 | 3.1 | 105+42 |
+| rust | 2898 | 272 | 10.6 | 428 | 3326 -> 700 | 4.7 | 117+108 |
+
+Readings: the two converted passes are 74-87% of the syntax path, so
+converting just them is a 3.1-4.7x whole-syntax-path win; in the hybrid the
+unconverted middle becomes the dominant term (cpp: 802 of 1131us), making
+`extract_tokens`/`expand_repeats` the natural next conversions; bridge costs
+are the same order as the remaining flat work, so even a with-adapters
+incremental landing wins, though the end state deletes them.
 
 Design shape that produced this (all in `flat_spike.rs`):
 - Fork-at-choice path enumeration replaces `extract_choices` + `RuleFlattener`:
