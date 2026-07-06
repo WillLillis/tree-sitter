@@ -147,6 +147,22 @@ fn error_mutual_let_via_qualified_access_does_not_hang() {
 }
 
 #[test]
+fn error_cyclic_inherits_chain_reports_circular_let() {
+    // A cycling let named by `inherits:` must report the precise CircularLet,
+    // not InheritsWithoutInherit: the binding check runs after typecheck.
+    let e = assert_err!(
+        dsl_err(
+            r#"let real = inherit("inherit_base/grammar.tsg")
+            grammar { language: "derived", inherits: base }
+            let base = base
+            rule extra { "x" }"#
+        ),
+        Type
+    );
+    assert_eq!(e.kind, TypeErrorKind::CircularLet("base".into()));
+}
+
+#[test]
 fn error_duplicate_declaration_has_note() {
     let e = assert_err!(
         dsl_err(r#"grammar { language: "test" } rule foo { "a" } rule foo { "b" }"#),
