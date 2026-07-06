@@ -38,6 +38,7 @@ use super::{
 };
 use crate::{Diagnostic, grammars::ReservedWordContext};
 
+#[derive(Clone)] // TEMP: for the flatten spike A/B (master flatten consumes the grammar)
 pub struct IntermediateGrammar<T, U> {
     variables: Vec<Variable>,
     extra_symbols: Vec<T>,
@@ -191,6 +192,50 @@ pub fn prepare_grammar(
     let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
     let syntax_grammar = expand_repeats(syntax_grammar);
+
+    // TEMP SPIKE A/B (remove after the pool decision): master flatten_grammar
+    // vs flat-pool flatten (fork-at-choice, pooled output, truncate-restore
+    // scratch). Master's flatten consumes its input, so its timing includes a
+    // per-iteration clone, reported separately. The flat side mirrors master's
+    // post-checks; it skips only the pass-through SyntaxGrammar assembly
+    // (reserved TokenSets, field moves), which is noise on real grammars.
+    // Materialized output is asserted equal to master's.
+    {
+        use std::hint::black_box;
+        let n = 300u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(syntax_grammar.clone());
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(flatten_grammar(syntax_grammar.clone()));
+        }
+        let master = t.elapsed() / n;
+
+        let pool = flat_spike::Pool::from_extracted(&syntax_grammar);
+        let mut st = flat_spike::FlattenState::default();
+        let mut out = flat_spike::FlatOut::default();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            pool.flatten(&syntax_grammar, &mut st, &mut out).unwrap();
+            black_box(&out);
+        }
+        let flat = t.elapsed() / n;
+        eprintln!(
+            "[SPIKE flatten_grammar] master {master:?} (incl clone {clone_only:?})  flat {flat:?}"
+        );
+
+        let master_out = flatten_grammar(syntax_grammar.clone()).unwrap();
+        pool.flatten(&syntax_grammar, &mut st, &mut out).unwrap();
+        assert_eq!(
+            pool.materialize(&out, &syntax_grammar.variables),
+            master_out.variables,
+            "flat flatten diverged from master"
+        );
+    }
+
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
     let lexical_grammar = expand_tokens(lexical_grammar)?;
     let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);

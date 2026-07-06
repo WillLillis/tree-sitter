@@ -1,25 +1,50 @@
-//! TEMP SPIKE (remove after the perf decision): a flat-pool `intern_symbols` that
-//! mutates `NamedSymbol -> Symbol` in place, to A/B against master's Rule-based
-//! `intern_symbols`. No hash-consing; string payloads are interned to a `StrId`
-//! (so nodes are small/`Copy` and name resolution is a `u32`-keyed lookup);
-//! children of `Seq`/`Choice` live as `(offset, len)` ranges into one backing
-//! `Vec`.
+//! TEMP SPIKE (remove after the perf decision): flat-pool `intern_symbols` and
+//! `flatten_grammar` to A/B against master's Rule-based passes. No hash-consing;
+//! string payloads intern to a `StrId`; children of `Seq`/`Choice` live as
+//! `(offset, len)` ranges into one backing `Vec`; `MetadataParams` live out of
+//! line in a params pool so `FNode` stays 12 bytes.
 //!
-//! Kept recursive on purpose (the iterative conversion is a separate later step) so
-//! this measures the flat backing type + in-place rewrite + string interning vs
-//! `Rule`.
+//! `flatten` enumerates choice alternatives by forking the walk at `Choice`
+//! nodes (master materializes the cross-product as cloned `Rule` trees). All
+//! flatten state is truncate-restore scratch: steady state does zero
+//! allocations beyond output-pool growth. Output is pooled (`FStep`/`FProd`
+//! ranges); materialization to master `Production`s happens only for the
+//! untimed equality assert, mirroring the `Rule -> pool` setup exclusion (a
+//! real backend consumes the flat form directly).
+//!
+//! Kept recursive at choice forks on purpose (depth = choice nesting); the
+//! iterative conversion is a separate later step.
+
+use std::num::NonZeroU32;
 
 use rustc_hash::FxHashMap;
 
-use crate::grammars::InputGrammar;
-use crate::rules::{MetadataParams, Rule, Symbol};
+use super::{ExtractedSyntaxGrammar, flatten_grammar::FlattenGrammarError};
+use crate::grammars::{
+    InputGrammar, Production, ProductionStep, ReservedWordSetId, SyntaxVariable, Variable,
+};
+use crate::rules::{Alias, Associativity, Precedence, Rule, Symbol, SymbolType};
 
 #[derive(Clone, Copy)]
 pub struct NodeId(u32);
 
-/// Interned string id into [`Pool::strings`].
+/// Interned string id: 1-based index into [`Pool::strs`] (`NonZeroU32` so
+/// `Option<StrId>` stays 4 bytes).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct StrId(u32);
+struct StrId(NonZeroU32);
+
+impl StrId {
+    fn idx(self) -> usize {
+        self.0.get() as usize - 1
+    }
+    const fn raw(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// Index into [`Pool::params`].
+#[derive(Clone, Copy)]
+struct ParamsId(u32);
 
 #[derive(Clone, Copy)]
 struct NodeRange {
@@ -27,75 +52,106 @@ struct NodeRange {
     len: u32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 enum FNode {
     Blank,
     String(StrId),
     Pattern(StrId, StrId),
     NamedSymbol(StrId),
-    Symbol(Symbol),
+    Sym { kind: SymbolType, index: u32 },
     Seq(NodeRange),
     Choice(NodeRange),
     Repeat(NodeId),
-    Metadata { params: MetadataParams, rule: NodeId },
-    Reserved { rule: NodeId, context_name: StrId },
+    Metadata { params: ParamsId, rule: NodeId },
+    Reserved { rule: NodeId, ctx: StrId },
+}
+
+const _: () = assert!(std::mem::size_of::<FNode>() == 12);
+
+/// `Precedence` with the name interned. `Copy`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FPrec {
+    None,
+    Integer(i32),
+    Name(StrId),
+}
+
+/// `Alias` with the value interned. `Copy`.
+#[derive(Clone, Copy)]
+struct FAlias {
+    value: StrId,
+    is_named: bool,
+}
+
+/// The `MetadataParams` fields flatten reads, interned and `Copy`. The token
+/// flags are dropped: neither spike pass reads them.
+#[derive(Clone, Copy)]
+struct FParams {
+    prec: FPrec,
+    assoc: Option<Associativity>,
+    dynamic_precedence: i32,
+    alias: Option<FAlias>,
+    field: Option<StrId>,
 }
 
 /// Flat pool: `nodes` is the arena (a child holds a `NodeId` into it); `children`
-/// is the backing store `Seq`/`Choice` index by range; `str_ids` interns string
-/// payloads to a `StrId`; `name_of_symbol` resolves an interned rule name (a dense
-/// `StrId`) to its `Symbol` by direct index.
-///
-/// Note: no `StrId -> str` reverse map. `intern_symbols` never needs the text (it
-/// resolves `StrId -> Symbol`), so each string is stored exactly once, in
-/// `str_ids`. The real design will need the reverse for serialize/errors; do that
-/// with `Rc<str>` or a blob + ranges to avoid a second allocation.
+/// backs `Seq`/`Choice` ranges; `params` backs `Metadata` nodes; `strs` +
+/// `str_ids` double-store the interner (spike shortcut; the real design uses a
+/// blob or `Rc<str>`); `name_of_symbol` resolves an interned rule name (a dense
+/// low `StrId`) to its `Symbol` by direct index.
 #[derive(Clone)]
 pub struct Pool {
     nodes: Vec<FNode>,
     children: Vec<NodeId>,
+    params: Vec<FParams>,
     str_ids: FxHashMap<Box<str>, StrId>,
+    strs: Vec<Box<str>>,
     roots: Vec<NodeId>,
     ext_roots: Vec<NodeId>,
     extra_roots: Vec<NodeId>,
     reserved_roots: Vec<NodeId>,
-    /// `StrId -> Symbol` for the `0..k` name `StrId`s. Dense (every entry is a name,
-    /// no `Option`): an *undefined* symbol's `StrId` is `>= k`, caught by the bounds
-    /// check in `resolve`, not by an in-range `None`. A `Vec` since `StrId`s are dense.
+    /// `StrId -> Symbol` for the dense low name `StrId`s (see `from_grammar`).
     name_of_symbol: Vec<Symbol>,
+    /// Reserved-set name -> set index, resolved at import (from_extracted).
+    reserved_sets: FxHashMap<StrId, u16>,
 }
 
 impl Pool {
+    fn empty() -> Self {
+        Self {
+            nodes: Vec::new(),
+            children: Vec::new(),
+            params: Vec::new(),
+            str_ids: FxHashMap::default(),
+            strs: Vec::new(),
+            roots: Vec::new(),
+            ext_roots: Vec::new(),
+            extra_roots: Vec::new(),
+            reserved_roots: Vec::new(),
+            name_of_symbol: Vec::new(),
+            reserved_sets: FxHashMap::default(),
+        }
+    }
+
     /// Convert a master `InputGrammar` into the flat pool. SETUP ONLY - excluded
     /// from the timed pass (mirrors how, in a real pipeline, the frontend would
     /// build the pool directly, with strings already interned).
     pub fn from_grammar(g: &InputGrammar) -> Self {
-        let mut p = Self {
-            nodes: Vec::new(),
-            children: Vec::new(),
-            str_ids: FxHashMap::default(),
-            roots: Vec::with_capacity(g.variables.len()),
-            ext_roots: Vec::with_capacity(g.external_tokens.len()),
-            extra_roots: Vec::with_capacity(g.extra_symbols.len()),
-            reserved_roots: Vec::new(),
-            name_of_symbol: Vec::new(),
-        };
-        // Intern names FIRST so name StrIds occupy the dense low range `0..k`.
-        // Variables are interned in order, so variable `i` gets StrId `i` and
-        // `name_of_symbol[i] = non_terminal(i)` directly.
+        let mut p = Self::empty();
+        // Intern names FIRST so name StrIds occupy the dense low range: variable
+        // `i` gets StrId `i+1`, so `name_of_symbol[sid.idx()]` resolves directly.
         for v in &g.variables {
             p.intern_str(&v.name);
         }
         let mut name_of_symbol: Vec<Symbol> =
             (0..g.variables.len()).map(Symbol::non_terminal).collect();
-        // An external name not already a variable gets the next StrId and is appended
-        // in order; a name that dups a variable (or an earlier external) resolves to
-        // an existing StrId, so we skip it - first writer wins, matching master's
-        // variables-before-externals scan.
+        // An external name not already a variable gets the next StrId and is
+        // appended in order; a dup resolves to an existing StrId and is skipped,
+        // matching master's variables-before-externals scan.
         for (i, e) in g.external_tokens.iter().enumerate() {
             if let Rule::NamedSymbol(name) = e {
                 let sid = p.intern_str(name);
-                if sid.0 as usize == name_of_symbol.len() {
+                if sid.idx() == name_of_symbol.len() {
                     name_of_symbol.push(Symbol::external(i));
                 }
             }
@@ -122,12 +178,55 @@ impl Pool {
         p
     }
 
+    /// Convert flatten's input into the flat pool. SETUP ONLY, like
+    /// [`Self::from_grammar`]. Reserved-set names resolve to set indices here.
+    pub fn from_extracted(g: &ExtractedSyntaxGrammar) -> Self {
+        let mut p = Self::empty();
+        // Last wins on duplicate names, matching master's map build.
+        for (i, set) in g.reserved_word_sets.iter().enumerate() {
+            let sid = p.intern_str(&set.name);
+            p.reserved_sets.insert(sid, i as u16);
+        }
+        for v in &g.variables {
+            let r = p.add(&v.rule);
+            p.roots.push(r);
+        }
+        p
+    }
+
     fn intern_str(&mut self, s: &str) -> StrId {
         if let Some(&id) = self.str_ids.get(s) {
             return id;
         }
-        let id = StrId(self.str_ids.len() as u32);
+        let id = StrId(NonZeroU32::new(self.strs.len() as u32 + 1).unwrap());
+        self.strs.push(s.into());
         self.str_ids.insert(s.into(), id);
+        id
+    }
+
+    fn str_of(&self, id: StrId) -> &str {
+        &self.strs[id.idx()]
+    }
+
+    fn add_params(&mut self, m: &crate::rules::MetadataParams) -> ParamsId {
+        let prec = match &m.precedence {
+            Precedence::None => FPrec::None,
+            Precedence::Integer(n) => FPrec::Integer(*n),
+            Precedence::Name(s) => FPrec::Name(self.intern_str(s)),
+        };
+        let alias = m.alias.as_ref().map(|a| FAlias {
+            value: self.intern_str(&a.value),
+            is_named: a.is_named,
+        });
+        let field = m.field_name.as_ref().map(|f| self.intern_str(f));
+        let id = ParamsId(self.params.len() as u32);
+        self.params.push(FParams {
+            prec,
+            assoc: m.associativity,
+            dynamic_precedence: m.dynamic_precedence,
+            alias,
+            field,
+        });
         id
     }
 
@@ -137,19 +236,22 @@ impl Pool {
             Rule::String(s) => FNode::String(self.intern_str(s)),
             Rule::Pattern(a, b) => FNode::Pattern(self.intern_str(a), self.intern_str(b)),
             Rule::NamedSymbol(n) => FNode::NamedSymbol(self.intern_str(n)),
-            Rule::Symbol(s) => FNode::Symbol(*s),
+            Rule::Symbol(s) => FNode::Sym {
+                kind: s.kind,
+                index: s.index as u32,
+            },
             Rule::Seq(elems) => FNode::Seq(self.add_children(elems)),
             Rule::Choice(elems) => FNode::Choice(self.add_children(elems)),
             Rule::Repeat(c) => FNode::Repeat(self.add(c)),
             Rule::Metadata { params, rule } => FNode::Metadata {
-                params: params.clone(),
+                params: self.add_params(params),
                 rule: self.add(rule),
             },
             Rule::Reserved { rule, context_name } => {
                 let context_name = self.intern_str(context_name);
                 FNode::Reserved {
                     rule: self.add(rule),
-                    context_name,
+                    ctx: context_name,
                 }
             }
         };
@@ -159,10 +261,11 @@ impl Pool {
     }
 
     fn add_children(&mut self, elems: &[Rule]) -> NodeRange {
-        // Convert each child subtree first (each returns its root id), then lay the
-        // ids down contiguously. The temp Vec is setup-only.
+        // Convert each child subtree first (each returns its root id), then lay
+        // the ids down contiguously. The temp Vec is setup-only.
         let ids: Vec<NodeId> = elems.iter().map(|e| self.add(e)).collect();
         let start = self.children.len() as u32;
+        debug_assert!(start < (1 << 30));
         self.children.extend_from_slice(&ids);
         NodeRange {
             start,
@@ -170,10 +273,9 @@ impl Pool {
         }
     }
 
-    /// The timed pass: resolve every `NamedSymbol` to a `Symbol` in place, over all
-    /// root sets. Recursive, in-place, zero allocation.
+    /// The timed intern pass: resolve every `NamedSymbol` to a symbol in place,
+    /// over all root sets. Recursive, in-place, zero allocation.
     pub fn intern_symbols(&mut self) {
-        // All root sets, indexed by position so we hold no borrow across `resolve`.
         for i in 0..self.roots.len() {
             self.resolve(self.roots[i]);
         }
@@ -190,36 +292,515 @@ impl Pool {
 
     fn resolve(&mut self, id: NodeId) {
         let idx = id.0 as usize;
-        // Read phase: decide the action without holding a mutable borrow.
-        enum Act {
-            Sym(Symbol),
-            One(NodeId),
-            Range(NodeRange),
-            Nop,
-        }
-        let act = match &self.nodes[idx] {
-            FNode::NamedSymbol(sid) => self
-                .name_of_symbol
-                .get(sid.0 as usize)
-                .copied()
-                .map_or(Act::Nop, Act::Sym),
-            FNode::Seq(r) | FNode::Choice(r) => Act::Range(*r),
-            FNode::Repeat(c)
-            | FNode::Metadata { rule: c, .. }
-            | FNode::Reserved { rule: c, .. } => Act::One(*c),
-            _ => Act::Nop,
-        };
-        // Apply phase.
-        match act {
-            Act::Sym(s) => self.nodes[idx] = FNode::Symbol(s),
-            Act::One(c) => self.resolve(c),
-            Act::Range(r) => {
+        match self.nodes[idx] {
+            FNode::NamedSymbol(sid) => {
+                if let Some(&s) = self.name_of_symbol.get(sid.idx()) {
+                    self.nodes[idx] = FNode::Sym {
+                        kind: s.kind,
+                        index: s.index as u32,
+                    };
+                }
+            }
+            FNode::Seq(r) | FNode::Choice(r) => {
                 for i in 0..r.len {
                     let c = self.children[(r.start + i) as usize];
                     self.resolve(c);
                 }
             }
-            Act::Nop => {}
+            FNode::Repeat(c)
+            | FNode::Metadata { rule: c, .. }
+            | FNode::Reserved { rule: c, .. } => self.resolve(c),
+            _ => {}
+        }
+    }
+}
+
+// --- flatten ---
+
+/// One continuation frame, packed to 8 bytes (tag in the 2 high bits of `.0`).
+///   Seq:          tag 0, `.0` = next child (abs index into `children`), `.1` = end
+///   MetaExit:     tag 1, `.0` low bits = pushed-stack flags, `.1` = steps len at entry
+///   ReservedExit: tag 2
+#[derive(Clone, Copy)]
+struct Frame(u32, u32);
+
+const _: () = assert!(std::mem::size_of::<Frame>() == 8);
+
+const FR_SEQ: u32 = 0;
+const FR_META: u32 = 1;
+const FR_RES: u32 = 2;
+const FR_PAYLOAD: u32 = (1 << 30) - 1;
+
+const MP_PREC: u32 = 1;
+const MP_ASSOC: u32 = 2;
+const MP_ALIAS: u32 = 4;
+const MP_FIELD: u32 = 8;
+
+impl Frame {
+    fn seq(r: NodeRange) -> Self {
+        debug_assert!(r.start + r.len < (1 << 30));
+        Self(r.start, r.start + r.len)
+    }
+    const fn meta(flags: u32, steps_before: u32) -> Self {
+        Self((FR_META << 30) | flags, steps_before)
+    }
+    const fn reserved() -> Self {
+        Self(FR_RES << 30, 0)
+    }
+    const fn tag(self) -> u32 {
+        self.0 >> 30
+    }
+    const fn seq_exhausted(self) -> bool {
+        self.0 == self.1
+    }
+}
+
+/// One pooled production step, 20 bytes and `Copy`. `flags` packs the symbol
+/// kind (bits 0..3), precedence tag (3..5: none/int/name), associativity
+/// (5..7: none/left/right), and alias-is-named (7). `prec_val` holds the
+/// integer value or the raw name `StrId` per the tag; `alias`/`field` are raw
+/// `StrId`s with 0 = none.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FStep {
+    sym_index: u32,
+    prec_val: i32,
+    alias: u32,
+    field: u32,
+    reserved: u16,
+    flags: u8,
+}
+
+const _: () = assert!(std::mem::size_of::<FStep>() == 20);
+
+const fn sym_type_from_bits(bits: u8) -> SymbolType {
+    match bits {
+        0 => SymbolType::External,
+        1 => SymbolType::End,
+        2 => SymbolType::EndOfNonTerminalExtra,
+        3 => SymbolType::Terminal,
+        _ => SymbolType::NonTerminal,
+    }
+}
+
+/// Pooled flatten output: one backing store for steps, productions as ranges
+/// into it, per-variable production ranges.
+#[derive(Clone, Copy)]
+struct FProd {
+    steps_start: u32,
+    steps_len: u32,
+    dynamic_precedence: i32,
+}
+
+#[derive(Default)]
+pub struct FlatOut {
+    steps: Vec<FStep>,
+    productions: Vec<FProd>,
+    var_prods: Vec<(u32, u32)>,
+}
+
+impl FlatOut {
+    fn clear(&mut self) {
+        self.steps.clear();
+        self.productions.clear();
+        self.var_prods.clear();
+    }
+}
+
+/// Reusable flatten scratch. Everything is truncate-restore; capacity persists
+/// across variables and runs.
+#[derive(Default)]
+pub struct FlattenState {
+    frames: Vec<Frame>,
+    steps: Vec<FStep>,
+    prec: Vec<FPrec>,
+    assoc: Vec<Associativity>,
+    alias: Vec<FAlias>,
+    field: Vec<StrId>,
+    reserved: Vec<u16>,
+    /// Fork snapshots of `frames`, stacked as segments.
+    snap: Vec<Frame>,
+    dyn_prec: i32,
+}
+
+/// Truncate-restore lengths captured at a fork; lives on the Rust call stack.
+#[derive(Clone, Copy)]
+struct Mark {
+    frames: u32,
+    steps: u32,
+    prec: u32,
+    assoc: u32,
+    alias: u32,
+    field: u32,
+    reserved: u32,
+    snap: u32,
+    dyn_prec: i32,
+}
+
+impl FlattenState {
+    fn reset(&mut self) {
+        self.frames.clear();
+        self.steps.clear();
+        self.prec.clear();
+        self.assoc.clear();
+        self.alias.clear();
+        self.field.clear();
+        self.reserved.clear();
+        self.snap.clear();
+        self.dyn_prec = 0;
+    }
+
+    fn mark(&self) -> Mark {
+        Mark {
+            frames: self.frames.len() as u32,
+            steps: self.steps.len() as u32,
+            prec: self.prec.len() as u32,
+            assoc: self.assoc.len() as u32,
+            alias: self.alias.len() as u32,
+            field: self.field.len() as u32,
+            reserved: self.reserved.len() as u32,
+            snap: self.snap.len() as u32,
+            dyn_prec: self.dyn_prec,
+        }
+    }
+
+    /// Restore to `mark`, reloading `frames` from the fork snapshot.
+    fn restore(&mut self, mark: Mark) {
+        self.steps.truncate(mark.steps as usize);
+        self.prec.truncate(mark.prec as usize);
+        self.assoc.truncate(mark.assoc as usize);
+        self.alias.truncate(mark.alias as usize);
+        self.field.truncate(mark.field as usize);
+        self.reserved.truncate(mark.reserved as usize);
+        self.dyn_prec = mark.dyn_prec;
+        self.frames.clear();
+        self.frames.extend_from_slice(&self.snap[mark.snap as usize..]);
+        debug_assert!(self.frames.len() == mark.frames as usize);
+    }
+
+    fn push_step(&mut self, kind: SymbolType, index: u32) {
+        let (prec_tag, prec_val) = match self.prec.last() {
+            None | Some(FPrec::None) => (0u8, 0i32),
+            Some(FPrec::Integer(n)) => (1, *n),
+            Some(FPrec::Name(sid)) => (2, sid.raw() as i32),
+        };
+        let assoc_bits = match self.assoc.last() {
+            None => 0u8,
+            Some(Associativity::Left) => 1,
+            Some(Associativity::Right) => 2,
+        };
+        let (alias, named) = self
+            .alias
+            .last()
+            .map_or((0, 0u8), |a| (a.value.raw(), u8::from(a.is_named)));
+        self.steps.push(FStep {
+            sym_index: index,
+            prec_val,
+            alias,
+            field: self.field.last().map_or(0, |f| f.raw()),
+            reserved: self.reserved.last().copied().unwrap_or(0),
+            flags: (kind as u8) | (prec_tag << 3) | (assoc_bits << 5) | (named << 7),
+        });
+    }
+
+    /// `true` if nothing after the current point can push a step: every `Seq`
+    /// frame in the remaining continuation is exhausted. Equivalent to master's
+    /// top-down `at_end`.
+    fn at_end(&self) -> bool {
+        self.frames
+            .iter()
+            .all(|f| f.tag() != FR_SEQ || f.seq_exhausted())
+    }
+
+    /// Master's `Metadata` pop branch: pop what was pushed; if a step was
+    /// pushed in the subtree and more steps can follow, rewrite the last step's
+    /// precedence/associativity to the outer context.
+    fn meta_exit(&mut self, flags: u32, steps_before: u32) {
+        let did_push = self.steps.len() as u32 > steps_before;
+        let fixup = did_push && !self.at_end();
+        if flags & MP_PREC != 0 {
+            self.prec.pop();
+            if fixup {
+                let (tag, val) = match self.prec.last() {
+                    None | Some(FPrec::None) => (0u8, 0i32),
+                    Some(FPrec::Integer(n)) => (1, *n),
+                    Some(FPrec::Name(sid)) => (2, sid.raw() as i32),
+                };
+                let step = self.steps.last_mut().unwrap();
+                step.prec_val = val;
+                step.flags = (step.flags & !(0b11 << 3)) | (tag << 3);
+            }
+        }
+        if flags & MP_ASSOC != 0 {
+            self.assoc.pop();
+            if fixup {
+                let bits = match self.assoc.last() {
+                    None => 0u8,
+                    Some(Associativity::Left) => 1,
+                    Some(Associativity::Right) => 2,
+                };
+                let step = self.steps.last_mut().unwrap();
+                step.flags = (step.flags & !(0b11 << 5)) | (bits << 5);
+            }
+        }
+        if flags & MP_ALIAS != 0 {
+            self.alias.pop();
+        }
+        if flags & MP_FIELD != 0 {
+            self.field.pop();
+        }
+    }
+}
+
+impl Pool {
+    /// The timed flatten pass: variables -> pooled productions, mirroring
+    /// master `flatten_grammar` (including its post-checks) minus the final
+    /// `SyntaxGrammar` assembly of pass-through fields.
+    pub fn flatten(
+        &self,
+        g: &ExtractedSyntaxGrammar,
+        st: &mut FlattenState,
+        out: &mut FlatOut,
+    ) -> Result<(), FlattenGrammarError> {
+        out.clear();
+        for &root in &self.roots {
+            let prod_start = out.productions.len() as u32;
+            st.reset();
+            self.run_path(root, st, out, prod_start)?;
+            out.var_prods.push((prod_start, out.productions.len() as u32));
+        }
+        self.check(g, out)?;
+        Ok(())
+    }
+
+    /// Mirror of master's post-flatten checks (empty-string and
+    /// recursive-inline), same iteration order and same O(V * steps) scan.
+    fn check(
+        &self,
+        g: &ExtractedSyntaxGrammar,
+        out: &FlatOut,
+    ) -> Result<(), FlattenGrammarError> {
+        let nt_bits = SymbolType::NonTerminal as u8;
+        for (i, &(ps, pe)) in out.var_prods.iter().enumerate() {
+            let used = out.steps.iter().any(|s| {
+                s.sym_index as usize == i && (s.flags & 0b111) == nt_bits
+            });
+            let inlined = g.variables_to_inline.contains(&Symbol::non_terminal(i));
+            for p in &out.productions[ps as usize..pe as usize] {
+                if used && p.steps_len == 0 {
+                    Err(FlattenGrammarError::EmptyString(g.variables[i].name.clone()))?;
+                }
+                if inlined {
+                    let steps = &out.steps[p.steps_start as usize
+                        ..(p.steps_start + p.steps_len) as usize];
+                    if steps.iter().any(|s| {
+                        s.sym_index as usize == i && (s.flags & 0b111) == nt_bits
+                    }) {
+                        Err(FlattenGrammarError::RecursiveInline(
+                            g.variables[i].name.clone(),
+                        ))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Enter `node` and, unless it forked, drive the continuation to
+    /// completion (emitting one production per completed path).
+    fn run_path(
+        &self,
+        node: NodeId,
+        st: &mut FlattenState,
+        out: &mut FlatOut,
+        prod_start: u32,
+    ) -> Result<(), FlattenGrammarError> {
+        if self.enter(node, st, out, prod_start)? {
+            self.drive(st, out, prod_start)?;
+        }
+        Ok(())
+    }
+
+    /// Process one node. Returns `false` if the node forked (a `Choice` drove
+    /// every branch to completion, emitting; the caller's continuation is
+    /// consumed). Unary chains (`Metadata`/`Reserved`) iterate in place.
+    fn enter(
+        &self,
+        mut node: NodeId,
+        st: &mut FlattenState,
+        out: &mut FlatOut,
+        prod_start: u32,
+    ) -> Result<bool, FlattenGrammarError> {
+        loop {
+            match self.nodes[node.0 as usize] {
+                FNode::Sym { kind, index } => {
+                    st.push_step(kind, index);
+                    return Ok(true);
+                }
+                FNode::Seq(r) => {
+                    st.frames.push(Frame::seq(r));
+                    return Ok(true);
+                }
+                FNode::Metadata { params, rule } => {
+                    let p = self.params[params.0 as usize];
+                    let mut flags = 0;
+                    if p.prec != FPrec::None {
+                        st.prec.push(p.prec);
+                        flags |= MP_PREC;
+                    }
+                    if let Some(a) = p.assoc {
+                        st.assoc.push(a);
+                        flags |= MP_ASSOC;
+                    }
+                    if let Some(a) = p.alias {
+                        st.alias.push(a);
+                        flags |= MP_ALIAS;
+                    }
+                    if let Some(f) = p.field {
+                        st.field.push(f);
+                        flags |= MP_FIELD;
+                    }
+                    if p.dynamic_precedence.abs() > st.dyn_prec.abs() {
+                        st.dyn_prec = p.dynamic_precedence;
+                    }
+                    st.frames.push(Frame::meta(flags, st.steps.len() as u32));
+                    node = rule;
+                }
+                FNode::Reserved { rule, ctx } => {
+                    let Some(&set) = self.reserved_sets.get(&ctx) else {
+                        return Err(FlattenGrammarError::NoReservedWordSet(
+                            self.str_of(ctx).to_string(),
+                        ));
+                    };
+                    st.reserved.push(set);
+                    st.frames.push(Frame::reserved());
+                    node = rule;
+                }
+                FNode::Choice(r) => {
+                    // Fork: snapshot the full continuation and context, drive
+                    // each branch to completion, restore between branches.
+                    let mark = st.mark();
+                    st.snap.extend_from_slice(&st.frames);
+                    for i in r.start..r.start + r.len {
+                        let c = self.children[i as usize];
+                        self.run_path(c, st, out, prod_start)?;
+                        st.restore(mark);
+                    }
+                    st.snap.truncate(mark.snap as usize);
+                    return Ok(false);
+                }
+                // Blank pushes nothing; String/Pattern/NamedSymbol/Repeat
+                // cannot appear post-extract/expand and match master's
+                // silent no-op arm (`_ => Ok(false)`).
+                _ => return Ok(true),
+            }
+        }
+    }
+
+    /// Consume frames until the continuation is exhausted, then emit. Stops
+    /// without emitting if a deeper fork took over (it emitted for us).
+    fn drive(
+        &self,
+        st: &mut FlattenState,
+        out: &mut FlatOut,
+        prod_start: u32,
+    ) -> Result<(), FlattenGrammarError> {
+        loop {
+            let Some(&top) = st.frames.last() else {
+                self.emit(st, out, prod_start);
+                return Ok(());
+            };
+            match top.tag() {
+                FR_SEQ => {
+                    if top.seq_exhausted() {
+                        st.frames.pop();
+                    } else {
+                        let cur = top.0 & FR_PAYLOAD;
+                        st.frames.last_mut().unwrap().0 += 1;
+                        let c = self.children[cur as usize];
+                        if !self.enter(c, st, out, prod_start)? {
+                            return Ok(());
+                        }
+                    }
+                }
+                FR_META => {
+                    let (flags, steps_before) = (top.0 & FR_PAYLOAD, top.1);
+                    st.frames.pop();
+                    st.meta_exit(flags, steps_before);
+                }
+                _ => {
+                    st.frames.pop();
+                    st.reserved.pop();
+                }
+            }
+        }
+    }
+
+    /// Append the completed path as a production unless this variable already
+    /// has an identical one (master's order-preserving `contains` dedup).
+    fn emit(&self, st: &mut FlattenState, out: &mut FlatOut, prod_start: u32) {
+        for p in &out.productions[prod_start as usize..] {
+            if p.dynamic_precedence == st.dyn_prec
+                && out.steps[p.steps_start as usize..(p.steps_start + p.steps_len) as usize]
+                    == st.steps[..]
+            {
+                return;
+            }
+        }
+        let steps_start = out.steps.len() as u32;
+        out.steps.extend_from_slice(&st.steps);
+        out.productions.push(FProd {
+            steps_start,
+            steps_len: st.steps.len() as u32,
+            dynamic_precedence: st.dyn_prec,
+        });
+    }
+
+    /// Materialize pooled output into master `SyntaxVariable`s. UNTIMED - only
+    /// for the equality assert against master's flatten.
+    pub fn materialize(&self, out: &FlatOut, vars: &[Variable]) -> Vec<SyntaxVariable> {
+        vars.iter()
+            .zip(&out.var_prods)
+            .map(|(v, &(ps, pe))| SyntaxVariable {
+                name: v.name.clone(),
+                kind: v.kind,
+                productions: out.productions[ps as usize..pe as usize]
+                    .iter()
+                    .map(|p| Production {
+                        dynamic_precedence: p.dynamic_precedence,
+                        steps: out.steps
+                            [p.steps_start as usize..(p.steps_start + p.steps_len) as usize]
+                            .iter()
+                            .map(|s| self.step_to_master(s))
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn step_to_master(&self, s: &FStep) -> ProductionStep {
+        let str_at = |raw: u32| self.strs[raw as usize - 1].to_string();
+        ProductionStep {
+            symbol: Symbol {
+                kind: sym_type_from_bits(s.flags & 0b111),
+                index: s.sym_index as usize,
+            },
+            precedence: match (s.flags >> 3) & 0b11 {
+                0 => Precedence::None,
+                1 => Precedence::Integer(s.prec_val),
+                _ => Precedence::Name(str_at(s.prec_val as u32)),
+            },
+            associativity: match (s.flags >> 5) & 0b11 {
+                0 => None,
+                1 => Some(Associativity::Left),
+                _ => Some(Associativity::Right),
+            },
+            alias: (s.alias != 0).then(|| Alias {
+                value: str_at(s.alias),
+                is_named: s.flags & (1 << 7) != 0,
+            }),
+            field_name: (s.field != 0).then(|| str_at(s.field)),
+            reserved_word_set_id: ReservedWordSetId(s.reserved as usize),
         }
     }
 }

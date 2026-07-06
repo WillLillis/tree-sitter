@@ -16,7 +16,14 @@ the native `.tsg` frontend) with a **flat, pool-indexed IR**, for two goals:
 shared backend ~15-20% vs master (see "Why #1 failed"). This is **attempt #2**:
 design the representation *around how the passes actually access rules*, with **no
 hash-consing**. We spiked `intern_symbols` on the new rep and it is **2-3x faster
-than master**. Next milestone is the `flatten_grammar` spike - the honest go/no-go.
+than master**.
+
+**2026-07-06: the `flatten_grammar` spike (the honest go/no-go) is done and it is a
+GO: 7-13x faster than master with output asserted byte-equal** (see measurements).
+The win is the fork-at-choice walk deleting `extract_choices`' materialized
+cross-product; no in-place rewrites involved, so the arena now wins at both ends
+of the pass access-pattern table. Next: validate on the corpus (incl. cpp), then
+the real design doc, then pass-by-pass implementation.
 
 ## Why attempt #1 failed (do NOT repeat)
 
@@ -104,6 +111,45 @@ Decomposition (cpp), each isolated:
 current 16-byte `Symbol`** (~53us either way for cpp). The dense `Vec` is the right,
 clean choice and will pull ahead once `Symbol` shrinks, but it's not the lever here.
 
+## Measurements: `flatten_grammar` (2026-07-06, WSL2, repo fixture grammars)
+
+`[SPIKE flatten_grammar]` block in `prepare_grammar.rs`; 300 iters; master's
+flatten consumes its input so its loop clones per iteration (clone timed
+separately and netted out below); the flat side mirrors master's post-checks
+(empty-string, recursive-inline) and skips only the pass-through SyntaxGrammar
+assembly. Output materialized (untimed) and asserted equal to master's on every
+grammar. us/iter:
+
+| grammar | master (net of clone) | flat | speedup |
+|---|---|---|---|
+| c | 1310 | 141 | 9.3x |
+| python | 625 | 60 | 10.5x |
+| go | 556 | 43 | 13.1x |
+| javascript | 902 | 83 | 10.8x |
+| rust | 2600 | 355 | 7.3x |
+
+(cpp pending: the repo fixture's grammar.js requires `tree-sitter-c/grammar`,
+needs the corpus checkout.)
+
+Design shape that produced this (all in `flat_spike.rs`):
+- Fork-at-choice path enumeration replaces `extract_choices` + `RuleFlattener`:
+  no alternative trees are ever materialized; a fork snapshots the frame stack
+  into a reusable buffer and truncate-restores between branches.
+- Zero steady-state allocations: all flatten state is persistent scratch;
+  output is pooled (`FStep` 20 B `Copy` steps + production ranges), so the only
+  allocation is amortized output-pool growth.
+- Packed layouts, const-asserted: `Frame` 8 B (2-bit tag in the high bits),
+  `FNode` 12 B (`MetadataParams` moved to a side pool - it was ~104 B inline in
+  the first spike revision), `FStep` 20 B, `StrId` = `NonZeroU32`.
+- Master's `at_end` (top-down) is recomputed bottom-up at metadata-exit as
+  "every remaining Seq frame is exhausted"; the last-step precedence/assoc
+  fix-ups apply per completed path.
+
+Caveat: the 300-iter loop retains output-pool capacity across iterations
+(steady-state framing, same convention as the intern spike's pre-cloned
+pools); a one-shot run additionally pays first pool growth, which is small
+next to master's per-alternative tree cloning.
+
 ### CAVEATS on these numbers (read before trusting them)
 
 - **`intern_symbols` is the BEST case for in-place** - it's a pure leaf rewrite, so
@@ -131,16 +177,18 @@ clean choice and will pull ahead once `Symbol` shrinks, but it's not the lever h
 
 ## Next steps (priority order)
 
-1. **`flatten_grammar` spike** = the go/no-go. Build a flat flatten (tree -> productions)
-   and A/B vs master's. If the flat arena wins where in-place can't help, green-light
-   the full redesign. If it only ties/loses, the pool's value is just the in-place
-   passes - reassess scope.
-2. **Land the name-map win on master independently** (`intern_name` O(V) scan -> O(1)
+1. ~~**`flatten_grammar` spike** = the go/no-go.~~ DONE 2026-07-06: GO (7-13x,
+   output byte-equal; table above).
+2. **Validate both spikes on the corpus machine** (cpp especially; it is the
+   choice-heaviest grammar and the fixture checkout cannot run it).
+3. **Land the name-map win on master independently** (`intern_name` O(V) scan -> O(1)
    map). It cut cpp `intern_symbols` 254 -> 152us with zero pool. Cheap, standalone.
-3. **`Symbol` usize -> u32** shrink, standalone, measured vs `build_tables`.
-4. If flatten validates: write the real design doc first (all pass access patterns),
-   THEN implement pass-by-pass keeping green + measuring each. Do NOT
-   implement-before-measuring (the attempt-#1 mistake).
+4. **`Symbol` usize -> u32** shrink, standalone, measured vs `build_tables`.
+5. Write the real design doc (all pass access patterns; converge the string
+   interner with the nativedsl lex-time interning design in
+   `plans/nativedsl-string-interning-design.md`), THEN implement pass-by-pass
+   keeping green + measuring each. Do NOT implement-before-measuring (the
+   attempt-#1 mistake).
 
 ## How to run the spike
 
