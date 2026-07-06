@@ -19,11 +19,31 @@ hash-consing**. We spiked `intern_symbols` on the new rep and it is **2-3x faste
 than master**.
 
 **2026-07-06: the `flatten_grammar` spike (the honest go/no-go) is done and it is a
-GO: 7-13x faster than master with output asserted byte-equal** (see measurements).
-The win is the fork-at-choice walk deleting `extract_choices`' materialized
-cross-product; no in-place rewrites involved, so the arena now wins at both ends
-of the pass access-pattern table. Next: validate on the corpus (incl. cpp), then
-the real design doc, then pass-by-pass implementation.
+GO: 8-12x faster than master with output verified byte-equal on all six fixture
+grammars** (see measurements). The win is the fork-at-choice walk deleting
+`extract_choices`' materialized cross-product; no in-place rewrites involved, so
+the arena wins at both ends of the pass access-pattern table.
+
+**Verification correction (same day):** the first measurement session claimed the
+equality assert passed, but the run commands used `grep -m1`, whose SIGPIPE
+killed `generate` before the assert executed. Running to completion exposed a
+real fork bug: restore between choice branches used `truncate` on the metadata
+stacks, but a branch pops context pushed BEFORE the fork (an enclosing
+`Metadata`/`Reserved` exit is part of the branch's continuation), which truncate
+cannot re-grow; alias/prec/field context leaked or vanished across branches.
+Fix: fork snapshots ALL consumable context stacks (frames, prec, assoc, alias,
+field, reserved); only `steps` is truncate-safe. Post-fix, full runs (exit 0,
+assert executed) verify all six grammars; timing was not materially affected.
+Protocol rule going forward: never pipe-truncate a run whose verification comes
+after the grepped line; capture to a file and check the exit code.
+
+**Scope decision (maintainer, 2026-07-06): all or nothing.** Either the backend
+moves fully to the pool IR or the spike is abandoned; no with-adapters
+incremental landing (that was attempt #1's valley). The bridge timings below
+remain useful only as development-time conversion bounds.
+
+Next: validate on the corpus, then the real design doc, then pass-by-pass
+implementation.
 
 ## Why attempt #1 failed (do NOT repeat)
 
@@ -120,14 +140,16 @@ separately and netted out below); the flat side mirrors master's post-checks
 assembly. Output materialized (untimed) and asserted equal to master's on every
 grammar. us/iter:
 
+Post-fix numbers (fork snapshot fix in, assert executed and passed, exit 0):
+
 | grammar | master (net of clone) | flat | speedup |
 |---|---|---|---|
-| c | 1310 | 141 | 9.3x |
-| python | 625 | 60 | 10.5x |
-| go | 556 | 43 | 13.1x |
-| javascript | 902 | 83 | 10.8x |
-| rust | 2600 | 355 | 7.3x |
-| cpp | 2778 | 383 | 7.3x |
+| c | 1335 | 126 | 10.6x |
+| python | 646 | 63 | 10.2x |
+| go | 599 | 49 | 12.3x |
+| javascript | 915 | 76 | 12.0x |
+| rust | 2575 | 281 | 9.2x |
+| cpp | 2750 | 340 | 8.1x |
 
 (cpp runs from the repo fixture after `mkdir -p
 test/fixtures/grammars/cpp/node_modules && ln -sfn ../../c
@@ -146,19 +168,49 @@ clones). "Hybrid" = flat intern + unconverted middle + flat flatten, i.e. the
 end-state projection with no bridges; one-shot pool-build (bridge) costs are
 printed for the with-adapters scenario. us:
 
-| grammar | two passes master | two passes flat | x | middle | syntax path master -> hybrid | x | bridges |
-|---|---|---|---|---|---|---|---|
-| c | 1632 | 131 | 12.5 | 388 | 2020 -> 519 | 3.9 | 173+82 |
-| cpp | 3199 | 329 | 9.7 | 802 | 4002 -> 1131 | 3.5 | 211+157 |
-| go | 638 | 51 | 12.5 | 225 | 863 -> 276 | 3.1 | 105+42 |
-| rust | 2898 | 272 | 10.6 | 428 | 3326 -> 700 | 4.7 | 117+108 |
+Post-fix numbers, all six grammars, asserts verified:
 
-Readings: the two converted passes are 74-87% of the syntax path, so
-converting just them is a 3.1-4.7x whole-syntax-path win; in the hybrid the
-unconverted middle becomes the dominant term (cpp: 802 of 1131us), making
-`extract_tokens`/`expand_repeats` the natural next conversions; bridge costs
-are the same order as the remaining flat work, so even a with-adapters
-incremental landing wins, though the end state deletes them.
+| grammar | two passes master | two passes flat | x | middle | syntax path master -> hybrid | x |
+|---|---|---|---|---|---|---|
+| c | 1471 | 138 | 10.7 | 400 | 1871 -> 538 | 3.5 |
+| cpp | 3012 | 360 | 8.4 | 777 | 3789 -> 1137 | 3.3 |
+| python | 725 | 71 | 10.2 | 245 | 970 -> 316 | 3.1 |
+| go | 692 | 58 | 11.9 | 267 | 959 -> 326 | 2.9 |
+| javascript | 1014 | 85 | 12.0 | 299 | 1313 -> 384 | 3.4 |
+| rust | 2692 | 293 | 9.2 | 448 | 3140 -> 742 | 4.2 |
+
+Readings: the two converted passes are 71-86% of the syntax path, so
+converting just them is a 2.9-4.2x whole-syntax-path win; in the projected
+full conversion the current middle (`extract_tokens`/`expand_repeats`) is the
+dominant remaining term, and it is the same tree-rebuild disease, so similar
+per-pass wins are plausible.
+
+### Where this sits in the whole `generate` pipeline (2026-07-06)
+
+Real single-shot stage times (`[SPIKE prepare-stages]` / `[SPIKE
+generate-stages]`, spike loops excluded), ms:
+
+| grammar | prepare total | of which syntax path | expand_tokens | aliases+inlines | build_tables | render |
+|---|---|---|---|---|---|---|
+| c | 3.3 | 1.8 | 1.0 | 0.3 | 552 | 26 |
+| cpp | 5.5 | 3.4 | 1.2 | 0.5 | 6366 | 150 |
+| python | 2.5 | 0.9 | 1.0 | 0.4 | 284 | 27 |
+| go | 2.0 | 1.0 | 0.6 | 0.2 | 221 | 15 |
+| javascript | 2.8 | 1.3 | 0.8 | 0.6 | 575 | 16 |
+| rust | 14.0 | 3.0 | 0.6 | 10.2 | 1358 | 45 |
+
+So `prepare_grammar` is ~0.1-1% of a full `tree-sitter generate`;
+`build_tables` is 85-97%. The honest framing for the all-or-nothing decision:
+- The full pool replacement does NOT measurably speed up end-to-end `generate`
+  today. Its immediate wins are prepare-bounded workloads (grammar.json
+  emission, node-types-only, LSP-grade validation of `.tsg` grammars, the
+  roundtrip corpus) and depth-safety (dropping `MAX_RULE_DEPTH`).
+- Its strategic value is as the foundation for attacking `build_tables`, where
+  the real time lives: the flat `SyntaxGrammar` (20 B `Copy` steps, dense
+  symbols) is exactly the input representation `build_tables`' item-set loops
+  want, and the handoff's `Symbol` u32 shrink already points there.
+- rust's `aliases+inlines` at 10.2 ms (`process_inlines`, another
+  tree-rebuild pass) is worth a row in the real design doc's pass table.
 
 Design shape that produced this (all in `flat_spike.rs`):
 - Fork-at-choice path enumeration replaces `extract_choices` + `RuleFlattener`:

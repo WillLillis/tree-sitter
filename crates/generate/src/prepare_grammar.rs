@@ -189,10 +189,14 @@ pub fn prepare_grammar(
         (master, flat, pool_build)
     };
 
+    let t0 = std::time::Instant::now();
     validate_precedences(input_grammar)?;
     validate_indirect_recursion(input_grammar)?;
+    let t_validate = t0.elapsed();
 
+    let t0 = std::time::Instant::now();
     let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
+    let t_intern = t0.elapsed();
 
     // TEMP SPIKE: time the unconverted middle passes (net of the input clone
     // each iteration needs) so the combined summary below can place the two
@@ -212,7 +216,9 @@ pub fn prepare_grammar(
         (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
     };
 
+    let t0 = std::time::Instant::now();
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
+    let t_extract = t0.elapsed();
 
     let expand_net = {
         use std::hint::black_box;
@@ -229,7 +235,9 @@ pub fn prepare_grammar(
         (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
     };
 
+    let t0 = std::time::Instant::now();
     let syntax_grammar = expand_repeats(syntax_grammar);
+    let t_expand = t0.elapsed();
 
     // TEMP SPIKE A/B (remove after the pool decision): master flatten_grammar
     // vs flat-pool flatten (fork-at-choice, pooled output, truncate-restore
@@ -292,10 +300,20 @@ pub fn prepare_grammar(
         );
     }
 
+    let t0 = std::time::Instant::now();
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
+    let t_flatten = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let lexical_grammar = expand_tokens(lexical_grammar)?;
+    let t_tokens = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
     let inlines = process_inlines(&syntax_grammar, &lexical_grammar)?;
+    let t_rest = t0.elapsed();
+    // TEMP SPIKE: real single-shot stage times (spike loops excluded).
+    eprintln!(
+        "[SPIKE prepare-stages] validate {t_validate:?} intern {t_intern:?} extract {t_extract:?} expand {t_expand:?} flatten {t_flatten:?} expand_tokens {t_tokens:?} aliases+inlines {t_rest:?}"
+    );
     Ok((syntax_grammar, lexical_grammar, inlines, default_aliases))
 }
 

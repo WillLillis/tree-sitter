@@ -417,22 +417,29 @@ pub struct FlattenState {
     alias: Vec<FAlias>,
     field: Vec<StrId>,
     reserved: Vec<u16>,
-    /// Fork snapshots of `frames`, stacked as segments.
-    snap: Vec<Frame>,
+    /// Fork snapshots, stacked as segments. A branch can consume context
+    /// pushed BEFORE the fork (an enclosing Metadata/Reserved exit pops it),
+    /// so every stack that exits pop through needs a full snapshot; only
+    /// `steps` grows monotonically within a branch and truncates back.
+    snap_frames: Vec<Frame>,
+    snap_prec: Vec<FPrec>,
+    snap_assoc: Vec<Associativity>,
+    snap_alias: Vec<FAlias>,
+    snap_field: Vec<StrId>,
+    snap_reserved: Vec<u16>,
     dyn_prec: i32,
 }
 
-/// Truncate-restore lengths captured at a fork; lives on the Rust call stack.
+/// Snapshot offsets captured at a fork; lives on the Rust call stack.
 #[derive(Clone, Copy)]
 struct Mark {
-    frames: u32,
     steps: u32,
+    frames: u32,
     prec: u32,
     assoc: u32,
     alias: u32,
     field: u32,
     reserved: u32,
-    snap: u32,
     dyn_prec: i32,
 }
 
@@ -445,36 +452,68 @@ impl FlattenState {
         self.alias.clear();
         self.field.clear();
         self.reserved.clear();
-        self.snap.clear();
+        self.snap_frames.clear();
+        self.snap_prec.clear();
+        self.snap_assoc.clear();
+        self.snap_alias.clear();
+        self.snap_field.clear();
+        self.snap_reserved.clear();
         self.dyn_prec = 0;
     }
 
-    fn mark(&self) -> Mark {
-        Mark {
-            frames: self.frames.len() as u32,
+    /// Snapshot everything a branch can consume; returns the segment offsets.
+    fn fork_save(&mut self) -> Mark {
+        let mark = Mark {
             steps: self.steps.len() as u32,
-            prec: self.prec.len() as u32,
-            assoc: self.assoc.len() as u32,
-            alias: self.alias.len() as u32,
-            field: self.field.len() as u32,
-            reserved: self.reserved.len() as u32,
-            snap: self.snap.len() as u32,
+            frames: self.snap_frames.len() as u32,
+            prec: self.snap_prec.len() as u32,
+            assoc: self.snap_assoc.len() as u32,
+            alias: self.snap_alias.len() as u32,
+            field: self.snap_field.len() as u32,
+            reserved: self.snap_reserved.len() as u32,
             dyn_prec: self.dyn_prec,
-        }
+        };
+        self.snap_frames.extend_from_slice(&self.frames);
+        self.snap_prec.extend_from_slice(&self.prec);
+        self.snap_assoc.extend_from_slice(&self.assoc);
+        self.snap_alias.extend_from_slice(&self.alias);
+        self.snap_field.extend_from_slice(&self.field);
+        self.snap_reserved.extend_from_slice(&self.reserved);
+        mark
     }
 
-    /// Restore to `mark`, reloading `frames` from the fork snapshot.
+    /// Restore to the fork point from the snapshot segments.
     fn restore(&mut self, mark: Mark) {
         self.steps.truncate(mark.steps as usize);
-        self.prec.truncate(mark.prec as usize);
-        self.assoc.truncate(mark.assoc as usize);
-        self.alias.truncate(mark.alias as usize);
-        self.field.truncate(mark.field as usize);
-        self.reserved.truncate(mark.reserved as usize);
         self.dyn_prec = mark.dyn_prec;
         self.frames.clear();
-        self.frames.extend_from_slice(&self.snap[mark.snap as usize..]);
-        debug_assert!(self.frames.len() == mark.frames as usize);
+        self.frames
+            .extend_from_slice(&self.snap_frames[mark.frames as usize..]);
+        self.prec.clear();
+        self.prec
+            .extend_from_slice(&self.snap_prec[mark.prec as usize..]);
+        self.assoc.clear();
+        self.assoc
+            .extend_from_slice(&self.snap_assoc[mark.assoc as usize..]);
+        self.alias.clear();
+        self.alias
+            .extend_from_slice(&self.snap_alias[mark.alias as usize..]);
+        self.field.clear();
+        self.field
+            .extend_from_slice(&self.snap_field[mark.field as usize..]);
+        self.reserved.clear();
+        self.reserved
+            .extend_from_slice(&self.snap_reserved[mark.reserved as usize..]);
+    }
+
+    /// Pop the fork's snapshot segments.
+    fn fork_done(&mut self, mark: Mark) {
+        self.snap_frames.truncate(mark.frames as usize);
+        self.snap_prec.truncate(mark.prec as usize);
+        self.snap_assoc.truncate(mark.assoc as usize);
+        self.snap_alias.truncate(mark.alias as usize);
+        self.snap_field.truncate(mark.field as usize);
+        self.snap_reserved.truncate(mark.reserved as usize);
     }
 
     fn push_step(&mut self, kind: SymbolType, index: u32) {
@@ -678,14 +717,13 @@ impl Pool {
                 FNode::Choice(r) => {
                     // Fork: snapshot the full continuation and context, drive
                     // each branch to completion, restore between branches.
-                    let mark = st.mark();
-                    st.snap.extend_from_slice(&st.frames);
+                    let mark = st.fork_save();
                     for i in r.start..r.start + r.len {
                         let c = self.children[i as usize];
                         self.run_path(c, st, out, prod_start)?;
                         st.restore(mark);
                     }
-                    st.snap.truncate(mark.snap as usize);
+                    st.fork_done(mark);
                     return Ok(false);
                 }
                 // Blank pushes nothing; String/Pattern/NamedSymbol/Repeat
