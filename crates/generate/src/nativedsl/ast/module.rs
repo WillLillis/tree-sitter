@@ -66,8 +66,7 @@ pub struct ModuleContext {
     pub root_items: Vec<NodeId>,
     /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
     /// collected by the parser so the loader can iterate without scanning the
-    /// arena. The inherit set (see [`ModuleContext::inherits`]) is derived from
-    /// this, so cfg gating only has to prune this one structure.
+    /// arena.
     pub module_refs: Vec<NodeId>,
     /// `true` if the parser pushed at least one `Node::Cfg` for this module.
     /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
@@ -179,5 +178,34 @@ impl GrammarConfig {
         fields
             .into_iter()
             .filter_map(|(f, opt)| opt.map(|id| (f, id)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_fields_covers_every_config_field() {
+        // A ConfigField missing from node_fields silently skips cfg gating
+        // and resolution; the exhaustive literal forces new fields through
+        // this test.
+        let id = NodeId::from_index(1);
+        let config = GrammarConfig {
+            language: Some(String::new()),
+            inherits: Some(id),
+            extras: Some(id),
+            externals: Some(id),
+            inline: Some(id),
+            supertypes: Some(id),
+            word: Some(id),
+            conflicts: Some(id),
+            precedences: Some(id),
+            reserved: Some(id),
+            start: Some(id),
+            flags: Some(id),
+        };
+        // COUNT minus `language`, the one non-node (string-valued) field.
+        assert_eq!(config.node_fields().count(), ConfigField::COUNT - 1);
     }
 }
