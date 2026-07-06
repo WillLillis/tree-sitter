@@ -241,6 +241,71 @@ next to master's per-alternative tree cloning.
   build the pool directly) and pre-clones pools (legit: measures per-invocation cost;
   in the real pipeline the pass runs once, no clone).
 
+## `build_tables` under the flat IR (quick investigation, 2026-07-06)
+
+`build_tables` is 85-97% of `generate`, so this is where a generate-wide win
+must come from. Temp instrumentation (`[SPIKE tables-stages]`,
+`[SPIKE item-ops]`; counters add a few percent to the counted phases):
+
+| grammar | item_set_builder | build_parse_table | token_conflicts | keywords+error+used | minimize | lex |
+|---|---|---|---|---|---|---|
+| c | 9ms | 278ms | 23ms | 139ms | 94ms | 6ms |
+| cpp | 44ms | 2639ms | 50ms | 1238ms | 1746ms | 41ms |
+| rust | 29ms | 919ms | 10ms | 283ms | 226ms | 10ms |
+
+| grammar | item hashes | steps walked by hashes | item eqs | item cmps |
+|---|---|---|---|---|
+| c | 0.47M | 1.5M | 1.5M | 5.2M |
+| cpp | 3.4M | 10.3M | 9.3M | **50.7M** |
+| rust | 1.3M | 4.0M | 4.2M | 24.1M |
+
+**The finding: `ParseItem` identity is structural over the entire production.**
+`Hash`/`PartialEq`/`Ord` in `build_tables/item.rs` walk every step, hashing and
+comparing `Precedence` (string for named), `Option<Alias>` and field-name
+`String`s per step. `ParseItemSet::insert` binary-searches with that `Ord`
+(the 50.7M cmps); state dedup (`state_ids_by_item_set`, `core_ids_by_core`)
+hashes and compares entire item sets through the same impls. On cpp that is
+~60M string-touching, production-length identity operations inside the 2.6s
+`build_parse_table`.
+
+Why it is this way today: items hold `&Production`, and dynamic inlining
+(`substitute_production`) creates distinct-but-equal productions, so identity
+cannot be pointer-based; and item equivalence is deliberately COARSER than
+production equality (pre-dot steps are ignored except their aliases/fields,
+see `has_preceding_inherited_fields`), which merges states.
+
+**The flat-IR design that collapses this:**
+1. Pooled, deduped productions - exactly what the flatten rework's output
+   already is - make production identity an id; `substitute_production`
+   becomes an id swap (inlined productions join the pool).
+2. Precompute, once per `(production, dot)` pair, an interned
+   **item-equivalence key**: hash-cons the exact projection the current
+   `Hash`/`Eq` use (dyn prec, steps len, prec/assoc at dot, completed steps'
+   alias+field (+symbol under the inherited-fields flag), remaining steps).
+   Pairs are bounded (total steps across the grammar), so this is the one
+   legitimate hash-consing site: bounded, precomputed, off the hot path -
+   unlike attempt #1's per-rebuild consing.
+3. `ParseItem` becomes `{ key: u32, prod: u32, dot: u32 }`, `Copy`;
+   hash/eq/cmp are integer ops; item-set hashing is ids + `TokenSet` words;
+   the 50.7M cmps become u32 compares.
+4. Step strings as `StrId`s also turn conflict-resolution precedence lookups
+   (scans of `precedence_orderings` with string equality) into id lookups.
+
+Expected impact, stated conservatively: if the ~60M identity walks are half of
+cpp's `build_parse_table`, collapsing them saves ~1.3s of cpp's 6.4s generate;
+c/rust proportional. Explicitly NOT addressed by this lever: `minimize`
+(1.75s) and the `keywords+error+used` bundle (1.24s) - separate
+investigations (state-refinement and O(states x tokens^2) shapes, not
+item-identity-bound).
+
+Oracle for any of this: byte-identical `parser.c` across fixture/corpus
+grammars - the equivalence-key projection must reproduce the current item
+equivalence exactly, or state counts (and tables) change.
+
+Landing: with the rework or immediately after it - the key layer REQUIRES
+pooled deduped productions, so it slots in as the first post-flatten consumer
+of the new `SyntaxGrammar`.
+
 ## `Symbol` shrink (investigated, not done)
 
 `Symbol { kind: SymbolType, index: usize }` today: 16 B; `Option<Symbol>` 16 B
@@ -267,9 +332,11 @@ next to master's per-alternative tree cloning.
 4. **`Symbol` usize -> u32** shrink, standalone, measured vs `build_tables`.
 5. Write the real design doc (all pass access patterns; converge the string
    interner with the nativedsl lex-time interning design in
-   `plans/nativedsl-string-interning-design.md`), THEN implement pass-by-pass
-   keeping green + measuring each. Do NOT implement-before-measuring (the
-   attempt-#1 mistake).
+   `plans/nativedsl-string-interning-design.md`; include the
+   `build_tables` item-equivalence-key layer, whose prerequisite is the
+   pooled deduped productions), THEN implement pass-by-pass keeping green +
+   measuring each. Do NOT implement-before-measuring (the attempt-#1
+   mistake).
 
 ## How to run the spike
 

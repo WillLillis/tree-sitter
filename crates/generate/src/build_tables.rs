@@ -52,9 +52,15 @@ pub fn build_tables(
     optimizations: OptLevel,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BuildTableResult<Tables> {
+    // TEMP SPIKE: sub-phase timing (remove with the other spike blocks).
+    let t0 = std::time::Instant::now();
     let item_set_builder = ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines);
+    let t_isb = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let following_tokens =
         get_following_tokens(syntax_grammar, lexical_grammar, inlines, &item_set_builder);
+    let t_following = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let (mut parse_table, parse_state_info) = build_parse_table(
         syntax_grammar,
         lexical_grammar,
@@ -62,7 +68,11 @@ pub fn build_tables(
         variable_info,
         diagnostics,
     )?;
+    let t_parse_table = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let token_conflict_map = TokenConflictMap::new(lexical_grammar, following_tokens);
+    let t_conflicts = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let coincident_token_index = CoincidentTokenIndex::new(&parse_table, lexical_grammar);
     let keywords = identify_keywords(
         lexical_grammar,
@@ -80,6 +90,8 @@ pub fn build_tables(
         &keywords,
     );
     populate_used_symbols(&mut parse_table, syntax_grammar, lexical_grammar);
+    let t_keywords_etc = t0.elapsed();
+    let t0 = std::time::Instant::now();
     minimize_parse_table(
         &mut parse_table,
         syntax_grammar,
@@ -89,6 +101,8 @@ pub fn build_tables(
         &keywords,
         optimizations,
     );
+    let t_minimize = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let lex_tables = build_lex_table(
         &mut parse_table,
         syntax_grammar,
@@ -97,8 +111,22 @@ pub fn build_tables(
         &coincident_token_index,
         &token_conflict_map,
     );
+    let t_lex = t0.elapsed();
     populate_external_lex_states(&mut parse_table, syntax_grammar);
     mark_fragile_tokens(&mut parse_table, &token_conflict_map);
+    eprintln!(
+        "[SPIKE tables-stages] item_set_builder {t_isb:?} following {t_following:?} build_parse_table {t_parse_table:?} token_conflicts {t_conflicts:?} keywords+error+used {t_keywords_etc:?} minimize {t_minimize:?} lex {t_lex:?}"
+    );
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        eprintln!(
+            "[SPIKE item-ops] hashes {} (steps walked {}) eqs {} cmps {}",
+            item::ITEM_HASHES.load(Relaxed),
+            item::ITEM_HASH_STEPS.load(Relaxed),
+            item::ITEM_EQS.load(Relaxed),
+            item::ITEM_CMPS.load(Relaxed),
+        );
+    }
 
     if let Some(report_symbol_name) = report_symbol_name {
         report_state_info(
