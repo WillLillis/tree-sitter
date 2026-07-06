@@ -42,8 +42,26 @@ moves fully to the pool IR or the spike is abandoned; no with-adapters
 incremental landing (that was attempt #1's valley). The bridge timings below
 remain useful only as development-time conversion bounds.
 
-Next: validate on the corpus, then the real design doc, then pass-by-pass
-implementation.
+**Sequencing decision (maintainer, 2026-07-06): master first.** The IR rewrite
+is worked out here, then lands on master BEFORE the native DSL changes. The
+backend between (synced) master and `native_dsl` is essentially identical
+(local `master` was merely stale; the apparent divergence is upstream commits),
+so the implementation branch forks from upstream master and the spikes port
+trivially. Consequences:
+- The rewrite becomes an upstream-able series independent of native DSL:
+  grammar.json frontend (`parse_grammar`) builds pools directly, all prepare
+  passes go flat, `SyntaxGrammar` is pooled, byte-identical `parser.c` is the
+  oracle. The standalone quick wins (intern_name O(1) map, `Symbol` u32) can
+  lead the series.
+- `native_dsl` then rebases and retargets its lowering to emit pools directly,
+  which deletes `build_rule`/`str_to_string` (the alloc bomb measured in
+  `plans/nativedsl-string-interning-design.md`) as part of the native PR: the
+  native frontend ships already built for the new backend.
+- The `build_tables` item-key layer lands with the series or immediately
+  after; its prerequisite (pooled deduped productions) is in the series.
+
+Next: validate on the corpus, then the real design doc (against master), then
+pass-by-pass implementation.
 
 ## Why attempt #1 failed (do NOT repeat)
 
