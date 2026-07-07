@@ -60,8 +60,10 @@ trivially. Consequences:
 - The `build_tables` item-key layer lands with the series or immediately
   after; its prerequisite (pooled deduped productions) is in the series.
 
-Next: validate on the corpus, then the real design doc (against master), then
-pass-by-pass implementation.
+Next: corpus validation when available; the real design doc is DONE
+(`FLAT_POOL_DESIGN.md`, 2026-07-07, includes the full pass survey,
+frontend contracts incl. the metadata-merge parity seam, and the landing
+plan); then pass-by-pass implementation on `rule_ir` per that doc.
 
 ## Why attempt #1 failed (do NOT repeat)
 
