@@ -37,6 +37,18 @@ impl StrId {
     pub const fn index(self) -> usize {
         self.0.get() as usize - 1
     }
+
+    /// The raw 1-based id, for packed encodings where 0 means "none".
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0.get()
+    }
+
+    /// Inverse of [`Self::raw`]. Caller must pass a value produced by `raw`.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(NonZeroU32::new(raw).unwrap())
+    }
 }
 
 /// Index into [`RulePool::params`].
@@ -389,6 +401,109 @@ impl RulePool {
             }),
             field_name: p.field.map(|f| self.resolve(f).to_string()),
         }
+    }
+}
+
+/// One flattened production step, 20 bytes and `Copy`. `flags` packs the
+/// symbol kind (bits 0..3), precedence tag (3..5: none/integer/name),
+/// associativity (5..7: none/left/right), and alias-is-named (7). `prec_val`
+/// holds the integer value or the raw name `StrId` per the tag;
+/// `alias`/`field` are raw `StrId`s with 0 meaning none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FStep {
+    pub sym_index: u32,
+    pub prec_val: i32,
+    pub alias: u32,
+    pub field: u32,
+    pub reserved: u16,
+    pub flags: u8,
+}
+
+const _: () = assert!(std::mem::size_of::<FStep>() == 20);
+
+pub const FSTEP_PREC_INTEGER: u8 = 1 << 3;
+pub const FSTEP_PREC_NAME: u8 = 2 << 3;
+pub const FSTEP_ASSOC_LEFT: u8 = 1 << 5;
+pub const FSTEP_ASSOC_RIGHT: u8 = 2 << 5;
+pub const FSTEP_ALIAS_NAMED: u8 = 1 << 7;
+
+impl FStep {
+    #[must_use]
+    pub const fn symbol(self) -> Symbol {
+        Symbol {
+            kind: match self.flags & 0b111 {
+                0 => SymbolType::External,
+                1 => SymbolType::End,
+                2 => SymbolType::EndOfNonTerminalExtra,
+                3 => SymbolType::Terminal,
+                _ => SymbolType::NonTerminal,
+            },
+            index: self.sym_index as usize,
+        }
+    }
+
+    #[must_use]
+    pub fn precedence(self) -> Prec {
+        match self.flags & (0b11 << 3) {
+            FSTEP_PREC_INTEGER => Prec::Integer(self.prec_val),
+            FSTEP_PREC_NAME => Prec::Name(StrId::from_raw(self.prec_val as u32)),
+            _ => Prec::None,
+        }
+    }
+
+    #[must_use]
+    pub fn associativity(self) -> Option<Associativity> {
+        match self.flags & (0b11 << 5) {
+            FSTEP_ASSOC_LEFT => Some(Associativity::Left),
+            FSTEP_ASSOC_RIGHT => Some(Associativity::Right),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn alias(self) -> Option<Alias> {
+        (self.alias != 0).then(|| Alias {
+            value: StrId::from_raw(self.alias),
+            is_named: self.flags & FSTEP_ALIAS_NAMED != 0,
+        })
+    }
+
+    #[must_use]
+    pub fn field(self) -> Option<StrId> {
+        (self.field != 0).then(|| StrId::from_raw(self.field))
+    }
+}
+
+/// A flattened production: a step range plus its dynamic precedence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FProd {
+    pub steps_start: u32,
+    pub steps_len: u32,
+    pub dynamic_precedence: i32,
+}
+
+impl FProd {
+    #[must_use]
+    pub const fn step_range(self) -> std::ops::Range<usize> {
+        self.steps_start as usize..(self.steps_start + self.steps_len) as usize
+    }
+}
+
+/// Pooled flatten output: one backing store for steps, productions as ranges
+/// into it, per-variable production ranges. Becomes the `SyntaxGrammar`
+/// rule representation at the container flip.
+#[derive(Clone, Default)]
+pub struct FlatOut {
+    pub steps: Vec<FStep>,
+    pub productions: Vec<FProd>,
+    pub var_prods: Vec<(u32, u32)>,
+}
+
+impl FlatOut {
+    pub fn clear(&mut self) {
+        self.steps.clear();
+        self.productions.clear();
+        self.var_prods.clear();
     }
 }
 

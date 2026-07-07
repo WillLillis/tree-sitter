@@ -205,6 +205,9 @@ Format: what it does today / cost shape / pool design.
   swap early.
 - `u16`/`u32` range guards: child counts and step counts keep the spike's
   `checked_len` pattern; frame payloads assert `< 2^30`.
+- `FStep`/`Frame` bit packing is ad hoc (shift constants); before the master
+  port, lock it in properly - `bitflags!` or an explicit layout doc plus
+  round-trip tests over the packed accessors (maintainer, 2026-07-07).
 - Error paths that need names mid-pipeline (e.g. `NoReservedWordSet`,
   `EmptyString`) resolve via the interner reverse table; every such site is
   an error path, so resolution cost is irrelevant.

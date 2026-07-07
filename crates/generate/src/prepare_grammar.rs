@@ -168,7 +168,7 @@ pub fn prepare_grammar(
     // iteration so we time only the in-place rewrite.
     // TEMP A/B (until the container flip): the real pool-based intern pass vs
     // master's, timing plus full-output and diagnostics equality.
-    let (intern_master, intern_flat, pool_build) = {
+    {
         use std::hint::black_box;
         let n = 300u32;
         let t = std::time::Instant::now();
@@ -177,9 +177,7 @@ pub fn prepare_grammar(
         }
         let master = t.elapsed() / n;
 
-        let t = std::time::Instant::now();
         let base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let pool_build = t.elapsed();
         let mut pools: Vec<_> = (0..n).map(|_| base.clone()).collect();
         let t = std::time::Instant::now();
         for p in &mut pools {
@@ -199,8 +197,7 @@ pub fn prepare_grammar(
             "pool intern_symbols diverged from master"
         );
         assert_eq!(pool_diags, master_diags, "pool intern diagnostics diverged");
-        (master, pool_time, pool_build)
-    };
+    }
 
     let t0 = std::time::Instant::now();
     validate_precedences(input_grammar)?;
@@ -317,13 +314,10 @@ pub fn prepare_grammar(
     let syntax_grammar = expand_repeats(syntax_grammar);
     let t_expand = t0.elapsed();
 
-    // TEMP SPIKE A/B (remove after the pool decision): master flatten_grammar
-    // vs flat-pool flatten (fork-at-choice, pooled output, truncate-restore
-    // scratch). Master's flatten consumes its input, so its timing includes a
-    // per-iteration clone, reported separately. The flat side mirrors master's
-    // post-checks; it skips only the pass-through SyntaxGrammar assembly
-    // (reserved TokenSets, field moves), which is noise on real grammars.
-    // Materialized output is asserted equal to master's.
+    // TEMP A/B (until the container flip): pool flatten vs master, run over
+    // the full converted chain (intern -> extract -> expand -> flatten all
+    // pool-side). Master's flatten consumes its input, so its timing includes
+    // a per-iteration clone, netted out. Full SyntaxGrammar asserted equal.
     {
         use std::hint::black_box;
         let n = 300u32;
@@ -336,45 +330,29 @@ pub fn prepare_grammar(
         for _ in 0..n {
             let _ = black_box(flatten_grammar(syntax_grammar.clone()));
         }
-        let master = t.elapsed() / n;
+        let master = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
 
-        let t = std::time::Instant::now();
-        let pool = flat_spike::Pool::from_extracted(&syntax_grammar);
-        let pool_build2 = t.elapsed();
-        let mut st = flat_spike::FlattenState::default();
-        let mut out = flat_spike::FlatOut::default();
+        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
+        let interned_meta =
+            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
+        let mut ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
+        expand_repeats::expand_repeats_pool(&mut base, &mut ext_meta);
+        let mut st = flatten_grammar::FlattenState::default();
+        let mut out = crate::rule_pool::FlatOut::default();
         let t = std::time::Instant::now();
         for _ in 0..n {
-            pool.flatten(&syntax_grammar, &mut st, &mut out).unwrap();
+            flatten_grammar::flatten_grammar_pool(&base, &ext_meta, &mut st, &mut out).unwrap();
             black_box(&out);
         }
-        let flat = t.elapsed() / n;
-        eprintln!(
-            "[SPIKE flatten_grammar] master {master:?} (incl clone {clone_only:?})  flat {flat:?}"
-        );
-
-        // The two converted passes together, then in syntax-path context
-        // (intern -> extract -> expand -> flatten; the middle is unconverted
-        // and shared). Bridge costs (one-shot pool builds) shown for the
-        // with-adapters scenario; the end state has no bridges.
-        let master_net = master.checked_sub(clone_only).unwrap_or_default();
-        let two_m = intern_master + master_net;
-        let two_f = intern_flat + flat;
-        let mid = extract_net + expand_net;
-        let path_m = two_m + mid;
-        let path_f = two_f + mid;
-        eprintln!(
-            "[SPIKE combined] converted passes: master {two_m:?}  flat {two_f:?}  ({:.1}x) | middle (unconverted extract+expand): {mid:?} | syntax path: master {path_m:?} -> hybrid {path_f:?} ({:.1}x) | bridges: {pool_build:?} + {pool_build2:?}",
-            two_m.as_secs_f64() / two_f.as_secs_f64(),
-            path_m.as_secs_f64() / path_f.as_secs_f64(),
-        );
+        let pool_time = t.elapsed() / n;
+        eprintln!("[POOL flatten_grammar] master {master:?}  pool {pool_time:?}");
 
         let master_out = flatten_grammar(syntax_grammar.clone()).unwrap();
-        pool.flatten(&syntax_grammar, &mut st, &mut out).unwrap();
+        flatten_grammar::flatten_grammar_pool(&base, &ext_meta, &mut st, &mut out).unwrap();
         assert_eq!(
-            pool.materialize(&out, &syntax_grammar.variables),
-            master_out.variables,
-            "flat flatten diverged from master"
+            flatten_grammar::materialize_flattened(&base, &ext_meta, &out),
+            master_out,
+            "pool flatten_grammar diverged from master"
         );
     }
 
