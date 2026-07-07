@@ -176,7 +176,7 @@ impl RulePool {
 
     /// Number of unique interned strings.
     #[must_use]
-    pub fn str_count(&self) -> usize {
+    pub const fn str_count(&self) -> usize {
         self.strs.len()
     }
 

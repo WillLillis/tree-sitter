@@ -434,7 +434,7 @@ use super::intern_symbols::PoolInternedMeta;
 use crate::grammars::PrecedenceEntry;
 use crate::rule_pool::{Node as PoolNode, NodeId, Params, PoolGrammar, RulePool, StrId};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct PoolLexicalVariable {
     pub name: StrId,
     pub kind: VariableType,
@@ -443,7 +443,7 @@ pub(super) struct PoolLexicalVariable {
 
 /// The extract pass's outputs besides the in-place rewrites: the lexical
 /// side, post-absorption variable metadata, and symbol-typed config lists.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct PoolExtractedMeta {
     pub kinds: Vec<VariableType>,
     pub lexical_variables: Vec<PoolLexicalVariable>,
@@ -530,7 +530,7 @@ const fn sym(symbol: Symbol) -> PoolNode {
     }
 }
 
-fn node_symbol(node: PoolNode) -> Option<Symbol> {
+const fn node_symbol(node: PoolNode) -> Option<Symbol> {
     match node {
         PoolNode::Sym { kind, index } => Some(Symbol {
             kind,

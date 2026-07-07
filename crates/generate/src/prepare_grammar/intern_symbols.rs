@@ -259,10 +259,10 @@ pub(super) fn intern_symbols_pool(
     let mut name_of_symbol: Vec<Symbol> =
         (0..variables.len()).map(Symbol::non_terminal).collect();
     for (i, &root) in external_roots.iter().enumerate() {
-        if let PoolNode::NamedSymbol(sid) = pool.node(root) {
-            if sid.index() == name_of_symbol.len() {
-                name_of_symbol.push(Symbol::external(i));
-            }
+        if let PoolNode::NamedSymbol(sid) = pool.node(root)
+            && sid.index() == name_of_symbol.len()
+        {
+            name_of_symbol.push(Symbol::external(i));
         }
     }
 

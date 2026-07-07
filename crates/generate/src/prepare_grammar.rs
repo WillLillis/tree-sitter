@@ -38,7 +38,7 @@ use super::{
 };
 use crate::{Diagnostic, grammars::ReservedWordContext};
 
-#[derive(Clone, Debug, PartialEq)] // TEMP: for the pass A/B loops and equality asserts
+#[derive(Clone, Debug, PartialEq, Eq)] // TEMP: for the pass A/B loops and equality asserts
 pub struct IntermediateGrammar<T, U> {
     variables: Vec<Variable>,
     extra_symbols: Vec<T>,
@@ -190,7 +190,7 @@ pub fn prepare_grammar(
 
         let mut master_diags = Vec::new();
         let master_out = intern_symbols(input_grammar, &mut master_diags).unwrap();
-        let mut g = base.clone();
+        let mut g = base;
         let mut pool_diags = Vec::new();
         let meta = intern_symbols::intern_symbols_pool(&mut g, &mut pool_diags).unwrap();
         assert_eq!(
@@ -279,6 +279,39 @@ pub fn prepare_grammar(
         }
         (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
     };
+
+    // TEMP A/B (until the container flip): pool expand_repeats vs master,
+    // chained after the pool intern + extract passes.
+    {
+        use std::hint::black_box;
+        let n = 300u32;
+        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
+        let interned_meta =
+            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
+        let ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box((base.clone(), ext_meta.clone()));
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let (mut g, mut m) = (base.clone(), ext_meta.clone());
+            expand_repeats::expand_repeats_pool(&mut g, &mut m);
+            black_box((&g, &m));
+        }
+        let pool_time = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+        eprintln!("[POOL expand_repeats] master {expand_net:?}  pool {pool_time:?}");
+
+        let master_out = expand_repeats(syntax_grammar.clone());
+        let (mut g, mut m) = (base, ext_meta);
+        expand_repeats::expand_repeats_pool(&mut g, &mut m);
+        assert_eq!(
+            extract_tokens::materialize_extracted(&g, &m, &g.precedence_orderings).0,
+            master_out,
+            "pool expand_repeats diverged from master"
+        );
+    }
 
     let t0 = std::time::Instant::now();
     let syntax_grammar = expand_repeats(syntax_grammar);
