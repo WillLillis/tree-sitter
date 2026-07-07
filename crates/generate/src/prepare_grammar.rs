@@ -38,7 +38,7 @@ use super::{
 };
 use crate::{Diagnostic, grammars::ReservedWordContext};
 
-#[derive(Clone)] // TEMP: for the flatten spike A/B (master flatten consumes the grammar)
+#[derive(Clone, Debug, PartialEq)] // TEMP: for the pass A/B loops and equality asserts
 pub struct IntermediateGrammar<T, U> {
     variables: Vec<Variable>,
     extra_symbols: Vec<T>,
@@ -166,6 +166,8 @@ pub fn prepare_grammar(
     // (in-place, no hash-cons, O(1) name map). The Rule->pool conversion is done
     // up front (setup) and excluded from timing; the flat pool is pre-cloned per
     // iteration so we time only the in-place rewrite.
+    // TEMP A/B (until the container flip): the real pool-based intern pass vs
+    // master's, timing plus full-output and diagnostics equality.
     let (intern_master, intern_flat, pool_build) = {
         use std::hint::black_box;
         let n = 300u32;
@@ -176,17 +178,28 @@ pub fn prepare_grammar(
         let master = t.elapsed() / n;
 
         let t = std::time::Instant::now();
-        let base = flat_spike::Pool::from_grammar(input_grammar);
+        let base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
         let pool_build = t.elapsed();
         let mut pools: Vec<_> = (0..n).map(|_| base.clone()).collect();
         let t = std::time::Instant::now();
         for p in &mut pools {
-            p.intern_symbols();
-            black_box(&*p);
+            let _ = black_box(intern_symbols::intern_symbols_pool(p, &mut Vec::new()));
         }
-        let flat = t.elapsed() / n;
-        eprintln!("[SPIKE intern_symbols] master {master:?}  flat {flat:?}");
-        (master, flat, pool_build)
+        let pool_time = t.elapsed() / n;
+        eprintln!("[POOL intern_symbols] master {master:?}  pool {pool_time:?}");
+
+        let mut master_diags = Vec::new();
+        let master_out = intern_symbols(input_grammar, &mut master_diags).unwrap();
+        let mut g = base.clone();
+        let mut pool_diags = Vec::new();
+        let meta = intern_symbols::intern_symbols_pool(&mut g, &mut pool_diags).unwrap();
+        assert_eq!(
+            intern_symbols::materialize_interned(&g, &meta),
+            master_out,
+            "pool intern_symbols diverged from master"
+        );
+        assert_eq!(pool_diags, master_diags, "pool intern diagnostics diverged");
+        (master, pool_time, pool_build)
     };
 
     let t0 = std::time::Instant::now();

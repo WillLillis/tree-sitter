@@ -285,7 +285,7 @@ impl Default for OptLevel {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Diagnostic {
     UnnecessaryConflicts(Vec<Vec<String>>),
     UnaryChoice { name: Option<String> },

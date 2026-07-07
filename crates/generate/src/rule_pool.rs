@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use rustc_hash::FxHashMap;
 
+use crate::grammars::{InputGrammar, PrecedenceEntry};
 use crate::rules::{Associativity, MetadataParams, Precedence, Rule, Symbol, SymbolType};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,7 +32,9 @@ impl NodeId {
 pub struct StrId(NonZeroU32);
 
 impl StrId {
-    const fn idx(self) -> usize {
+    /// Dense 0-based index (ids are 1-based).
+    #[must_use]
+    pub const fn index(self) -> usize {
         self.0.get() as usize - 1
     }
 }
@@ -104,7 +107,7 @@ pub struct Params {
 
 /// The arena: nodes, their pooled children/params, and the string interner.
 /// Append-only; passes rewrite nodes in place and may orphan subtrees.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RulePool {
     nodes: Vec<Node>,
     children: Vec<NodeId>,
@@ -168,7 +171,7 @@ impl RulePool {
 
     #[must_use]
     pub fn resolve(&self, id: StrId) -> &str {
-        &self.strs[id.idx()]
+        &self.strs[id.index()]
     }
 
     /// Number of unique interned strings.
@@ -284,6 +287,102 @@ impl RulePool {
                 is_named: a.is_named,
             }),
             field_name: p.field.map(|f| self.resolve(f).to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct PoolVariable {
+    pub name: StrId,
+    pub root: NodeId,
+}
+
+#[derive(Clone)]
+pub struct PoolReservedSet {
+    pub name: StrId,
+    pub roots: Vec<NodeId>,
+}
+
+/// Pool-owning input grammar. Built from [`InputGrammar`] transitionally;
+/// frontends build this directly at series end.
+///
+/// Invariant: variable names are interned first (variable `i` holds
+/// `StrId(i + 1)`), then external token names, so name resolution is a dense
+/// index (see `intern_symbols_pool`). Both frontends guarantee unique
+/// variable names.
+#[derive(Clone)]
+pub struct PoolGrammar {
+    pub pool: RulePool,
+    pub name: String,
+    pub variables: Vec<PoolVariable>,
+    pub external_roots: Vec<NodeId>,
+    pub extra_roots: Vec<NodeId>,
+    pub reserved_sets: Vec<PoolReservedSet>,
+    pub supertype_names: Vec<StrId>,
+    pub conflict_names: Vec<Vec<StrId>>,
+    pub inline_names: Vec<StrId>,
+    pub word_name: Option<StrId>,
+    pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
+}
+
+impl PoolGrammar {
+    /// Transitional: convert a master [`InputGrammar`]. Deleted when the
+    /// frontends build pools directly.
+    #[must_use]
+    pub fn from_input_grammar(g: &InputGrammar) -> Self {
+        let mut pool = RulePool::default();
+        // Dense-name contract: variable names first, external names second,
+        // before any body or config string.
+        let var_names: Vec<StrId> = g.variables.iter().map(|v| pool.intern(&v.name)).collect();
+        debug_assert!(var_names.iter().enumerate().all(|(i, s)| s.index() == i));
+        for e in &g.external_tokens {
+            if let Rule::NamedSymbol(n) = e {
+                pool.intern(n);
+            }
+        }
+        let variables = g
+            .variables
+            .iter()
+            .zip(var_names)
+            .map(|(v, name)| PoolVariable {
+                name,
+                root: pool.add_rule(&v.rule),
+            })
+            .collect();
+        let external_roots = g.external_tokens.iter().map(|e| pool.add_rule(e)).collect();
+        let extra_roots = g.extra_symbols.iter().map(|e| pool.add_rule(e)).collect();
+        let reserved_sets = g
+            .reserved_words
+            .iter()
+            .map(|set| PoolReservedSet {
+                name: pool.intern(&set.name),
+                roots: set.reserved_words.iter().map(|r| pool.add_rule(r)).collect(),
+            })
+            .collect();
+        let supertype_names = g.supertype_symbols.iter().map(|s| pool.intern(s)).collect();
+        let conflict_names = g
+            .expected_conflicts
+            .iter()
+            .map(|c| c.iter().map(|n| pool.intern(n)).collect())
+            .collect();
+        let inline_names = g
+            .variables_to_inline
+            .iter()
+            .map(|n| pool.intern(n))
+            .collect();
+        let word_name = g.word_token.as_ref().map(|w| pool.intern(w));
+        Self {
+            pool,
+            name: g.name.clone(),
+            variables,
+            external_roots,
+            extra_roots,
+            reserved_sets,
+            supertype_names,
+            conflict_names,
+            inline_names,
+            word_name,
+            precedence_orderings: g.precedence_orderings.clone(),
         }
     }
 }
