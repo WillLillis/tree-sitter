@@ -198,6 +198,39 @@ pub fn prepare_grammar(
         assert_eq!(pool_diags, master_diags, "pool intern diagnostics diverged");
     }
 
+    // TEMP A/B (until the container flip): pool validate walks vs master.
+    // Success is (), so the asserts compare success/failure and error text.
+    {
+        use std::hint::black_box;
+        let n = 300u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(validate_precedences(input_grammar));
+            let _ = black_box(validate_indirect_recursion(input_grammar));
+        }
+        let master = t.elapsed() / n;
+
+        let base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(validate_precedences_pool(&base));
+            let _ = black_box(validate_indirect_recursion_pool(&base));
+        }
+        let pool_time = t.elapsed() / n;
+        eprintln!("[POOL validate] master {master:?}  pool {pool_time:?}");
+
+        assert_eq!(
+            validate_precedences_pool(&base).map_err(|e| e.to_string()),
+            validate_precedences(input_grammar).map_err(|e| e.to_string()),
+            "pool validate_precedences diverged from master"
+        );
+        assert_eq!(
+            validate_indirect_recursion_pool(&base).map_err(|e| e.to_string()),
+            validate_indirect_recursion(input_grammar).map_err(|e| e.to_string()),
+            "pool validate_indirect_recursion diverged from master"
+        );
+    }
+
     let t0 = std::time::Instant::now();
     validate_precedences(input_grammar)?;
     validate_indirect_recursion(input_grammar)?;
@@ -645,10 +678,34 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
         }
     }
 
-    // For any two precedence names `a` and `b`, if `a` comes before `b`
-    // in some list, then it cannot come *after* `b` in any list.
+    check_ordering_conflicts(&grammar.precedence_orderings)?;
+
+    let precedence_names = grammar
+        .precedence_orderings
+        .iter()
+        .flat_map(|l| l.iter())
+        .filter_map(|p| {
+            if let PrecedenceEntry::Name(n) = p {
+                Some(n)
+            } else {
+                None
+            }
+        })
+        .collect::<FxHashSet<&String>>();
+    for variable in &grammar.variables {
+        validate(&variable.name, &variable.rule, &precedence_names)?;
+    }
+
+    Ok(())
+}
+
+/// For any two precedence names `a` and `b`, if `a` comes before `b` in some
+/// list, then it cannot come *after* `b` in any list.
+fn check_ordering_conflicts(
+    precedence_orderings: &[Vec<PrecedenceEntry>],
+) -> ValidatePrecedenceResult<()> {
     let mut pairs = FxHashMap::default();
-    for list in &grammar.precedence_orderings {
+    for list in precedence_orderings {
         for (i, mut entry1) in list.iter().enumerate() {
             for mut entry2 in list.iter().skip(i + 1) {
                 if entry2 == entry1 {
@@ -675,21 +732,107 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
             }
         }
     }
+    Ok(())
+}
 
-    let precedence_names = grammar
+/// Pool twin of `validate_precedences`: the same pre-order walk, with the
+/// declared-name set built as `&str` so `StrId`s resolve straight into it.
+/// Like master, `Reserved` subtrees are not descended.
+fn validate_precedences_pool(g: &crate::rule_pool::PoolGrammar) -> ValidatePrecedenceResult<()> {
+    use crate::rule_pool::{Node, Prec};
+
+    check_ordering_conflicts(&g.precedence_orderings)?;
+
+    let precedence_names = g
         .precedence_orderings
         .iter()
         .flat_map(|l| l.iter())
         .filter_map(|p| {
             if let PrecedenceEntry::Name(n) = p {
-                Some(n)
+                Some(n.as_str())
             } else {
                 None
             }
         })
-        .collect::<FxHashSet<&String>>();
-    for variable in &grammar.variables {
-        validate(&variable.name, &variable.rule, &precedence_names)?;
+        .collect::<FxHashSet<&str>>();
+    let mut stack = Vec::new();
+    for variable in &g.variables {
+        stack.clear();
+        stack.push(variable.root);
+        while let Some(id) = stack.pop() {
+            match g.pool.node(id) {
+                Node::Repeat(inner) => stack.push(inner),
+                Node::Seq(range) | Node::Choice(range) => {
+                    let base = stack.len();
+                    stack.extend_from_slice(g.pool.child_slice(range));
+                    stack[base..].reverse();
+                }
+                Node::Metadata { params, rule } => {
+                    if let Prec::Name(sid) = g.pool.params(params).prec
+                        && !precedence_names.contains(g.pool.resolve(sid))
+                    {
+                        Err(UndeclaredPrecedenceError {
+                            precedence: g.pool.resolve(sid).to_string(),
+                            rule: g.pool.resolve(variable.name).to_string(),
+                        })?;
+                    }
+                    stack.push(rule);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Pool twin of `validate_indirect_recursion`: only the transition
+/// collection walks the pool; the name-graph DFS (`get_cycle`) is shared.
+/// Like master, `Seq`/`Repeat`/`Reserved` are not single-symbol productions.
+fn validate_indirect_recursion_pool(
+    g: &crate::rule_pool::PoolGrammar,
+) -> Result<(), IndirectRecursionError> {
+    use crate::rule_pool::Node;
+
+    let mut epsilon_transitions: IndexMap<&str, BTreeSet<String>> = IndexMap::new();
+    let mut stack = Vec::new();
+    for variable in &g.variables {
+        let name = g.pool.resolve(variable.name);
+        let mut productions = BTreeSet::new();
+        stack.clear();
+        stack.push(variable.root);
+        while let Some(id) = stack.pop() {
+            match g.pool.node(id) {
+                Node::NamedSymbol(sid) => {
+                    // Rules that *directly* reference themselves don't cause
+                    // a parsing loop.
+                    let symbol = g.pool.resolve(sid);
+                    if symbol != name {
+                        productions.insert(symbol.to_string());
+                    }
+                }
+                Node::Choice(range) => {
+                    stack.extend_from_slice(g.pool.child_slice(range));
+                }
+                Node::Metadata { rule, .. } => stack.push(rule),
+                _ => {}
+            }
+        }
+        epsilon_transitions.insert(name, productions);
+    }
+
+    for start_symbol in epsilon_transitions.keys() {
+        let mut visited = BTreeSet::new();
+        let mut path = Vec::new();
+        if let Some((start_idx, end_idx)) =
+            get_cycle(start_symbol, &epsilon_transitions, &mut visited, &mut path)
+        {
+            let cycle_symbols = path[start_idx..=end_idx]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            return Err(IndirectRecursionError(cycle_symbols));
+        }
     }
 
     Ok(())
@@ -835,6 +978,12 @@ mod tests {
             result.unwrap_err().to_string(),
             "Undeclared precedence 'omg' in rule 'v2'",
         );
+
+        let pool = crate::rule_pool::PoolGrammar::from_input_grammar(&grammar);
+        assert_eq!(
+            validate_precedences_pool(&pool).unwrap_err().to_string(),
+            "Undeclared precedence 'omg' in rule 'v2'",
+        );
     }
 
     #[test]
@@ -877,5 +1026,41 @@ mod tests {
             result.unwrap_err().to_string(),
             "Conflicting orderings for precedences 'a' and 'b'",
         );
+
+        let pool = crate::rule_pool::PoolGrammar::from_input_grammar(&grammar);
+        assert_eq!(
+            validate_precedences_pool(&pool).unwrap_err().to_string(),
+            "Conflicting orderings for precedences 'a' and 'b'",
+        );
+    }
+
+    #[test]
+    fn test_validate_indirect_recursion_pool_matches_master() {
+        let cycle = |variables: Vec<Variable>| InputGrammar {
+            variables,
+            ..Default::default()
+        };
+        let cases = [
+            // indirect cycle through a choice and metadata wrapper
+            cycle(vec![
+                Variable::named("a", Rule::choice(vec![Rule::named("b"), Rule::string("x")])),
+                Variable::named("b", Rule::prec(Precedence::Integer(1), Rule::named("a"))),
+            ]),
+            // direct self-reference only: allowed
+            cycle(vec![Variable::named("a", Rule::named("a"))]),
+            // three-step cycle, entered from the second variable's subgraph
+            cycle(vec![
+                Variable::named("a", Rule::string("x")),
+                Variable::named("b", Rule::named("c")),
+                Variable::named("c", Rule::named("d")),
+                Variable::named("d", Rule::named("b")),
+            ]),
+        ];
+        for grammar in &cases {
+            let master = validate_indirect_recursion(grammar).map_err(|e| e.to_string());
+            let pool = crate::rule_pool::PoolGrammar::from_input_grammar(grammar);
+            let pool_result = validate_indirect_recursion_pool(&pool).map_err(|e| e.to_string());
+            assert_eq!(pool_result, master);
+        }
     }
 }

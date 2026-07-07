@@ -310,8 +310,15 @@ master's map is address-keyed) all asserted equal on the six grammars.
 (*) master cpp aliases cannot genuinely be 3x faster than master c on a
 superset grammar; netted sub-100us numbers at n=50 are noise.
 
-Still Rule-based: the two pre-pipeline `validate_*` walks and the containers
-themselves (the flip).
+The two pre-pipeline `validate_*` walks (2026-07-07) complete the set: parity
+timing (69-198us both sides across the six grammars; the cost is the shared
+name-graph DFS + ordering-conflict check, not the tree walk), converted so no
+pass consumes `Rule` trees. The ordering-conflict half and `get_cycle` DFS are
+shared with master, not duplicated; parity quirk preserved: neither walk
+descends into `Reserved` subtrees.
+
+With that, every `prepare_grammar` pass runs pool-side. Still Rule-based: only
+the containers themselves (the flip).
 
 ## `build_tables` under the flat IR (quick investigation, 2026-07-06)
 
@@ -395,9 +402,8 @@ of the new `SyntaxGrammar`.
 
 ## Next steps (priority order)
 
-1. **Remaining pass conversions**: the two pre-pipeline `validate_*` walks
-   (`validate_precedences`, `validate_indirect_recursion`); everything else
-   is converted.
+1. ~~**Remaining pass conversions**~~ DONE 2026-07-07: every prepare pass has
+   a verified pool twin.
 2. **Container flip** per `FLAT_POOL_DESIGN.md`: pool-owning grammar structs,
    delete the `Rule` bridges (`add_rule`/`rule`), `materialize_*` fns, TEMP
    derives, and the A/B blocks.
