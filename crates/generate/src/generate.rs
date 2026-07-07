@@ -26,6 +26,7 @@ mod nfa;
 mod node_types;
 pub mod parse_grammar;
 mod prepare_grammar;
+mod rule_pool;
 #[cfg(feature = "qjs-rt")]
 mod quickjs;
 mod render;
