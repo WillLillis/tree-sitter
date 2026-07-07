@@ -143,7 +143,10 @@ fn computed_ref_to_let_name_rejected() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::ComputedNameNotARule("width".into()));
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::ComputedNameNotARule("width".into())
+    );
 }
 
 #[test]
@@ -161,7 +164,10 @@ fn computed_ref_unknown_gets_suggestion() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("porgram".into()));
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::UnknownIdentifier("porgram".into())
+    );
     assert!(
         e.notes
             .iter()

@@ -222,7 +222,9 @@ pub fn prepare_grammar(
         for _ in 0..n {
             let _ = black_box(extract_tokens(interned_grammar.clone()));
         }
-        (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
+        (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default()
     };
 
     // TEMP A/B (until the container flip): pool extract_tokens vs master,
@@ -244,7 +246,9 @@ pub fn prepare_grammar(
             let mut g = base.clone();
             let _ = black_box(extract_tokens::extract_tokens_pool(&mut g, &interned_meta));
         }
-        let pool_time = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+        let pool_time = (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default();
         eprintln!("[POOL extract_tokens] master {extract_net:?}  pool {pool_time:?}");
 
         let master_out = extract_tokens(interned_grammar.clone()).unwrap();
@@ -273,7 +277,9 @@ pub fn prepare_grammar(
         for _ in 0..n {
             black_box(expand_repeats(syntax_grammar.clone()));
         }
-        (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
+        (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default()
     };
 
     // TEMP A/B (until the container flip): pool expand_repeats vs master,
@@ -296,7 +302,9 @@ pub fn prepare_grammar(
             expand_repeats::expand_repeats_pool(&mut g, &mut m);
             black_box((&g, &m));
         }
-        let pool_time = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+        let pool_time = (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default();
         eprintln!("[POOL expand_repeats] master {expand_net:?}  pool {pool_time:?}");
 
         let master_out = expand_repeats(syntax_grammar.clone());
@@ -329,7 +337,9 @@ pub fn prepare_grammar(
         for _ in 0..n {
             let _ = black_box(flatten_grammar(syntax_grammar.clone()));
         }
-        let master = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+        let master = (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default();
 
         let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
         let interned_meta =
@@ -373,7 +383,9 @@ pub fn prepare_grammar(
         for _ in 0..n {
             let _ = black_box(expand_tokens(lexical_grammar.clone()));
         }
-        let master = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+        let master = (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default();
 
         let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
         let interned_meta =

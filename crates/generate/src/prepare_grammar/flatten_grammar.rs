@@ -304,9 +304,8 @@ pub(super) fn flatten_grammar(
 
 use super::extract_tokens::PoolExtractedMeta;
 use crate::rule_pool::{
-    FProd, FStep, FlatOut, FSTEP_ALIAS_NAMED, FSTEP_ASSOC_LEFT, FSTEP_ASSOC_RIGHT,
-    FSTEP_PREC_INTEGER, FSTEP_PREC_NAME, Node as PoolNode, NodeId, PoolGrammar, Prec,
-    RulePool, StrId,
+    FProd, FSTEP_ALIAS_NAMED, FSTEP_ASSOC_LEFT, FSTEP_ASSOC_RIGHT, FSTEP_PREC_INTEGER,
+    FSTEP_PREC_NAME, FStep, FlatOut, Node as PoolNode, NodeId, PoolGrammar, Prec, RulePool, StrId,
 };
 use crate::rules::SymbolType;
 
@@ -467,7 +466,10 @@ impl FlattenState {
             Some(Associativity::Right) => FSTEP_ASSOC_RIGHT,
         };
         let (alias, named_bit) = self.alias.last().map_or((0, 0u8), |a| {
-            (a.value.raw(), if a.is_named { FSTEP_ALIAS_NAMED } else { 0 })
+            (
+                a.value.raw(),
+                if a.is_named { FSTEP_ALIAS_NAMED } else { 0 },
+            )
         });
         self.steps.push(FStep {
             sym_index: index,
@@ -545,7 +547,8 @@ pub(super) fn flatten_grammar_pool(
         let prod_start = out.productions.len() as u32;
         st.reset();
         run_path(&g.pool, &reserved_ids, v.root, st, out, prod_start)?;
-        out.var_prods.push((prod_start, out.productions.len() as u32));
+        out.var_prods
+            .push((prod_start, out.productions.len() as u32));
     }
     check(g, meta, out)
 }
@@ -563,7 +566,9 @@ fn check(g: &PoolGrammar, meta: &PoolExtractedMeta, out: &FlatOut) -> FlattenGra
                 ))?;
             }
             if inlined
-                && out.steps[p.step_range()].iter().any(|s| s.symbol() == symbol)
+                && out.steps[p.step_range()]
+                    .iter()
+                    .any(|s| s.symbol() == symbol)
             {
                 Err(FlattenGrammarError::RecursiveInline(
                     g.pool.resolve(g.variables[i].name).to_string(),
@@ -684,10 +689,8 @@ fn drive(
                 } else {
                     let cur = top.0 & FR_PAYLOAD;
                     st.frames.last_mut().unwrap().0 += 1;
-                    let child = pool.child_slice(crate::rule_pool::NodeRange {
-                        start: cur,
-                        len: 1,
-                    })[0];
+                    let child =
+                        pool.child_slice(crate::rule_pool::NodeRange { start: cur, len: 1 })[0];
                     if !enter(pool, reserved_ids, child, st, out, prod_start)? {
                         return Ok(());
                     }
@@ -766,7 +769,10 @@ pub(super) fn materialize_flattened(
                     .iter()
                     .map(|p| Production {
                         dynamic_precedence: p.dynamic_precedence,
-                        steps: out.steps[p.step_range()].iter().map(step_to_master).collect(),
+                        steps: out.steps[p.step_range()]
+                            .iter()
+                            .map(step_to_master)
+                            .collect(),
                     })
                     .collect(),
             })
@@ -994,9 +1000,7 @@ mod tests {
         );
     }
 
-    fn pool_from_extracted(
-        g: &ExtractedSyntaxGrammar,
-    ) -> (PoolGrammar, PoolExtractedMeta) {
+    fn pool_from_extracted(g: &ExtractedSyntaxGrammar) -> (PoolGrammar, PoolExtractedMeta) {
         use crate::rule_pool::PoolVariable;
         let mut pool = RulePool::default();
         let variables = g

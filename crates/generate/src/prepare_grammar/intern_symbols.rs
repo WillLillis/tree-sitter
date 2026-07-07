@@ -33,11 +33,15 @@ pub(super) fn intern_symbols(
     // uses, to isolate the map win from the backing-type/in-place win.
     let mut name_map: FxHashMap<&str, Symbol> = FxHashMap::default();
     for (i, v) in grammar.variables.iter().enumerate() {
-        name_map.entry(v.name.as_str()).or_insert_with(|| Symbol::non_terminal(i));
+        name_map
+            .entry(v.name.as_str())
+            .or_insert_with(|| Symbol::non_terminal(i));
     }
     for (i, e) in grammar.external_tokens.iter().enumerate() {
         if let Rule::NamedSymbol(name) = e {
-            name_map.entry(name.as_str()).or_insert_with(|| Symbol::external(i));
+            name_map
+                .entry(name.as_str())
+                .or_insert_with(|| Symbol::external(i));
         }
     }
     let interner = Interner { name_map };
@@ -255,8 +259,7 @@ pub(super) fn intern_symbols_pool(
     // an external name not shadowing a variable got the next id in order. A
     // name's StrId indexes this table directly; undefined names have larger
     // ids and fall out via the bounds check.
-    let mut name_of_symbol: Vec<Symbol> =
-        (0..variables.len()).map(Symbol::non_terminal).collect();
+    let mut name_of_symbol: Vec<Symbol> = (0..variables.len()).map(Symbol::non_terminal).collect();
     for (i, &root) in external_roots.iter().enumerate() {
         if let PoolNode::NamedSymbol(sid) = pool.node(root)
             && sid.index() == name_of_symbol.len()
@@ -273,9 +276,7 @@ pub(super) fn intern_symbols_pool(
     let external_tokens: Vec<(Option<StrId>, VariableType)> = external_roots
         .iter()
         .map(|&root| match pool.node(root) {
-            PoolNode::NamedSymbol(sid) => {
-                (Some(sid), variable_type_for_name(pool.resolve(sid)))
-            }
+            PoolNode::NamedSymbol(sid) => (Some(sid), variable_type_for_name(pool.resolve(sid))),
             _ => (None, VariableType::Anonymous),
         })
         .collect();
@@ -287,7 +288,14 @@ pub(super) fn intern_symbols_pool(
 
     let mut stack = Vec::new();
     for v in variables.iter() {
-        intern_root(pool, v.root, Some(v.name), &name_of_symbol, diagnostics, &mut stack)?;
+        intern_root(
+            pool,
+            v.root,
+            Some(v.name),
+            &name_of_symbol,
+            diagnostics,
+            &mut stack,
+        )?;
     }
     for &root in external_roots.iter() {
         intern_root(pool, root, None, &name_of_symbol, diagnostics, &mut stack)?;
@@ -540,9 +548,7 @@ mod tests {
         }
     }
 
-    fn pool_pass(
-        g: &InputGrammar,
-    ) -> InternSymbolsResult<(InternedGrammar, Vec<Diagnostic>)> {
+    fn pool_pass(g: &InputGrammar) -> InternSymbolsResult<(InternedGrammar, Vec<Diagnostic>)> {
         let mut pg = crate::rule_pool::PoolGrammar::from_input_grammar(g);
         let mut diags = Vec::new();
         let meta = intern_symbols_pool(&mut pg, &mut diags)?;

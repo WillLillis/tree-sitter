@@ -576,9 +576,19 @@ fn extract_in_root(
                         PoolNode::String(s) => Some(s),
                         _ => None,
                     };
-                    let boundary = if cleaned == Params::default() { rule } else { id };
-                    let i =
-                        ex.extract(pool, boundary, string_name, var_name, &mut counter, is_first)?;
+                    let boundary = if cleaned == Params::default() {
+                        rule
+                    } else {
+                        id
+                    };
+                    let i = ex.extract(
+                        pool,
+                        boundary,
+                        string_name,
+                        var_name,
+                        &mut counter,
+                        is_first,
+                    )?;
                     pool.set_node(id, sym(Symbol::terminal(i as usize)));
                 } else {
                     stack.push(rule);
@@ -603,7 +613,14 @@ pub(super) fn extract_tokens_pool(
     let mut ex = PoolTokenExtractor::default();
     let mut stack = Vec::new();
     for (i, v) in g.variables.iter().enumerate() {
-        extract_in_root(&mut g.pool, v.root, Some(v.name), i == 0, &mut ex, &mut stack)?;
+        extract_in_root(
+            &mut g.pool,
+            v.root,
+            Some(v.name),
+            i == 0,
+            &mut ex,
+            &mut stack,
+        )?;
     }
     for (&root, &(name, _)) in g.external_roots.iter().zip(&interned.external_tokens) {
         extract_in_root(&mut g.pool, root, name, false, &mut ex, &mut stack)?;
@@ -756,9 +773,7 @@ pub(super) fn extract_tokens_pool(
                     node => node,
                 };
                 let token_name = match inner {
-                    PoolNode::String(s) | PoolNode::Pattern(s, _) => {
-                        g.pool.resolve(s).to_string()
-                    }
+                    PoolNode::String(s) | PoolNode::Pattern(s, _) => g.pool.resolve(s).to_string(),
                     _ => "unknown".to_string(),
                 };
                 Err(ExtractTokensError::NonTokenReservedWord(token_name))?;
@@ -1112,7 +1127,11 @@ mod test {
             .iter()
             .map(|set| PoolReservedSet {
                 name: pool.intern(&set.name),
-                roots: set.reserved_words.iter().map(|r| pool.add_rule(r)).collect(),
+                roots: set
+                    .reserved_words
+                    .iter()
+                    .map(|r| pool.add_rule(r))
+                    .collect(),
             })
             .collect();
         let external_tokens = g
