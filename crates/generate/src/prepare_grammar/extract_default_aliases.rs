@@ -159,6 +159,176 @@ pub(super) fn extract_default_aliases(
     result
 }
 
+// --- pool-based pass (replaces the Rule-based one at the container flip) ---
+
+use std::collections::BTreeMap;
+
+use super::extract_tokens::PoolExtractedMeta;
+use crate::rule_pool::{Alias as PoolAlias, FSTEP_ALIAS_NAMED, FlatOut, PoolGrammar, RulePool};
+
+#[derive(Clone, Default)]
+struct PoolSymbolStatus {
+    aliases: Vec<(PoolAlias, usize)>,
+    appears_unaliased: bool,
+}
+
+/// Pool twin of `extract_default_aliases`: alias identity is the interned
+/// `(StrId, is_named)` pair, and default-redundant step aliases are cleared
+/// in place (zeroing both the id and the named bit keeps steps canonical for
+/// `==`/`Hash` dedup).
+pub(super) fn extract_default_aliases_pool(
+    g: &PoolGrammar,
+    meta: &PoolExtractedMeta,
+    out: &mut FlatOut,
+) -> BTreeMap<Symbol, PoolAlias> {
+    let mut terminal_status_list = vec![PoolSymbolStatus::default(); meta.lexical_variables.len()];
+    let mut non_terminal_status_list = vec![PoolSymbolStatus::default(); g.variables.len()];
+    let mut external_status_list = vec![PoolSymbolStatus::default(); meta.external_tokens.len()];
+
+    for prod in &out.productions[..] {
+        for step in &out.steps[prod.step_range()] {
+            let symbol = step.symbol();
+            let status = match symbol.kind {
+                SymbolType::External => &mut external_status_list[symbol.index],
+                SymbolType::NonTerminal => &mut non_terminal_status_list[symbol.index],
+                SymbolType::Terminal => &mut terminal_status_list[symbol.index],
+                SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
+                    panic!("Unexpected end token")
+                }
+            };
+
+            // Default aliases don't work for inlined variables.
+            if meta.inline.contains(&symbol) {
+                continue;
+            }
+
+            if let Some(alias) = step.alias() {
+                if let Some(count_for_alias) = status
+                    .aliases
+                    .iter_mut()
+                    .find_map(|(a, count)| (*a == alias).then_some(count))
+                {
+                    *count_for_alias += 1;
+                } else {
+                    status.aliases.push((alias, 1));
+                }
+            } else {
+                status.appears_unaliased = true;
+            }
+        }
+    }
+
+    for symbol in &meta.extra_symbols {
+        let status = match symbol.kind {
+            SymbolType::External => &mut external_status_list[symbol.index],
+            SymbolType::NonTerminal => &mut non_terminal_status_list[symbol.index],
+            SymbolType::Terminal => &mut terminal_status_list[symbol.index],
+            SymbolType::End | SymbolType::EndOfNonTerminalExtra => panic!("Unexpected end token"),
+        };
+        status.appears_unaliased = true;
+    }
+
+    let symbols_with_statuses = (terminal_status_list
+        .iter_mut()
+        .enumerate()
+        .map(|(i, status)| (Symbol::terminal(i), status)))
+    .chain(
+        non_terminal_status_list
+            .iter_mut()
+            .enumerate()
+            .map(|(i, status)| (Symbol::non_terminal(i), status)),
+    )
+    .chain(
+        external_status_list
+            .iter_mut()
+            .enumerate()
+            .map(|(i, status)| (Symbol::external(i), status)),
+    );
+
+    let mut result = BTreeMap::new();
+    for (symbol, status) in symbols_with_statuses {
+        if status.appears_unaliased {
+            status.aliases.clear();
+        } else if let Some(default_entry) = status
+            .aliases
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, (_, count))| (count, -(*i as i64)))
+            .map(|(_, entry)| *entry)
+        {
+            status.aliases.clear();
+            status.aliases.push(default_entry);
+            result.insert(symbol, default_entry.0);
+        }
+    }
+
+    let mut alias_positions_to_clear = Vec::new();
+    for &(ps, pe) in &out.var_prods {
+        alias_positions_to_clear.clear();
+
+        let productions = &out.productions[ps as usize..pe as usize];
+        for (i, prod) in productions.iter().enumerate() {
+            for (j, step) in out.steps[prod.step_range()].iter().enumerate() {
+                let symbol = step.symbol();
+                let status = match symbol.kind {
+                    SymbolType::External => &external_status_list[symbol.index],
+                    SymbolType::NonTerminal => &non_terminal_status_list[symbol.index],
+                    SymbolType::Terminal => &terminal_status_list[symbol.index],
+                    SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
+                        panic!("Unexpected end token")
+                    }
+                };
+
+                // If this step is aliased as the symbol's default alias, then remove that alias.
+                if step.alias().is_some() && step.alias() == status.aliases.first().map(|t| t.0) {
+                    let mut other_productions_must_use_this_alias_at_this_index = false;
+                    for (other_i, other_prod) in productions.iter().enumerate() {
+                        let other_steps = &out.steps[other_prod.step_range()];
+                        if other_i != i
+                            && other_steps.len() > j
+                            && other_steps[j].alias() == step.alias()
+                            && result.get(&other_steps[j].symbol()) != step.alias().as_ref()
+                        {
+                            other_productions_must_use_this_alias_at_this_index = true;
+                            break;
+                        }
+                    }
+
+                    if !other_productions_must_use_this_alias_at_this_index {
+                        alias_positions_to_clear.push(prod.steps_start as usize + j);
+                    }
+                }
+            }
+        }
+
+        for &step_index in &alias_positions_to_clear {
+            let step = &mut out.steps[step_index];
+            step.alias = 0;
+            step.flags &= !FSTEP_ALIAS_NAMED;
+        }
+    }
+
+    result
+}
+
+/// A/B materialization of the pool alias map. Deleted at the container flip.
+pub(super) fn materialize_default_aliases(
+    pool: &RulePool,
+    map: &BTreeMap<Symbol, PoolAlias>,
+) -> AliasMap {
+    map.iter()
+        .map(|(&symbol, alias)| {
+            (
+                symbol,
+                Alias {
+                    value: pool.resolve(alias.value).to_string(),
+                    is_named: alias.is_named,
+                },
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,8 +410,21 @@ mod tests {
             ],
         };
 
+        let pristine = syntax_grammar.clone();
         let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
         assert_eq!(default_aliases.len(), 3);
+
+        // Pool A/B on the same fixture: the alias map and the mutated steps.
+        let (g, meta, mut out) = super::super::pool_from_syntax(&pristine, &lexical_grammar);
+        let pool_map = extract_default_aliases_pool(&g, &meta, &mut out);
+        assert_eq!(
+            materialize_default_aliases(&g.pool, &pool_map),
+            default_aliases
+        );
+        assert_eq!(
+            super::super::flatten_grammar::materialize_flattened(&g, &meta, &out).variables,
+            syntax_grammar.variables
+        );
 
         assert_eq!(
             default_aliases.get(&Symbol::terminal(0)),

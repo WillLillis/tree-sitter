@@ -419,6 +419,112 @@ pub fn prepare_grammar(
     let t0 = std::time::Instant::now();
     let lexical_grammar = expand_tokens(lexical_grammar)?;
     let t_tokens = t0.elapsed();
+
+    // TEMP A/B (until the container flip): pool extract_default_aliases and
+    // process_inlines vs master, one block because inlines consumes the
+    // aliases-mutated state. Master's map is address-keyed, so the inline
+    // maps compare through a canonical (variable, production, step) form.
+    {
+        use std::hint::black_box;
+        let n = 50u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(syntax_grammar.clone());
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let mut sg = syntax_grammar.clone();
+            black_box(extract_default_aliases(&mut sg, &lexical_grammar));
+        }
+        let master_aliases_time = (t.elapsed() / n)
+            .checked_sub(clone_only)
+            .unwrap_or_default();
+
+        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
+        let interned_meta =
+            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
+        let mut ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
+        expand_repeats::expand_repeats_pool(&mut base, &mut ext_meta);
+        let mut st = flatten_grammar::FlattenState::default();
+        let mut out = crate::rule_pool::FlatOut::default();
+        flatten_grammar::flatten_grammar_pool(&base, &ext_meta, &mut st, &mut out).unwrap();
+
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(out.clone());
+        }
+        let out_clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let mut o = out.clone();
+            black_box(extract_default_aliases::extract_default_aliases_pool(
+                &base, &ext_meta, &mut o,
+            ));
+        }
+        let pool_aliases_time = (t.elapsed() / n)
+            .checked_sub(out_clone_only)
+            .unwrap_or_default();
+        eprintln!(
+            "[POOL extract_default_aliases] master {master_aliases_time:?}  pool {pool_aliases_time:?}"
+        );
+
+        // Aliases parity: the returned map and the mutated grammar.
+        let mut master_sg = syntax_grammar.clone();
+        let master_aliases = extract_default_aliases(&mut master_sg, &lexical_grammar);
+        let pool_aliases =
+            extract_default_aliases::extract_default_aliases_pool(&base, &ext_meta, &mut out);
+        assert_eq!(
+            extract_default_aliases::materialize_default_aliases(&base.pool, &pool_aliases),
+            master_aliases,
+            "pool extract_default_aliases map diverged from master"
+        );
+        assert_eq!(
+            flatten_grammar::materialize_flattened(&base, &ext_meta, &out),
+            master_sg,
+            "pool extract_default_aliases grammar mutation diverged from master"
+        );
+
+        // Inlines run on the post-aliases state on both sides.
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(process_inlines(&master_sg, &lexical_grammar));
+        }
+        let master_inlines_time = t.elapsed() / n;
+
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(out.clone());
+        }
+        let out_clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let mut o = out.clone();
+            let _ = black_box(process_inlines::process_inlines_pool(
+                &base, &ext_meta, &mut o,
+            ));
+        }
+        let pool_inlines_time = (t.elapsed() / n)
+            .checked_sub(out_clone_only)
+            .unwrap_or_default();
+        eprintln!(
+            "[POOL process_inlines] master {master_inlines_time:?}  pool {pool_inlines_time:?}"
+        );
+
+        let master_map = process_inlines(&master_sg, &lexical_grammar).unwrap();
+        let inl = process_inlines::process_inlines_pool(&base, &ext_meta, &mut out).unwrap();
+        assert_eq!(
+            process_inlines::materialize_inlined_productions(&base.pool, &out, inl.first_inlined),
+            master_map.productions,
+            "pool process_inlines productions diverged from master"
+        );
+        assert_eq!(
+            process_inlines::canon_pool_inlines(&inl, &out),
+            process_inlines::canon_master_inlines(&master_map, &master_sg),
+            "pool process_inlines map diverged from master"
+        );
+    }
+
     let t0 = std::time::Instant::now();
     let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
     let inlines = process_inlines(&syntax_grammar, &lexical_grammar)?;
@@ -587,6 +693,101 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
     }
 
     Ok(())
+}
+
+/// Test fixture bridge: convert a hand-built master `SyntaxGrammar` (+
+/// `LexicalGrammar` for token names) into the pool-pass inputs. Steps pack
+/// through `FStep::pack`, so the result is canonical. Deleted at the flip.
+#[cfg(test)]
+fn pool_from_syntax(
+    sg: &SyntaxGrammar,
+    lex: &LexicalGrammar,
+) -> (
+    crate::rule_pool::PoolGrammar,
+    extract_tokens::PoolExtractedMeta,
+    crate::rule_pool::FlatOut,
+) {
+    use crate::rule_pool::{
+        Alias, FProd, FStep, FlatOut, Node, PoolGrammar, PoolVariable, Prec, RulePool,
+    };
+
+    let mut pool = RulePool::default();
+    let blank = pool.push_node(Node::Blank);
+    let variables = sg
+        .variables
+        .iter()
+        .map(|v| PoolVariable {
+            name: pool.intern(&v.name),
+            root: blank,
+        })
+        .collect();
+
+    let mut out = FlatOut::default();
+    for v in &sg.variables {
+        let ps = out.productions.len() as u32;
+        for p in &v.productions {
+            let steps_start = out.steps.len() as u32;
+            for s in &p.steps {
+                out.steps.push(FStep::pack(
+                    s.symbol,
+                    match &s.precedence {
+                        Precedence::None => Prec::None,
+                        Precedence::Integer(n) => Prec::Integer(*n),
+                        Precedence::Name(n) => Prec::Name(pool.intern(n)),
+                    },
+                    s.associativity,
+                    s.alias.as_ref().map(|a| Alias {
+                        value: pool.intern(&a.value),
+                        is_named: a.is_named,
+                    }),
+                    s.field_name.as_ref().map(|f| pool.intern(f)),
+                    s.reserved_word_set_id.0 as u16,
+                ));
+            }
+            out.productions.push(FProd {
+                steps_start,
+                steps_len: out.steps.len() as u32 - steps_start,
+                dynamic_precedence: p.dynamic_precedence,
+            });
+        }
+        out.var_prods.push((ps, out.productions.len() as u32));
+    }
+
+    let meta = extract_tokens::PoolExtractedMeta {
+        kinds: sg.variables.iter().map(|v| v.kind).collect(),
+        lexical_variables: lex
+            .variables
+            .iter()
+            .map(|v| extract_tokens::PoolLexicalVariable {
+                name: pool.intern(&v.name),
+                kind: v.kind,
+                root: blank,
+            })
+            .collect(),
+        separator_roots: Vec::new(),
+        extra_symbols: sg.extra_symbols.clone(),
+        external_tokens: sg.external_tokens.clone(),
+        reserved_sets: Vec::new(),
+        supertypes: sg.supertype_symbols.clone(),
+        conflicts: sg.expected_conflicts.clone(),
+        inline: sg.variables_to_inline.clone(),
+        word: sg.word_token,
+    };
+
+    let g = PoolGrammar {
+        pool,
+        name: String::new(),
+        variables,
+        external_roots: Vec::new(),
+        extra_roots: Vec::new(),
+        reserved_sets: Vec::new(),
+        supertype_names: Vec::new(),
+        conflict_names: Vec::new(),
+        inline_names: Vec::new(),
+        word_name: None,
+        precedence_orderings: sg.precedence_orderings.clone(),
+    };
+    (g, meta, out)
 }
 
 #[cfg(test)]

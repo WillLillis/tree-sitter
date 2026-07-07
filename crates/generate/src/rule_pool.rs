@@ -418,7 +418,7 @@ impl RulePool {
 /// associativity (5..7: none/left/right), and alias-is-named (7). `prec_val`
 /// holds the integer value or the raw name `StrId` per the tag;
 /// `alias`/`field` are raw `StrId`s with 0 meaning none.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FStep {
     pub sym_index: u32,
     pub prec_val: i32,
@@ -435,8 +435,47 @@ pub const FSTEP_PREC_NAME: u8 = 2 << 3;
 pub const FSTEP_ASSOC_LEFT: u8 = 1 << 5;
 pub const FSTEP_ASSOC_RIGHT: u8 = 2 << 5;
 pub const FSTEP_ALIAS_NAMED: u8 = 1 << 7;
+pub const FSTEP_PREC_MASK: u8 = 0b11 << 3;
+pub const FSTEP_ASSOC_MASK: u8 = 0b11 << 5;
 
 impl FStep {
+    /// The one packing site. Canonical: absent parts zero their value bits
+    /// too (`prec_val`/`alias`/`field`), so packed steps compare with `==`.
+    #[must_use]
+    pub fn pack(
+        symbol: Symbol,
+        prec: Prec,
+        assoc: Option<Associativity>,
+        alias: Option<Alias>,
+        field: Option<StrId>,
+        reserved: u16,
+    ) -> Self {
+        let (prec_bits, prec_val) = match prec {
+            Prec::None => (0u8, 0i32),
+            Prec::Integer(n) => (FSTEP_PREC_INTEGER, n),
+            Prec::Name(sid) => (FSTEP_PREC_NAME, sid.raw() as i32),
+        };
+        let assoc_bits = match assoc {
+            None => 0u8,
+            Some(Associativity::Left) => FSTEP_ASSOC_LEFT,
+            Some(Associativity::Right) => FSTEP_ASSOC_RIGHT,
+        };
+        let (alias_raw, named_bit) = alias.map_or((0, 0u8), |a| {
+            (
+                a.value.raw(),
+                if a.is_named { FSTEP_ALIAS_NAMED } else { 0 },
+            )
+        });
+        Self {
+            sym_index: symbol.index as u32,
+            prec_val,
+            alias: alias_raw,
+            field: field.map_or(0, StrId::raw),
+            reserved,
+            flags: (symbol.kind as u8) | prec_bits | assoc_bits | named_bit,
+        }
+    }
+
     #[must_use]
     pub const fn symbol(self) -> Symbol {
         Symbol {

@@ -291,9 +291,27 @@ remembering: the combined separator rule mirrors
 with NO singleton unwrap, and `expand_rule`'s Repeat leaves its placeholder
 `Accept` state behind when the inner rule fails to expand (quirk preserved).
 
-Still Rule-based: `process_inlines` (the rust 10.2ms hotspot),
-`extract_default_aliases`, the two pre-pipeline `validate_*` walks, and the
-containers themselves (the flip).
+`extract_default_aliases` + `process_inlines` (2026-07-07, converted together
+because inlines consumes the aliases-mutated grammar; n=50 loops, us master ->
+pool):
+
+| pass | c | cpp | python | go | javascript | rust |
+|---|---|---|---|---|---|---|
+| extract_default_aliases | 162 -> 71 | 60 -> 134 (*) | 106 -> 29 | 42 -> 14 | 88 -> 33 | 141 -> 114 |
+| process_inlines | 158 -> 63 | 559 -> 125 | 733 -> 174 | 167 -> 74 | 951 -> 375 | **17533 -> 1063 (16.5x)** |
+
+The rust `process_inlines` hotspot (the branch's biggest remaining prepare
+term) is the payoff: master's O(created^2) dedup scan with per-step String
+compares becomes a content-hash memo over `Copy` step slices, and the
+address-keyed result map becomes `(production id, dot)` keys. Verified: alias
+map, alias-mutated whole `SyntaxGrammar`, created inlined productions, and
+the inline map (through a canonical `(variable, production, dot)` form, since
+master's map is address-keyed) all asserted equal on the six grammars.
+(*) master cpp aliases cannot genuinely be 3x faster than master c on a
+superset grammar; netted sub-100us numbers at n=50 are noise.
+
+Still Rule-based: the two pre-pipeline `validate_*` walks and the containers
+themselves (the flip).
 
 ## `build_tables` under the flat IR (quick investigation, 2026-07-06)
 
@@ -377,9 +395,9 @@ of the new `SyntaxGrammar`.
 
 ## Next steps (priority order)
 
-1. **Remaining pass conversions**: `process_inlines` (the rust 10.2ms
-   hotspot; pooled step ranges + `(ProdId, dot)` keys per the design doc),
-   `extract_default_aliases`, the two pre-pipeline `validate_*` walks.
+1. **Remaining pass conversions**: the two pre-pipeline `validate_*` walks
+   (`validate_precedences`, `validate_indirect_recursion`); everything else
+   is converted.
 2. **Container flip** per `FLAT_POOL_DESIGN.md`: pool-owning grammar structs,
    delete the `Rule` bridges (`add_rule`/`rule`), `materialize_*` fns, TEMP
    derives, and the A/B blocks.

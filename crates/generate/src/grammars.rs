@@ -93,7 +93,7 @@ pub struct Production {
     pub dynamic_precedence: i32,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)] // TEMP Debug: pool-pass A/B unwraps
 pub struct InlinedProductionMap {
     pub productions: Vec<Production>,
     pub production_map: HashMap<(*const Production, u32), Vec<usize>>,
@@ -113,7 +113,7 @@ pub struct ExternalToken {
     pub corresponding_internal_token: Option<Symbol>,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)] // TEMP PartialEq/Eq: pool-pass A/B equality asserts
+#[derive(Clone, Debug, Default, PartialEq, Eq)] // TEMP Clone/PartialEq/Eq: pool-pass A/B blocks
 pub struct SyntaxGrammar {
     pub variables: Vec<SyntaxVariable>,
     pub extra_symbols: Vec<Symbol>,

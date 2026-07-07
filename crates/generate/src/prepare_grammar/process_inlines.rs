@@ -232,13 +232,310 @@ pub(super) fn process_inlines(
     .build(grammar))
 }
 
+// --- pool-based pass (replaces the Rule-based one at the container flip) ---
+
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
+
+use rustc_hash::FxHasher;
+
+use super::extract_tokens::PoolExtractedMeta;
+use crate::rule_pool::{
+    FProd, FSTEP_ALIAS_NAMED, FSTEP_ASSOC_MASK, FSTEP_PREC_MASK, FStep, FlatOut, PoolGrammar,
+    RulePool,
+};
+use crate::rules::Symbol;
+
+/// Pool inline map: created productions are appended to the `FlatOut`
+/// production pool, so ids are unified (ids at or above `first_inlined` are
+/// created). `map` is keyed by `(production id, step index)`.
+#[derive(Debug)]
+pub(super) struct PoolInlines {
+    pub first_inlined: u32,
+    pub map: FxHashMap<(u32, u32), Vec<u32>>,
+}
+
+/// Pool twin of `process_inlines`: the same worklist over `Copy` step
+/// buffers, with the O(created^2) structural dedup scan replaced by a
+/// content-hash memo and the address-keyed map replaced by production ids.
+pub(super) fn process_inlines_pool(
+    g: &PoolGrammar,
+    meta: &PoolExtractedMeta,
+    out: &mut FlatOut,
+) -> ProcessInlinesResult<PoolInlines> {
+    for symbol in &meta.inline {
+        match symbol.kind {
+            SymbolType::External => {
+                Err(ProcessInlinesError::ExternalToken(
+                    meta.external_tokens[symbol.index].name.clone(),
+                ))?;
+            }
+            SymbolType::Terminal => {
+                Err(ProcessInlinesError::Token(
+                    g.pool
+                        .resolve(meta.lexical_variables[symbol.index].name)
+                        .to_string(),
+                ))?;
+            }
+            SymbolType::NonTerminal if symbol.index == 0 => {
+                Err(ProcessInlinesError::FirstRule(
+                    g.pool.resolve(g.variables[0].name).to_string(),
+                ))?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(PoolInlineBuilder {
+        first_inlined: out.productions.len() as u32,
+        out,
+        inline: &meta.inline,
+        map: FxHashMap::default(),
+        memo: FxHashMap::default(),
+    }
+    .build())
+}
+
+struct PoolInlineBuilder<'a> {
+    out: &'a mut FlatOut,
+    first_inlined: u32,
+    inline: &'a [Symbol],
+    map: FxHashMap<(u32, u32), Vec<u32>>,
+    /// Created-production dedup: content hash -> unified ids, candidates in
+    /// creation order so the first structural match mirrors master's
+    /// first-position scan.
+    memo: FxHashMap<u64, Vec<u32>>,
+}
+
+#[derive(Clone, Default)]
+struct ScratchProd {
+    steps: Vec<FStep>,
+    dynamic_precedence: i32,
+}
+
+impl PoolInlineBuilder<'_> {
+    fn build(mut self) -> PoolInlines {
+        let mut worklist: Vec<(u32, u32)> = Vec::new();
+        for prod_id in 0..self.first_inlined {
+            worklist.push((prod_id, 0));
+            while !worklist.is_empty() {
+                let mut i = 0;
+                while i < worklist.len() {
+                    let (prod_id, step_index) = worklist[i];
+                    if let Some(step) = self.step_at(prod_id, step_index) {
+                        if self.inline.contains(&step.symbol()) {
+                            let ids = self.inline_at(prod_id, step_index);
+                            worklist.splice(i..=i, ids.into_iter().map(|id| (id, step_index)));
+                        } else {
+                            worklist[i].1 += 1;
+                            i += 1;
+                        }
+                    } else {
+                        worklist.remove(i);
+                    }
+                }
+            }
+        }
+        PoolInlines {
+            first_inlined: self.first_inlined,
+            map: self.map,
+        }
+    }
+
+    fn step_at(&self, prod_id: u32, step: u32) -> Option<FStep> {
+        let p = self.out.productions[prod_id as usize];
+        (step < p.steps_len).then(|| self.out.steps[(p.steps_start + step) as usize])
+    }
+
+    /// Mirror of `inline_production_at_step` on `Copy` step buffers; also
+    /// expands nested inlining at the same step index before storing.
+    fn inline_at(&mut self, prod_id: u32, step_index: u32) -> Vec<u32> {
+        if let Some(ids) = self.map.get(&(prod_id, step_index)) {
+            return ids.clone();
+        }
+
+        let si = step_index as usize;
+        let src = self.out.productions[prod_id as usize];
+        let mut scratch = vec![ScratchProd {
+            steps: self.out.steps[src.step_range()].to_vec(),
+            dynamic_precedence: src.dynamic_precedence,
+        }];
+        let mut i = 0;
+        while i < scratch.len() {
+            let symbol = match scratch[i].steps.get(si) {
+                Some(s) if self.inline.contains(&s.symbol()) => s.symbol(),
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            let removed_prod = std::mem::take(&mut scratch[i]);
+            let removed_step = removed_prod.steps[si];
+            let (vs, ve) = self.out.var_prods[symbol.index];
+            let replacements: Vec<ScratchProd> = (vs..ve)
+                .map(|p_idx| {
+                    let p = self.out.productions[p_idx as usize];
+                    let mut production = removed_prod.clone();
+                    production
+                        .steps
+                        .splice(si..=si, self.out.steps[p.step_range()].iter().copied());
+                    let inserted = &mut production.steps[si..si + p.steps_len as usize];
+                    if removed_step.alias != 0 {
+                        for step in inserted.iter_mut() {
+                            step.alias = removed_step.alias;
+                            step.flags = (step.flags & !FSTEP_ALIAS_NAMED)
+                                | (removed_step.flags & FSTEP_ALIAS_NAMED);
+                        }
+                    }
+                    if removed_step.field != 0 {
+                        for step in inserted.iter_mut() {
+                            step.field = removed_step.field;
+                        }
+                    }
+                    if let Some(last) = inserted.last_mut() {
+                        if last.flags & FSTEP_PREC_MASK == 0 {
+                            last.prec_val = removed_step.prec_val;
+                            last.flags |= removed_step.flags & FSTEP_PREC_MASK;
+                        }
+                        if last.flags & FSTEP_ASSOC_MASK == 0 {
+                            last.flags |= removed_step.flags & FSTEP_ASSOC_MASK;
+                        }
+                    }
+                    if p.dynamic_precedence.abs() > production.dynamic_precedence.abs() {
+                        production.dynamic_precedence = p.dynamic_precedence;
+                    }
+                    production
+                })
+                .collect();
+            scratch.splice(i..=i, replacements);
+        }
+
+        let mut result = Vec::with_capacity(scratch.len());
+        for sp in scratch {
+            let mut hasher = FxHasher::default();
+            sp.dynamic_precedence.hash(&mut hasher);
+            sp.steps.hash(&mut hasher);
+            let candidates = self.memo.entry(hasher.finish()).or_default();
+            let existing = candidates.iter().copied().find(|&id| {
+                let p = self.out.productions[id as usize];
+                p.dynamic_precedence == sp.dynamic_precedence
+                    && self.out.steps[p.step_range()] == sp.steps[..]
+            });
+            result.push(existing.unwrap_or_else(|| {
+                let steps_start = self.out.steps.len() as u32;
+                self.out.steps.extend_from_slice(&sp.steps);
+                self.out.productions.push(FProd {
+                    steps_start,
+                    steps_len: sp.steps.len() as u32,
+                    dynamic_precedence: sp.dynamic_precedence,
+                });
+                let id = (self.out.productions.len() - 1) as u32;
+                candidates.push(id);
+                id
+            }));
+        }
+
+        self.map.insert((prod_id, step_index), result.clone());
+        result
+    }
+}
+
+/// Canonical production identity for A/B comparison (the master map is
+/// address-keyed): grammar productions as `(0, variable, production)`,
+/// created ones as `(1, created index, 0)`. Deleted at the container flip.
+type CanonInlines = BTreeMap<((u8, u32, u32), u32), Vec<u32>>;
+
+pub(super) fn canon_pool_inlines(inl: &PoolInlines, out: &FlatOut) -> CanonInlines {
+    let first = inl.first_inlined;
+    let mut flat_to_var = vec![(0u32, 0u32); first as usize];
+    for (v, &(ps, pe)) in out.var_prods.iter().enumerate() {
+        for (p, id) in (ps..pe).enumerate() {
+            flat_to_var[id as usize] = (v as u32, p as u32);
+        }
+    }
+    let ident = |id: u32| {
+        if id < first {
+            let (v, p) = flat_to_var[id as usize];
+            (0u8, v, p)
+        } else {
+            (1u8, id - first, 0)
+        }
+    };
+    inl.map
+        .iter()
+        .map(|(&(id, step), ids)| {
+            (
+                (ident(id), step),
+                ids.iter().map(|&id| id - first).collect(),
+            )
+        })
+        .collect()
+}
+
+pub(super) fn canon_master_inlines(
+    map: &InlinedProductionMap,
+    grammar: &SyntaxGrammar,
+) -> CanonInlines {
+    let mut by_addr: FxHashMap<*const Production, (u8, u32, u32)> = FxHashMap::default();
+    for (v, variable) in grammar.variables.iter().enumerate() {
+        for (p, production) in variable.productions.iter().enumerate() {
+            by_addr.insert(std::ptr::from_ref(production), (0, v as u32, p as u32));
+        }
+    }
+    for (i, production) in map.productions.iter().enumerate() {
+        by_addr.insert(std::ptr::from_ref(production), (1, i as u32, 0));
+    }
+    map.production_map
+        .iter()
+        .map(|(&(addr, step), ids)| {
+            (
+                (by_addr[&addr], step),
+                ids.iter().map(|&id| id as u32).collect(),
+            )
+        })
+        .collect()
+}
+
+/// A/B materialization of the created productions. Deleted at the flip.
+pub(super) fn materialize_inlined_productions(
+    pool: &RulePool,
+    out: &FlatOut,
+    first_inlined: u32,
+) -> Vec<Production> {
+    out.productions[first_inlined as usize..]
+        .iter()
+        .map(|p| Production {
+            dynamic_precedence: p.dynamic_precedence,
+            steps: out.steps[p.step_range()]
+                .iter()
+                .map(|s| super::flatten_grammar::step_to_master(pool, s))
+                .collect(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        grammars::{LexicalVariable, SyntaxVariable, VariableType},
+        grammars::{ExternalToken, LexicalVariable, SyntaxVariable, VariableType},
         rules::{Associativity, Precedence, Symbol},
     };
+
+    fn assert_pool_matches_master(grammar: &SyntaxGrammar, lexical_grammar: &LexicalGrammar) {
+        let master = process_inlines(grammar, lexical_grammar).unwrap();
+        let (g, meta, mut out) = super::super::pool_from_syntax(grammar, lexical_grammar);
+        let inl = process_inlines_pool(&g, &meta, &mut out).unwrap();
+        assert_eq!(
+            materialize_inlined_productions(&g.pool, &out, inl.first_inlined),
+            master.productions
+        );
+        assert_eq!(
+            canon_pool_inlines(&inl, &out),
+            canon_master_inlines(&master, grammar)
+        );
+    }
 
     #[test]
     fn test_basic_inlining() {
@@ -278,6 +575,7 @@ mod tests {
             ..Default::default()
         };
 
+        assert_pool_matches_master(&grammar, &LexicalGrammar::default());
         let inline_map = process_inlines(&grammar, &LexicalGrammar::default()).unwrap();
 
         // Nothing to inline at step 0.
@@ -376,6 +674,7 @@ mod tests {
             ..Default::default()
         };
 
+        assert_pool_matches_master(&grammar, &LexicalGrammar::default());
         let inline_map = process_inlines(&grammar, &LexicalGrammar::default()).unwrap();
 
         let productions = inline_map
@@ -475,6 +774,7 @@ mod tests {
             ..Default::default()
         };
 
+        assert_pool_matches_master(&grammar, &LexicalGrammar::default());
         let inline_map = process_inlines(&grammar, &LexicalGrammar::default()).unwrap();
 
         let productions = inline_map
@@ -554,5 +854,42 @@ mod tests {
         assert!(result.is_err(), "expected an error, but got none");
         let err = result.err().unwrap();
         assert_eq!(err.to_string(), "Token `something` cannot be inlined",);
+    }
+
+    #[test]
+    fn pool_errors_match_master() {
+        let lexical_grammar = LexicalGrammar {
+            variables: vec![LexicalVariable {
+                name: "tok".to_string(),
+                kind: VariableType::Named,
+                implicit_precedence: 0,
+                start_state: 0,
+            }],
+            ..Default::default()
+        };
+        for inline in [
+            Symbol::terminal(0),
+            Symbol::external(0),
+            Symbol::non_terminal(0),
+        ] {
+            let grammar = SyntaxGrammar {
+                variables_to_inline: vec![inline],
+                variables: vec![SyntaxVariable {
+                    name: "rule0".to_string(),
+                    kind: VariableType::Named,
+                    productions: vec![Production::default()],
+                }],
+                external_tokens: vec![ExternalToken {
+                    name: "ext".to_string(),
+                    kind: VariableType::Named,
+                    corresponding_internal_token: None,
+                }],
+                ..Default::default()
+            };
+            let master_err = process_inlines(&grammar, &lexical_grammar).unwrap_err();
+            let (g, meta, mut out) = super::super::pool_from_syntax(&grammar, &lexical_grammar);
+            let pool_err = process_inlines_pool(&g, &meta, &mut out).unwrap_err();
+            assert_eq!(pool_err.to_string(), master_err.to_string());
+        }
     }
 }

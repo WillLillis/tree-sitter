@@ -304,8 +304,9 @@ pub(super) fn flatten_grammar(
 
 use super::extract_tokens::PoolExtractedMeta;
 use crate::rule_pool::{
-    FProd, FSTEP_ALIAS_NAMED, FSTEP_ASSOC_LEFT, FSTEP_ASSOC_RIGHT, FSTEP_PREC_INTEGER,
-    FSTEP_PREC_NAME, FStep, FlatOut, Node as PoolNode, NodeId, PoolGrammar, Prec, RulePool, StrId,
+    FProd, FSTEP_ASSOC_LEFT, FSTEP_ASSOC_MASK, FSTEP_ASSOC_RIGHT, FSTEP_PREC_INTEGER,
+    FSTEP_PREC_MASK, FSTEP_PREC_NAME, FStep, FlatOut, Node as PoolNode, NodeId, PoolGrammar, Prec,
+    RulePool, StrId,
 };
 use crate::rules::SymbolType;
 
@@ -455,30 +456,17 @@ impl FlattenState {
     }
 
     fn push_step(&mut self, kind: SymbolType, index: u32) {
-        let (prec_bits, prec_val) = match self.prec.last() {
-            None | Some(Prec::None) => (0u8, 0i32),
-            Some(Prec::Integer(n)) => (FSTEP_PREC_INTEGER, *n),
-            Some(Prec::Name(sid)) => (FSTEP_PREC_NAME, sid.raw() as i32),
-        };
-        let assoc_bits = match self.assoc.last() {
-            None => 0u8,
-            Some(Associativity::Left) => FSTEP_ASSOC_LEFT,
-            Some(Associativity::Right) => FSTEP_ASSOC_RIGHT,
-        };
-        let (alias, named_bit) = self.alias.last().map_or((0, 0u8), |a| {
-            (
-                a.value.raw(),
-                if a.is_named { FSTEP_ALIAS_NAMED } else { 0 },
-            )
-        });
-        self.steps.push(FStep {
-            sym_index: index,
-            prec_val,
-            alias,
-            field: self.field.last().map_or(0, |f| f.raw()),
-            reserved: self.reserved.last().copied().unwrap_or(0),
-            flags: (kind as u8) | prec_bits | assoc_bits | named_bit,
-        });
+        self.steps.push(FStep::pack(
+            Symbol {
+                kind,
+                index: index as usize,
+            },
+            self.prec.last().copied().unwrap_or(Prec::None),
+            self.assoc.last().copied(),
+            self.alias.last().copied(),
+            self.field.last().copied(),
+            self.reserved.last().copied().unwrap_or(0),
+        ));
     }
 
     /// `true` if nothing after the current point can push a step. Equivalent
@@ -505,7 +493,7 @@ impl FlattenState {
                 };
                 let step = self.steps.last_mut().unwrap();
                 step.prec_val = val;
-                step.flags = (step.flags & !(0b11 << 3)) | bits;
+                step.flags = (step.flags & !FSTEP_PREC_MASK) | bits;
             }
         }
         if flags & MP_ASSOC != 0 {
@@ -517,7 +505,7 @@ impl FlattenState {
                     Some(Associativity::Right) => FSTEP_ASSOC_RIGHT,
                 };
                 let step = self.steps.last_mut().unwrap();
-                step.flags = (step.flags & !(0b11 << 5)) | bits;
+                step.flags = (step.flags & !FSTEP_ASSOC_MASK) | bits;
             }
         }
         if flags & MP_ALIAS != 0 {
@@ -728,26 +716,31 @@ fn emit(st: &FlattenState, out: &mut FlatOut, prod_start: u32) {
 
 /// Materialize the pool pass's output as a master [`SyntaxGrammar`] for A/B
 /// verification. Deleted at the container flip.
+/// A/B materialization of one flat step. Deleted at the container flip.
+pub(super) fn step_to_master(pool: &RulePool, s: &FStep) -> ProductionStep {
+    ProductionStep {
+        symbol: s.symbol(),
+        precedence: match s.precedence() {
+            Prec::None => Precedence::None,
+            Prec::Integer(n) => Precedence::Integer(n),
+            Prec::Name(sid) => Precedence::Name(pool.resolve(sid).to_string()),
+        },
+        associativity: s.associativity(),
+        alias: s.alias().map(|a| crate::rules::Alias {
+            value: pool.resolve(a.value).to_string(),
+            is_named: a.is_named,
+        }),
+        field_name: s.field().map(|f| pool.resolve(f).to_string()),
+        reserved_word_set_id: ReservedWordSetId(s.reserved as usize),
+    }
+}
+
 pub(super) fn materialize_flattened(
     g: &PoolGrammar,
     meta: &PoolExtractedMeta,
     out: &FlatOut,
 ) -> SyntaxGrammar {
-    let step_to_master = |s: &FStep| ProductionStep {
-        symbol: s.symbol(),
-        precedence: match s.precedence() {
-            Prec::None => Precedence::None,
-            Prec::Integer(n) => Precedence::Integer(n),
-            Prec::Name(sid) => Precedence::Name(g.pool.resolve(sid).to_string()),
-        },
-        associativity: s.associativity(),
-        alias: s.alias().map(|a| crate::rules::Alias {
-            value: g.pool.resolve(a.value).to_string(),
-            is_named: a.is_named,
-        }),
-        field_name: s.field().map(|f| g.pool.resolve(f).to_string()),
-        reserved_word_set_id: ReservedWordSetId(s.reserved as usize),
-    };
+    let step_to_master = |s: &FStep| step_to_master(&g.pool, s);
     let mut reserved_word_sets: Vec<TokenSet> = meta
         .reserved_sets
         .iter()
