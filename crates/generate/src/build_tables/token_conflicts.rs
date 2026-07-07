@@ -491,15 +491,14 @@ mod tests {
     use super::*;
     use crate::{
         grammars::{Variable, VariableType},
-        prepare_grammar::{ExtractedLexicalGrammar, expand_tokens},
+        prepare_grammar::expand_token_rules,
         rules::{Precedence, Rule, Symbol},
     };
 
     #[test]
     fn test_starting_characters() {
-        let grammar = expand_tokens(ExtractedLexicalGrammar {
-            separators: Vec::new(),
-            variables: vec![
+        let grammar = expand_token_rules(
+            &[
                 Variable {
                     name: "token_0".to_string(),
                     kind: VariableType::Named,
@@ -511,7 +510,8 @@ mod tests {
                     rule: Rule::pattern("d*ef", ""),
                 },
             ],
-        })
+            &[],
+        )
         .unwrap();
 
         let token_map = TokenConflictMap::new(&grammar, Vec::new());
@@ -528,9 +528,8 @@ mod tests {
 
     #[test]
     fn test_token_conflicts() {
-        let grammar = expand_tokens(ExtractedLexicalGrammar {
-            separators: Vec::new(),
-            variables: vec![
+        let grammar = expand_token_rules(
+            &[
                 Variable {
                     name: "in".to_string(),
                     kind: VariableType::Named,
@@ -547,7 +546,8 @@ mod tests {
                     rule: Rule::string("instanceof"),
                 },
             ],
-        })
+            &[],
+        )
         .unwrap();
 
         let var = |name| index_of_var(&grammar, name);
@@ -583,9 +583,8 @@ mod tests {
 
     #[test]
     fn test_token_conflicts_with_separators() {
-        let grammar = expand_tokens(ExtractedLexicalGrammar {
-            separators: vec![Rule::pattern("\\s", "")],
-            variables: vec![
+        let grammar = expand_token_rules(
+            &[
                 Variable {
                     name: "x".to_string(),
                     kind: VariableType::Named,
@@ -597,7 +596,8 @@ mod tests {
                     rule: Rule::string("\n"),
                 },
             ],
-        })
+            &[Rule::pattern("\\s", "")],
+        )
         .unwrap();
 
         let var = |name| index_of_var(&grammar, name);
@@ -610,9 +610,8 @@ mod tests {
 
     #[test]
     fn test_token_conflicts_with_open_ended_tokens() {
-        let grammar = expand_tokens(ExtractedLexicalGrammar {
-            separators: vec![Rule::pattern("\\s", "")],
-            variables: vec![
+        let grammar = expand_token_rules(
+            &[
                 Variable {
                     name: "x".to_string(),
                     kind: VariableType::Named,
@@ -624,7 +623,8 @@ mod tests {
                     rule: Rule::prec(Precedence::Integer(-1), Rule::pattern(".*", "")),
                 },
             ],
-        })
+            &[Rule::pattern("\\s", "")],
+        )
         .unwrap();
 
         let var = |name| index_of_var(&grammar, name);

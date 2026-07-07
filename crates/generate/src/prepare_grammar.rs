@@ -22,22 +22,26 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use self::expand_tokens::expand_tokens;
-use self::{
-    expand_repeats::expand_repeats, extract_default_aliases::extract_default_aliases,
-    extract_tokens::extract_tokens, flatten_grammar::flatten_grammar,
-    intern_symbols::intern_symbols, process_inlines::process_inlines,
+#[cfg(test)]
+pub use self::expand_tokens::expand_token_rules;
+#[cfg(test)]
+use super::{
+    grammars::{ExternalToken, ReservedWordContext, Variable},
+    rules::{Precedence, Rule, Symbol},
 };
 use super::{
     grammars::{
-        ExternalToken, InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry,
-        SyntaxGrammar, Variable,
+        InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry, SyntaxGrammar,
     },
-    rules::{AliasMap, Precedence, Rule, Symbol},
+    rules::AliasMap,
 };
-use crate::{Diagnostic, grammars::ReservedWordContext};
+use crate::Diagnostic;
 
-#[derive(Clone, Debug, PartialEq, Eq)] // TEMP: for the pass A/B loops and equality asserts
+/// Test-only since the pipeline flip: the pool passes carry this state as
+/// `PoolGrammar` + pass metadata; tests still assert against this shape via
+/// the `materialize_*` helpers. Deleted at the frontend flip.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntermediateGrammar<T, U> {
     variables: Vec<Variable>,
     extra_symbols: Vec<T>,
@@ -50,16 +54,20 @@ pub struct IntermediateGrammar<T, U> {
     reserved_word_sets: Vec<ReservedWordContext<T>>,
 }
 
+#[cfg(test)]
 pub type InternedGrammar = IntermediateGrammar<Rule, Variable>;
 
+#[cfg(test)]
 pub type ExtractedSyntaxGrammar = IntermediateGrammar<Symbol, ExternalToken>;
 
-#[derive(Clone, Debug, PartialEq, Eq)] // TEMP Clone: pool expand_tokens A/B loop
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractedLexicalGrammar {
     pub variables: Vec<Variable>,
     pub separators: Vec<Rule>,
 }
 
+#[cfg(test)]
 impl<T, U> Default for IntermediateGrammar<T, U> {
     fn default() -> Self {
         Self {
@@ -160,461 +168,59 @@ pub fn prepare_grammar(
     InlinedProductionMap,
     AliasMap,
 )> {
-    // TEMP SPIKE A/B (remove after the pool decision): master intern_symbols
-    // (Rule, produces a new tree incl. alloc) vs flat-pool intern_symbols
-    // (in-place, no hash-cons, O(1) name map). The Rule->pool conversion is done
-    // up front (setup) and excluded from timing; the flat pool is pre-cloned per
-    // iteration so we time only the in-place rewrite.
-    // TEMP A/B (until the container flip): the real pool-based intern pass vs
-    // master's, timing plus full-output and diagnostics equality.
-    {
-        use std::hint::black_box;
-        let n = 300u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(intern_symbols(input_grammar, &mut Vec::new()));
-        }
-        let master = t.elapsed() / n;
-
-        let base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let mut pools: Vec<_> = (0..n).map(|_| base.clone()).collect();
-        let t = std::time::Instant::now();
-        for p in &mut pools {
-            let _ = black_box(intern_symbols::intern_symbols_pool(p, &mut Vec::new()));
-        }
-        let pool_time = t.elapsed() / n;
-        eprintln!("[POOL intern_symbols] master {master:?}  pool {pool_time:?}");
-
-        let mut master_diags = Vec::new();
-        let master_out = intern_symbols(input_grammar, &mut master_diags).unwrap();
-        let mut g = base;
-        let mut pool_diags = Vec::new();
-        let meta = intern_symbols::intern_symbols_pool(&mut g, &mut pool_diags).unwrap();
-        assert_eq!(
-            intern_symbols::materialize_interned(&g, &meta),
-            master_out,
-            "pool intern_symbols diverged from master"
-        );
-        assert_eq!(pool_diags, master_diags, "pool intern diagnostics diverged");
-    }
-
-    // TEMP A/B (until the container flip): pool validate walks vs master.
-    // Success is (), so the asserts compare success/failure and error text.
-    {
-        use std::hint::black_box;
-        let n = 300u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(validate_precedences(input_grammar));
-            let _ = black_box(validate_indirect_recursion(input_grammar));
-        }
-        let master = t.elapsed() / n;
-
-        let base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(validate_precedences_pool(&base));
-            let _ = black_box(validate_indirect_recursion_pool(&base));
-        }
-        let pool_time = t.elapsed() / n;
-        eprintln!("[POOL validate] master {master:?}  pool {pool_time:?}");
-
-        assert_eq!(
-            validate_precedences_pool(&base).map_err(|e| e.to_string()),
-            validate_precedences(input_grammar).map_err(|e| e.to_string()),
-            "pool validate_precedences diverged from master"
-        );
-        assert_eq!(
-            validate_indirect_recursion_pool(&base).map_err(|e| e.to_string()),
-            validate_indirect_recursion(input_grammar).map_err(|e| e.to_string()),
-            "pool validate_indirect_recursion diverged from master"
-        );
-    }
+    // TEMP (until the frontend flip): the frontends still produce Rule-based
+    // grammars; convert once at the boundary.
+    let mut g = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
 
     let t0 = std::time::Instant::now();
-    validate_precedences(input_grammar)?;
-    validate_indirect_recursion(input_grammar)?;
+    validate_precedences(&g)?;
+    validate_indirect_recursion(&g)?;
     let t_validate = t0.elapsed();
 
     let t0 = std::time::Instant::now();
-    let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
+    let interned_meta = intern_symbols::intern_symbols(&mut g, diagnostics)?;
     let t_intern = t0.elapsed();
 
-    // TEMP SPIKE: time the unconverted middle passes (net of the input clone
-    // each iteration needs) so the combined summary below can place the two
-    // converted passes in syntax-path context.
-    let extract_net = {
-        use std::hint::black_box;
-        let n = 300u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(interned_grammar.clone());
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(extract_tokens(interned_grammar.clone()));
-        }
-        (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default()
-    };
-
-    // TEMP A/B (until the container flip): pool extract_tokens vs master,
-    // chained after the pool intern pass so the converted prefix verifies as
-    // a real pipeline. Asserts both outputs (syntax and lexical grammars).
-    {
-        use std::hint::black_box;
-        let n = 300u32;
-        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let interned_meta =
-            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(base.clone());
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let mut g = base.clone();
-            let _ = black_box(extract_tokens::extract_tokens_pool(&mut g, &interned_meta));
-        }
-        let pool_time = (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default();
-        eprintln!("[POOL extract_tokens] master {extract_net:?}  pool {pool_time:?}");
-
-        let master_out = extract_tokens(interned_grammar.clone()).unwrap();
-        let mut g = base.clone();
-        let meta = extract_tokens::extract_tokens_pool(&mut g, &interned_meta).unwrap();
-        assert_eq!(
-            extract_tokens::materialize_extracted(&g, &meta, &g.precedence_orderings),
-            master_out,
-            "pool extract_tokens diverged from master"
-        );
-    }
-
     let t0 = std::time::Instant::now();
-    let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
+    let mut ext_meta = extract_tokens::extract_tokens(&mut g, &interned_meta)?;
     let t_extract = t0.elapsed();
 
-    let expand_net = {
-        use std::hint::black_box;
-        let n = 300u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(syntax_grammar.clone());
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(expand_repeats(syntax_grammar.clone()));
-        }
-        (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default()
-    };
-
-    // TEMP A/B (until the container flip): pool expand_repeats vs master,
-    // chained after the pool intern + extract passes.
-    {
-        use std::hint::black_box;
-        let n = 300u32;
-        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let interned_meta =
-            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
-        let ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box((base.clone(), ext_meta.clone()));
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let (mut g, mut m) = (base.clone(), ext_meta.clone());
-            expand_repeats::expand_repeats_pool(&mut g, &mut m);
-            black_box((&g, &m));
-        }
-        let pool_time = (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default();
-        eprintln!("[POOL expand_repeats] master {expand_net:?}  pool {pool_time:?}");
-
-        let master_out = expand_repeats(syntax_grammar.clone());
-        let (mut g, mut m) = (base, ext_meta);
-        expand_repeats::expand_repeats_pool(&mut g, &mut m);
-        assert_eq!(
-            extract_tokens::materialize_extracted(&g, &m, &g.precedence_orderings).0,
-            master_out,
-            "pool expand_repeats diverged from master"
-        );
-    }
-
     let t0 = std::time::Instant::now();
-    let syntax_grammar = expand_repeats(syntax_grammar);
+    expand_repeats::expand_repeats(&mut g, &mut ext_meta);
     let t_expand = t0.elapsed();
 
-    // TEMP A/B (until the container flip): pool flatten vs master, run over
-    // the full converted chain (intern -> extract -> expand -> flatten all
-    // pool-side). Master's flatten consumes its input, so its timing includes
-    // a per-iteration clone, netted out. Full SyntaxGrammar asserted equal.
-    {
-        use std::hint::black_box;
-        let n = 300u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(syntax_grammar.clone());
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(flatten_grammar(syntax_grammar.clone()));
-        }
-        let master = (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default();
-
-        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let interned_meta =
-            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
-        let mut ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
-        expand_repeats::expand_repeats_pool(&mut base, &mut ext_meta);
-        let mut st = flatten_grammar::FlattenState::default();
-        let mut out = crate::rule_pool::FlatOut::default();
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            flatten_grammar::flatten_grammar_pool(&base, &ext_meta, &mut st, &mut out).unwrap();
-            black_box(&out);
-        }
-        let pool_time = t.elapsed() / n;
-        eprintln!("[POOL flatten_grammar] master {master:?}  pool {pool_time:?}");
-
-        let master_out = flatten_grammar(syntax_grammar.clone()).unwrap();
-        flatten_grammar::flatten_grammar_pool(&base, &ext_meta, &mut st, &mut out).unwrap();
-        assert_eq!(
-            flatten_grammar::materialize_flattened(&base, &ext_meta, &out),
-            master_out,
-            "pool flatten_grammar diverged from master"
-        );
-    }
-
     let t0 = std::time::Instant::now();
-    let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
+    let mut state = flatten_grammar::FlattenState::default();
+    let mut out = crate::rule_pool::FlatOut::default();
+    flatten_grammar::flatten_grammar(&g, &ext_meta, &mut state, &mut out)?;
     let t_flatten = t0.elapsed();
 
-    // TEMP A/B (until the container flip): pool expand_tokens vs master, run
-    // over the full converted pool chain. Output LexicalGrammar asserted equal.
-    {
-        use std::hint::black_box;
-        let n = 300u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(lexical_grammar.clone());
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(expand_tokens(lexical_grammar.clone()));
-        }
-        let master = (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default();
-
-        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let interned_meta =
-            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
-        let mut ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
-        expand_repeats::expand_repeats_pool(&mut base, &mut ext_meta);
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(expand_tokens::expand_tokens_pool(
-                &mut base.pool,
-                &ext_meta.lexical_variables,
-                &ext_meta.separator_roots,
-            ));
-        }
-        let pool_time = t.elapsed() / n;
-        eprintln!("[POOL expand_tokens] master {master:?}  pool {pool_time:?}");
-
-        let master_out = expand_tokens(lexical_grammar.clone()).unwrap();
-        let pool_out = expand_tokens::expand_tokens_pool(
-            &mut base.pool,
-            &ext_meta.lexical_variables,
-            &ext_meta.separator_roots,
-        )
-        .unwrap();
-        assert_eq!(
-            pool_out, master_out,
-            "pool expand_tokens diverged from master"
-        );
-    }
-
     let t0 = std::time::Instant::now();
-    let lexical_grammar = expand_tokens(lexical_grammar)?;
+    let lexical_grammar = expand_tokens::expand_tokens(
+        &mut g.pool,
+        &ext_meta.lexical_variables,
+        &ext_meta.separator_roots,
+    )?;
     let t_tokens = t0.elapsed();
 
-    // TEMP A/B (until the container flip): pool extract_default_aliases and
-    // process_inlines vs master, one block because inlines consumes the
-    // aliases-mutated state. Master's map is address-keyed, so the inline
-    // maps compare through a canonical (variable, production, step) form.
-    {
-        use std::hint::black_box;
-        let n = 50u32;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(syntax_grammar.clone());
-        }
-        let clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let mut sg = syntax_grammar.clone();
-            black_box(extract_default_aliases(&mut sg, &lexical_grammar));
-        }
-        let master_aliases_time = (t.elapsed() / n)
-            .checked_sub(clone_only)
-            .unwrap_or_default();
-
-        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-        let interned_meta =
-            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
-        let mut ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
-        expand_repeats::expand_repeats_pool(&mut base, &mut ext_meta);
-        let mut st = flatten_grammar::FlattenState::default();
-        let mut out = crate::rule_pool::FlatOut::default();
-        flatten_grammar::flatten_grammar_pool(&base, &ext_meta, &mut st, &mut out).unwrap();
-
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(out.clone());
-        }
-        let out_clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let mut o = out.clone();
-            black_box(extract_default_aliases::extract_default_aliases_pool(
-                &base, &ext_meta, &mut o,
-            ));
-        }
-        let pool_aliases_time = (t.elapsed() / n)
-            .checked_sub(out_clone_only)
-            .unwrap_or_default();
-        eprintln!(
-            "[POOL extract_default_aliases] master {master_aliases_time:?}  pool {pool_aliases_time:?}"
-        );
-
-        // Aliases parity: the returned map and the mutated grammar.
-        let mut master_sg = syntax_grammar.clone();
-        let master_aliases = extract_default_aliases(&mut master_sg, &lexical_grammar);
-        let pool_aliases =
-            extract_default_aliases::extract_default_aliases_pool(&base, &ext_meta, &mut out);
-        assert_eq!(
-            extract_default_aliases::materialize_default_aliases(&base.pool, &pool_aliases),
-            master_aliases,
-            "pool extract_default_aliases map diverged from master"
-        );
-        assert_eq!(
-            flatten_grammar::materialize_flattened(&base, &ext_meta, &out),
-            master_sg,
-            "pool extract_default_aliases grammar mutation diverged from master"
-        );
-
-        // Inlines run on the post-aliases state on both sides.
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let _ = black_box(process_inlines(&master_sg, &lexical_grammar));
-        }
-        let master_inlines_time = t.elapsed() / n;
-
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            black_box(out.clone());
-        }
-        let out_clone_only = t.elapsed() / n;
-        let t = std::time::Instant::now();
-        for _ in 0..n {
-            let mut o = out.clone();
-            let _ = black_box(process_inlines::process_inlines_pool(
-                &base, &ext_meta, &mut o,
-            ));
-        }
-        let pool_inlines_time = (t.elapsed() / n)
-            .checked_sub(out_clone_only)
-            .unwrap_or_default();
-        eprintln!(
-            "[POOL process_inlines] master {master_inlines_time:?}  pool {pool_inlines_time:?}"
-        );
-
-        let master_map = process_inlines(&master_sg, &lexical_grammar).unwrap();
-        let inl = process_inlines::process_inlines_pool(&base, &ext_meta, &mut out).unwrap();
-        assert_eq!(
-            process_inlines::materialize_inlined_productions(&base.pool, &out, inl.first_inlined),
-            master_map.productions,
-            "pool process_inlines productions diverged from master"
-        );
-        assert_eq!(
-            process_inlines::canon_pool_inlines(&inl, &out),
-            process_inlines::canon_master_inlines(&master_map, &master_sg),
-            "pool process_inlines map diverged from master"
-        );
-    }
-
     let t0 = std::time::Instant::now();
-    let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
-    let inlines = process_inlines(&syntax_grammar, &lexical_grammar)?;
+    let default_aliases = extract_default_aliases::extract_default_aliases(&g, &ext_meta, &mut out);
+    let inlines = process_inlines::process_inlines(&g, &ext_meta, &mut out)?;
     let t_rest = t0.elapsed();
-    // TEMP SPIKE: real single-shot stage times (spike loops excluded).
+
+    // TEMP (until the `SyntaxGrammar` flip): materialize the legacy-shaped
+    // outputs once at the boundary for build_tables/node_types/render.
+    let default_aliases =
+        extract_default_aliases::materialize_default_aliases(&g.pool, &default_aliases);
+    let syntax_grammar = flatten_grammar::materialize_flattened(&g, &ext_meta, &out);
+    let inlines = process_inlines::materialize_inlines(&g.pool, &out, &inlines, &syntax_grammar);
+
+    // TEMP SPIKE: real single-shot stage times.
     eprintln!(
         "[SPIKE prepare-stages] validate {t_validate:?} intern {t_intern:?} extract {t_extract:?} expand {t_expand:?} flatten {t_flatten:?} expand_tokens {t_tokens:?} aliases+inlines {t_rest:?}"
     );
     Ok((syntax_grammar, lexical_grammar, inlines, default_aliases))
 }
-
-/// Check for indirect recursion cycles in the grammar that can cause infinite loops while
-/// parsing. An indirect recursion cycle occurs when a non-terminal can derive itself through
-/// a chain of single-symbol productions (e.g., A -> B, B -> A).
-fn validate_indirect_recursion(grammar: &InputGrammar) -> Result<(), IndirectRecursionError> {
-    let mut epsilon_transitions: IndexMap<&str, BTreeSet<String>> = IndexMap::new();
-
-    for variable in &grammar.variables {
-        let productions = get_single_symbol_productions(&variable.rule);
-        // Filter out rules that *directly* reference themselves, as this doesn't
-        // cause a parsing loop.
-        let filtered: BTreeSet<String> = productions
-            .into_iter()
-            .filter(|s| s != &variable.name)
-            .collect();
-        epsilon_transitions.insert(variable.name.as_str(), filtered);
-    }
-
-    for start_symbol in epsilon_transitions.keys() {
-        let mut visited = BTreeSet::new();
-        let mut path = Vec::new();
-        if let Some((start_idx, end_idx)) =
-            get_cycle(start_symbol, &epsilon_transitions, &mut visited, &mut path)
-        {
-            let cycle_symbols = path[start_idx..=end_idx]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
-            return Err(IndirectRecursionError(cycle_symbols));
-        }
-    }
-
-    Ok(())
-}
-
-fn get_single_symbol_productions(rule: &Rule) -> BTreeSet<String> {
-    match rule {
-        Rule::NamedSymbol(name) => BTreeSet::from([name.clone()]),
-        Rule::Choice(choices) => choices
-            .iter()
-            .flat_map(get_single_symbol_productions)
-            .collect(),
-        Rule::Metadata { rule, .. } => get_single_symbol_productions(rule),
-        _ => BTreeSet::new(),
-    }
-}
-
 /// Perform a depth-first search to detect cycles in single state transitions.
 fn get_cycle<'a>(
     current: &'a str,
@@ -649,56 +255,6 @@ fn get_cycle<'a>(
 /// Check that all of the named precedences used in the grammar are declared
 /// within the `precedences` lists, and also that there are no conflicting
 /// precedence orderings declared in those lists.
-fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> {
-    // Check that no rule contains a named precedence that is not present in
-    // any of the `precedences` lists.
-    fn validate(
-        rule_name: &str,
-        rule: &Rule,
-        names: &FxHashSet<&String>,
-    ) -> ValidatePrecedenceResult<()> {
-        match rule {
-            Rule::Repeat(rule) => validate(rule_name, rule, names),
-            Rule::Seq(elements) | Rule::Choice(elements) => elements
-                .iter()
-                .try_for_each(|e| validate(rule_name, e, names)),
-            Rule::Metadata { rule, params } => {
-                if let Precedence::Name(n) = &params.precedence
-                    && !names.contains(n)
-                {
-                    Err(UndeclaredPrecedenceError {
-                        precedence: n.clone(),
-                        rule: rule_name.to_string(),
-                    })?;
-                }
-                validate(rule_name, rule, names)?;
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    check_ordering_conflicts(&grammar.precedence_orderings)?;
-
-    let precedence_names = grammar
-        .precedence_orderings
-        .iter()
-        .flat_map(|l| l.iter())
-        .filter_map(|p| {
-            if let PrecedenceEntry::Name(n) = p {
-                Some(n)
-            } else {
-                None
-            }
-        })
-        .collect::<FxHashSet<&String>>();
-    for variable in &grammar.variables {
-        validate(&variable.name, &variable.rule, &precedence_names)?;
-    }
-
-    Ok(())
-}
-
 /// For any two precedence names `a` and `b`, if `a` comes before `b` in some
 /// list, then it cannot come *after* `b` in any list.
 fn check_ordering_conflicts(
@@ -735,10 +291,10 @@ fn check_ordering_conflicts(
     Ok(())
 }
 
-/// Pool twin of `validate_precedences`: the same pre-order walk, with the
-/// declared-name set built as `&str` so `StrId`s resolve straight into it.
-/// Like master, `Reserved` subtrees are not descended.
-fn validate_precedences_pool(g: &crate::rule_pool::PoolGrammar) -> ValidatePrecedenceResult<()> {
+/// Check that all named precedences used in the grammar are declared in the
+/// `precedences` lists, and that those lists don't conflict. `Reserved`
+/// subtrees are not descended.
+fn validate_precedences(g: &crate::rule_pool::PoolGrammar) -> ValidatePrecedenceResult<()> {
     use crate::rule_pool::{Node, Prec};
 
     check_ordering_conflicts(&g.precedence_orderings)?;
@@ -786,10 +342,10 @@ fn validate_precedences_pool(g: &crate::rule_pool::PoolGrammar) -> ValidatePrece
     Ok(())
 }
 
-/// Pool twin of `validate_indirect_recursion`: only the transition
-/// collection walks the pool; the name-graph DFS (`get_cycle`) is shared.
-/// Like master, `Seq`/`Repeat`/`Reserved` are not single-symbol productions.
-fn validate_indirect_recursion_pool(
+/// Check for indirect recursion cycles that would loop while parsing: a
+/// non-terminal deriving itself through a chain of single-symbol
+/// productions. `Seq`/`Repeat`/`Reserved` are not single-symbol productions.
+fn validate_indirect_recursion(
     g: &crate::rule_pool::PoolGrammar,
 ) -> Result<(), IndirectRecursionError> {
     use crate::rule_pool::Node;
@@ -838,9 +394,10 @@ fn validate_indirect_recursion_pool(
     Ok(())
 }
 
-/// Test fixture bridge: convert a hand-built master `SyntaxGrammar` (+
-/// `LexicalGrammar` for token names) into the pool-pass inputs. Steps pack
-/// through `FStep::pack`, so the result is canonical. Deleted at the flip.
+/// Test fixture bridge: convert a hand-built `SyntaxGrammar` (+
+/// `LexicalGrammar` for token names) into the pass inputs. Steps pack
+/// through `FStep::pack`, so the result is canonical. Deleted at the
+/// `SyntaxGrammar` flip.
 #[cfg(test)]
 fn pool_from_syntax(
     sg: &SyntaxGrammar,
@@ -973,15 +530,9 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_precedences(&grammar);
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Undeclared precedence 'omg' in rule 'v2'",
-        );
-
         let pool = crate::rule_pool::PoolGrammar::from_input_grammar(&grammar);
         assert_eq!(
-            validate_precedences_pool(&pool).unwrap_err().to_string(),
+            validate_precedences(&pool).unwrap_err().to_string(),
             "Undeclared precedence 'omg' in rule 'v2'",
         );
     }
@@ -1021,46 +572,45 @@ mod tests {
             ..Default::default()
         };
 
-        let result = validate_precedences(&grammar);
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Conflicting orderings for precedences 'a' and 'b'",
-        );
-
         let pool = crate::rule_pool::PoolGrammar::from_input_grammar(&grammar);
         assert_eq!(
-            validate_precedences_pool(&pool).unwrap_err().to_string(),
+            validate_precedences(&pool).unwrap_err().to_string(),
             "Conflicting orderings for precedences 'a' and 'b'",
         );
     }
 
     #[test]
-    fn test_validate_indirect_recursion_pool_matches_master() {
+    fn test_validate_indirect_recursion() {
         let cycle = |variables: Vec<Variable>| InputGrammar {
             variables,
             ..Default::default()
         };
         let cases = [
             // indirect cycle through a choice and metadata wrapper
-            cycle(vec![
-                Variable::named("a", Rule::choice(vec![Rule::named("b"), Rule::string("x")])),
-                Variable::named("b", Rule::prec(Precedence::Integer(1), Rule::named("a"))),
-            ]),
+            (
+                cycle(vec![
+                    Variable::named("a", Rule::choice(vec![Rule::named("b"), Rule::string("x")])),
+                    Variable::named("b", Rule::prec(Precedence::Integer(1), Rule::named("a"))),
+                ]),
+                Err("Grammar contains an indirectly recursive rule: a -> b -> a".to_string()),
+            ),
             // direct self-reference only: allowed
-            cycle(vec![Variable::named("a", Rule::named("a"))]),
+            (cycle(vec![Variable::named("a", Rule::named("a"))]), Ok(())),
             // three-step cycle, entered from the second variable's subgraph
-            cycle(vec![
-                Variable::named("a", Rule::string("x")),
-                Variable::named("b", Rule::named("c")),
-                Variable::named("c", Rule::named("d")),
-                Variable::named("d", Rule::named("b")),
-            ]),
+            (
+                cycle(vec![
+                    Variable::named("a", Rule::string("x")),
+                    Variable::named("b", Rule::named("c")),
+                    Variable::named("c", Rule::named("d")),
+                    Variable::named("d", Rule::named("b")),
+                ]),
+                Err("Grammar contains an indirectly recursive rule: b -> c -> d -> b".to_string()),
+            ),
         ];
-        for grammar in &cases {
-            let master = validate_indirect_recursion(grammar).map_err(|e| e.to_string());
+        for (grammar, expected) in &cases {
             let pool = crate::rule_pool::PoolGrammar::from_input_grammar(grammar);
-            let pool_result = validate_indirect_recursion_pool(&pool).map_err(|e| e.to_string());
-            assert_eq!(pool_result, master);
+            let result = validate_indirect_recursion(&pool).map_err(|e| e.to_string());
+            assert_eq!(result, *expected);
         }
     }
 }

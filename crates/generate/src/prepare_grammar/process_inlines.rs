@@ -3,190 +3,12 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::grammars::{LexicalGrammar, ProductionStep};
 use crate::{
-    grammars::{InlinedProductionMap, LexicalGrammar, Production, ProductionStep, SyntaxGrammar},
+    grammars::{InlinedProductionMap, Production, SyntaxGrammar},
     rules::SymbolType,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct ProductionStepId {
-    // A `None` value here means that the production itself was produced via inlining,
-    // and is stored in the builder's `productions` vector, as opposed to being
-    // stored in one of the grammar's variables.
-    variable: Option<usize>,
-    production: usize,
-    step: usize,
-}
-
-struct InlinedProductionMapBuilder {
-    production_indices_by_step_id: FxHashMap<ProductionStepId, Vec<usize>>,
-    productions: Vec<Production>,
-}
-
-impl InlinedProductionMapBuilder {
-    fn build(mut self, grammar: &SyntaxGrammar) -> InlinedProductionMap {
-        let mut step_ids_to_process = Vec::new();
-        for (variable_index, variable) in grammar.variables.iter().enumerate() {
-            for production_index in 0..variable.productions.len() {
-                step_ids_to_process.push(ProductionStepId {
-                    variable: Some(variable_index),
-                    production: production_index,
-                    step: 0,
-                });
-                while !step_ids_to_process.is_empty() {
-                    let mut i = 0;
-                    while i < step_ids_to_process.len() {
-                        let step_id = step_ids_to_process[i];
-                        if let Some(step) = self.production_step_for_id(step_id, grammar) {
-                            if grammar.variables_to_inline.contains(&step.symbol) {
-                                let inlined_step_ids = self
-                                    .inline_production_at_step(step_id, grammar)
-                                    .iter()
-                                    .copied()
-                                    .map(|production_index| ProductionStepId {
-                                        variable: None,
-                                        production: production_index,
-                                        step: step_id.step,
-                                    });
-                                step_ids_to_process.splice(i..=i, inlined_step_ids);
-                            } else {
-                                step_ids_to_process[i] = ProductionStepId {
-                                    variable: step_id.variable,
-                                    production: step_id.production,
-                                    step: step_id.step + 1,
-                                };
-                                i += 1;
-                            }
-                        } else {
-                            step_ids_to_process.remove(i);
-                        }
-                    }
-                }
-            }
-        }
-
-        let productions = self.productions;
-        let production_indices_by_step_id = self.production_indices_by_step_id;
-        let production_map = production_indices_by_step_id
-            .into_iter()
-            .map(|(step_id, production_indices)| {
-                let production = core::ptr::from_ref::<Production>(step_id.variable.map_or_else(
-                    || &productions[step_id.production],
-                    |variable_index| {
-                        &grammar.variables[variable_index].productions[step_id.production]
-                    },
-                ));
-                ((production, step_id.step as u32), production_indices)
-            })
-            .collect();
-
-        InlinedProductionMap {
-            productions,
-            production_map,
-        }
-    }
-
-    fn inline_production_at_step<'a>(
-        &'a mut self,
-        step_id: ProductionStepId,
-        grammar: &'a SyntaxGrammar,
-    ) -> &'a [usize] {
-        // Build a list of productions produced by inlining rules.
-        let mut i = 0;
-        let step_index = step_id.step;
-        let mut productions_to_add = vec![self.production_for_id(step_id, grammar).clone()];
-        while i < productions_to_add.len() {
-            if let Some(step) = productions_to_add[i].steps.get(step_index) {
-                let symbol = step.symbol;
-                if grammar.variables_to_inline.contains(&symbol) {
-                    // Remove the production from the vector, replacing it with a placeholder.
-                    let production = productions_to_add
-                        .splice(i..=i, std::iter::once(&Production::default()).cloned())
-                        .next()
-                        .unwrap();
-
-                    // Replace the placeholder with the inlined productions.
-                    productions_to_add.splice(
-                        i..=i,
-                        grammar.variables[symbol.index].productions.iter().map(|p| {
-                            let mut production = production.clone();
-                            let removed_step = production
-                                .steps
-                                .splice(step_index..=step_index, p.steps.iter().cloned())
-                                .next()
-                                .unwrap();
-                            let inserted_steps =
-                                &mut production.steps[step_index..(step_index + p.steps.len())];
-                            if let Some(alias) = removed_step.alias {
-                                for inserted_step in inserted_steps.iter_mut() {
-                                    inserted_step.alias = Some(alias.clone());
-                                }
-                            }
-                            if let Some(field_name) = removed_step.field_name {
-                                for inserted_step in inserted_steps.iter_mut() {
-                                    inserted_step.field_name = Some(field_name.clone());
-                                }
-                            }
-                            if let Some(last_inserted_step) = inserted_steps.last_mut() {
-                                if last_inserted_step.precedence.is_none() {
-                                    last_inserted_step.precedence = removed_step.precedence;
-                                }
-                                if last_inserted_step.associativity.is_none() {
-                                    last_inserted_step.associativity = removed_step.associativity;
-                                }
-                            }
-                            if p.dynamic_precedence.abs() > production.dynamic_precedence.abs() {
-                                production.dynamic_precedence = p.dynamic_precedence;
-                            }
-                            production
-                        }),
-                    );
-
-                    continue;
-                }
-            }
-            i += 1;
-        }
-
-        // Store all the computed productions.
-        let result = productions_to_add
-            .into_iter()
-            .map(|production| {
-                self.productions
-                    .iter()
-                    .position(|p| *p == production)
-                    .unwrap_or_else(|| {
-                        self.productions.push(production);
-                        self.productions.len() - 1
-                    })
-            })
-            .collect();
-
-        // Cache these productions based on the original production step.
-        self.production_indices_by_step_id
-            .entry(step_id)
-            .or_insert(result)
-    }
-
-    fn production_for_id<'a>(
-        &'a self,
-        id: ProductionStepId,
-        grammar: &'a SyntaxGrammar,
-    ) -> &'a Production {
-        id.variable.map_or_else(
-            || &self.productions[id.production],
-            |variable_index| &grammar.variables[variable_index].productions[id.production],
-        )
-    }
-
-    fn production_step_for_id<'a>(
-        &'a self,
-        id: ProductionStepId,
-        grammar: &'a SyntaxGrammar,
-    ) -> Option<&'a ProductionStep> {
-        self.production_for_id(id, grammar).steps.get(id.step)
-    }
-}
 
 pub type ProcessInlinesResult<T> = Result<T, ProcessInlinesError>;
 
@@ -200,41 +22,6 @@ pub enum ProcessInlinesError {
     FirstRule(String),
 }
 
-pub(super) fn process_inlines(
-    grammar: &SyntaxGrammar,
-    lexical_grammar: &LexicalGrammar,
-) -> ProcessInlinesResult<InlinedProductionMap> {
-    for symbol in &grammar.variables_to_inline {
-        match symbol.kind {
-            SymbolType::External => {
-                Err(ProcessInlinesError::ExternalToken(
-                    grammar.external_tokens[symbol.index].name.clone(),
-                ))?;
-            }
-            SymbolType::Terminal => {
-                Err(ProcessInlinesError::Token(
-                    lexical_grammar.variables[symbol.index].name.clone(),
-                ))?;
-            }
-            SymbolType::NonTerminal if symbol.index == 0 => {
-                Err(ProcessInlinesError::FirstRule(
-                    grammar.variables[symbol.index].name.clone(),
-                ))?;
-            }
-            _ => {}
-        }
-    }
-
-    Ok(InlinedProductionMapBuilder {
-        productions: Vec::new(),
-        production_indices_by_step_id: FxHashMap::default(),
-    }
-    .build(grammar))
-}
-
-// --- pool-based pass (replaces the Rule-based one at the container flip) ---
-
-use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use rustc_hash::FxHasher;
@@ -255,10 +42,10 @@ pub(super) struct PoolInlines {
     pub map: FxHashMap<(u32, u32), Vec<u32>>,
 }
 
-/// Pool twin of `process_inlines`: the same worklist over `Copy` step
-/// buffers, with the O(created^2) structural dedup scan replaced by a
-/// content-hash memo and the address-keyed map replaced by production ids.
-pub(super) fn process_inlines_pool(
+/// Expand the grammar's inlined variables: walk every production step,
+/// splicing inlined variables' productions in place of referencing steps
+/// (cartesian over their alternatives, repeated to a fixed point).
+pub(super) fn process_inlines(
     g: &PoolGrammar,
     meta: &PoolExtractedMeta,
     out: &mut FlatOut,
@@ -302,8 +89,7 @@ struct PoolInlineBuilder<'a> {
     inline: &'a [Symbol],
     map: FxHashMap<(u32, u32), Vec<u32>>,
     /// Created-production dedup: content hash -> unified ids, candidates in
-    /// creation order so the first structural match mirrors master's
-    /// first-position scan.
+    /// creation order so the first structural match wins.
     memo: FxHashMap<u64, Vec<u32>>,
 }
 
@@ -347,8 +133,8 @@ impl PoolInlineBuilder<'_> {
         (step < p.steps_len).then(|| self.out.steps[(p.steps_start + step) as usize])
     }
 
-    /// Mirror of `inline_production_at_step` on `Copy` step buffers; also
-    /// expands nested inlining at the same step index before storing.
+    /// Expand inlining at one step of one production, including nested
+    /// inlining at the same step index, then dedup and store the results.
     fn inline_at(&mut self, prod_id: u32, step_index: u32) -> Vec<u32> {
         if let Some(ids) = self.map.get(&(prod_id, step_index)) {
             return ids.clone();
@@ -441,69 +227,17 @@ impl PoolInlineBuilder<'_> {
     }
 }
 
-/// Canonical production identity for A/B comparison (the master map is
-/// address-keyed): grammar productions as `(0, variable, production)`,
-/// created ones as `(1, created index, 0)`. Deleted at the container flip.
-type CanonInlines = BTreeMap<((u8, u32, u32), u32), Vec<u32>>;
-
-pub(super) fn canon_pool_inlines(inl: &PoolInlines, out: &FlatOut) -> CanonInlines {
-    let first = inl.first_inlined;
-    let mut flat_to_var = vec![(0u32, 0u32); first as usize];
-    for (v, &(ps, pe)) in out.var_prods.iter().enumerate() {
-        for (p, id) in (ps..pe).enumerate() {
-            flat_to_var[id as usize] = (v as u32, p as u32);
-        }
-    }
-    let ident = |id: u32| {
-        if id < first {
-            let (v, p) = flat_to_var[id as usize];
-            (0u8, v, p)
-        } else {
-            (1u8, id - first, 0)
-        }
-    };
-    inl.map
-        .iter()
-        .map(|(&(id, step), ids)| {
-            (
-                (ident(id), step),
-                ids.iter().map(|&id| id - first).collect(),
-            )
-        })
-        .collect()
-}
-
-pub(super) fn canon_master_inlines(
-    map: &InlinedProductionMap,
-    grammar: &SyntaxGrammar,
-) -> CanonInlines {
-    let mut by_addr: FxHashMap<*const Production, (u8, u32, u32)> = FxHashMap::default();
-    for (v, variable) in grammar.variables.iter().enumerate() {
-        for (p, production) in variable.productions.iter().enumerate() {
-            by_addr.insert(std::ptr::from_ref(production), (0, v as u32, p as u32));
-        }
-    }
-    for (i, production) in map.productions.iter().enumerate() {
-        by_addr.insert(std::ptr::from_ref(production), (1, i as u32, 0));
-    }
-    map.production_map
-        .iter()
-        .map(|(&(addr, step), ids)| {
-            (
-                (by_addr[&addr], step),
-                ids.iter().map(|&id| id as u32).collect(),
-            )
-        })
-        .collect()
-}
-
-/// A/B materialization of the created productions. Deleted at the flip.
-pub(super) fn materialize_inlined_productions(
+/// Boundary materialization to the address-keyed
+/// [`InlinedProductionMap`] (created productions materialized once, map keys
+/// resolved to production addresses). Deleted at the `SyntaxGrammar` flip.
+pub(super) fn materialize_inlines(
     pool: &RulePool,
     out: &FlatOut,
-    first_inlined: u32,
-) -> Vec<Production> {
-    out.productions[first_inlined as usize..]
+    inl: &PoolInlines,
+    syntax_grammar: &SyntaxGrammar,
+) -> InlinedProductionMap {
+    let first = inl.first_inlined as usize;
+    let productions: Vec<Production> = out.productions[first..]
         .iter()
         .map(|p| Production {
             dynamic_precedence: p.dynamic_precedence,
@@ -512,7 +246,33 @@ pub(super) fn materialize_inlined_productions(
                 .map(|s| super::flatten_grammar::step_to_master(pool, s))
                 .collect(),
         })
-        .collect()
+        .collect();
+    let mut flat_to_var = vec![(0usize, 0usize); first];
+    for (v, &(ps, pe)) in out.var_prods.iter().enumerate() {
+        for (p, id) in (ps..pe).enumerate() {
+            flat_to_var[id as usize] = (v, p);
+        }
+    }
+    let production_map = inl
+        .map
+        .iter()
+        .map(|(&(id, step), ids)| {
+            let production = if (id as usize) < first {
+                let (v, p) = flat_to_var[id as usize];
+                std::ptr::from_ref::<Production>(&syntax_grammar.variables[v].productions[p])
+            } else {
+                std::ptr::from_ref::<Production>(&productions[id as usize - first])
+            };
+            (
+                (production, step),
+                ids.iter().map(|&id| id as usize - first).collect(),
+            )
+        })
+        .collect();
+    InlinedProductionMap {
+        productions,
+        production_map,
+    }
 }
 
 #[cfg(test)]
@@ -523,18 +283,17 @@ mod tests {
         rules::{Associativity, Precedence, Symbol},
     };
 
-    fn assert_pool_matches_master(grammar: &SyntaxGrammar, lexical_grammar: &LexicalGrammar) {
-        let master = process_inlines(grammar, lexical_grammar).unwrap();
+    /// Returns the materialized grammar too: the map is address-keyed, so
+    /// lookups must go through the same materialization.
+    fn pool_pass(
+        grammar: &SyntaxGrammar,
+        lexical_grammar: &LexicalGrammar,
+    ) -> ProcessInlinesResult<(SyntaxGrammar, InlinedProductionMap)> {
         let (g, meta, mut out) = super::super::pool_from_syntax(grammar, lexical_grammar);
-        let inl = process_inlines_pool(&g, &meta, &mut out).unwrap();
-        assert_eq!(
-            materialize_inlined_productions(&g.pool, &out, inl.first_inlined),
-            master.productions
-        );
-        assert_eq!(
-            canon_pool_inlines(&inl, &out),
-            canon_master_inlines(&master, grammar)
-        );
+        let inl = process_inlines(&g, &meta, &mut out)?;
+        let sg = super::super::flatten_grammar::materialize_flattened(&g, &meta, &out);
+        let map = materialize_inlines(&g.pool, &out, &inl, &sg);
+        Ok((sg, map))
     }
 
     #[test]
@@ -575,8 +334,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_pool_matches_master(&grammar, &LexicalGrammar::default());
-        let inline_map = process_inlines(&grammar, &LexicalGrammar::default()).unwrap();
+        let (grammar, inline_map) = pool_pass(&grammar, &LexicalGrammar::default()).unwrap();
 
         // Nothing to inline at step 0.
         assert!(
@@ -674,8 +432,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_pool_matches_master(&grammar, &LexicalGrammar::default());
-        let inline_map = process_inlines(&grammar, &LexicalGrammar::default()).unwrap();
+        let (grammar, inline_map) = pool_pass(&grammar, &LexicalGrammar::default()).unwrap();
 
         let productions = inline_map
             .inlined_productions(&grammar.variables[0].productions[0], 1)
@@ -774,8 +531,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_pool_matches_master(&grammar, &LexicalGrammar::default());
-        let inline_map = process_inlines(&grammar, &LexicalGrammar::default()).unwrap();
+        let (grammar, inline_map) = pool_pass(&grammar, &LexicalGrammar::default()).unwrap();
 
         let productions = inline_map
             .inlined_productions(&grammar.variables[0].productions[0], 0)
@@ -850,14 +606,14 @@ mod tests {
             ..Default::default()
         };
 
-        let result = process_inlines(&grammar, &lexical_grammar);
+        let result = pool_pass(&grammar, &lexical_grammar);
         assert!(result.is_err(), "expected an error, but got none");
         let err = result.err().unwrap();
         assert_eq!(err.to_string(), "Token `something` cannot be inlined",);
     }
 
     #[test]
-    fn pool_errors_match_master() {
+    fn test_errors() {
         let lexical_grammar = LexicalGrammar {
             variables: vec![LexicalVariable {
                 name: "tok".to_string(),
@@ -867,10 +623,16 @@ mod tests {
             }],
             ..Default::default()
         };
-        for inline in [
-            Symbol::terminal(0),
-            Symbol::external(0),
-            Symbol::non_terminal(0),
+        for (inline, expected) in [
+            (Symbol::terminal(0), "Token `tok` cannot be inlined"),
+            (
+                Symbol::external(0),
+                "External token `ext` cannot be inlined",
+            ),
+            (
+                Symbol::non_terminal(0),
+                "Rule `rule0` cannot be inlined because it is the first rule",
+            ),
         ] {
             let grammar = SyntaxGrammar {
                 variables_to_inline: vec![inline],
@@ -886,10 +648,8 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let master_err = process_inlines(&grammar, &lexical_grammar).unwrap_err();
-            let (g, meta, mut out) = super::super::pool_from_syntax(&grammar, &lexical_grammar);
-            let pool_err = process_inlines_pool(&g, &meta, &mut out).unwrap_err();
-            assert_eq!(pool_err.to_string(), master_err.to_string());
+            let err = pool_pass(&grammar, &lexical_grammar).unwrap_err();
+            assert_eq!(err.to_string(), *expected);
         }
     }
 }

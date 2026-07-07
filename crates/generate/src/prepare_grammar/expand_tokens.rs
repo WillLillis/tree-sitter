@@ -5,11 +5,12 @@ use regex_syntax::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::ExtractedLexicalGrammar;
+#[cfg(test)]
+use crate::rules::Precedence;
 use crate::{
     grammars::{LexicalGrammar, LexicalVariable},
     nfa::{CharacterSet, Nfa, NfaState},
-    rules::{Precedence, Rule},
+    rules::Rule,
 };
 
 struct NfaBuilder {
@@ -52,91 +53,6 @@ impl std::fmt::Display for ExpandTokensProcessingError {
     }
 }
 
-fn get_implicit_precedence(rule: &Rule) -> i32 {
-    match rule {
-        Rule::String(_) => 2,
-        Rule::Metadata { rule, params } => {
-            if params.is_main_token {
-                get_implicit_precedence(rule) + 1
-            } else {
-                get_implicit_precedence(rule)
-            }
-        }
-        _ => 0,
-    }
-}
-
-const fn get_completion_precedence(rule: &Rule) -> i32 {
-    if let Rule::Metadata { params, .. } = rule
-        && let Precedence::Integer(p) = params.precedence
-    {
-        return p;
-    }
-    0
-}
-
-pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult<LexicalGrammar> {
-    let mut builder = NfaBuilder {
-        nfa: Nfa::new(),
-        is_sep: true,
-        precedence_stack: vec![0],
-    };
-
-    let separator_rule = if grammar.separators.is_empty() {
-        Rule::Blank
-    } else {
-        grammar.separators.push(Rule::Blank);
-        Rule::repeat(Rule::choice(grammar.separators))
-    };
-
-    let mut variables = Vec::with_capacity(grammar.variables.len());
-    for (i, variable) in grammar.variables.into_iter().enumerate() {
-        if variable.rule.is_empty() {
-            Err(ExpandTokensError::EmptyString(variable.name.clone()))?;
-        }
-
-        let is_immediate_token = match &variable.rule {
-            Rule::Metadata { params, .. } => params.is_main_token,
-            _ => false,
-        };
-
-        builder.is_sep = false;
-        builder.nfa.states.push(NfaState::Accept {
-            variable_index: i,
-            precedence: get_completion_precedence(&variable.rule),
-        });
-        let last_state_id = builder.nfa.last_state_id();
-        builder
-            .expand_rule(&variable.rule, last_state_id)
-            .map_err(|e| {
-                ExpandTokensError::Processing(ExpandTokensProcessingError {
-                    rule: variable.name.clone(),
-                    error: e,
-                })
-            })?;
-
-        if !is_immediate_token {
-            builder.is_sep = true;
-            let last_state_id = builder.nfa.last_state_id();
-            builder
-                .expand_rule(&separator_rule, last_state_id)
-                .map_err(ExpandTokensError::ExpandRule)?;
-        }
-
-        variables.push(LexicalVariable {
-            name: variable.name,
-            kind: variable.kind,
-            implicit_precedence: get_implicit_precedence(&variable.rule),
-            start_state: builder.nfa.last_state_id(),
-        });
-    }
-
-    Ok(LexicalGrammar {
-        nfa: builder.nfa,
-        variables,
-    })
-}
-
 pub type ExpandRuleResult<T> = Result<T, ExpandRuleError>;
 
 #[derive(Debug, Error, Serialize, Deserialize)]
@@ -160,98 +76,6 @@ pub enum ExpandRegexError {
 }
 
 impl NfaBuilder {
-    fn expand_rule(&mut self, rule: &Rule, mut next_state_id: u32) -> ExpandRuleResult<bool> {
-        match rule {
-            Rule::Pattern(s, f) => {
-                // With unicode enabled, `\w`, `\s` and `\d` expand to character sets that are much
-                // larger than intended, so we replace them with the actual
-                // character sets they should represent. If the full unicode range
-                // of `\w`, `\s` or `\d` are needed then `\p{L}`, `\p{Z}` and `\p{N}` should be
-                // used.
-                let s = s
-                    .replace(r"\w", r"[0-9A-Za-z_]")
-                    .replace(r"\s", r"[\t-\r ]")
-                    .replace(r"\d", r"[0-9]")
-                    .replace(r"\W", r"[^0-9A-Za-z_]")
-                    .replace(r"\S", r"[^\t-\r ]")
-                    .replace(r"\D", r"[^0-9]");
-                let mut parser = ParserBuilder::new()
-                    .case_insensitive(f.contains('i'))
-                    .unicode(true)
-                    .utf8(false)
-                    .build();
-                let hir = parser
-                    .parse(&s)
-                    .map_err(|e| ExpandRuleError::Parse(e.to_string()))?;
-                self.expand_regex(&hir, next_state_id)
-                    .map_err(ExpandRuleError::ExpandRegex)
-            }
-            Rule::String(s) => {
-                for c in s.chars().rev() {
-                    self.push_advance(CharacterSet::from_char(c), next_state_id);
-                    next_state_id = self.nfa.last_state_id();
-                }
-                Ok(!s.is_empty())
-            }
-            Rule::Choice(elements) => {
-                let mut alternative_state_ids = Vec::with_capacity(elements.len());
-                for element in elements {
-                    if self.expand_rule(element, next_state_id)? {
-                        alternative_state_ids.push(self.nfa.last_state_id());
-                    } else {
-                        alternative_state_ids.push(next_state_id);
-                    }
-                }
-                alternative_state_ids.sort_unstable();
-                alternative_state_ids.dedup();
-                alternative_state_ids.retain(|i| *i != self.nfa.last_state_id());
-                for alternative_state_id in alternative_state_ids {
-                    self.push_split(alternative_state_id);
-                }
-                Ok(true)
-            }
-            Rule::Seq(elements) => {
-                let mut result = false;
-                for element in elements.iter().rev() {
-                    if self.expand_rule(element, next_state_id)? {
-                        result = true;
-                    }
-                    next_state_id = self.nfa.last_state_id();
-                }
-                Ok(result)
-            }
-            Rule::Repeat(rule) => {
-                self.nfa.states.push(NfaState::Accept {
-                    variable_index: 0,
-                    precedence: 0,
-                }); // Placeholder for split
-                let split_state_id = self.nfa.last_state_id();
-                if self.expand_rule(rule, split_state_id)? {
-                    self.nfa.states[split_state_id as usize] =
-                        NfaState::Split(self.nfa.last_state_id(), next_state_id);
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            Rule::Metadata { rule, params } => {
-                let has_precedence = if let Precedence::Integer(precedence) = &params.precedence {
-                    self.precedence_stack.push(*precedence);
-                    true
-                } else {
-                    false
-                };
-                let result = self.expand_rule(rule, next_state_id);
-                if has_precedence {
-                    self.precedence_stack.pop();
-                }
-                result
-            }
-            Rule::Blank => Ok(false),
-            _ => Err(ExpandRuleError::UnexpectedRule(rule.clone()))?,
-        }
-    }
-
     fn expand_regex(&mut self, hir: &Hir, mut next_state_id: u32) -> ExpandRegexResult<bool> {
         match hir.kind() {
             HirKind::Empty => Ok(false),
@@ -423,16 +247,13 @@ impl NfaBuilder {
             .push(NfaState::Split(state_id, last_state_id));
     }
 }
-
-// --- pool-based pass (replaces the Rule-based one at the container flip) ---
-
 use super::extract_tokens::PoolLexicalVariable;
 use crate::rule_pool::{Node, NodeId, Prec, RulePool};
 
-/// Pool twin of `expand_tokens`: a read-only walk over the lexical roots
-/// (only the combined separator rule appends nodes). Produces the final
-/// `LexicalGrammar` directly; strings resolve at the NFA boundary.
-pub(super) fn expand_tokens_pool(
+/// Expand token rules into the NFA: a read-only walk over the lexical roots
+/// (only the combined separator rule appends nodes). Strings resolve at the
+/// NFA boundary.
+pub(super) fn expand_tokens(
     pool: &mut RulePool,
     lexical_variables: &[PoolLexicalVariable],
     separator_roots: &[NodeId],
@@ -495,9 +316,9 @@ pub(super) fn expand_tokens_pool(
     })
 }
 
-/// Mirror of the master separator construction: `Blank` when there are no
-/// separators, else `repeat(choice(separators + Blank))` where choice
-/// flattens nested choices and dedups (but keeps a single-element `Choice`).
+/// The combined separator rule: `Blank` when there are no separators, else
+/// `repeat(choice(separators + Blank))` where choice flattens nested choices
+/// and dedups (but keeps a single-element `Choice`).
 fn build_separator(pool: &mut RulePool, separator_roots: &[NodeId]) -> NodeId {
     if separator_roots.is_empty() {
         return pool.push_node(Node::Blank);
@@ -540,7 +361,8 @@ fn subtree_is_empty(pool: &RulePool, id: NodeId) -> bool {
     }
 }
 
-/// Mirror of `get_implicit_precedence`.
+/// String tokens get implicit precedence 2; each `token.immediate` wrapper
+/// adds 1.
 fn implicit_precedence(pool: &RulePool, root: NodeId) -> i32 {
     let mut id = root;
     let mut boost = 0;
@@ -558,7 +380,7 @@ fn implicit_precedence(pool: &RulePool, root: NodeId) -> i32 {
     }
 }
 
-/// Mirror of `get_completion_precedence`.
+/// A token's completion precedence: its top-level integer precedence.
 fn completion_precedence(pool: &RulePool, id: NodeId) -> i32 {
     if let Node::Metadata { params, .. } = pool.node(id)
         && let Prec::Integer(p) = pool.params(params).prec
@@ -569,7 +391,7 @@ fn completion_precedence(pool: &RulePool, id: NodeId) -> i32 {
 }
 
 impl NfaBuilder {
-    /// Pool twin of `expand_rule`; shares `expand_regex` and the NFA helpers.
+    /// Expand one token rule subtree into NFA states.
     fn expand_node(
         &mut self,
         pool: &RulePool,
@@ -667,6 +489,25 @@ impl NfaBuilder {
             }
         }
     }
+}
+
+/// Test builder: run `Rule`-based token definitions through the pass.
+#[cfg(test)]
+pub fn expand_token_rules(
+    variables: &[crate::grammars::Variable],
+    separators: &[Rule],
+) -> ExpandTokensResult<LexicalGrammar> {
+    let mut pool = RulePool::default();
+    let vars: Vec<PoolLexicalVariable> = variables
+        .iter()
+        .map(|v| PoolLexicalVariable {
+            name: pool.intern(&v.name),
+            kind: v.kind,
+            root: pool.add_rule(&v.rule),
+        })
+        .collect();
+    let seps: Vec<NodeId> = separators.iter().map(|r| pool.add_rule(r)).collect();
+    expand_tokens(&mut pool, &vars, &seps)
 }
 
 #[cfg(test)]
@@ -1057,15 +898,7 @@ mod tests {
                 .iter()
                 .map(|rule| Variable::named("", rule.clone()))
                 .collect();
-            let grammar = expand_tokens(ExtractedLexicalGrammar {
-                separators: separators.clone(),
-                variables: variables.clone(),
-            })
-            .unwrap();
-
-            let (mut pool, vars, seps) = pool_from_lexical(&variables, separators);
-            let pool_grammar = expand_tokens_pool(&mut pool, &vars, &seps).unwrap();
-            assert_eq!(pool_grammar, grammar, "pool NFA diverged from master");
+            let grammar = expand_token_rules(&variables, separators).unwrap();
 
             for (haystack, needle) in examples {
                 assert_eq!(simulate_nfa(&grammar, haystack), *needle);
@@ -1073,53 +906,48 @@ mod tests {
         }
     }
 
-    fn pool_from_lexical(
-        variables: &[Variable],
-        separators: &[Rule],
-    ) -> (RulePool, Vec<PoolLexicalVariable>, Vec<NodeId>) {
-        let mut pool = RulePool::default();
-        let vars = variables
-            .iter()
-            .map(|v| PoolLexicalVariable {
-                name: pool.intern(&v.name),
-                kind: v.kind,
-                root: pool.add_rule(&v.rule),
-            })
-            .collect();
-        let seps = separators.iter().map(|r| pool.add_rule(r)).collect();
-        (pool, vars, seps)
-    }
-
     #[test]
-    fn pool_expand_matches_master_errors() {
-        let cases: Vec<(Vec<Variable>, Vec<Rule>)> = vec![
-            // empty-string token
-            (vec![Variable::named("tok", Rule::string(""))], vec![]),
-            // unexpected rule: symbol inside a token
-            (
-                vec![Variable::named(
-                    "tok",
-                    Rule::Seq(vec![Rule::string("a"), Rule::non_terminal(3)]),
-                )],
-                vec![],
-            ),
-            // invalid regex
-            (vec![Variable::named("tok", Rule::pattern("[", ""))], vec![]),
-            // invalid regex in a separator
-            (
+    fn test_errors() {
+        let expand = |variables: Vec<Variable>, separators: Vec<Rule>| {
+            expand_token_rules(&variables, &separators).unwrap_err()
+        };
+
+        // empty-string token
+        assert_eq!(
+            expand(vec![Variable::named("tok", Rule::string(""))], vec![]).to_string(),
+            "The rule `tok` matches the empty string.
+Tree-sitter does not support syntactic rules that match the empty string
+unless they are used only as the grammar's start rule.
+"
+        );
+
+        // unexpected rule: symbol inside a token
+        let err = expand(
+            vec![Variable::named(
+                "tok",
+                Rule::Seq(vec![Rule::string("a"), Rule::non_terminal(3)]),
+            )],
+            vec![],
+        );
+        assert_eq!(
+            err.to_string(),
+            "Error processing rule tok: Grammar error: Unexpected rule \
+             UnexpectedRule(Symbol(Symbol { kind: NonTerminal, index: 3 }))\n"
+        );
+
+        // invalid regex
+        assert!(matches!(
+            expand(vec![Variable::named("tok", Rule::pattern("[", ""))], vec![]),
+            ExpandTokensError::Processing(_)
+        ));
+
+        // invalid regex in a separator
+        assert!(matches!(
+            expand(
                 vec![Variable::named("tok", Rule::string("a"))],
                 vec![Rule::pattern("(", "")],
             ),
-        ];
-        for (variables, separators) in cases {
-            let master = expand_tokens(ExtractedLexicalGrammar {
-                separators: separators.clone(),
-                variables: variables.clone(),
-            })
-            .unwrap_err();
-            let (mut pool, vars, seps) = pool_from_lexical(&variables, &separators);
-            let pool_err = expand_tokens_pool(&mut pool, &vars, &seps).unwrap_err();
-            assert_eq!(pool_err.to_string(), master.to_string());
-        }
+            ExpandTokensError::ExpandRule(_)
+        ));
     }
 }

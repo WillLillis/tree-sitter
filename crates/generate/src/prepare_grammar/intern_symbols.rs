@@ -1,12 +1,13 @@
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(test)]
 use super::InternedGrammar;
+use crate::{Diagnostic, grammars::VariableType, rules::Symbol};
+#[cfg(test)]
 use crate::{
-    Diagnostic,
-    grammars::{InputGrammar, ReservedWordContext, Variable, VariableType},
-    rules::{Rule, Symbol},
+    grammars::{InputGrammar, ReservedWordContext, Variable},
+    rules::Rule,
 };
 
 pub type InternSymbolsResult<T> = Result<T, InternSymbolsError>;
@@ -24,199 +25,6 @@ pub enum InternSymbolsError {
     #[error("Undefined symbol `{0}` as grammar's word token")]
     UndefinedWordToken(String),
 }
-
-pub(super) fn intern_symbols(
-    grammar: &InputGrammar,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> InternSymbolsResult<InternedGrammar> {
-    // TEMP A/B: give master's name resolution the same O(1) map the flat spike
-    // uses, to isolate the map win from the backing-type/in-place win.
-    let mut name_map: FxHashMap<&str, Symbol> = FxHashMap::default();
-    for (i, v) in grammar.variables.iter().enumerate() {
-        name_map
-            .entry(v.name.as_str())
-            .or_insert_with(|| Symbol::non_terminal(i));
-    }
-    for (i, e) in grammar.external_tokens.iter().enumerate() {
-        if let Rule::NamedSymbol(name) = e {
-            name_map
-                .entry(name.as_str())
-                .or_insert_with(|| Symbol::external(i));
-        }
-    }
-    let interner = Interner { name_map };
-
-    if variable_type_for_name(&grammar.variables[0].name) == VariableType::Hidden {
-        Err(InternSymbolsError::HiddenStartRule)?;
-    }
-
-    let mut variables = Vec::with_capacity(grammar.variables.len());
-    for variable in &grammar.variables {
-        variables.push(Variable {
-            name: variable.name.clone(),
-            kind: variable_type_for_name(&variable.name),
-            rule: interner.intern_rule(&variable.rule, Some(&variable.name), diagnostics)?,
-        });
-    }
-
-    let mut external_tokens = Vec::with_capacity(grammar.external_tokens.len());
-    for external_token in &grammar.external_tokens {
-        let rule = interner.intern_rule(external_token, None, diagnostics)?;
-        let (name, kind) = if let Rule::NamedSymbol(name) = external_token {
-            (name.clone(), variable_type_for_name(name))
-        } else {
-            (String::new(), VariableType::Anonymous)
-        };
-        external_tokens.push(Variable { name, kind, rule });
-    }
-
-    let mut extra_symbols = Vec::with_capacity(grammar.extra_symbols.len());
-    for extra_token in &grammar.extra_symbols {
-        extra_symbols.push(interner.intern_rule(extra_token, None, diagnostics)?);
-    }
-
-    let mut supertype_symbols = Vec::with_capacity(grammar.supertype_symbols.len());
-    for supertype_symbol_name in &grammar.supertype_symbols {
-        supertype_symbols.push(interner.intern_name(supertype_symbol_name).ok_or_else(|| {
-            InternSymbolsError::UndefinedSupertype(supertype_symbol_name.clone())
-        })?);
-    }
-
-    let mut reserved_words = Vec::with_capacity(grammar.reserved_words.len());
-    for reserved_word_set in &grammar.reserved_words {
-        let mut interned_set = Vec::with_capacity(reserved_word_set.reserved_words.len());
-        for rule in &reserved_word_set.reserved_words {
-            interned_set.push(interner.intern_rule(rule, None, diagnostics)?);
-        }
-        reserved_words.push(ReservedWordContext {
-            name: reserved_word_set.name.clone(),
-            reserved_words: interned_set,
-        });
-    }
-
-    let mut expected_conflicts = Vec::with_capacity(grammar.expected_conflicts.len());
-    for conflict in &grammar.expected_conflicts {
-        let mut interned_conflict = Vec::with_capacity(conflict.len());
-        for name in conflict {
-            interned_conflict.push(
-                interner
-                    .intern_name(name)
-                    .ok_or_else(|| InternSymbolsError::UndefinedConflict(name.clone()))?,
-            );
-        }
-        expected_conflicts.push(interned_conflict);
-    }
-
-    let mut variables_to_inline = Vec::new();
-    for name in &grammar.variables_to_inline {
-        if let Some(symbol) = interner.intern_name(name) {
-            variables_to_inline.push(symbol);
-        }
-    }
-
-    let word_token = if let Some(name) = grammar.word_token.as_ref() {
-        Some(
-            interner
-                .intern_name(name)
-                .ok_or_else(|| InternSymbolsError::UndefinedWordToken(name.clone()))?,
-        )
-    } else {
-        None
-    };
-
-    for (i, variable) in variables.iter_mut().enumerate() {
-        if supertype_symbols.contains(&Symbol::non_terminal(i)) {
-            variable.kind = VariableType::Hidden;
-        }
-    }
-
-    Ok(InternedGrammar {
-        variables,
-        external_tokens,
-        extra_symbols,
-        expected_conflicts,
-        variables_to_inline,
-        supertype_symbols,
-        word_token,
-        precedence_orderings: grammar.precedence_orderings.clone(),
-        reserved_word_sets: reserved_words,
-    })
-}
-
-struct Interner<'a> {
-    name_map: FxHashMap<&'a str, Symbol>,
-}
-
-impl Interner<'_> {
-    fn intern_rule(
-        &self,
-        rule: &Rule,
-        name: Option<&str>,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) -> InternSymbolsResult<Rule> {
-        match rule {
-            Rule::Choice(elements) => {
-                Self::check_single(elements, name, true, diagnostics);
-                let mut result = Vec::with_capacity(elements.len());
-                for element in elements {
-                    result.push(self.intern_rule(element, name, diagnostics)?);
-                }
-                Ok(Rule::Choice(result))
-            }
-            Rule::Seq(elements) => {
-                Self::check_single(elements, name, false, diagnostics);
-                let mut result = Vec::with_capacity(elements.len());
-                for element in elements {
-                    result.push(self.intern_rule(element, name, diagnostics)?);
-                }
-                Ok(Rule::Seq(result))
-            }
-            Rule::Repeat(content) => Ok(Rule::Repeat(Box::new(self.intern_rule(
-                content,
-                name,
-                diagnostics,
-            )?))),
-            Rule::Metadata { rule, params } => Ok(Rule::Metadata {
-                rule: Box::new(self.intern_rule(rule, name, diagnostics)?),
-                params: params.clone(),
-            }),
-            Rule::Reserved { rule, context_name } => Ok(Rule::Reserved {
-                rule: Box::new(self.intern_rule(rule, name, diagnostics)?),
-                context_name: context_name.clone(),
-            }),
-            Rule::NamedSymbol(name) => self.intern_name(name).map_or_else(
-                || Err(InternSymbolsError::Undefined(name.clone())),
-                |symbol| Ok(Rule::Symbol(symbol)),
-            ),
-            _ => Ok(rule.clone()),
-        }
-    }
-
-    fn intern_name(&self, symbol: &str) -> Option<Symbol> {
-        // TEMP A/B: was an O(V) linear scan over variables + externals; now an O(1)
-        // map lookup, to isolate the map win in the spike comparison.
-        self.name_map.get(symbol).copied()
-    }
-
-    // In the case of a seq or choice rule of 1 element in a hidden rule, weird
-    // inconsistent behavior with queries can occur. So we should warn the user about it.
-    fn check_single(
-        elements: &[Rule],
-        name: Option<&str>,
-        is_choice: bool,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        if elements.len() == 1 && matches!(elements[0], Rule::String(_) | Rule::Pattern(_, _)) {
-            let name = name.map(str::to_string);
-            diagnostics.push(if is_choice {
-                Diagnostic::UnaryChoice { name }
-            } else {
-                Diagnostic::UnarySeq { name }
-            });
-        }
-    }
-}
-
 fn variable_type_for_name(name: &str) -> VariableType {
     if name.starts_with('_') {
         VariableType::Hidden
@@ -224,8 +32,6 @@ fn variable_type_for_name(name: &str) -> VariableType {
         VariableType::Named
     }
 }
-
-// --- pool-based pass (replaces the Rule-based one at the container flip) ---
 
 use crate::rule_pool::{Node as PoolNode, NodeId, PoolGrammar, RulePool, StrId};
 
@@ -242,7 +48,7 @@ pub(super) struct PoolInternedMeta {
     pub word: Option<Symbol>,
 }
 
-pub(super) fn intern_symbols_pool(
+pub(super) fn intern_symbols(
     g: &mut PoolGrammar,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> InternSymbolsResult<PoolInternedMeta> {
@@ -332,7 +138,7 @@ pub(super) fn intern_symbols_pool(
                 .collect::<InternSymbolsResult<Vec<_>>>()
         })
         .collect::<InternSymbolsResult<Vec<_>>>()?;
-    // Unknown inline names are silently skipped, matching master.
+    // Unknown inline names are silently skipped.
     let inline = g.inline_names.iter().filter_map(|&s| lookup(s)).collect();
     let word = g
         .word_name
@@ -359,9 +165,8 @@ pub(super) fn intern_symbols_pool(
     })
 }
 
-/// Iterative pre-order walk rewriting `NamedSymbol -> Sym` in place, emitting
-/// the same `check_single` diagnostics as the recursive pass, in the same
-/// order.
+/// Iterative pre-order walk rewriting `NamedSymbol -> Sym` in place,
+/// emitting unary-choice/seq diagnostics in pre-order.
 fn intern_root(
     pool: &mut RulePool,
     root: NodeId,
@@ -412,8 +217,9 @@ fn intern_root(
     Ok(())
 }
 
-/// Materialize the pool pass's output as a master [`InternedGrammar`] for A/B
-/// verification. Deleted at the container flip.
+/// Materialize the pass's output as a test-shape [`InternedGrammar`].
+/// Deleted at the frontend flip.
+#[cfg(test)]
 pub(super) fn materialize_interned(g: &PoolGrammar, meta: &PoolInternedMeta) -> InternedGrammar {
     InternedGrammar {
         variables: g
@@ -458,15 +264,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_repeat_expansion() {
-        let grammar = intern_symbols(
-            &build_grammar(vec![
-                Variable::named("x", Rule::choice(vec![Rule::named("y"), Rule::named("_z")])),
-                Variable::named("y", Rule::named("_z")),
-                Variable::named("_z", Rule::string("a")),
-            ]),
-            &mut Vec::new(),
-        )
+    fn test_basic_symbol_interning() {
+        let (grammar, _) = pool_pass(&build_grammar(vec![
+            Variable::named("x", Rule::choice(vec![Rule::named("y"), Rule::named("_z")])),
+            Variable::named("y", Rule::named("_z")),
+            Variable::named("_z", Rule::string("a")),
+        ]))
         .unwrap();
 
         assert_eq!(
@@ -498,7 +301,7 @@ mod tests {
             .external_tokens
             .extend(vec![Rule::named("y"), Rule::named("z")]);
 
-        let grammar = intern_symbols(&input_grammar, &mut Vec::new()).unwrap();
+        let (grammar, _) = pool_pass(&input_grammar).unwrap();
 
         // Variable `y` is referred to by its internal index.
         // Variable `z` is referred to by its external index.
@@ -529,60 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_grammar_with_undefined_symbols() {
-        let result = intern_symbols(
-            &build_grammar(vec![Variable::named("x", Rule::named("y"))]),
-            &mut Vec::new(),
-        );
-
-        assert!(result.is_err(), "Expected an error but got none");
-        let e = result.err().unwrap();
-        assert_eq!(e.to_string(), "Undefined symbol `y`");
-    }
-
-    fn build_grammar(variables: Vec<Variable>) -> InputGrammar {
-        InputGrammar {
-            variables,
-            name: "the_language".to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn pool_pass(g: &InputGrammar) -> InternSymbolsResult<(InternedGrammar, Vec<Diagnostic>)> {
-        let mut pg = crate::rule_pool::PoolGrammar::from_input_grammar(g);
-        let mut diags = Vec::new();
-        let meta = intern_symbols_pool(&mut pg, &mut diags)?;
-        Ok((materialize_interned(&pg, &meta), diags))
-    }
-
-    fn assert_pool_matches_master(g: &InputGrammar) {
-        let mut master_diags = Vec::new();
-        let master = intern_symbols(g, &mut master_diags).unwrap();
-        let (pool_out, pool_diags) = pool_pass(g).unwrap();
-        assert_eq!(pool_out, master);
-        assert_eq!(pool_diags, master_diags);
-    }
-
-    #[test]
-    fn pool_pass_matches_master() {
-        // Bodies, hidden rules, external interplay.
-        assert_pool_matches_master(&build_grammar(vec![
-            Variable::named("x", Rule::choice(vec![Rule::named("y"), Rule::named("_z")])),
-            Variable::named("y", Rule::named("_z")),
-            Variable::named("_z", Rule::string("a")),
-        ]));
-        let mut g = build_grammar(vec![
-            Variable::named(
-                "w",
-                Rule::choice(vec![Rule::named("x"), Rule::named("y"), Rule::named("z")]),
-            ),
-            Variable::named("x", Rule::string("a")),
-            Variable::named("y", Rule::string("b")),
-        ]);
-        g.external_tokens
-            .extend(vec![Rule::named("y"), Rule::named("z")]);
-        assert_pool_matches_master(&g);
-
+    fn test_meta_paths_and_diagnostics() {
         // Every meta path: supertype hiding, conflicts, silent inline skip,
         // word token, reserved sets, extras, and a unary-choice diagnostic.
         let mut g = build_grammar(vec![
@@ -598,24 +348,78 @@ mod tests {
             name: "default".to_string(),
             reserved_words: vec![Rule::string("if")],
         }];
-        assert_pool_matches_master(&g);
+
+        let (grammar, diagnostics) = pool_pass(&g).unwrap();
+        assert_eq!(
+            grammar.variables,
+            vec![
+                Variable::named(
+                    "x",
+                    Rule::seq(vec![Rule::non_terminal(1), Rule::non_terminal(1)])
+                ),
+                Variable::hidden("y", Rule::Choice(vec![Rule::string("a")])),
+            ]
+        );
+        assert_eq!(grammar.supertype_symbols, vec![Symbol::non_terminal(1)]);
+        assert_eq!(grammar.word_token, Some(Symbol::non_terminal(1)));
+        assert_eq!(
+            grammar.expected_conflicts,
+            vec![vec![Symbol::non_terminal(0), Symbol::non_terminal(1)]]
+        );
+        assert_eq!(grammar.variables_to_inline, vec![Symbol::non_terminal(0)]);
+        assert_eq!(grammar.extra_symbols, vec![Rule::non_terminal(1)]);
+        assert_eq!(
+            grammar.reserved_word_sets,
+            vec![crate::grammars::ReservedWordContext {
+                name: "default".to_string(),
+                reserved_words: vec![Rule::string("if")],
+            }]
+        );
+        assert_eq!(
+            diagnostics,
+            vec![Diagnostic::UnaryChoice {
+                name: Some("y".to_string())
+            }]
+        );
     }
 
     #[test]
-    fn pool_pass_matches_master_errors() {
+    fn test_errors() {
         let cases = [
-            build_grammar(vec![Variable::named("x", Rule::named("y"))]),
-            build_grammar(vec![Variable::named("_x", Rule::string("a"))]),
-            {
-                let mut g = build_grammar(vec![Variable::named("x", Rule::string("a"))]);
-                g.word_token = Some("nope".to_string());
-                g
-            },
+            (
+                build_grammar(vec![Variable::named("x", Rule::named("y"))]),
+                "Undefined symbol `y`",
+            ),
+            (
+                build_grammar(vec![Variable::named("_x", Rule::string("a"))]),
+                "A grammar's start rule must be visible.",
+            ),
+            (
+                {
+                    let mut g = build_grammar(vec![Variable::named("x", Rule::string("a"))]);
+                    g.word_token = Some("nope".to_string());
+                    g
+                },
+                "Undefined symbol `nope` as grammar's word token",
+            ),
         ];
-        for g in &cases {
-            let master_err = intern_symbols(g, &mut Vec::new()).unwrap_err();
-            let pool_err = pool_pass(g).unwrap_err();
-            assert_eq!(pool_err.to_string(), master_err.to_string());
+        for (g, expected) in &cases {
+            assert_eq!(pool_pass(g).unwrap_err().to_string(), *expected);
         }
+    }
+
+    fn build_grammar(variables: Vec<Variable>) -> InputGrammar {
+        InputGrammar {
+            variables,
+            name: "the_language".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn pool_pass(g: &InputGrammar) -> InternSymbolsResult<(InternedGrammar, Vec<Diagnostic>)> {
+        let mut pg = crate::rule_pool::PoolGrammar::from_input_grammar(g);
+        let mut diags = Vec::new();
+        let meta = intern_symbols(&mut pg, &mut diags)?;
+        Ok((materialize_interned(&pg, &meta), diags))
     }
 }

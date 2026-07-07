@@ -1,165 +1,6 @@
-use crate::{
-    grammars::{LexicalGrammar, SyntaxGrammar},
-    rules::{Alias, AliasMap, Symbol, SymbolType},
-};
-
-#[derive(Clone, Default)]
-struct SymbolStatus {
-    aliases: Vec<(Alias, usize)>,
-    appears_unaliased: bool,
-}
-
-// Update the grammar by finding symbols that always are aliased, and for each such symbol,
-// promoting one of its aliases to a "default alias", which is applied globally instead
-// of in a context-specific way.
-//
-// This has two benefits:
-// * It reduces the overhead of storing production-specific alias info in the parse table.
-// * Within an `ERROR` node, no context-specific aliases will be applied. This transformation
-//   ensures that the children of an `ERROR` node have symbols that are consistent with the way that
-//   they would appear in a valid syntax tree.
-pub(super) fn extract_default_aliases(
-    syntax_grammar: &mut SyntaxGrammar,
-    lexical_grammar: &LexicalGrammar,
-) -> AliasMap {
-    let mut terminal_status_list = vec![SymbolStatus::default(); lexical_grammar.variables.len()];
-    let mut non_terminal_status_list =
-        vec![SymbolStatus::default(); syntax_grammar.variables.len()];
-    let mut external_status_list =
-        vec![SymbolStatus::default(); syntax_grammar.external_tokens.len()];
-
-    // For each grammar symbol, find all of the aliases under which the symbol appears,
-    // and determine whether or not the symbol ever appears *unaliased*.
-    for variable in &syntax_grammar.variables {
-        for production in &variable.productions {
-            for step in &production.steps {
-                let status = match step.symbol.kind {
-                    SymbolType::External => &mut external_status_list[step.symbol.index],
-                    SymbolType::NonTerminal => &mut non_terminal_status_list[step.symbol.index],
-                    SymbolType::Terminal => &mut terminal_status_list[step.symbol.index],
-                    SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
-                        panic!("Unexpected end token")
-                    }
-                };
-
-                // Default aliases don't work for inlined variables.
-                if syntax_grammar.variables_to_inline.contains(&step.symbol) {
-                    continue;
-                }
-
-                if let Some(alias) = &step.alias {
-                    if let Some(count_for_alias) = status
-                        .aliases
-                        .iter_mut()
-                        .find_map(|(a, count)| if a == alias { Some(count) } else { None })
-                    {
-                        *count_for_alias += 1;
-                    } else {
-                        status.aliases.push((alias.clone(), 1));
-                    }
-                } else {
-                    status.appears_unaliased = true;
-                }
-            }
-        }
-    }
-
-    for symbol in &syntax_grammar.extra_symbols {
-        let status = match symbol.kind {
-            SymbolType::External => &mut external_status_list[symbol.index],
-            SymbolType::NonTerminal => &mut non_terminal_status_list[symbol.index],
-            SymbolType::Terminal => &mut terminal_status_list[symbol.index],
-            SymbolType::End | SymbolType::EndOfNonTerminalExtra => panic!("Unexpected end token"),
-        };
-        status.appears_unaliased = true;
-    }
-
-    let symbols_with_statuses = (terminal_status_list
-        .iter_mut()
-        .enumerate()
-        .map(|(i, status)| (Symbol::terminal(i), status)))
-    .chain(
-        non_terminal_status_list
-            .iter_mut()
-            .enumerate()
-            .map(|(i, status)| (Symbol::non_terminal(i), status)),
-    )
-    .chain(
-        external_status_list
-            .iter_mut()
-            .enumerate()
-            .map(|(i, status)| (Symbol::external(i), status)),
-    );
-
-    // For each symbol that always appears aliased, find the alias that occurs most often,
-    // and designate that alias as the symbol's "default alias". Store all of these
-    // default aliases in a map that will be returned.
-    let mut result = AliasMap::new();
-    for (symbol, status) in symbols_with_statuses {
-        if status.appears_unaliased {
-            status.aliases.clear();
-        } else if let Some(default_entry) = status
-            .aliases
-            .iter()
-            .enumerate()
-            .max_by_key(|(i, (_, count))| (count, -(*i as i64)))
-            .map(|(_, entry)| entry.clone())
-        {
-            status.aliases.clear();
-            status.aliases.push(default_entry.clone());
-            result.insert(symbol, default_entry.0);
-        }
-    }
-
-    // Wherever a symbol is aliased as its default alias, remove the usage of the alias,
-    // because it will now be redundant.
-    let mut alias_positions_to_clear = Vec::new();
-    for variable in &mut syntax_grammar.variables {
-        alias_positions_to_clear.clear();
-
-        for (i, production) in variable.productions.iter().enumerate() {
-            for (j, step) in production.steps.iter().enumerate() {
-                let status = match step.symbol.kind {
-                    SymbolType::External => &mut external_status_list[step.symbol.index],
-                    SymbolType::NonTerminal => &mut non_terminal_status_list[step.symbol.index],
-                    SymbolType::Terminal => &mut terminal_status_list[step.symbol.index],
-                    SymbolType::End | SymbolType::EndOfNonTerminalExtra => {
-                        panic!("Unexpected end token")
-                    }
-                };
-
-                // If this step is aliased as the symbol's default alias, then remove that alias.
-                if step.alias.is_some()
-                    && step.alias.as_ref() == status.aliases.first().map(|t| &t.0)
-                {
-                    let mut other_productions_must_use_this_alias_at_this_index = false;
-                    for (other_i, other_production) in variable.productions.iter().enumerate() {
-                        if other_i != i
-                            && other_production.steps.len() > j
-                            && other_production.steps[j].alias == step.alias
-                            && result.get(&other_production.steps[j].symbol) != step.alias.as_ref()
-                        {
-                            other_productions_must_use_this_alias_at_this_index = true;
-                            break;
-                        }
-                    }
-
-                    if !other_productions_must_use_this_alias_at_this_index {
-                        alias_positions_to_clear.push((i, j));
-                    }
-                }
-            }
-        }
-
-        for (production_index, step_index) in &alias_positions_to_clear {
-            variable.productions[*production_index].steps[*step_index].alias = None;
-        }
-    }
-
-    result
-}
-
-// --- pool-based pass (replaces the Rule-based one at the container flip) ---
+#[cfg(test)]
+use crate::grammars::{LexicalGrammar, SyntaxGrammar};
+use crate::rules::{Alias, AliasMap, Symbol, SymbolType};
 
 use std::collections::BTreeMap;
 
@@ -172,11 +13,12 @@ struct PoolSymbolStatus {
     appears_unaliased: bool,
 }
 
-/// Pool twin of `extract_default_aliases`: alias identity is the interned
-/// `(StrId, is_named)` pair, and default-redundant step aliases are cleared
-/// in place (zeroing both the id and the named bit keeps steps canonical for
-/// `==`/`Hash` dedup).
-pub(super) fn extract_default_aliases_pool(
+/// Find symbols that always appear aliased and promote their most frequent
+/// alias to a global default, clearing the now-redundant step aliases in
+/// place. Alias identity is the interned `(StrId, is_named)` pair; clearing
+/// zeroes both the id and the named bit to keep steps canonical for
+/// `==`/`Hash` dedup.
+pub(super) fn extract_default_aliases(
     g: &PoolGrammar,
     meta: &PoolExtractedMeta,
     out: &mut FlatOut,
@@ -311,7 +153,8 @@ pub(super) fn extract_default_aliases_pool(
     result
 }
 
-/// A/B materialization of the pool alias map. Deleted at the container flip.
+/// Boundary materialization to the render-facing [`AliasMap`]. Deleted at
+/// the `SyntaxGrammar` flip.
 pub(super) fn materialize_default_aliases(
     pool: &RulePool,
     map: &BTreeMap<Symbol, PoolAlias>,
@@ -410,21 +253,13 @@ mod tests {
             ],
         };
 
-        let pristine = syntax_grammar.clone();
-        let default_aliases = extract_default_aliases(&mut syntax_grammar, &lexical_grammar);
+        let (g, meta, mut out) = super::super::pool_from_syntax(&syntax_grammar, &lexical_grammar);
+        let pool_map = extract_default_aliases(&g, &meta, &mut out);
+        let default_aliases = materialize_default_aliases(&g.pool, &pool_map);
+        // The mutated grammar is compared through the same materialization
+        // the pipeline uses.
+        syntax_grammar = super::super::flatten_grammar::materialize_flattened(&g, &meta, &out);
         assert_eq!(default_aliases.len(), 3);
-
-        // Pool A/B on the same fixture: the alias map and the mutated steps.
-        let (g, meta, mut out) = super::super::pool_from_syntax(&pristine, &lexical_grammar);
-        let pool_map = extract_default_aliases_pool(&g, &meta, &mut out);
-        assert_eq!(
-            materialize_default_aliases(&g.pool, &pool_map),
-            default_aliases
-        );
-        assert_eq!(
-            super::super::flatten_grammar::materialize_flattened(&g, &meta, &out).variables,
-            syntax_grammar.variables
-        );
 
         assert_eq!(
             default_aliases.get(&Symbol::terminal(0)),

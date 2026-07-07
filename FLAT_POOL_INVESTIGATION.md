@@ -404,18 +404,27 @@ of the new `SyntaxGrammar`.
 
 1. ~~**Remaining pass conversions**~~ DONE 2026-07-07: every prepare pass has
    a verified pool twin.
-2. **Container flip** per `FLAT_POOL_DESIGN.md`: pool-owning grammar structs,
-   delete the `Rule` bridges (`add_rule`/`rule`), `materialize_*` fns, TEMP
-   derives, and the A/B blocks.
-3. **Harden or drop the A/B blocks before corpus runs**: every block
-   `unwrap()`s master and pool results, so a grammar that legitimately fails
-   a pass (e.g. empty-string token) panics in the block instead of returning
-   the clean error. Fixture grammars all pass; translated corpus grammars may
-   not.
+2. **Container flip**, staged (stage 1 DONE 2026-07-07): the pipeline runs
+   pool passes only; master passes, `Interner`/`TokenExtractor`/
+   `RuleFlattener`/`InlinedProductionMapBuilder`, and every A/B block are
+   deleted; the pool passes own the plain names. Legacy-shaped
+   `SyntaxGrammar`/`InlinedProductionMap`/`AliasMap` materialize once at the
+   boundary. Oracle: regenerated parser.c byte-identical on all six fixture
+   grammars; 604/604 tests (pass tests now run the pool path against the old
+   literal expectations; parity-only tests died with master). Real-pipeline
+   rust aliases+inlines: 10.2ms -> 0.77ms.
+   Remaining: **stage 2** (pool-backed `SyntaxGrammar`, `FProd`/`FStep`
+   consumers in build_tables/node_types/render, delete `materialize_*`),
+   **stage 3** (frontends emit pools; `InputGrammar` pool-owning; delete
+   `Rule` + bridges + `pool_from_syntax`-style test bridges).
+3. ~~**Harden or drop the A/B blocks before corpus runs**~~ moot: the A/B
+   blocks are gone with stage 1; corpus verification is now generate-and-diff
+   against a master-built parser.c.
 4. **Lock in the `FStep`/`Frame` bit packing** (bitflags! or a layout doc +
-   roundtrip tests) before the master port.
-5. **Corpus-machine validation**: full A/B on the translated grammars,
-   roundtrip suite, `ident_histogram_corpus`.
+   roundtrip tests) before the master port (user: style/readability, can
+   follow the flip).
+5. **Corpus-machine validation**: generate the translated grammars, diff
+   parser.c vs master output, roundtrip suite, `ident_histogram_corpus`.
 6. **`build_tables` item-equivalence-key layer** over pooled deduped
    productions (measured design below); lands with or after the master port.
 
