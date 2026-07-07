@@ -2,7 +2,6 @@ mod expand_repeats;
 mod expand_tokens;
 mod extract_default_aliases;
 mod extract_tokens;
-mod flat_spike; // TEMP: perf spike, remove after the pool decision
 mod flatten_grammar;
 mod intern_symbols;
 mod process_inlines;
