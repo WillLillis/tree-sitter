@@ -229,6 +229,38 @@ pub fn prepare_grammar(
         (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default()
     };
 
+    // TEMP A/B (until the container flip): pool extract_tokens vs master,
+    // chained after the pool intern pass so the converted prefix verifies as
+    // a real pipeline. Asserts both outputs (syntax and lexical grammars).
+    {
+        use std::hint::black_box;
+        let n = 300u32;
+        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
+        let interned_meta =
+            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(base.clone());
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let mut g = base.clone();
+            let _ = black_box(extract_tokens::extract_tokens_pool(&mut g, &interned_meta));
+        }
+        let pool_time = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+        eprintln!("[POOL extract_tokens] master {extract_net:?}  pool {pool_time:?}");
+
+        let master_out = extract_tokens(interned_grammar.clone()).unwrap();
+        let mut g = base.clone();
+        let meta = extract_tokens::extract_tokens_pool(&mut g, &interned_meta).unwrap();
+        assert_eq!(
+            extract_tokens::materialize_extracted(&g, &meta, &g.precedence_orderings),
+            master_out,
+            "pool extract_tokens diverged from master"
+        );
+    }
+
     let t0 = std::time::Instant::now();
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
     let t_extract = t0.elapsed();

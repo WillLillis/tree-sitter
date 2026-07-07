@@ -77,7 +77,7 @@ pub enum Node {
 const _: () = assert!(std::mem::size_of::<Node>() == 12);
 
 /// [`Precedence`] with the name interned. `Copy`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum Prec {
     #[default]
     None,
@@ -86,7 +86,7 @@ pub enum Prec {
 }
 
 /// [`crate::rules::Alias`] with the value interned. `Copy`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Alias {
     pub value: StrId,
     pub is_named: bool,
@@ -178,6 +178,107 @@ impl RulePool {
     #[must_use]
     pub fn str_count(&self) -> usize {
         self.strs.len()
+    }
+
+    /// Structural hash of a subtree: node tags plus interned/`Copy` payloads,
+    /// so content-equal subtrees hash equal regardless of their node ids.
+    #[must_use]
+    pub fn subtree_hash(&self, root: NodeId) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let node = self.node(id);
+            std::mem::discriminant(&node).hash(&mut hasher);
+            match node {
+                Node::Blank => {}
+                Node::String(s) | Node::NamedSymbol(s) => s.hash(&mut hasher),
+                Node::Pattern(p, f) => {
+                    p.hash(&mut hasher);
+                    f.hash(&mut hasher);
+                }
+                Node::Sym { kind, index } => {
+                    (kind as u8).hash(&mut hasher);
+                    index.hash(&mut hasher);
+                }
+                Node::Seq(range) | Node::Choice(range) => {
+                    hasher.write_u32(range.len);
+                    let base = stack.len();
+                    stack.extend_from_slice(self.child_slice(range));
+                    stack[base..].reverse();
+                }
+                Node::Repeat(inner) => stack.push(inner),
+                Node::Metadata { params, rule } => {
+                    let p = self.params(params);
+                    (p.prec, p.assoc, p.dynamic_precedence).hash(&mut hasher);
+                    p.alias
+                        .map(|a| (a.value, a.is_named))
+                        .hash(&mut hasher);
+                    (p.field, p.is_token, p.is_main_token).hash(&mut hasher);
+                    stack.push(rule);
+                }
+                Node::Reserved { rule, ctx } => {
+                    ctx.hash(&mut hasher);
+                    stack.push(rule);
+                }
+            }
+        }
+        hasher.finish()
+    }
+
+    /// Structural equality of two subtrees (content, not node identity).
+    #[must_use]
+    pub fn subtree_eq(&self, a: NodeId, b: NodeId) -> bool {
+        let mut stack = vec![(a, b)];
+        while let Some((a, b)) = stack.pop() {
+            match (self.node(a), self.node(b)) {
+                (Node::Blank, Node::Blank) => {}
+                (Node::String(x), Node::String(y)) | (Node::NamedSymbol(x), Node::NamedSymbol(y)) => {
+                    if x != y {
+                        return false;
+                    }
+                }
+                (Node::Pattern(p1, f1), Node::Pattern(p2, f2)) => {
+                    if p1 != p2 || f1 != f2 {
+                        return false;
+                    }
+                }
+                (n1 @ Node::Sym { .. }, n2 @ Node::Sym { .. }) => {
+                    if n1 != n2 {
+                        return false;
+                    }
+                }
+                (Node::Seq(r1), Node::Seq(r2)) | (Node::Choice(r1), Node::Choice(r2)) => {
+                    if r1.len != r2.len {
+                        return false;
+                    }
+                    stack.extend(
+                        self.child_slice(r1)
+                            .iter()
+                            .copied()
+                            .zip(self.child_slice(r2).iter().copied()),
+                    );
+                }
+                (Node::Repeat(i1), Node::Repeat(i2)) => stack.push((i1, i2)),
+                (
+                    Node::Metadata { params: p1, rule: r1 },
+                    Node::Metadata { params: p2, rule: r2 },
+                ) => {
+                    if self.params(p1) != self.params(p2) {
+                        return false;
+                    }
+                    stack.push((r1, r2));
+                }
+                (Node::Reserved { rule: r1, ctx: c1 }, Node::Reserved { rule: r2, ctx: c2 }) => {
+                    if c1 != c2 {
+                        return false;
+                    }
+                    stack.push((r1, r2));
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     // --- transitional Rule bridges (deleted at series end) ---

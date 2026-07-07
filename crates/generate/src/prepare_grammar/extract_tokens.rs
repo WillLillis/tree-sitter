@@ -428,6 +428,442 @@ impl SymbolReplacer {
     }
 }
 
+// --- pool-based pass (replaces the Rule-based one at the container flip) ---
+
+use super::intern_symbols::PoolInternedMeta;
+use crate::grammars::PrecedenceEntry;
+use crate::rule_pool::{Node as PoolNode, NodeId, Params, PoolGrammar, RulePool, StrId};
+
+#[derive(Debug)]
+pub(super) struct PoolLexicalVariable {
+    pub name: StrId,
+    pub kind: VariableType,
+    pub root: NodeId,
+}
+
+/// The extract pass's outputs besides the in-place rewrites: the lexical
+/// side, post-absorption variable metadata, and symbol-typed config lists.
+#[derive(Debug)]
+pub(super) struct PoolExtractedMeta {
+    pub kinds: Vec<VariableType>,
+    pub lexical_variables: Vec<PoolLexicalVariable>,
+    pub separator_roots: Vec<NodeId>,
+    pub extra_symbols: Vec<Symbol>,
+    pub external_tokens: Vec<ExternalToken>,
+    pub reserved_sets: Vec<(StrId, Vec<Symbol>)>,
+    pub supertypes: Vec<Symbol>,
+    pub conflicts: Vec<Vec<Symbol>>,
+    pub inline: Vec<Symbol>,
+    pub word: Option<Symbol>,
+}
+
+/// Token dedup: structural memo over pool subtrees (hash of interned
+/// content, verified with `subtree_eq`).
+#[derive(Default)]
+struct PoolTokenExtractor {
+    lexical: Vec<PoolLexicalVariable>,
+    usage_counts: Vec<u32>,
+    memo: FxHashMap<u64, Vec<u32>>,
+}
+
+impl PoolTokenExtractor {
+    /// Find or create the lexical token for `boundary`, hoisting by shallow
+    /// root copy (the subtree below is shared with the syntax side until the
+    /// caller overwrites the original node).
+    fn extract(
+        &mut self,
+        pool: &mut RulePool,
+        boundary: NodeId,
+        string_name: Option<StrId>,
+        var_name: Option<StrId>,
+        counter: &mut u32,
+        is_first: bool,
+    ) -> ExtractTokensResult<u32> {
+        let hash = pool.subtree_hash(boundary);
+        if let Some(candidates) = self.memo.get(&hash) {
+            for &i in candidates {
+                if pool.subtree_eq(self.lexical[i as usize].root, boundary) {
+                    self.usage_counts[i as usize] += 1;
+                    return Ok(i);
+                }
+            }
+        }
+        let (name, kind) = if let Some(sid) = string_name {
+            if pool.resolve(sid).is_empty() && !is_first {
+                Err(ExtractTokensError::EmptyString(
+                    var_name.map_or_else(String::new, |v| pool.resolve(v).to_string()),
+                ))?;
+            }
+            (sid, VariableType::Anonymous)
+        } else {
+            *counter += 1;
+            let name = format!(
+                "{}_token{}",
+                var_name.map_or("", |v| pool.resolve(v)),
+                counter
+            );
+            (pool.intern(&name), VariableType::Auxiliary)
+        };
+        let index = self.lexical.len() as u32;
+        let root = pool.push_node(pool.node(boundary));
+        self.lexical.push(PoolLexicalVariable { name, kind, root });
+        self.usage_counts.push(1);
+        self.memo.entry(hash).or_default().push(index);
+        Ok(index)
+    }
+
+    /// Structural lookup without insertion (extras/reserved routing).
+    fn find(&self, pool: &RulePool, root: NodeId) -> Option<u32> {
+        self.memo.get(&pool.subtree_hash(root)).and_then(|cands| {
+            cands
+                .iter()
+                .copied()
+                .find(|&i| pool.subtree_eq(self.lexical[i as usize].root, root))
+        })
+    }
+}
+
+const fn sym(symbol: Symbol) -> PoolNode {
+    PoolNode::Sym {
+        kind: symbol.kind,
+        index: symbol.index as u32,
+    }
+}
+
+fn node_symbol(node: PoolNode) -> Option<Symbol> {
+    match node {
+        PoolNode::Sym { kind, index } => Some(Symbol {
+            kind,
+            index: index as usize,
+        }),
+        _ => None,
+    }
+}
+
+/// In-place token extraction over one root, mirroring master's boundary
+/// rules: `String`/`Pattern` always; `token(...)` metadata extracts the inner
+/// child when no other params are set, else the whole metadata node (which
+/// keeps `is_token` on the lexical side).
+fn extract_in_root(
+    pool: &mut RulePool,
+    root: NodeId,
+    var_name: Option<StrId>,
+    is_first: bool,
+    ex: &mut PoolTokenExtractor,
+    stack: &mut Vec<NodeId>,
+) -> ExtractTokensResult<()> {
+    let mut counter = 0u32;
+    stack.clear();
+    stack.push(root);
+    while let Some(id) = stack.pop() {
+        match pool.node(id) {
+            PoolNode::String(sid) => {
+                let i = ex.extract(pool, id, Some(sid), var_name, &mut counter, is_first)?;
+                pool.set_node(id, sym(Symbol::terminal(i as usize)));
+            }
+            PoolNode::Pattern(..) => {
+                let i = ex.extract(pool, id, None, var_name, &mut counter, is_first)?;
+                pool.set_node(id, sym(Symbol::terminal(i as usize)));
+            }
+            PoolNode::Metadata { params, rule } => {
+                let p = pool.params(params);
+                if p.is_token {
+                    let cleaned = Params {
+                        is_token: false,
+                        ..p
+                    };
+                    let string_name = match pool.node(rule) {
+                        PoolNode::String(s) => Some(s),
+                        _ => None,
+                    };
+                    let boundary = if cleaned == Params::default() { rule } else { id };
+                    let i =
+                        ex.extract(pool, boundary, string_name, var_name, &mut counter, is_first)?;
+                    pool.set_node(id, sym(Symbol::terminal(i as usize)));
+                } else {
+                    stack.push(rule);
+                }
+            }
+            PoolNode::Seq(range) | PoolNode::Choice(range) => {
+                let base = stack.len();
+                stack.extend_from_slice(pool.child_slice(range));
+                stack[base..].reverse();
+            }
+            PoolNode::Repeat(inner) | PoolNode::Reserved { rule: inner, .. } => stack.push(inner),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn extract_tokens_pool(
+    g: &mut PoolGrammar,
+    interned: &PoolInternedMeta,
+) -> ExtractTokensResult<PoolExtractedMeta> {
+    let mut ex = PoolTokenExtractor::default();
+    let mut stack = Vec::new();
+    for (i, v) in g.variables.iter().enumerate() {
+        extract_in_root(&mut g.pool, v.root, Some(v.name), i == 0, &mut ex, &mut stack)?;
+    }
+    for (&root, &(name, _)) in g.external_roots.iter().zip(&interned.external_tokens) {
+        extract_in_root(&mut g.pool, root, name, false, &mut ex, &mut stack)?;
+    }
+
+    // Absorption: a variable (other than the start rule) whose entire body
+    // became one single-use terminal donates its name/kind to that token and
+    // is removed.
+    let old_len = g.variables.len();
+    let mut replacements: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut retained = Vec::with_capacity(old_len);
+    let mut kinds = Vec::with_capacity(old_len);
+    for (i, v) in g.variables.iter().enumerate() {
+        if i > 0
+            && let Some(s) = node_symbol(g.pool.node(v.root))
+            && s.is_terminal()
+            && ex.usage_counts[s.index] == 1
+        {
+            let lexical = &mut ex.lexical[s.index];
+            if lexical.kind == VariableType::Auxiliary || interned.kinds[i] != VariableType::Hidden
+            {
+                lexical.kind = interned.kinds[i];
+                lexical.name = v.name;
+                replacements.insert(i as u32, s.index as u32);
+                continue;
+            }
+        }
+        retained.push(*v);
+        kinds.push(interned.kinds[i]);
+    }
+    g.variables = retained;
+
+    // Prefix-sum renumbering: O(1) per symbol.
+    let mut shift = vec![0u32; old_len];
+    let mut removed = 0u32;
+    for (i, slot) in shift.iter_mut().enumerate() {
+        *slot = removed;
+        if replacements.contains_key(&(i as u32)) {
+            removed += 1;
+        }
+    }
+    let replace_symbol = |s: Symbol| {
+        if !s.is_non_terminal() {
+            return s;
+        }
+        replacements.get(&(s.index as u32)).map_or_else(
+            || Symbol::non_terminal(s.index - shift[s.index] as usize),
+            |&r| Symbol::terminal(r as usize),
+        )
+    };
+
+    for v in &g.variables {
+        renumber_root(&mut g.pool, v.root, &replace_symbol, &mut stack);
+    }
+    for &root in &g.external_roots {
+        renumber_root(&mut g.pool, root, &replace_symbol, &mut stack);
+    }
+
+    let conflicts = interned
+        .conflicts
+        .iter()
+        .map(|c| {
+            let mut result: Vec<Symbol> = c.iter().map(|&s| replace_symbol(s)).collect();
+            result.sort_unstable();
+            result.dedup();
+            result
+        })
+        .collect();
+
+    let supertypes: Vec<Symbol> = interned
+        .supertypes
+        .iter()
+        .map(|&s| replace_symbol(s))
+        .collect();
+    for s in &supertypes {
+        if s.is_terminal() {
+            Err(ExtractTokensError::SupertypeTerminal(
+                g.pool.resolve(ex.lexical[s.index].name).to_string(),
+            ))?;
+        }
+    }
+
+    let inline = interned.inline.iter().map(|&s| replace_symbol(s)).collect();
+
+    let mut separator_roots = Vec::new();
+    let mut extra_symbols = Vec::new();
+    for &root in &g.extra_roots {
+        if let Some(s) = node_symbol(g.pool.node(root)) {
+            extra_symbols.push(replace_symbol(s));
+        } else if let Some(i) = ex.find(&g.pool, root) {
+            extra_symbols.push(Symbol::terminal(i as usize));
+        } else {
+            separator_roots.push(root);
+        }
+    }
+
+    let mut external_tokens = Vec::with_capacity(g.external_roots.len());
+    for (&root, &(name, kind)) in g.external_roots.iter().zip(&interned.external_tokens) {
+        let Some(s) = node_symbol(g.pool.node(root)) else {
+            Err(ExtractTokensError::NonSymbolExternalToken)?
+        };
+        if s.is_non_terminal() {
+            Err(ExtractTokensError::ExternalTokenNonTerminal(
+                g.pool.resolve(g.variables[s.index].name).to_string(),
+            ))?;
+        }
+        external_tokens.push(if s.is_external() {
+            ExternalToken {
+                name: name.map_or_else(String::new, |n| g.pool.resolve(n).to_string()),
+                kind,
+                corresponding_internal_token: None,
+            }
+        } else {
+            ExternalToken {
+                name: g.pool.resolve(ex.lexical[s.index].name).to_string(),
+                kind,
+                corresponding_internal_token: Some(s),
+            }
+        });
+    }
+
+    let word = match interned.word.map(replace_symbol) {
+        Some(token) if token.is_non_terminal() => {
+            let word_root = g.variables[token.index].root;
+            let conflicting_symbol_name = g
+                .variables
+                .iter()
+                .enumerate()
+                .find(|(i, v)| *i != token.index && g.pool.subtree_eq(v.root, word_root))
+                .map(|(_, v)| g.pool.resolve(v.name).to_string());
+            Err(ExtractTokensError::WordToken(NonTerminalWordTokenError {
+                symbol_name: g.pool.resolve(g.variables[token.index].name).to_string(),
+                conflicting_symbol_name,
+            }))?
+        }
+        word => word,
+    };
+
+    let mut reserved_sets = Vec::with_capacity(g.reserved_sets.len());
+    for set in &g.reserved_sets {
+        let mut symbols = Vec::with_capacity(set.roots.len());
+        for &root in &set.roots {
+            if let Some(s) = node_symbol(g.pool.node(root)) {
+                symbols.push(replace_symbol(s));
+            } else if let Some(i) = ex.find(&g.pool, root) {
+                symbols.push(Symbol::terminal(i as usize));
+            } else {
+                let inner = match g.pool.node(root) {
+                    PoolNode::Metadata { rule, .. } => g.pool.node(rule),
+                    node => node,
+                };
+                let token_name = match inner {
+                    PoolNode::String(s) | PoolNode::Pattern(s, _) => {
+                        g.pool.resolve(s).to_string()
+                    }
+                    _ => "unknown".to_string(),
+                };
+                Err(ExtractTokensError::NonTokenReservedWord(token_name))?;
+            }
+        }
+        reserved_sets.push((set.name, symbols));
+    }
+
+    Ok(PoolExtractedMeta {
+        kinds,
+        lexical_variables: ex.lexical,
+        separator_roots,
+        extra_symbols,
+        external_tokens,
+        reserved_sets,
+        supertypes,
+        conflicts,
+        inline,
+        word,
+    })
+}
+
+/// In-place symbol renumbering after absorption.
+fn renumber_root(
+    pool: &mut RulePool,
+    root: NodeId,
+    replace: &impl Fn(Symbol) -> Symbol,
+    stack: &mut Vec<NodeId>,
+) {
+    stack.clear();
+    stack.push(root);
+    while let Some(id) = stack.pop() {
+        match pool.node(id) {
+            node @ PoolNode::Sym { .. } => {
+                let s = node_symbol(node).unwrap();
+                let replaced = replace(s);
+                if replaced != s {
+                    pool.set_node(id, sym(replaced));
+                }
+            }
+            PoolNode::Seq(range) | PoolNode::Choice(range) => {
+                stack.extend_from_slice(pool.child_slice(range));
+            }
+            PoolNode::Repeat(inner)
+            | PoolNode::Metadata { rule: inner, .. }
+            | PoolNode::Reserved { rule: inner, .. } => stack.push(inner),
+            _ => {}
+        }
+    }
+}
+
+/// Materialize the pool pass's output for A/B verification. Deleted at the
+/// container flip.
+pub(super) fn materialize_extracted(
+    g: &PoolGrammar,
+    meta: &PoolExtractedMeta,
+    precedence_orderings: &[Vec<PrecedenceEntry>],
+) -> (ExtractedSyntaxGrammar, ExtractedLexicalGrammar) {
+    (
+        ExtractedSyntaxGrammar {
+            variables: g
+                .variables
+                .iter()
+                .zip(&meta.kinds)
+                .map(|(v, &kind)| Variable {
+                    name: g.pool.resolve(v.name).to_string(),
+                    kind,
+                    rule: g.pool.rule(v.root),
+                })
+                .collect(),
+            expected_conflicts: meta.conflicts.clone(),
+            extra_symbols: meta.extra_symbols.clone(),
+            variables_to_inline: meta.inline.clone(),
+            supertype_symbols: meta.supertypes.clone(),
+            external_tokens: meta.external_tokens.clone(),
+            word_token: meta.word,
+            precedence_orderings: precedence_orderings.to_vec(),
+            reserved_word_sets: meta
+                .reserved_sets
+                .iter()
+                .map(|(name, symbols)| ReservedWordContext {
+                    name: g.pool.resolve(*name).to_string(),
+                    reserved_words: symbols.clone(),
+                })
+                .collect(),
+        },
+        ExtractedLexicalGrammar {
+            variables: meta
+                .lexical_variables
+                .iter()
+                .map(|v| Variable {
+                    name: g.pool.resolve(v.name).to_string(),
+                    kind: v.kind,
+                    rule: g.pool.rule(v.root),
+                })
+                .collect(),
+            separators: meta
+                .separator_roots
+                .iter()
+                .map(|&r| g.pool.rule(r))
+                .collect(),
+        },
+    )
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -650,5 +1086,178 @@ mod test {
             variables,
             ..Default::default()
         }
+    }
+
+    fn pool_from_interned(
+        g: &InternedGrammar,
+    ) -> (PoolGrammar, super::super::intern_symbols::PoolInternedMeta) {
+        use crate::rule_pool::{PoolReservedSet, PoolVariable, RulePool};
+        let mut pool = RulePool::default();
+        let variables = g
+            .variables
+            .iter()
+            .map(|v| PoolVariable {
+                name: pool.intern(&v.name),
+                root: pool.add_rule(&v.rule),
+            })
+            .collect();
+        let external_roots = g
+            .external_tokens
+            .iter()
+            .map(|v| pool.add_rule(&v.rule))
+            .collect();
+        let extra_roots = g.extra_symbols.iter().map(|r| pool.add_rule(r)).collect();
+        let reserved_sets = g
+            .reserved_word_sets
+            .iter()
+            .map(|set| PoolReservedSet {
+                name: pool.intern(&set.name),
+                roots: set.reserved_words.iter().map(|r| pool.add_rule(r)).collect(),
+            })
+            .collect();
+        let external_tokens = g
+            .external_tokens
+            .iter()
+            .map(|v| ((!v.name.is_empty()).then(|| pool.intern(&v.name)), v.kind))
+            .collect();
+        let meta = super::super::intern_symbols::PoolInternedMeta {
+            kinds: g.variables.iter().map(|v| v.kind).collect(),
+            external_tokens,
+            supertypes: g.supertype_symbols.clone(),
+            conflicts: g.expected_conflicts.clone(),
+            inline: g.variables_to_inline.clone(),
+            word: g.word_token,
+        };
+        let pg = PoolGrammar {
+            pool,
+            name: String::new(),
+            variables,
+            external_roots,
+            extra_roots,
+            reserved_sets,
+            supertype_names: Vec::new(),
+            conflict_names: Vec::new(),
+            inline_names: Vec::new(),
+            word_name: None,
+            precedence_orderings: g.precedence_orderings.clone(),
+        };
+        (pg, meta)
+    }
+
+    fn assert_pool_matches_master(g: InternedGrammar) {
+        let (mut pg, meta) = pool_from_interned(&g);
+        let master = extract_tokens(g);
+        let pool_result = extract_tokens_pool(&mut pg, &meta);
+        match (master, pool_result) {
+            (Ok((master_syntax, master_lexical)), Ok(pool_meta)) => {
+                let (pool_syntax, pool_lexical) =
+                    materialize_extracted(&pg, &pool_meta, &pg.precedence_orderings);
+                assert_eq!(pool_syntax, master_syntax);
+                assert_eq!(pool_lexical, master_lexical);
+            }
+            (Err(master_err), Err(pool_err)) => {
+                assert_eq!(pool_err.to_string(), master_err.to_string());
+            }
+            (master, pool) => panic!("master {master:?} but pool {pool:?}"),
+        }
+    }
+
+    #[test]
+    fn pool_extract_matches_master() {
+        // The dedup/absorption shape from test_extraction.
+        assert_pool_matches_master(build_grammar(vec![
+            Variable::named(
+                "rule_0",
+                Rule::repeat(Rule::seq(vec![
+                    Rule::string("a"),
+                    Rule::pattern("b", ""),
+                    Rule::choice(vec![
+                        Rule::non_terminal(1),
+                        Rule::non_terminal(2),
+                        Rule::token(Rule::repeat(Rule::choice(vec![
+                            Rule::string("c"),
+                            Rule::string("d"),
+                        ]))),
+                    ]),
+                ])),
+            ),
+            Variable::named("rule_1", Rule::pattern("e", "")),
+            Variable::named("rule_2", Rule::pattern("b", "")),
+            Variable::named(
+                "rule_3",
+                Rule::seq(vec![Rule::non_terminal(2), Rule::Blank]),
+            ),
+        ]));
+
+        // Start rule fully tokenized; hidden terminal not absorbed.
+        assert_pool_matches_master(build_grammar(vec![Variable::named(
+            "rule_0",
+            Rule::string("hello"),
+        )]));
+        assert_pool_matches_master(build_grammar(vec![
+            Variable::named("rule_0", Rule::non_terminal(1)),
+            Variable::hidden("_rule_1", Rule::string("a")),
+        ]));
+
+        // Extras routing (symbol, lexical match, separator).
+        let mut g = build_grammar(vec![
+            Variable::named("rule_0", Rule::string("x")),
+            Variable::named("comment", Rule::pattern("//.*", "")),
+        ]);
+        g.extra_symbols = vec![Rule::string(" "), Rule::non_terminal(1)];
+        assert_pool_matches_master(g);
+
+        // Externals: pure external, anonymous internal, named internal.
+        let mut g = build_grammar(vec![
+            Variable::named(
+                "rule_0",
+                Rule::seq(vec![
+                    Rule::external(0),
+                    Rule::string("a"),
+                    Rule::non_terminal(1),
+                    Rule::non_terminal(2),
+                ]),
+            ),
+            Variable::named("rule_1", Rule::string("b")),
+            Variable::named("rule_2", Rule::string("c")),
+        ]);
+        g.external_tokens = vec![
+            Variable::named("external_0", Rule::external(0)),
+            Variable::anonymous("a", Rule::string("a")),
+            Variable::named("rule_2", Rule::non_terminal(2)),
+        ];
+        assert_pool_matches_master(g);
+    }
+
+    #[test]
+    fn pool_extract_matches_master_errors() {
+        // Empty string outside the first rule.
+        assert_pool_matches_master(build_grammar(vec![
+            Variable::named("rule_0", Rule::non_terminal(1)),
+            Variable::hidden("_rule_1", Rule::string("")),
+        ]));
+
+        // External token that is also a non-terminal.
+        let mut g = build_grammar(vec![
+            Variable::named(
+                "rule_0",
+                Rule::seq(vec![Rule::non_terminal(1), Rule::non_terminal(2)]),
+            ),
+            Variable::named(
+                "rule_1",
+                Rule::seq(vec![Rule::non_terminal(2), Rule::non_terminal(2)]),
+            ),
+            Variable::named("rule_2", Rule::string("a")),
+        ]);
+        g.external_tokens = vec![Variable::named("rule_1", Rule::non_terminal(1))];
+        assert_pool_matches_master(g);
+
+        // Supertype resolving to a terminal.
+        let mut g = build_grammar(vec![
+            Variable::named("rule_0", Rule::non_terminal(1)),
+            Variable::named("rule_1", Rule::string("a")),
+        ]);
+        g.supertype_symbols = vec![Symbol::non_terminal(1)];
+        assert_pool_matches_master(g);
     }
 }
