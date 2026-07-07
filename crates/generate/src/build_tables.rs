@@ -18,6 +18,7 @@ use self::{
     build_lex_table::build_lex_table,
     build_parse_table::{ParseStateInfo, build_parse_table},
     coincident_tokens::CoincidentTokenIndex,
+    item::ItemKeyMap,
     item_set_builder::ParseItemSetBuilder,
     minimize_parse_table::minimize_parse_table,
     token_conflicts::TokenConflictMap,
@@ -54,7 +55,9 @@ pub fn build_tables(
 ) -> BuildTableResult<Tables> {
     // TEMP SPIKE: sub-phase timing (remove with the other spike blocks).
     let t0 = std::time::Instant::now();
-    let item_set_builder = ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines);
+    let item_key_map = ItemKeyMap::new(syntax_grammar, inlines);
+    let item_set_builder =
+        ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines, &item_key_map);
     let t_isb = t0.elapsed();
     let t0 = std::time::Instant::now();
     let following_tokens =
@@ -120,9 +123,8 @@ pub fn build_tables(
     {
         use std::sync::atomic::Ordering::Relaxed;
         eprintln!(
-            "[SPIKE item-ops] hashes {} (steps walked {}) eqs {} cmps {}",
+            "[SPIKE item-ops] hashes {} eqs {} cmps {}",
             item::ITEM_HASHES.load(Relaxed),
-            item::ITEM_HASH_STEPS.load(Relaxed),
             item::ITEM_EQS.load(Relaxed),
             item::ITEM_CMPS.load(Relaxed),
         );

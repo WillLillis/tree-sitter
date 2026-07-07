@@ -425,8 +425,18 @@ of the new `SyntaxGrammar`.
    follow the flip).
 5. **Corpus-machine validation**: generate the translated grammars, diff
    parser.c vs master output, roundtrip suite, `ident_histogram_corpus`.
-6. **`build_tables` item-equivalence-key layer** over pooled deduped
-   productions (measured design below); lands with or after the master port.
+6. ~~**`build_tables` item-equivalence-key layer**~~ DONE 2026-07-07 (stage
+   2a): `ItemKeyMap` precomputes per-`(production, dot)` dense ids by ranking
+   the whole key universe with the item-content comparator (strings compared
+   once, at table-build start), plus a second id subdividing by preceding
+   symbols for `has_preceding_inherited_fields` items. `ParseItem` carries the
+   per-production key slice; Hash/Eq/Ord are now integer ops with identical op
+   counts. Order-preserving rank assignment keeps item-set ordering, so
+   parser.c stays byte-identical (verified on all six). build_parse_table:
+   cpp -15%, rust -32%, c -30%, js -23%; build_tables total: rust 1.53 ->
+   1.18s, cpp 6.19 -> 5.46s. Remaining stage-2b work: swap `SyntaxGrammar`
+   storage to `FProd`/`FStep`, convert node_types/render/build_tables reads,
+   delete `Production`/`ProductionStep` and the boundary materialization.
 
 ## How to run the A/B
 
