@@ -54,7 +54,7 @@ pub type InternedGrammar = IntermediateGrammar<Rule, Variable>;
 
 pub type ExtractedSyntaxGrammar = IntermediateGrammar<Symbol, ExternalToken>;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)] // TEMP Clone: pool expand_tokens A/B loop
 pub struct ExtractedLexicalGrammar {
     pub variables: Vec<Variable>,
     pub separators: Vec<Rule>,
@@ -358,6 +358,52 @@ pub fn prepare_grammar(
     let t0 = std::time::Instant::now();
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
     let t_flatten = t0.elapsed();
+
+    // TEMP A/B (until the container flip): pool expand_tokens vs master, run
+    // over the full converted pool chain. Output LexicalGrammar asserted equal.
+    {
+        use std::hint::black_box;
+        let n = 300u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            black_box(lexical_grammar.clone());
+        }
+        let clone_only = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(expand_tokens(lexical_grammar.clone()));
+        }
+        let master = (t.elapsed() / n).checked_sub(clone_only).unwrap_or_default();
+
+        let mut base = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
+        let interned_meta =
+            intern_symbols::intern_symbols_pool(&mut base, &mut Vec::new()).unwrap();
+        let mut ext_meta = extract_tokens::extract_tokens_pool(&mut base, &interned_meta).unwrap();
+        expand_repeats::expand_repeats_pool(&mut base, &mut ext_meta);
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = black_box(expand_tokens::expand_tokens_pool(
+                &mut base.pool,
+                &ext_meta.lexical_variables,
+                &ext_meta.separator_roots,
+            ));
+        }
+        let pool_time = t.elapsed() / n;
+        eprintln!("[POOL expand_tokens] master {master:?}  pool {pool_time:?}");
+
+        let master_out = expand_tokens(lexical_grammar.clone()).unwrap();
+        let pool_out = expand_tokens::expand_tokens_pool(
+            &mut base.pool,
+            &ext_meta.lexical_variables,
+            &ext_meta.separator_roots,
+        )
+        .unwrap();
+        assert_eq!(
+            pool_out, master_out,
+            "pool expand_tokens diverged from master"
+        );
+    }
+
     let t0 = std::time::Instant::now();
     let lexical_grammar = expand_tokens(lexical_grammar)?;
     let t_tokens = t0.elapsed();

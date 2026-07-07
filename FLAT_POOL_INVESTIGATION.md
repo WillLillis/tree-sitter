@@ -261,6 +261,40 @@ next to master's per-alternative tree cloning.
   build the pool directly) and pre-clones pools (legit: measures per-invocation cost;
   in the real pipeline the pass runs once, no clone).
 
+## Promoted passes (running table, updated 2026-07-07)
+
+Spike retired (`flat_spike.rs` deleted). These are the real pool passes,
+chained in `prepare_grammar` behind `[POOL <pass>]` TEMP A/B blocks: 300-iter
+loops, master netted of input clones where it consumes input, full-output
+equality asserted on every `generate` run (exit 0 on all six fixture
+grammars). One coherent run, us/iter as master -> pool; WSL2 run-to-run
+variance is ~2x on sub-ms master numbers, so treat ratios as indicative and
+re-establish on the corpus machine.
+
+| pass | c | cpp | python | go | javascript | rust |
+|---|---|---|---|---|---|---|
+| intern_symbols | 15.8x | 6.3x | 8.5x | 7.4x | 7.5x | 7.2x |
+| extract_tokens | 5.4x | 5.8x | 5.4x | 6.1x | 3.8x | 4.8x |
+| expand_repeats | 3.8x | 7.6x | 1.9x | 4.4x | 5.8x | 3.2x |
+| flatten_grammar | 4.9x | 4.5x | 8.1x | 5.5x | 7.5x | 6.4x |
+| chain (sum, us) | 3055 -> 575 | 5993 -> 1213 | 1619 -> 257 | 1314 -> 233 | 2037 -> 328 | 5069 -> 838 |
+
+`expand_tokens` (2026-07-07) is converted for IR uniformity, not speed: the
+pass is regex-parse/NFA-bound and that half is shared code, so it measures at
+parity (0.95-1.29x across the six grammars; us master -> pool: c 1393 -> 1459,
+cpp 1830 -> 1865, python 1197 -> 1090, go 942 -> 731, javascript 1062 -> 1094,
+rust 871 -> 815). It removes the last `Rule`-typed consumer on the lexical
+side (`ExtractedLexicalGrammar` dies at the flip) and produces the final
+`LexicalGrammar` directly, so it has no materialize step. Parity details worth
+remembering: the combined separator rule mirrors
+`Rule::repeat(Rule::choice(seps + Blank))` including choice flatten + dedup
+with NO singleton unwrap, and `expand_rule`'s Repeat leaves its placeholder
+`Accept` state behind when the inner rule fails to expand (quirk preserved).
+
+Still Rule-based: `process_inlines` (the rust 10.2ms hotspot),
+`extract_default_aliases`, the two pre-pipeline `validate_*` walks, and the
+containers themselves (the flip).
+
 ## `build_tables` under the flat IR (quick investigation, 2026-07-06)
 
 `build_tables` is 85-97% of `generate`, so this is where a generate-wide win
@@ -343,45 +377,51 @@ of the new `SyntaxGrammar`.
 
 ## Next steps (priority order)
 
-1. ~~**`flatten_grammar` spike** = the go/no-go.~~ DONE 2026-07-06: GO (7-13x,
-   output byte-equal; table above).
-2. **Validate both spikes on the corpus machine** (cpp especially; it is the
-   choice-heaviest grammar and the fixture checkout cannot run it).
-3. **Land the name-map win on master independently** (`intern_name` O(V) scan -> O(1)
-   map). It cut cpp `intern_symbols` 254 -> 152us with zero pool. Cheap, standalone.
-4. **`Symbol` usize -> u32** shrink, standalone, measured vs `build_tables`.
-5. Write the real design doc (all pass access patterns; converge the string
-   interner with the nativedsl lex-time interning design in
-   `plans/nativedsl-string-interning-design.md`; include the
-   `build_tables` item-equivalence-key layer, whose prerequisite is the
-   pooled deduped productions), THEN implement pass-by-pass keeping green +
-   measuring each. Do NOT implement-before-measuring (the attempt-#1
-   mistake).
+1. **Remaining pass conversions**: `process_inlines` (the rust 10.2ms
+   hotspot; pooled step ranges + `(ProdId, dot)` keys per the design doc),
+   `extract_default_aliases`, the two pre-pipeline `validate_*` walks.
+2. **Container flip** per `FLAT_POOL_DESIGN.md`: pool-owning grammar structs,
+   delete the `Rule` bridges (`add_rule`/`rule`), `materialize_*` fns, TEMP
+   derives, and the A/B blocks.
+3. **Harden or drop the A/B blocks before corpus runs**: every block
+   `unwrap()`s master and pool results, so a grammar that legitimately fails
+   a pass (e.g. empty-string token) panics in the block instead of returning
+   the clean error. Fixture grammars all pass; translated corpus grammars may
+   not.
+4. **Lock in the `FStep`/`Frame` bit packing** (bitflags! or a layout doc +
+   roundtrip tests) before the master port.
+5. **Corpus-machine validation**: full A/B on the translated grammars,
+   roundtrip suite, `ident_histogram_corpus`.
+6. **`build_tables` item-equivalence-key layer** over pooled deduped
+   productions (measured design below); lands with or after the master port.
 
-## How to run the spike
+## How to run the A/B
 
 ```
 cargo build --release -p tree-sitter-cli
-for g in cpp c python go javascript; do
-  ( cd ~/projects/grammars/tree-sitter-$g \
-    && /path/to/tree-sitter/target/release/tree-sitter generate grammar.js 2>&1 ) \
-    | grep '\[SPIKE'
+for g in c cpp python go javascript rust; do
+  target/release/tree-sitter generate -o /tmp/gen_$g \
+    test/fixtures/grammars/$g/grammar.js > /tmp/ab_$g.txt 2>&1; echo "$g exit=$?"
 done
+grep '\[POOL' /tmp/ab_*.txt
 ```
-`generate` runs `prepare_grammar` once; the temp bench block there prints the A/B and
-then generation continues to `build_tables` (slow for cpp - the number is already
-printed, Ctrl-C or wait). Grammars live at `~/projects/grammars/tree-sitter-<lang>/`.
+Full runs to files + exit codes, never pipe-truncated (see the verification
+correction above): the equality asserts must actually execute. Exit 0 means
+every `[POOL]` assert passed; the `[SPIKE *-stages]` lines give real one-shot
+stage times.
 
 ## Temp code inventory (all on `rule_ir`, remove/relocate before landing)
 
-- `crates/generate/src/prepare_grammar/flat_spike.rs` - the whole spike module
-  (flat `Pool` + `Rule->pool` converter + flat `intern_symbols`). Plus
-  `mod flat_spike;` in `prepare_grammar.rs`.
-- The `[SPIKE intern_symbols] ...` bench block at the top of `prepare_grammar`
-  (`prepare_grammar.rs`).
-- `intern_symbols.rs`: the temp O(1) `name_map` (Interner field + `FxHashMap` import +
-  `intern_name` rewrite). **This one is a genuine independent win** - consider KEEPING
-  it / landing it on master rather than reverting (see next-step 2).
+- The `[POOL <pass>]` A/B blocks in `prepare_grammar.rs` (timing loops +
+  equality asserts) and the `[SPIKE prepare-stages]`/`[SPIKE
+  generate-stages]`/`[SPIKE tables-stages]`/`[SPIKE item-ops]` prints
+  (`prepare_grammar.rs`, `generate.rs`, `build_tables.rs`, `build_tables/item.rs`).
+- `materialize_interned`/`materialize_extracted`/`materialize_flattened` and
+  the `add_rule`/`rule` pool<->Rule bridges (die at the flip).
+- TEMP derives: `Clone/Debug/PartialEq/Eq` on `IntermediateGrammar`,
+  `PartialEq/Eq` on `SyntaxGrammar`, `Clone` on `ExtractedLexicalGrammar`,
+  `PartialEq/Eq` on `Diagnostic`; TEMP `#[allow(dead_code)]` on
+  `PoolGrammar::name` and `RulePool::str_count`.
 
 ## Git state
 

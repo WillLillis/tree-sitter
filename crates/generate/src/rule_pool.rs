@@ -224,9 +224,7 @@ impl RulePool {
                 Node::Metadata { params, rule } => {
                     let p = self.params(params);
                     (p.prec, p.assoc, p.dynamic_precedence).hash(&mut hasher);
-                    p.alias
-                        .map(|a| (a.value, a.is_named))
-                        .hash(&mut hasher);
+                    p.alias.map(|a| (a.value, a.is_named)).hash(&mut hasher);
                     (p.field, p.is_token, p.is_main_token).hash(&mut hasher);
                     stack.push(rule);
                 }
@@ -246,7 +244,8 @@ impl RulePool {
         while let Some((a, b)) = stack.pop() {
             match (self.node(a), self.node(b)) {
                 (Node::Blank, Node::Blank) => {}
-                (Node::String(x), Node::String(y)) | (Node::NamedSymbol(x), Node::NamedSymbol(y)) => {
+                (Node::String(x), Node::String(y))
+                | (Node::NamedSymbol(x), Node::NamedSymbol(y)) => {
                     if x != y {
                         return false;
                     }
@@ -274,8 +273,14 @@ impl RulePool {
                 }
                 (Node::Repeat(i1), Node::Repeat(i2)) => stack.push((i1, i2)),
                 (
-                    Node::Metadata { params: p1, rule: r1 },
-                    Node::Metadata { params: p2, rule: r2 },
+                    Node::Metadata {
+                        params: p1,
+                        rule: r1,
+                    },
+                    Node::Metadata {
+                        params: p2,
+                        rule: r2,
+                    },
                 ) => {
                     if self.params(p1) != self.params(p2) {
                         return false;
@@ -381,7 +386,10 @@ impl RulePool {
     }
 
     fn rule_children(&self, range: NodeRange) -> Vec<Rule> {
-        self.child_slice(range).iter().map(|&c| self.rule(c)).collect()
+        self.child_slice(range)
+            .iter()
+            .map(|&c| self.rule(c))
+            .collect()
     }
 
     fn metadata_params(&self, id: ParamsId) -> MetadataParams {
@@ -574,7 +582,11 @@ impl PoolGrammar {
             .iter()
             .map(|set| PoolReservedSet {
                 name: pool.intern(&set.name),
-                roots: set.reserved_words.iter().map(|r| pool.add_rule(r)).collect(),
+                roots: set
+                    .reserved_words
+                    .iter()
+                    .map(|r| pool.add_rule(r))
+                    .collect(),
             })
             .collect();
         let supertype_names = g.supertype_symbols.iter().map(|s| pool.intern(s)).collect();
