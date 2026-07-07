@@ -311,9 +311,9 @@ use crate::rule_pool::{
 use crate::rules::SymbolType;
 
 /// One continuation frame, packed to 8 bytes (tag in the 2 high bits of `.0`).
-///   Seq:          tag 0, `.0` = next child (abs index into `children`), `.1` = end
-///   MetaExit:     tag 1, `.0` low bits = pushed-stack flags, `.1` = steps len at entry
-///   ReservedExit: tag 2
+///   `Seq`:          tag 0, `.0` = next child (abs index into `children`), `.1` = end
+///   `MetaExit`:     tag 1, `.0` low bits = pushed-stack flags, `.1` = steps len at entry
+///   `ReservedExit`: tag 2
 #[derive(Clone, Copy)]
 struct Frame(u32, u32);
 
@@ -708,7 +708,7 @@ fn drive(
 
 /// Append the completed path as a production unless this variable already
 /// has an identical one (master's order-preserving dedup).
-fn emit(st: &mut FlattenState, out: &mut FlatOut, prod_start: u32) {
+fn emit(st: &FlattenState, out: &mut FlatOut, prod_start: u32) {
     for p in &out.productions[prod_start as usize..] {
         if p.dynamic_precedence == st.dyn_prec && out.steps[p.step_range()] == st.steps[..] {
             return;

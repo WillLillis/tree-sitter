@@ -40,7 +40,7 @@ pub(super) fn intern_symbols(
             name_map.entry(name.as_str()).or_insert_with(|| Symbol::external(i));
         }
     }
-    let interner = Interner { grammar, name_map };
+    let interner = Interner { name_map };
 
     if variable_type_for_name(&grammar.variables[0].name) == VariableType::Hidden {
         Err(InternSymbolsError::HiddenStartRule)?;
@@ -140,7 +140,6 @@ pub(super) fn intern_symbols(
 }
 
 struct Interner<'a> {
-    grammar: &'a InputGrammar,
     name_map: FxHashMap<&'a str, Symbol>,
 }
 

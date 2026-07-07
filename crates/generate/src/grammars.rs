@@ -113,7 +113,7 @@ pub struct ExternalToken {
     pub corresponding_internal_token: Option<Symbol>,
 }
 
-#[derive(Debug, Default, PartialEq)] // TEMP PartialEq: pool-pass A/B equality asserts
+#[derive(Debug, Default, PartialEq, Eq)] // TEMP PartialEq/Eq: pool-pass A/B equality asserts
 pub struct SyntaxGrammar {
     pub variables: Vec<SyntaxVariable>,
     pub extra_symbols: Vec<Symbol>,

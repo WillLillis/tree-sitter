@@ -187,6 +187,7 @@ impl RulePool {
     }
 
     /// Number of unique interned strings.
+    #[allow(dead_code)] // TEMP: test-only until the container flip
     #[must_use]
     pub const fn str_count(&self) -> usize {
         self.strs.len()
@@ -443,7 +444,7 @@ impl FStep {
     }
 
     #[must_use]
-    pub fn precedence(self) -> Prec {
+    pub const fn precedence(self) -> Prec {
         match self.flags & (0b11 << 3) {
             FSTEP_PREC_INTEGER => Prec::Integer(self.prec_val),
             FSTEP_PREC_NAME => Prec::Name(StrId::from_raw(self.prec_val as u32)),
@@ -452,7 +453,7 @@ impl FStep {
     }
 
     #[must_use]
-    pub fn associativity(self) -> Option<Associativity> {
+    pub const fn associativity(self) -> Option<Associativity> {
         match self.flags & (0b11 << 5) {
             FSTEP_ASSOC_LEFT => Some(Associativity::Left),
             FSTEP_ASSOC_RIGHT => Some(Associativity::Right),
@@ -529,6 +530,7 @@ pub struct PoolReservedSet {
 #[derive(Clone)]
 pub struct PoolGrammar {
     pub pool: RulePool,
+    #[allow(dead_code)] // TEMP: unread until the container flip
     pub name: String,
     pub variables: Vec<PoolVariable>,
     pub external_roots: Vec<NodeId>,
