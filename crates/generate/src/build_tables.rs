@@ -55,7 +55,7 @@ pub fn build_tables(
 ) -> BuildTableResult<Tables> {
     // TEMP SPIKE: sub-phase timing (remove with the other spike blocks).
     let t0 = std::time::Instant::now();
-    let item_key_map = ItemKeyMap::new(syntax_grammar, inlines);
+    let item_key_map = ItemKeyMap::new(syntax_grammar);
     let item_set_builder =
         ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines, &item_key_map);
     let t_isb = t0.elapsed();

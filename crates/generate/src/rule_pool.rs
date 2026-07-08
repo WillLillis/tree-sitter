@@ -28,7 +28,7 @@ impl NodeId {
 }
 
 /// Interned string id: 1-based index into the pool's string table
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct StrId(NonZeroU32);
 
 impl StrId {
@@ -89,7 +89,7 @@ pub enum Node {
 const _: () = assert!(std::mem::size_of::<Node>() == 12);
 
 /// [`Precedence`] with the name interned. `Copy`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum Prec {
     #[default]
     None,
@@ -184,6 +184,14 @@ impl RulePool {
     #[must_use]
     pub fn resolve(&self, id: StrId) -> &str {
         &self.strs[id.index()]
+    }
+
+    /// The interned strings, indexed by `StrId::index`. Cloning is cheap
+    /// (`Rc` bumps); the pooled `SyntaxGrammar` carries this table so its
+    /// `FStep`s stay resolvable after the pool is gone.
+    #[must_use]
+    pub fn strs(&self) -> &[Rc<str>] {
+        &self.strs
     }
 
     /// Number of unique interned strings.
@@ -437,6 +445,10 @@ pub const FSTEP_ASSOC_RIGHT: u8 = 2 << 5;
 pub const FSTEP_ALIAS_NAMED: u8 = 1 << 7;
 pub const FSTEP_PREC_MASK: u8 = 0b11 << 3;
 pub const FSTEP_ASSOC_MASK: u8 = 0b11 << 5;
+/// `FStep::reserved` sentinel: no reserved word set at all (as opposed to id
+/// 0, the default set). Only the augmented start production carries it; it
+/// must never index the reserved-sets table.
+pub const NO_RESERVED_WORDS: u16 = u16::MAX;
 
 impl FStep {
     /// The one packing site. Canonical: absent parts zero their value bits

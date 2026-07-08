@@ -479,6 +479,10 @@ pub(super) fn materialize_flattened(
         reserved_word_sets.push(TokenSet::default());
     }
     SyntaxGrammar {
+        steps: out.steps.clone(),
+        productions: out.productions.clone(),
+        var_prods: out.var_prods.clone(),
+        strs: g.pool.strs().to_vec(),
         variables: g
             .variables
             .iter()

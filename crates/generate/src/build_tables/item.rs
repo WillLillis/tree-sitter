@@ -2,33 +2,36 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    sync::LazyLock,
+    rc::Rc,
 };
 
 use rustc_hash::FxHashMap;
 
 use crate::{
-    grammars::{
-        InlinedProductionMap, LexicalGrammar, NO_RESERVED_WORDS, Production, ProductionStep,
-        ReservedWordSetId, SyntaxGrammar,
-    },
-    rules::{Associativity, Precedence, Symbol, SymbolType, TokenSet},
+    grammars::{LexicalGrammar, ProdRef, ReservedWordSetId, SyntaxGrammar},
+    rule_pool::{FStep, NO_RESERVED_WORDS, Prec, StrId},
+    rules::{Associativity, Symbol, SymbolType, TokenSet},
 };
 
-static START_PRODUCTION: LazyLock<Production> = LazyLock::new(|| Production {
-    dynamic_precedence: 0,
-    steps: vec![ProductionStep {
-        symbol: Symbol {
-            index: 0,
-            kind: SymbolType::NonTerminal,
-        },
-        precedence: Precedence::None,
-        associativity: None,
-        alias: None,
-        field_name: None,
-        reserved_word_set_id: NO_RESERVED_WORDS,
-    }],
-});
+/// The augmented start production: one step, the grammar's root nonterminal.
+static START_STEPS: [FStep; 1] = [FStep {
+    sym_index: 0,
+    prec_val: 0,
+    alias: 0,
+    field: 0,
+    reserved: NO_RESERVED_WORDS,
+    flags: SymbolType::NonTerminal as u8,
+}];
+
+pub const START_PRODUCTION_ID: u32 = u32::MAX;
+
+const fn start_production() -> ProdRef<'static> {
+    ProdRef {
+        steps: &START_STEPS,
+        dynamic_precedence: 0,
+        id: START_PRODUCTION_ID,
+    }
+}
 
 /// Precomputed identity keys for one `(production, dot)` pair. Dense ids
 /// assigned in item-content order, so item comparisons are integer ops
@@ -47,36 +50,40 @@ pub struct DotKeys {
     pub eq_with_syms: u32,
 }
 
-/// Identity keys for every `(production, dot)` in a grammar: all grammar
-/// productions, all inlined productions, and the augmented start production.
+/// Identity keys for every `(production, dot)` in a grammar: the whole
+/// pooled production table (grammar productions and inlining-created ones
+/// alike) plus the augmented start production in slot 0.
 pub struct ItemKeyMap {
-    keys: FxHashMap<*const Production, Box<[DotKeys]>>,
+    keys: Vec<Box<[DotKeys]>>,
     start: Box<[DotKeys]>,
 }
 
 impl ItemKeyMap {
-    pub fn new(grammar: &SyntaxGrammar, inlines: &InlinedProductionMap) -> Self {
-        let mut prods: Vec<&Production> = vec![&START_PRODUCTION];
-        for variable in &grammar.variables {
-            prods.extend(variable.productions.iter());
-        }
-        prods.extend(inlines.productions.iter());
+    pub fn new(grammar: &SyntaxGrammar) -> Self {
+        let prod = |slot: usize| -> ProdRef {
+            if slot == 0 {
+                start_production()
+            } else {
+                grammar.production(slot as u32 - 1)
+            }
+        };
+        let slot_count = grammar.productions.len() + 1;
 
         let mut contents: Vec<(u32, u32)> = Vec::new();
-        for (pi, p) in prods.iter().enumerate() {
-            for dot in 0..=p.steps.len() {
+        for pi in 0..slot_count {
+            for dot in 0..=prod(pi).steps.len() {
                 contents.push((pi as u32, dot as u32));
             }
         }
         let content = |&(pi, dot): &(u32, u32)| ItemContent {
-            production: prods[pi as usize],
+            production: prod(pi as usize),
             dot: dot as usize,
+            strs: &grammar.strs,
         };
         contents.sort_unstable_by(|a, b| content(a).cmp(&content(b)));
 
-        let mut slot_keys: Vec<Box<[DotKeys]>> = prods
-            .iter()
-            .map(|p| vec![DotKeys::default(); p.steps.len() + 1].into_boxed_slice())
+        let mut slot_keys: Vec<Box<[DotKeys]>> = (0..slot_count)
+            .map(|pi| vec![DotKeys::default(); prod(pi).steps.len() + 1].into_boxed_slice())
             .collect();
         let mut cmp_id = 0u32;
         let mut prev: Option<(u32, u32)> = None;
@@ -92,9 +99,9 @@ impl ItemKeyMap {
 
         let mut sym_classes: FxHashMap<(u32, Vec<Symbol>), u32> = FxHashMap::default();
         for &(pi, dot) in &contents {
-            let syms: Vec<Symbol> = prods[pi as usize].steps[..dot as usize]
+            let syms: Vec<Symbol> = prod(pi as usize).steps[..dot as usize]
                 .iter()
-                .map(|s| s.symbol)
+                .map(|s| s.symbol())
                 .collect();
             let next = sym_classes.len() as u32;
             let keys = &mut slot_keys[pi as usize][dot as usize];
@@ -103,17 +110,19 @@ impl ItemKeyMap {
 
         let mut slots = slot_keys.into_iter();
         let start = slots.next().unwrap();
-        let keys = prods[1..]
-            .iter()
-            .zip(slots)
-            .map(|(p, ks)| (std::ptr::from_ref::<Production>(p), ks))
-            .collect();
-        Self { keys, start }
+        Self {
+            keys: slots.collect(),
+            start,
+        }
     }
 
     /// The keys slice (indexed by dot) for a production of this grammar.
-    pub fn keys_for(&self, production: &Production) -> &[DotKeys] {
-        &self.keys[&std::ptr::from_ref::<Production>(production)]
+    pub fn keys_for(&self, id: u32) -> &[DotKeys] {
+        if id == START_PRODUCTION_ID {
+            &self.start
+        } else {
+            &self.keys[id as usize]
+        }
     }
 
     pub fn start_keys(&self) -> &[DotKeys] {
@@ -123,29 +132,71 @@ impl ItemKeyMap {
 
 /// The content tuple that `ParseItem`'s `Ord` (and flagless `Eq`) observe,
 /// evaluated on `(production, dot)` directly. Ranking the key universe by
-/// this order is what makes the dense `cmp` ids order-preserving. Item
+/// this order is what makes the dense `cmp` ids order-preserving; every
+/// string-bearing field resolves and compares as a string here so the ranks
+/// reproduce the historical `String`-ordered comparisons exactly. Item
 /// ordering only ever compares same-dot pairs; the dot comparison keeps the
 /// order total across dots so ranks are well defined.
 struct ItemContent<'a> {
-    production: &'a Production,
+    production: ProdRef<'a>,
     dot: usize,
+    strs: &'a [Rc<str>],
 }
 
 impl ItemContent<'_> {
-    fn prec(&self) -> &Precedence {
+    fn prec(&self) -> Prec {
         if self.dot > 0 {
-            &self.production.steps[self.dot - 1].precedence
+            self.production.steps[self.dot - 1].precedence()
         } else {
-            &Precedence::None
+            Prec::None
         }
     }
 
     fn assoc(&self) -> Option<Associativity> {
         if self.dot > 0 {
-            self.production.steps[self.dot - 1].associativity
+            self.production.steps[self.dot - 1].associativity()
         } else {
             None
         }
+    }
+
+    fn resolve(&self, id: StrId) -> &str {
+        &self.strs[id.index()]
+    }
+
+    /// `Precedence` order: `None`, then `Integer`, then `Name` by string.
+    fn prec_cmp(&self, a: Prec, b: Prec) -> Ordering {
+        match (a, b) {
+            (Prec::None, Prec::None) => Ordering::Equal,
+            (Prec::Integer(x), Prec::Integer(y)) => x.cmp(&y),
+            (Prec::Name(x), Prec::Name(y)) => self.resolve(x).cmp(self.resolve(y)),
+            (Prec::None, _) | (Prec::Integer(_), Prec::Name(_)) => Ordering::Less,
+            (_, Prec::None) | (Prec::Name(_), Prec::Integer(_)) => Ordering::Greater,
+        }
+    }
+
+    /// `Option<Alias>` order: `None` first, then value string, then
+    /// `is_named`.
+    fn alias_cmp(&self, a: FStep, b: FStep) -> Ordering {
+        let key = |s: FStep| s.alias().map(|a| (self.resolve(a.value), a.is_named));
+        key(a).cmp(&key(b))
+    }
+
+    fn field_cmp(&self, a: FStep, b: FStep) -> Ordering {
+        let key = |s: FStep| s.field().map(|f| self.resolve(f));
+        key(a).cmp(&key(b))
+    }
+
+    /// `ProductionStep` order: symbol, precedence, associativity, alias,
+    /// field, reserved word set.
+    fn step_cmp(&self, a: FStep, b: FStep) -> Ordering {
+        a.symbol()
+            .cmp(&b.symbol())
+            .then_with(|| self.prec_cmp(a.precedence(), b.precedence()))
+            .then_with(|| a.associativity().cmp(&b.associativity()))
+            .then_with(|| self.alias_cmp(a, b))
+            .then_with(|| self.field_cmp(a, b))
+            .then_with(|| a.reserved.cmp(&b.reserved))
     }
 }
 
@@ -160,18 +211,16 @@ impl Ord for ItemContent<'_> {
                     .len()
                     .cmp(&other.production.steps.len())
             })
-            .then_with(|| self.prec().cmp(other.prec()))
+            .then_with(|| self.prec_cmp(self.prec(), other.prec()))
             .then_with(|| self.assoc().cmp(&other.assoc()))
             .then_with(|| self.dot.cmp(&other.dot))
             .then_with(|| {
-                let steps = self.production.steps.iter().zip(&other.production.steps);
-                for (i, (sa, sb)) in steps.enumerate() {
+                let steps = self.production.steps.iter().zip(other.production.steps);
+                for (i, (&sa, &sb)) in steps.enumerate() {
                     let o = if i < self.dot {
-                        sa.alias
-                            .cmp(&sb.alias)
-                            .then_with(|| sa.field_name.cmp(&sb.field_name))
+                        self.alias_cmp(sa, sb).then_with(|| self.field_cmp(sa, sb))
                     } else {
-                        sa.cmp(sb)
+                        self.step_cmp(sa, sb)
                     };
                     if o != Ordering::Equal {
                         return o;
@@ -204,7 +253,7 @@ pub struct ParseItem<'a> {
     /// The number of symbols that have already been matched.
     pub step_index: u32,
     /// The production being matched.
-    pub production: &'a Production,
+    pub production: ProdRef<'a>,
     /// The production's identity keys, indexed by `step_index`.
     pub keys: &'a [DotKeys],
     /// A boolean indicating whether any of the already-matched children were
@@ -270,7 +319,7 @@ impl<'a> ParseItem<'a> {
     pub fn start(key_map: &'a ItemKeyMap) -> Self {
         ParseItem {
             variable_index: u32::MAX,
-            production: &START_PRODUCTION,
+            production: start_production(),
             keys: key_map.start_keys(),
             step_index: 0,
             has_preceding_inherited_fields: false,
@@ -278,30 +327,29 @@ impl<'a> ParseItem<'a> {
     }
 
     #[must_use]
-    pub fn step(&self) -> Option<&'a ProductionStep> {
-        self.production.steps.get(self.step_index as usize)
+    pub fn step(&self) -> Option<FStep> {
+        self.production.steps.get(self.step_index as usize).copied()
     }
 
     #[must_use]
     pub fn symbol(&self) -> Option<Symbol> {
-        self.step().map(|step| step.symbol)
+        self.step().map(FStep::symbol)
     }
 
     #[must_use]
     pub fn associativity(&self) -> Option<Associativity> {
-        self.prev_step().and_then(|step| step.associativity)
+        self.prev_step().and_then(FStep::associativity)
     }
 
     #[must_use]
-    pub fn precedence(&self) -> &Precedence {
-        self.prev_step()
-            .map_or(&Precedence::None, |step| &step.precedence)
+    pub fn precedence(&self) -> Prec {
+        self.prev_step().map_or(Prec::None, FStep::precedence)
     }
 
     #[must_use]
-    pub fn prev_step(&self) -> Option<&'a ProductionStep> {
+    pub fn prev_step(&self) -> Option<FStep> {
         if self.step_index > 0 {
-            Some(&self.production.steps[self.step_index as usize - 1])
+            Some(self.production.steps[self.step_index as usize - 1])
         } else {
             None
         }
@@ -334,7 +382,7 @@ impl<'a> ParseItem<'a> {
     #[must_use]
     pub const fn substitute_production(
         &self,
-        production: &'a Production,
+        production: ProdRef<'a>,
         keys: &'a [DotKeys],
     ) -> Self {
         let mut result = *self;
@@ -377,6 +425,15 @@ impl<'a> ParseItemSet<'a> {
     }
 }
 
+/// `Precedence`'s display, resolved from the pooled form.
+pub fn prec_display(grammar: &SyntaxGrammar, prec: Prec) -> String {
+    match prec {
+        Prec::None => "none".to_string(),
+        Prec::Integer(i) => i.to_string(),
+        Prec::Name(sid) => format!("'{}'", grammar.resolve(sid)),
+    }
+}
+
 impl fmt::Display for ParseItemDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         if self.0.is_augmented() {
@@ -390,55 +447,60 @@ impl fmt::Display for ParseItemDisplay<'_> {
         }
 
         for (i, step) in self.0.production.steps.iter().enumerate() {
+            let symbol = step.symbol();
             if i == self.0.step_index as usize {
                 write!(f, " •")?;
-                if !step.precedence.is_none()
-                    || step.associativity.is_some()
-                    || step.reserved_word_set_id != ReservedWordSetId::default()
+                if !matches!(step.precedence(), Prec::None)
+                    || step.associativity().is_some()
+                    || step.reserved != 0
                 {
                     write!(f, " (")?;
-                    if !step.precedence.is_none() {
-                        write!(f, " {}", step.precedence)?;
+                    if !matches!(step.precedence(), Prec::None) {
+                        write!(f, " {}", prec_display(self.1, step.precedence()))?;
                     }
-                    if let Some(associativity) = step.associativity {
+                    if let Some(associativity) = step.associativity() {
                         write!(f, " {associativity:?}")?;
                     }
-                    if step.reserved_word_set_id != ReservedWordSetId::default() {
-                        write!(f, "reserved: {}", step.reserved_word_set_id)?;
+                    if step.reserved != 0 {
+                        write!(f, "reserved: {}", step.reserved)?;
                     }
                     write!(f, " )")?;
                 }
             }
 
             write!(f, " ")?;
-            if step.symbol.is_terminal() {
-                if let Some(variable) = self.2.variables.get(step.symbol.index) {
+            if symbol.is_terminal() {
+                if let Some(variable) = self.2.variables.get(symbol.index) {
                     write!(f, "{}", variable.name)?;
                 } else {
-                    write!(f, "terminal-{}", step.symbol.index)?;
+                    write!(f, "terminal-{}", symbol.index)?;
                 }
-            } else if step.symbol.is_external() {
-                write!(f, "{}", self.1.external_tokens[step.symbol.index].name)?;
+            } else if symbol.is_external() {
+                write!(f, "{}", self.1.external_tokens[symbol.index].name)?;
             } else {
-                write!(f, "{}", self.1.variables[step.symbol.index].name)?;
+                write!(f, "{}", self.1.variables[symbol.index].name)?;
             }
 
-            if let Some(alias) = &step.alias {
-                write!(f, "@{}", alias.value)?;
+            if let Some(alias) = step.alias() {
+                write!(f, "@{}", self.1.resolve(alias.value))?;
             }
         }
 
         if self.0.is_done() {
             write!(f, " •")?;
-            if let Some(step) = self.0.production.steps.last() {
-                if let Some(associativity) = step.associativity {
-                    if step.precedence.is_none() {
+            if let Some(&step) = self.0.production.steps.last() {
+                if let Some(associativity) = step.associativity() {
+                    if matches!(step.precedence(), Prec::None) {
                         write!(f, " ({associativity:?})")?;
                     } else {
-                        write!(f, " ({} {associativity:?})", step.precedence)?;
+                        write!(
+                            f,
+                            " ({} {associativity:?})",
+                            prec_display(self.1, step.precedence())
+                        )?;
                     }
-                } else if !step.precedence.is_none() {
-                    write!(f, " ({})", step.precedence)?;
+                } else if !matches!(step.precedence(), Prec::None) {
+                    write!(f, " ({})", prec_display(self.1, step.precedence()))?;
                 }
             }
         }

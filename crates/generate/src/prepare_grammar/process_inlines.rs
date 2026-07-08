@@ -272,6 +272,8 @@ pub(super) fn materialize_inlines(
     InlinedProductionMap {
         productions,
         production_map,
+        first_inlined: inl.first_inlined,
+        map: inl.map.clone(),
     }
 }
 

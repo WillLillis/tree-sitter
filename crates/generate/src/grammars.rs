@@ -1,9 +1,12 @@
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, rc::Rc};
+
+use rustc_hash::FxHashMap;
 
 use super::{
     nfa::Nfa,
     rules::{Alias, Associativity, Precedence, Rule, Symbol, TokenSet},
 };
+use crate::rule_pool::{FProd, FStep, StrId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VariableType {
@@ -85,8 +88,6 @@ impl fmt::Display for ReservedWordSetId {
     }
 }
 
-pub const NO_RESERVED_WORDS: ReservedWordSetId = ReservedWordSetId(usize::MAX);
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Production {
     pub steps: Vec<ProductionStep>,
@@ -95,8 +96,16 @@ pub struct Production {
 
 #[derive(Debug, Default)] // TEMP Debug: pool-pass A/B unwraps
 pub struct InlinedProductionMap {
+    #[allow(dead_code)] // TEMP: test-only until the legacy-storage drop
     pub productions: Vec<Production>,
+    #[allow(dead_code)] // TEMP: test-only until the legacy-storage drop
     pub production_map: HashMap<(*const Production, u32), Vec<usize>>,
+    /// Pooled form (replaces the address-keyed map at the storage flip):
+    /// production ids into [`SyntaxGrammar::productions`]; ids at or above
+    /// `first_inlined` are inlining-created.
+    #[allow(dead_code)] // TEMP: unread until the legacy-storage drop
+    pub first_inlined: u32,
+    pub map: FxHashMap<(u32, u32), Vec<u32>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +133,54 @@ pub struct SyntaxGrammar {
     pub word_token: Option<Symbol>,
     pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
     pub reserved_word_sets: Vec<TokenSet>,
+    /// Pooled production storage (replaces `SyntaxVariable::productions` at
+    /// the storage flip): one step pool, productions as ranges into it
+    /// (inlining-created productions appended after the grammar's own), and
+    /// per-variable production ranges parallel to `variables`. `strs`
+    /// resolves the `StrId`s packed in the steps.
+    pub steps: Vec<FStep>,
+    pub productions: Vec<FProd>,
+    pub var_prods: Vec<(u32, u32)>,
+    pub strs: Vec<Rc<str>>,
+}
+
+/// A production in the pooled [`SyntaxGrammar`] storage.
+#[derive(Clone, Copy, Debug)]
+pub struct ProdRef<'a> {
+    pub steps: &'a [FStep],
+    pub dynamic_precedence: i32,
+    pub id: u32,
+}
+
+impl ProdRef<'_> {
+    #[must_use]
+    pub fn first_symbol(&self) -> Option<Symbol> {
+        self.steps.first().map(|s| s.symbol())
+    }
+}
+
+impl SyntaxGrammar {
+    #[must_use]
+    pub fn resolve(&self, id: StrId) -> &str {
+        &self.strs[id.index()]
+    }
+
+    #[must_use]
+    pub fn production(&self, id: u32) -> ProdRef<'_> {
+        let p = self.productions[id as usize];
+        ProdRef {
+            steps: &self.steps[p.step_range()],
+            dynamic_precedence: p.dynamic_precedence,
+            id,
+        }
+    }
+
+    /// The pooled production ids belonging to a variable.
+    #[must_use]
+    pub fn variable_prod_ids(&self, variable_index: usize) -> std::ops::Range<u32> {
+        let (start, end) = self.var_prods[variable_index];
+        start..end
+    }
 }
 
 #[cfg(test)]
@@ -164,13 +221,6 @@ impl ProductionStep {
     pub fn with_field_name(mut self, name: &str) -> Self {
         self.field_name = Some(name.to_string());
         self
-    }
-}
-
-impl Production {
-    #[must_use]
-    pub fn first_symbol(&self) -> Option<Symbol> {
-        self.steps.first().map(|s| s.symbol)
     }
 }
 
@@ -260,6 +310,9 @@ impl SyntaxVariable {
 }
 
 impl InlinedProductionMap {
+    /// Test-only since the pooled lookup took over; dies with the legacy
+    /// storage.
+    #[cfg(test)]
     #[must_use]
     pub fn inlined_productions<'a>(
         &'a self,
@@ -274,6 +327,12 @@ impl InlinedProductionMap {
                     .copied()
                     .map(move |index| &self.productions[index])
             })
+    }
+
+    /// Pooled lookup: the production ids created by inlining at this step.
+    #[must_use]
+    pub fn inlined_prod_ids(&self, prod_id: u32, step_index: u32) -> Option<&[u32]> {
+        self.map.get(&(prod_id, step_index)).map(Vec::as_slice)
     }
 }
 
