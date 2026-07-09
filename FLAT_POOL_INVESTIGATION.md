@@ -413,10 +413,19 @@ of the new `SyntaxGrammar`.
    grammars; 604/604 tests (pass tests now run the pool path against the old
    literal expectations; parity-only tests died with master). Real-pipeline
    rust aliases+inlines: 10.2ms -> 0.77ms.
-   Remaining: **stage 2** (pool-backed `SyntaxGrammar`, `FProd`/`FStep`
-   consumers in build_tables/node_types/render, delete `materialize_*`),
-   **stage 3** (frontends emit pools; `InputGrammar` pool-owning; delete
-   `Rule` + bridges + `pool_from_syntax`-style test bridges).
+   Stage 2 DONE 2026-07-08 in three verified commits: build_tables reads
+   pooled storage (`ProdRef`/`FStep`, id-keyed inlining, `Prec` conflict
+   resolution), then node_types/render/minimize walks, then the legacy drop
+   (`SyntaxVariable::productions` is cfg(test) fixture vocabulary,
+   `Production`/`ProductionStep` cfg(test), `InlinedProductionMap` is just
+   the `(id, dot)` map, `assemble_syntax_grammar` moves the pools in with no
+   clones). Byte-identical parser.c after every commit; interleaved min-of-3
+   perf: parity with stage 2a (cpp -1.5%, rust prepare -1ms). Perf protocol
+   note: single-shot WSL numbers swing +/-10-20%; regressions are checked
+   with interleaved min-of-N runs of both binaries.
+   Remaining: **stage 3** (frontends emit pools; `InputGrammar` pool-owning;
+   delete `Rule` + the `add_rule`/`rule`/`from_input_grammar` bridges + the
+   `pool_from_*` test bridges; dsl-tests `pub mod rules` exposure resolved).
 3. ~~**Harden or drop the A/B blocks before corpus runs**~~ moot: the A/B
    blocks are gone with stage 1; corpus verification is now generate-and-diff
    against a master-built parser.c.
