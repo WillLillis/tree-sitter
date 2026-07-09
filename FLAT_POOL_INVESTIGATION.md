@@ -320,6 +320,52 @@ descends into `Reserved` subtrees.
 With that, every `prepare_grammar` pass runs pool-side. Still Rule-based: only
 the containers themselves (the flip).
 
+## Master A/B baseline + the perf-followup levers (2026-07-08)
+
+First true master-vs-branch measurement (interleaved min-of-3, item-op
+counters stubbed out of the branch binary, grammar.json inputs so the JS
+runtime stays out of RSS):
+
+| grammar | wall master -> branch | peak RSS master -> branch |
+|---|---|---|
+| c | 0.62 -> 0.58s (-6%) | 160.7 -> 162.2MB (+1%) |
+| cpp | 6.08 -> 5.68s (-7%) | 996 -> 1004MB (+0.8%) |
+| rust | 1.54 -> 1.25s (-19%) | 302 -> 303MB (+0.4%) |
+
+Honest reading: end-to-end time is a modest real win; peak memory is flat
+because the peak was never the grammar representation. On cpp the ~1GB
+lives in build_tables' own structures: per-entry lookahead `TokenSet`s
+(cloned per transitive-closure addition), `parse_state_info` retaining a
+full `ParseItemSet` per state for conflict reporting, and the parse table.
+The +1% is the fatter `ParseItem` (~56B vs ~24B: `ProdRef` + keys slice).
+
+The maintainer bar for the master port is demonstrated, meaningful time AND
+memory wins. Levers for the perf campaign, in expected-impact order (the
+IR makes all of these cheap to implement now; none are speculative
+representation changes):
+
+1. **Lookahead `TokenSet` interning** - the item-key trick applied to the
+   other half of `ParseItemSetEntry`: rank-intern lookahead sets, store ids,
+   memoize unions. Kills the per-addition set clones, turns item-set
+   hash/eq's set traversals into int ops, and dedups massively-repeated
+   sets (time AND memory; likely the biggest single lever).
+2. **`parse_state_info` retention** - a `(SymbolSequence, ParseItemSet)` per
+   state held for the whole build, used only for conflict reporting. Store
+   interned/compact forms, or materialize lazily on the conflict path.
+   Probably the biggest pure-memory lever.
+3. **`ParseItem` shrink** - `prod_id: u32` + `DotKeys` base index instead of
+   `ProdRef` + keys slice (identity already goes through keys; step access
+   can deref through the grammar at the few use sites). Item back to ~16B,
+   halving item-set memory traffic.
+4. **minimize / keywords+error+used / token_conflicts** - untouched by the
+   IR (cpp: ~4s combined); need profiling, likely state-signature grouping
+   and bitset-operation work.
+
+Also in the master-PR value story beyond generate wall time: the
+prepare-bound paths (tsg frontend, LSP-grade validation, grammar.json
+emission: 5-7x), the native frontend's alloc-bomb deletion (stage 3),
+depth-safety (`MAX_RULE_DEPTH` removal), and rust `process_inlines` 16x.
+
 ## `build_tables` under the flat IR (quick investigation, 2026-07-06)
 
 `build_tables` is 85-97% of `generate`, so this is where a generate-wide win
