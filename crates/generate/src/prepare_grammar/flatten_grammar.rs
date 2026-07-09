@@ -6,10 +6,13 @@ use thiserror::Error;
 #[cfg(test)]
 use super::ExtractedSyntaxGrammar;
 #[cfg(test)]
-use crate::{grammars::Variable, rules::Rule};
 use crate::{
-    grammars::{Production, ProductionStep, ReservedWordSetId, SyntaxGrammar, SyntaxVariable},
-    rules::{Associativity, Precedence, Symbol, TokenSet},
+    grammars::{Production, ProductionStep, Variable},
+    rules::{Precedence, Rule},
+};
+use crate::{
+    grammars::{SyntaxGrammar, SyntaxVariable},
+    rules::{Associativity, Symbol, TokenSet},
 };
 
 pub type FlattenGrammarResult<T> = Result<T, FlattenGrammarError>;
@@ -443,33 +446,13 @@ fn emit(st: &FlattenState, out: &mut FlatOut, prod_start: u32) {
     });
 }
 
-/// Materialize one flat step. Deleted at the `SyntaxGrammar` flip.
-pub(super) fn step_to_master(pool: &RulePool, s: &FStep) -> ProductionStep {
-    ProductionStep {
-        symbol: s.symbol(),
-        precedence: match s.precedence() {
-            Prec::None => Precedence::None,
-            Prec::Integer(n) => Precedence::Integer(n),
-            Prec::Name(sid) => Precedence::Name(pool.resolve(sid).to_string()),
-        },
-        associativity: s.associativity(),
-        alias: s.alias().map(|a| crate::rules::Alias {
-            value: pool.resolve(a.value).to_string(),
-            is_named: a.is_named,
-        }),
-        field_name: s.field().map(|f| pool.resolve(f).to_string()),
-        reserved_word_set_id: ReservedWordSetId(s.reserved as usize),
-    }
-}
-
-/// Boundary materialization to the legacy-shaped [`SyntaxGrammar`].
-/// Deleted at the `SyntaxGrammar` flip.
-pub(super) fn materialize_flattened(
+/// Assemble the [`SyntaxGrammar`]: the flat pools move in, names resolve
+/// once, and the pass metadata becomes the passthrough fields.
+pub(super) fn assemble_syntax_grammar(
     g: &PoolGrammar,
     meta: &PoolExtractedMeta,
-    out: &FlatOut,
+    out: FlatOut,
 ) -> SyntaxGrammar {
-    let step_to_master = |s: &FStep| step_to_master(&g.pool, s);
     let mut reserved_word_sets: Vec<TokenSet> = meta
         .reserved_sets
         .iter()
@@ -479,30 +462,21 @@ pub(super) fn materialize_flattened(
         reserved_word_sets.push(TokenSet::default());
     }
     SyntaxGrammar {
-        steps: out.steps.clone(),
-        productions: out.productions.clone(),
-        var_prods: out.var_prods.clone(),
-        strs: g.pool.strs().to_vec(),
         variables: g
             .variables
             .iter()
             .zip(&meta.kinds)
-            .zip(&out.var_prods)
-            .map(|((v, &kind), &(ps, pe))| SyntaxVariable {
+            .map(|(v, &kind)| SyntaxVariable {
                 name: g.pool.resolve(v.name).to_string(),
                 kind,
-                productions: out.productions[ps as usize..pe as usize]
-                    .iter()
-                    .map(|p| Production {
-                        dynamic_precedence: p.dynamic_precedence,
-                        steps: out.steps[p.step_range()]
-                            .iter()
-                            .map(step_to_master)
-                            .collect(),
-                    })
-                    .collect(),
+                #[cfg(test)]
+                productions: Vec::new(),
             })
             .collect(),
+        steps: out.steps,
+        productions: out.productions,
+        var_prods: out.var_prods,
+        strs: g.pool.strs().to_vec(),
         extra_symbols: meta.extra_symbols.clone(),
         expected_conflicts: meta.conflicts.clone(),
         variables_to_inline: meta.inline.clone(),
@@ -545,7 +519,7 @@ mod tests {
         });
 
         assert_eq!(
-            result.productions,
+            result,
             vec![
                 Production {
                     dynamic_precedence: 0,
@@ -603,7 +577,7 @@ mod tests {
         });
 
         assert_eq!(
-            result.productions,
+            result,
             vec![
                 Production {
                     dynamic_precedence: 102,
@@ -642,7 +616,7 @@ mod tests {
         });
 
         assert_eq!(
-            result.productions,
+            result,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![
@@ -664,7 +638,7 @@ mod tests {
         });
 
         assert_eq!(
-            result.productions,
+            result,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![
@@ -691,7 +665,7 @@ mod tests {
         });
 
         assert_eq!(
-            result.productions,
+            result,
             vec![
                 Production {
                     dynamic_precedence: 0,
@@ -761,16 +735,15 @@ mod tests {
         let mut st = FlattenState::default();
         let mut out = crate::rule_pool::FlatOut::default();
         flatten_grammar(&pg, &meta, &mut st, &mut out)?;
-        Ok(materialize_flattened(&pg, &meta, &out))
+        Ok(assemble_syntax_grammar(&pg, &meta, out))
     }
 
-    fn flatten_variable(variable: Variable) -> SyntaxVariable {
+    fn flatten_variable(variable: Variable) -> Vec<Production> {
         let g = ExtractedSyntaxGrammar {
             variables: vec![variable],
             ..Default::default()
         };
-        let mut grammar = pool_pass(&g).unwrap();
-        grammar.variables.pop().unwrap()
+        pool_pass(&g).unwrap().legacy_variable_productions(0)
     }
 
     #[test]

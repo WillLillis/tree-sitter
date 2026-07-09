@@ -4,11 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[cfg(test)]
-use crate::grammars::{LexicalGrammar, ProductionStep};
-use crate::{
-    grammars::{InlinedProductionMap, Production, SyntaxGrammar},
-    rules::SymbolType,
-};
+use crate::grammars::{LexicalGrammar, ProductionStep, SyntaxGrammar};
+use crate::{grammars::InlinedProductionMap, rules::SymbolType};
 
 pub type ProcessInlinesResult<T> = Result<T, ProcessInlinesError>;
 
@@ -29,27 +26,19 @@ use rustc_hash::FxHasher;
 use super::extract_tokens::PoolExtractedMeta;
 use crate::rule_pool::{
     FProd, FSTEP_ALIAS_NAMED, FSTEP_ASSOC_MASK, FSTEP_PREC_MASK, FStep, FlatOut, PoolGrammar,
-    RulePool,
 };
 use crate::rules::Symbol;
 
-/// Pool inline map: created productions are appended to the `FlatOut`
-/// production pool, so ids are unified (ids at or above `first_inlined` are
-/// created). `map` is keyed by `(production id, step index)`.
-#[derive(Debug)]
-pub(super) struct PoolInlines {
-    pub first_inlined: u32,
-    pub map: FxHashMap<(u32, u32), Vec<u32>>,
-}
-
 /// Expand the grammar's inlined variables: walk every production step,
 /// splicing inlined variables' productions in place of referencing steps
-/// (cartesian over their alternatives, repeated to a fixed point).
+/// (cartesian over their alternatives, repeated to a fixed point). Created
+/// productions append to the `FlatOut` production pool, so the returned
+/// map's ids are unified with the grammar's.
 pub(super) fn process_inlines(
     g: &PoolGrammar,
     meta: &PoolExtractedMeta,
     out: &mut FlatOut,
-) -> ProcessInlinesResult<PoolInlines> {
+) -> ProcessInlinesResult<InlinedProductionMap> {
     for symbol in &meta.inline {
         match symbol.kind {
             SymbolType::External => {
@@ -100,7 +89,7 @@ struct ScratchProd {
 }
 
 impl PoolInlineBuilder<'_> {
-    fn build(mut self) -> PoolInlines {
+    fn build(mut self) -> InlinedProductionMap {
         let mut worklist: Vec<(u32, u32)> = Vec::new();
         for prod_id in 0..self.first_inlined {
             worklist.push((prod_id, 0));
@@ -122,10 +111,7 @@ impl PoolInlineBuilder<'_> {
                 }
             }
         }
-        PoolInlines {
-            first_inlined: self.first_inlined,
-            map: self.map,
-        }
+        InlinedProductionMap { map: self.map }
     }
 
     fn step_at(&self, prod_id: u32, step: u32) -> Option<FStep> {
@@ -227,75 +213,38 @@ impl PoolInlineBuilder<'_> {
     }
 }
 
-/// Boundary materialization to the address-keyed
-/// [`InlinedProductionMap`] (created productions materialized once, map keys
-/// resolved to production addresses). Deleted at the `SyntaxGrammar` flip.
-pub(super) fn materialize_inlines(
-    pool: &RulePool,
-    out: &FlatOut,
-    inl: &PoolInlines,
-    syntax_grammar: &SyntaxGrammar,
-) -> InlinedProductionMap {
-    let first = inl.first_inlined as usize;
-    let productions: Vec<Production> = out.productions[first..]
-        .iter()
-        .map(|p| Production {
-            dynamic_precedence: p.dynamic_precedence,
-            steps: out.steps[p.step_range()]
-                .iter()
-                .map(|s| super::flatten_grammar::step_to_master(pool, s))
-                .collect(),
-        })
-        .collect();
-    let mut flat_to_var = vec![(0usize, 0usize); first];
-    for (v, &(ps, pe)) in out.var_prods.iter().enumerate() {
-        for (p, id) in (ps..pe).enumerate() {
-            flat_to_var[id as usize] = (v, p);
-        }
-    }
-    let production_map = inl
-        .map
-        .iter()
-        .map(|(&(id, step), ids)| {
-            let production = if (id as usize) < first {
-                let (v, p) = flat_to_var[id as usize];
-                std::ptr::from_ref::<Production>(&syntax_grammar.variables[v].productions[p])
-            } else {
-                std::ptr::from_ref::<Production>(&productions[id as usize - first])
-            };
-            (
-                (production, step),
-                ids.iter().map(|&id| id as usize - first).collect(),
-            )
-        })
-        .collect();
-    InlinedProductionMap {
-        productions,
-        production_map,
-        first_inlined: inl.first_inlined,
-        map: inl.map.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        grammars::{ExternalToken, LexicalVariable, SyntaxVariable, VariableType},
+        grammars::{ExternalToken, LexicalVariable, Production, SyntaxVariable, VariableType},
         rules::{Associativity, Precedence, Symbol},
     };
 
-    /// Returns the materialized grammar too: the map is address-keyed, so
-    /// lookups must go through the same materialization.
     fn pool_pass(
         grammar: &SyntaxGrammar,
         lexical_grammar: &LexicalGrammar,
     ) -> ProcessInlinesResult<(SyntaxGrammar, InlinedProductionMap)> {
         let (g, meta, mut out) = super::super::pool_from_syntax(grammar, lexical_grammar);
-        let inl = process_inlines(&g, &meta, &mut out)?;
-        let sg = super::super::flatten_grammar::materialize_flattened(&g, &meta, &out);
-        let map = materialize_inlines(&g.pool, &out, &inl, &sg);
-        Ok((sg, map))
+        let inlines = process_inlines(&g, &meta, &mut out)?;
+        let sg = super::super::flatten_grammar::assemble_syntax_grammar(&g, &meta, out);
+        Ok((sg, inlines))
+    }
+
+    /// Look up inlining replacements: the replacement ids (for chained
+    /// lookups) and their materialized content (for asserts).
+    fn lookup(
+        sg: &SyntaxGrammar,
+        map: &InlinedProductionMap,
+        prod_id: u32,
+        step: u32,
+    ) -> Option<(Vec<u32>, Vec<Production>)> {
+        map.inlined_prod_ids(prod_id, step).map(|ids| {
+            (
+                ids.to_vec(),
+                ids.iter().map(|&id| sg.legacy_production(id)).collect(),
+            )
+        })
     }
 
     #[test]
@@ -337,21 +286,14 @@ mod tests {
         };
 
         let (grammar, inline_map) = pool_pass(&grammar, &LexicalGrammar::default()).unwrap();
+        let prod0 = grammar.variable_prod_ids(0).start;
 
         // Nothing to inline at step 0.
-        assert!(
-            inline_map
-                .inlined_productions(&grammar.variables[0].productions[0], 0)
-                .is_none()
-        );
+        assert!(lookup(&grammar, &inline_map, prod0, 0).is_none());
 
         // Inlining variable 1 yields two productions.
         assert_eq!(
-            inline_map
-                .inlined_productions(&grammar.variables[0].productions[0], 1)
-                .unwrap()
-                .cloned()
-                .collect::<Vec<_>>(),
+            lookup(&grammar, &inline_map, prod0, 1).unwrap().1,
             vec![
                 Production {
                     dynamic_precedence: 0,
@@ -435,14 +377,12 @@ mod tests {
         };
 
         let (grammar, inline_map) = pool_pass(&grammar, &LexicalGrammar::default()).unwrap();
+        let prod0 = grammar.variable_prod_ids(0).start;
 
-        let productions = inline_map
-            .inlined_productions(&grammar.variables[0].productions[0], 1)
-            .unwrap()
-            .collect::<Vec<_>>();
+        let (ids, productions) = lookup(&grammar, &inline_map, prod0, 1).unwrap();
 
         assert_eq!(
-            productions.iter().copied().cloned().collect::<Vec<_>>(),
+            productions,
             vec![
                 Production {
                     dynamic_precedence: 0,
@@ -469,11 +409,7 @@ mod tests {
         );
 
         assert_eq!(
-            inline_map
-                .inlined_productions(productions[0], 3)
-                .unwrap()
-                .cloned()
-                .collect::<Vec<_>>(),
+            lookup(&grammar, &inline_map, ids[0], 3).unwrap().1,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![
@@ -534,14 +470,12 @@ mod tests {
         };
 
         let (grammar, inline_map) = pool_pass(&grammar, &LexicalGrammar::default()).unwrap();
+        let prod0 = grammar.variable_prod_ids(0).start;
 
-        let productions = inline_map
-            .inlined_productions(&grammar.variables[0].productions[0], 0)
-            .unwrap()
-            .collect::<Vec<_>>();
+        let (ids, productions) = lookup(&grammar, &inline_map, prod0, 0).unwrap();
 
         assert_eq!(
-            productions.iter().copied().cloned().collect::<Vec<_>>(),
+            productions,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![
@@ -561,11 +495,7 @@ mod tests {
         );
 
         assert_eq!(
-            inline_map
-                .inlined_productions(productions[0], 3)
-                .unwrap()
-                .cloned()
-                .collect::<Vec<_>>(),
+            lookup(&grammar, &inline_map, ids[0], 3).unwrap().1,
             vec![Production {
                 dynamic_precedence: 0,
                 steps: vec![

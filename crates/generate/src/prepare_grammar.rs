@@ -208,12 +208,9 @@ pub fn prepare_grammar(
     let inlines = process_inlines::process_inlines(&g, &ext_meta, &mut out)?;
     let t_rest = t0.elapsed();
 
-    // TEMP (until the `SyntaxGrammar` flip): materialize the legacy-shaped
-    // outputs once at the boundary for build_tables/node_types/render.
     let default_aliases =
         extract_default_aliases::materialize_default_aliases(&g.pool, &default_aliases);
-    let syntax_grammar = flatten_grammar::materialize_flattened(&g, &ext_meta, &out);
-    let inlines = process_inlines::materialize_inlines(&g.pool, &out, &inlines, &syntax_grammar);
+    let syntax_grammar = flatten_grammar::assemble_syntax_grammar(&g, &ext_meta, out);
 
     // TEMP SPIKE: real single-shot stage times.
     eprintln!(

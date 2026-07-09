@@ -60,8 +60,7 @@ pub fn build_tables(
         ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines, &item_key_map);
     let t_isb = t0.elapsed();
     let t0 = std::time::Instant::now();
-    let following_tokens =
-        get_following_tokens(syntax_grammar, lexical_grammar, inlines, &item_set_builder);
+    let following_tokens = get_following_tokens(syntax_grammar, lexical_grammar, &item_set_builder);
     let t_following = t0.elapsed();
     let t0 = std::time::Instant::now();
     let (mut parse_table, parse_state_info) = build_parse_table(
@@ -155,25 +154,22 @@ pub fn build_tables(
 fn get_following_tokens(
     syntax_grammar: &SyntaxGrammar,
     lexical_grammar: &LexicalGrammar,
-    inlines: &InlinedProductionMap,
     builder: &ParseItemSetBuilder,
 ) -> Vec<TokenSet> {
     let n_terminals = lexical_grammar.variables.len();
     let n_externals = syntax_grammar.external_tokens.len();
     let mut result = vec![TokenSet::with_capacity(n_terminals, n_externals); n_terminals];
-    let productions = syntax_grammar
-        .variables
-        .iter()
-        .flat_map(|v| &v.productions)
-        .chain(&inlines.productions);
     let all_tokens = (0..result.len())
         .map(Symbol::terminal)
         .collect::<TokenSet>();
-    for production in productions {
-        for i in 1..production.steps.len() {
-            let left_tokens = builder.last_set(&production.steps[i - 1].symbol);
-            let right_tokens = builder.first_set(&production.steps[i].symbol);
-            let right_reserved_tokens = builder.reserved_first_set(&production.steps[i].symbol);
+    // The pooled production table holds the grammar's productions and the
+    // inlining-created ones alike.
+    for production in &syntax_grammar.productions {
+        let steps = &syntax_grammar.steps[production.step_range()];
+        for i in 1..steps.len() {
+            let left_tokens = builder.last_set(&steps[i - 1].symbol());
+            let right_tokens = builder.first_set(&steps[i].symbol());
+            let right_reserved_tokens = builder.reserved_first_set(&steps[i].symbol());
             for left_token in left_tokens.iter() {
                 if left_token.is_terminal() {
                     result[left_token.index].insert_all_terminals(right_tokens);

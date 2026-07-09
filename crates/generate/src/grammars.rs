@@ -1,10 +1,12 @@
-use std::{collections::HashMap, fmt, rc::Rc};
+use std::{fmt, rc::Rc};
 
 use rustc_hash::FxHashMap;
 
+#[cfg(test)]
+use super::rules::{Alias, Associativity, Precedence};
 use super::{
     nfa::Nfa,
-    rules::{Alias, Associativity, Precedence, Rule, Symbol, TokenSet},
+    rules::{Rule, Symbol, TokenSet},
 };
 use crate::rule_pool::{FProd, FStep, StrId};
 
@@ -69,7 +71,11 @@ pub struct LexicalGrammar {
 
 // Extracted syntax grammar
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Test-only vocabulary since the storage flip: fixtures build productions in
+/// this owned shape (see `SyntaxGrammar::with_pooled_storage`), and asserts
+/// compare against it (see `SyntaxGrammar::legacy_production`).
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProductionStep {
     pub symbol: Symbol,
     pub precedence: Precedence,
@@ -88,23 +94,18 @@ impl fmt::Display for ReservedWordSetId {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Production {
     pub steps: Vec<ProductionStep>,
     pub dynamic_precedence: i32,
 }
 
-#[derive(Debug, Default)] // TEMP Debug: pool-pass A/B unwraps
+/// The replacements for an inlined reference at `(production id, step
+/// index)`. Inlining-created productions are appended to
+/// [`SyntaxGrammar::productions`], so the ids share one space.
+#[derive(Debug, Default)]
 pub struct InlinedProductionMap {
-    #[allow(dead_code)] // TEMP: test-only until the legacy-storage drop
-    pub productions: Vec<Production>,
-    #[allow(dead_code)] // TEMP: test-only until the legacy-storage drop
-    pub production_map: HashMap<(*const Production, u32), Vec<usize>>,
-    /// Pooled form (replaces the address-keyed map at the storage flip):
-    /// production ids into [`SyntaxGrammar::productions`]; ids at or above
-    /// `first_inlined` are inlining-created.
-    #[allow(dead_code)] // TEMP: unread until the legacy-storage drop
-    pub first_inlined: u32,
     pub map: FxHashMap<(u32, u32), Vec<u32>>,
 }
 
@@ -112,6 +113,9 @@ pub struct InlinedProductionMap {
 pub struct SyntaxVariable {
     pub name: String,
     pub kind: VariableType,
+    /// Test-only fixture vocabulary; the real storage is pooled on
+    /// [`SyntaxGrammar`].
+    #[cfg(test)]
     pub productions: Vec<Production>,
 }
 
@@ -185,6 +189,44 @@ impl SyntaxGrammar {
 
 #[cfg(test)]
 impl SyntaxGrammar {
+    /// Test bridge: materialize one pooled production into the owned test
+    /// vocabulary for asserts. Dies with the legacy types.
+    #[must_use]
+    pub fn legacy_production(&self, id: u32) -> Production {
+        use crate::rule_pool::Prec;
+        let p = self.production(id);
+        Production {
+            dynamic_precedence: p.dynamic_precedence,
+            steps: p
+                .steps
+                .iter()
+                .map(|s| ProductionStep {
+                    symbol: s.symbol(),
+                    precedence: match s.precedence() {
+                        Prec::None => Precedence::None,
+                        Prec::Integer(n) => Precedence::Integer(n),
+                        Prec::Name(sid) => Precedence::Name(self.resolve(sid).to_string()),
+                    },
+                    associativity: s.associativity(),
+                    alias: s.alias().map(|a| Alias {
+                        value: self.resolve(a.value).to_string(),
+                        is_named: a.is_named,
+                    }),
+                    field_name: s.field().map(|f| self.resolve(f).to_string()),
+                    reserved_word_set_id: ReservedWordSetId(s.reserved as usize),
+                })
+                .collect(),
+        }
+    }
+
+    /// All of one variable's productions, materialized for asserts.
+    #[must_use]
+    pub fn legacy_variable_productions(&self, variable_index: usize) -> Vec<Production> {
+        self.variable_prod_ids(variable_index)
+            .map(|id| self.legacy_production(id))
+            .collect()
+    }
+
     /// Test bridge: derive the pooled storage from a legacy-shaped
     /// `variables[].productions` fixture. Dies with the legacy storage.
     #[must_use]
@@ -353,26 +395,7 @@ impl SyntaxVariable {
 }
 
 impl InlinedProductionMap {
-    /// Test-only since the pooled lookup took over; dies with the legacy
-    /// storage.
-    #[cfg(test)]
-    #[must_use]
-    pub fn inlined_productions<'a>(
-        &'a self,
-        production: &Production,
-        step_index: u32,
-    ) -> Option<impl Iterator<Item = &'a Production> + 'a> {
-        self.production_map
-            .get(&(std::ptr::from_ref::<Production>(production), step_index))
-            .map(|production_indices| {
-                production_indices
-                    .iter()
-                    .copied()
-                    .map(move |index| &self.productions[index])
-            })
-    }
-
-    /// Pooled lookup: the production ids created by inlining at this step.
+    /// The production ids created by inlining at this step.
     #[must_use]
     pub fn inlined_prod_ids(&self, prod_id: u32, step_index: u32) -> Option<&[u32]> {
         self.map.get(&(prod_id, step_index)).map(Vec::as_slice)

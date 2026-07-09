@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_extract_simple_aliases() {
-        let mut syntax_grammar = SyntaxGrammar {
+        let syntax_grammar = SyntaxGrammar {
             variables: vec![
                 SyntaxVariable {
                     name: "v1".to_owned(),
@@ -256,9 +256,8 @@ mod tests {
         let (g, meta, mut out) = super::super::pool_from_syntax(&syntax_grammar, &lexical_grammar);
         let pool_map = extract_default_aliases(&g, &meta, &mut out);
         let default_aliases = materialize_default_aliases(&g.pool, &pool_map);
-        // The mutated grammar is compared through the same materialization
-        // the pipeline uses.
-        syntax_grammar = super::super::flatten_grammar::materialize_flattened(&g, &meta, &out);
+        // The mutated steps are compared through the test bridge.
+        let result = super::super::flatten_grammar::assemble_syntax_grammar(&g, &meta, out);
         assert_eq!(default_aliases.len(), 3);
 
         assert_eq!(
@@ -285,36 +284,29 @@ mod tests {
         assert_eq!(default_aliases.get(&Symbol::terminal(1)), None);
 
         assert_eq!(
-            syntax_grammar.variables,
-            vec![
-                SyntaxVariable {
-                    name: "v1".to_owned(),
-                    kind: VariableType::Named,
-                    productions: vec![Production {
-                        dynamic_precedence: 0,
-                        steps: vec![
-                            ProductionStep::new(Symbol::terminal(0)),
-                            ProductionStep::new(Symbol::terminal(1)).with_alias("a2", true),
-                            ProductionStep::new(Symbol::terminal(2)),
-                            ProductionStep::new(Symbol::terminal(3)).with_alias("a4", true),
-                        ],
-                    },],
-                },
-                SyntaxVariable {
-                    name: "v2".to_owned(),
-                    kind: VariableType::Named,
-                    productions: vec![Production {
-                        dynamic_precedence: 0,
-                        steps: vec![
-                            ProductionStep::new(Symbol::terminal(0)),
-                            ProductionStep::new(Symbol::terminal(1)),
-                            ProductionStep::new(Symbol::terminal(2)).with_alias("a5", true),
-                            ProductionStep::new(Symbol::terminal(3)),
-                            ProductionStep::new(Symbol::terminal(3)),
-                        ],
-                    },],
-                },
-            ]
+            result.legacy_variable_productions(0),
+            vec![Production {
+                dynamic_precedence: 0,
+                steps: vec![
+                    ProductionStep::new(Symbol::terminal(0)),
+                    ProductionStep::new(Symbol::terminal(1)).with_alias("a2", true),
+                    ProductionStep::new(Symbol::terminal(2)),
+                    ProductionStep::new(Symbol::terminal(3)).with_alias("a4", true),
+                ],
+            }]
+        );
+        assert_eq!(
+            result.legacy_variable_productions(1),
+            vec![Production {
+                dynamic_precedence: 0,
+                steps: vec![
+                    ProductionStep::new(Symbol::terminal(0)),
+                    ProductionStep::new(Symbol::terminal(1)),
+                    ProductionStep::new(Symbol::terminal(2)).with_alias("a5", true),
+                    ProductionStep::new(Symbol::terminal(3)),
+                    ProductionStep::new(Symbol::terminal(3)),
+                ],
+            }]
         );
     }
 }
