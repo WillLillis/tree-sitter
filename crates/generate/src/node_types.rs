@@ -192,13 +192,14 @@ pub fn get_variable_info(
     while did_change {
         did_change = false;
 
-        for (i, variable) in syntax_grammar.variables.iter().enumerate() {
+        for i in 0..syntax_grammar.variables.len() {
             let mut variable_info = result[i].clone();
 
             // Examine each of the variable's productions. The variable's child types can be
             // immediately combined across all productions, but the child quantities must be
             // recorded separately for each production.
-            for production in &variable.productions {
+            for prod_id in syntax_grammar.variable_prod_ids(i) {
+                let production = syntax_grammar.production(prod_id);
                 let mut production_field_quantities = FxHashMap::default();
                 let mut production_children_quantity = ChildQuantity::zero();
                 let mut production_children_without_fields_quantity = ChildQuantity::zero();
@@ -208,11 +209,14 @@ pub fn get_variable_info(
                     variable_info.has_multi_step_production = true;
                 }
 
-                for step in &production.steps {
-                    let child_symbol = step.symbol;
-                    let child_type = if let Some(alias) = &step.alias {
-                        ChildType::Aliased(alias.clone())
-                    } else if let Some(alias) = default_aliases.get(&step.symbol) {
+                for step in production.steps {
+                    let child_symbol = step.symbol();
+                    let child_type = if let Some(alias) = step.alias() {
+                        ChildType::Aliased(Alias {
+                            value: syntax_grammar.resolve(alias.value).to_string(),
+                            is_named: alias.is_named,
+                        })
+                    } else if let Some(alias) = default_aliases.get(&child_symbol) {
                         ChildType::Aliased(alias.clone())
                     } else {
                         ChildType::Normal(child_symbol)
@@ -231,10 +235,11 @@ pub fn get_variable_info(
 
                     // Maintain the set of child types associated with each field, and the quantity
                     // of children associated with each field in this production.
-                    if let Some(field_name) = &step.field_name {
+                    if let Some(field) = step.field() {
+                        let field_name = syntax_grammar.resolve(field);
                         let field_info = variable_info
                             .fields
-                            .entry(field_name.clone())
+                            .entry(field_name.to_string())
                             .or_insert_with(FieldInfo::default);
                         did_change |= extend_sorted(&mut field_info.types, Some(&child_type));
 
@@ -301,7 +306,7 @@ pub fn get_variable_info(
 
                         // If a hidden child can have named children without fields, then the parent
                         // node can appear to have those same children.
-                        if step.field_name.is_none() {
+                        if step.field().is_none() {
                             let grandchildren_info = &child_variable_info.children_without_fields;
                             if !grandchildren_info.types.is_empty() {
                                 production_children_without_fields_quantity
@@ -338,7 +343,7 @@ pub fn get_variable_info(
                     for (field_name, info) in &mut variable_info.fields {
                         did_change |= info.quantity.union(
                             production_field_quantities
-                                .get(field_name)
+                                .get(field_name.as_str())
                                 .copied()
                                 .unwrap_or_else(ChildQuantity::zero),
                         );
@@ -400,18 +405,21 @@ fn get_aliases_by_symbol(
                 .insert(None);
         }
     }
-    for variable in &syntax_grammar.variables {
-        for production in &variable.productions {
-            for step in &production.steps {
+    for i in 0..syntax_grammar.variables.len() {
+        for prod_id in syntax_grammar.variable_prod_ids(i) {
+            for step in syntax_grammar.production(prod_id).steps {
+                let symbol = step.symbol();
+                let alias = step
+                    .alias()
+                    .map(|a| Alias {
+                        value: syntax_grammar.resolve(a.value).to_string(),
+                        is_named: a.is_named,
+                    })
+                    .or_else(|| default_aliases.get(&symbol).cloned());
                 aliases_by_symbol
-                    .entry(step.symbol)
+                    .entry(symbol)
                     .or_insert_with(BTreeSet::new)
-                    .insert(
-                        step.alias
-                            .as_ref()
-                            .or_else(|| default_aliases.get(&step.symbol))
-                            .cloned(),
-                    );
+                    .insert(alias);
             }
         }
     }
@@ -2134,6 +2142,7 @@ mod tests {
             supertype_symbols,
             ..SyntaxGrammar::default()
         }
+        .with_pooled_storage()
     }
 
     fn build_lexical_grammar() -> LexicalGrammar {

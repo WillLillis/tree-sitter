@@ -613,17 +613,19 @@ impl Generator {
 
     fn add_non_terminal_alias_map(&mut self) {
         let mut alias_ids_by_symbol = FxHashMap::default();
-        for variable in &self.syntax_grammar.variables {
-            for production in &variable.productions {
-                for step in &production.steps {
-                    if let Some(alias) = &step.alias
-                        && step.symbol.is_non_terminal()
-                        && Some(alias) != self.default_aliases.get(&step.symbol)
-                        && self.symbol_ids.contains_key(&step.symbol)
-                        && let Some(alias_id) = self.alias_ids.get(alias)
+        for i in 0..self.syntax_grammar.variables.len() {
+            for prod_id in self.syntax_grammar.variable_prod_ids(i) {
+                for step in self.syntax_grammar.production(prod_id).steps {
+                    let symbol = step.symbol();
+                    if let Some(alias) = step.alias().map(|a| Alias {
+                        value: self.syntax_grammar.resolve(a.value).to_string(),
+                        is_named: a.is_named,
+                    }) && symbol.is_non_terminal()
+                        && Some(&alias) != self.default_aliases.get(&symbol)
+                        && self.symbol_ids.contains_key(&symbol)
+                        && let Some(alias_id) = self.alias_ids.get(&alias)
                     {
-                        let alias_ids =
-                            alias_ids_by_symbol.entry(step.symbol).or_insert(Vec::new());
+                        let alias_ids = alias_ids_by_symbol.entry(symbol).or_insert(Vec::new());
                         if let Err(i) = alias_ids.binary_search(&alias_id) {
                             alias_ids.insert(i, alias_id);
                         }

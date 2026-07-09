@@ -104,11 +104,11 @@ struct Minimizer<'a> {
 impl Minimizer<'_> {
     fn remove_unit_reductions(&mut self) {
         let mut aliased_symbols = FxHashSet::default();
-        for variable in &self.syntax_grammar.variables {
-            for production in &variable.productions {
-                for step in &production.steps {
-                    if step.alias.is_some() {
-                        aliased_symbols.insert(step.symbol);
+        for i in 0..self.syntax_grammar.variables.len() {
+            for prod_id in self.syntax_grammar.variable_prod_ids(i) {
+                for step in self.syntax_grammar.production(prod_id).steps {
+                    if step.alias != 0 {
+                        aliased_symbols.insert(step.symbol());
                     }
                 }
             }

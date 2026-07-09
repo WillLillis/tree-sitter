@@ -184,6 +184,49 @@ impl SyntaxGrammar {
 }
 
 #[cfg(test)]
+impl SyntaxGrammar {
+    /// Test bridge: derive the pooled storage from a legacy-shaped
+    /// `variables[].productions` fixture. Dies with the legacy storage.
+    #[must_use]
+    pub fn with_pooled_storage(mut self) -> Self {
+        use crate::rule_pool::{Alias as PoolAlias, Prec, RulePool};
+
+        let mut pool = RulePool::default();
+        for variable in &self.variables {
+            let first = self.productions.len() as u32;
+            for production in &variable.productions {
+                let steps_start = self.steps.len() as u32;
+                for step in &production.steps {
+                    self.steps.push(FStep::pack(
+                        step.symbol,
+                        match &step.precedence {
+                            Precedence::None => Prec::None,
+                            Precedence::Integer(n) => Prec::Integer(*n),
+                            Precedence::Name(n) => Prec::Name(pool.intern(n)),
+                        },
+                        step.associativity,
+                        step.alias.as_ref().map(|a| PoolAlias {
+                            value: pool.intern(&a.value),
+                            is_named: a.is_named,
+                        }),
+                        step.field_name.as_ref().map(|f| pool.intern(f)),
+                        step.reserved_word_set_id.0 as u16,
+                    ));
+                }
+                self.productions.push(FProd {
+                    steps_start,
+                    steps_len: self.steps.len() as u32 - steps_start,
+                    dynamic_precedence: production.dynamic_precedence,
+                });
+            }
+            self.var_prods.push((first, self.productions.len() as u32));
+        }
+        self.strs = pool.strs().to_vec();
+        self
+    }
+}
+
+#[cfg(test)]
 impl ProductionStep {
     #[must_use]
     pub fn new(symbol: Symbol) -> Self {
