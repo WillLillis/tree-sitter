@@ -40,6 +40,30 @@ fn find_or_push<T: Eq>(vector: &mut Vec<T>, value: T) {
     }
 }
 
+// TEMP SPIKE: memory attribution of the builder's precomputed caches
+// (first/last sets, transitive-closure additions).
+impl ParseItemSetBuilder<'_> {
+    pub fn spike_cache_bytes(&self) -> (usize, usize) {
+        let sets = self
+            .first_sets
+            .values()
+            .chain(self.last_sets.values())
+            .map(TokenSet::heap_bytes)
+            .sum();
+        let additions = self
+            .transitive_closure_additions
+            .iter()
+            .map(|v| {
+                v.len() * size_of::<TransitiveClosureAddition>()
+                    + v.iter()
+                        .map(|a| a.info.lookaheads.heap_bytes())
+                        .sum::<usize>()
+            })
+            .sum();
+        (sets, additions)
+    }
+}
+
 impl<'a> ParseItemSetBuilder<'a> {
     #[must_use]
     pub fn new(

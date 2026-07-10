@@ -53,15 +53,36 @@ pub fn build_tables(
     optimizations: OptLevel,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BuildTableResult<Tables> {
+    // TEMP SPIKE: (current, peak) RSS in MB, for per-stage memory attribution.
+    fn spike_rss() -> (f64, f64) {
+        let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let get = |k: &str| {
+            s.lines()
+                .find(|l| l.starts_with(k))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|v| v.parse::<f64>().ok())
+                .map_or(0.0, |kb| kb / 1000.0)
+        };
+        (get("VmRSS"), get("VmHWM"))
+    }
+    let mut rss_marks: Vec<(&str, f64, f64)> = Vec::new();
+    let mut mark = |label| {
+        let (cur, peak) = spike_rss();
+        rss_marks.push((label, cur, peak));
+    };
+    mark("start");
+
     // TEMP SPIKE: sub-phase timing (remove with the other spike blocks).
     let t0 = std::time::Instant::now();
     let item_key_map = ItemKeyMap::new(syntax_grammar);
     let item_set_builder =
         ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines, &item_key_map);
     let t_isb = t0.elapsed();
+    mark("item_set_builder");
     let t0 = std::time::Instant::now();
     let following_tokens = get_following_tokens(syntax_grammar, lexical_grammar, &item_set_builder);
     let t_following = t0.elapsed();
+    mark("following");
     let t0 = std::time::Instant::now();
     let (mut parse_table, parse_state_info) = build_parse_table(
         syntax_grammar,
@@ -71,14 +92,16 @@ pub fn build_tables(
         diagnostics,
     )?;
     let t_parse_table = t0.elapsed();
+    mark("build_parse_table");
     let t0 = std::time::Instant::now();
     let token_conflict_map = TokenConflictMap::new(lexical_grammar, following_tokens);
     let t_conflicts = t0.elapsed();
+    mark("token_conflicts");
     let t0 = std::time::Instant::now();
-    let coincident_token_index = CoincidentTokenIndex::new(&parse_table, lexical_grammar);
+    let coincident_token_index =
+        CoincidentTokenIndex::new(&parse_table, lexical_grammar, syntax_grammar.word_token);
     let keywords = identify_keywords(
         lexical_grammar,
-        &parse_table,
         syntax_grammar.word_token,
         &token_conflict_map,
         &coincident_token_index,
@@ -93,6 +116,7 @@ pub fn build_tables(
     );
     populate_used_symbols(&mut parse_table, syntax_grammar, lexical_grammar);
     let t_keywords_etc = t0.elapsed();
+    mark("keywords+error+used");
     let t0 = std::time::Instant::now();
     minimize_parse_table(
         &mut parse_table,
@@ -104,6 +128,7 @@ pub fn build_tables(
         optimizations,
     );
     let t_minimize = t0.elapsed();
+    mark("minimize");
     let t0 = std::time::Instant::now();
     let lex_tables = build_lex_table(
         &mut parse_table,
@@ -114,11 +139,16 @@ pub fn build_tables(
         &token_conflict_map,
     );
     let t_lex = t0.elapsed();
+    mark("lex");
     populate_external_lex_states(&mut parse_table, syntax_grammar);
     mark_fragile_tokens(&mut parse_table, &token_conflict_map);
     eprintln!(
         "[SPIKE tables-stages] item_set_builder {t_isb:?} following {t_following:?} build_parse_table {t_parse_table:?} token_conflicts {t_conflicts:?} keywords+error+used {t_keywords_etc:?} minimize {t_minimize:?} lex {t_lex:?}"
     );
+    // TEMP SPIKE: per-stage RSS attribution.
+    for (label, cur, peak) in &rss_marks {
+        eprintln!("[SPIKE rss] {label}: cur {cur:.0}MB peak {peak:.0}MB");
+    }
 
     if let Some(report_symbol_name) = report_symbol_name {
         report_state_info(
@@ -345,7 +375,6 @@ fn populate_external_lex_states(parse_table: &mut ParseTable, syntax_grammar: &S
 
 fn identify_keywords(
     lexical_grammar: &LexicalGrammar,
-    parse_table: &ParseTable,
     word_token: Option<Symbol>,
     token_conflict_map: &TokenConflictMap,
     coincident_token_index: &CoincidentTokenIndex,
@@ -415,13 +444,7 @@ fn identify_keywords(
                 // this keyword candidate, then substituting the word token won't
                 // introduce any new lexical conflicts.
                 if coincident_token_index
-                    .states_with(*token, Symbol::terminal(other_index))
-                    .iter()
-                    .all(|state_id| {
-                        parse_table.states[*state_id]
-                            .terminal_entries
-                            .contains_key(&word_token)
-                    })
+                    .all_coincident_states_have_word(*token, Symbol::terminal(other_index))
                 {
                     continue;
                 }

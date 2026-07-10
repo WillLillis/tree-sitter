@@ -120,6 +120,12 @@ impl BitVec {
         (self.num_bits as usize).div_ceil(64)
     }
 
+    // TEMP SPIKE: arena bytes held, for memory attribution.
+    #[must_use]
+    pub const fn heap_bytes(&self) -> usize {
+        self.capacity as usize * 8
+    }
+
     /// View the in-use words as a slice.
     #[inline]
     #[must_use]

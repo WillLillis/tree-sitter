@@ -1,16 +1,17 @@
 use std::fmt;
 
-use crate::{
-    grammars::LexicalGrammar,
-    rules::Symbol,
-    tables::{ParseStateId, ParseTable},
-};
+use crate::{grammars::LexicalGrammar, rules::Symbol, tables::ParseTable};
 
 pub struct CoincidentTokenIndex<'a> {
-    entries: Vec<Vec<ParseStateId>>,
     /// Flat bitset for fast [`contains()`](Self::contains) checks. Indexed as `a * n + b`
     /// (both `(a,b)` and `(b,a)` bits are set, so no min/max normalization needed).
     contains_bits: Vec<u64>,
+    /// Same shape as `contains_bits`: bit `(a, b)` is set iff tokens `a` and
+    /// `b` are coincident in some parse state where the grammar's word token
+    /// is NOT a valid lookahead. Lets keyword identification ask "do all
+    /// states containing this pair also contain the word token?" without
+    /// storing per-pair state lists.
+    without_word_bits: Vec<u64>,
     /// Word-aligned per-row bitsets for vectorized intersection checks.
     /// Row `a` spans `[a * row_words .. (a+1) * row_words]`.
     /// Bit `b` is set iff tokens `a` and `b` are coincident in some parse state.
@@ -21,20 +22,24 @@ pub struct CoincidentTokenIndex<'a> {
 
 impl<'a> CoincidentTokenIndex<'a> {
     #[must_use]
-    pub fn new(table: &ParseTable, lexical_grammar: &'a LexicalGrammar) -> Self {
+    pub fn new(
+        table: &ParseTable,
+        lexical_grammar: &'a LexicalGrammar,
+        word_token: Option<Symbol>,
+    ) -> Self {
         let n = lexical_grammar.variables.len();
         let row_words = n.div_ceil(64);
         let mut result = Self {
             n,
             grammar: lexical_grammar,
-            entries: vec![Vec::new(); n * n],
             contains_bits: vec![0u64; (n * n).div_ceil(64)],
+            without_word_bits: vec![0u64; (n * n).div_ceil(64)],
             row_bits: vec![0u64; n * row_words],
         };
         // Pre-collect terminal indices up front rather than continuously recomputing within the
         // loop below.
         let mut terminal_indices = Vec::new();
-        for (i, state) in table.states.iter().enumerate() {
+        for state in &table.states {
             terminal_indices.clear();
             terminal_indices.extend(
                 state
@@ -43,18 +48,19 @@ impl<'a> CoincidentTokenIndex<'a> {
                     .filter(|s| s.is_terminal())
                     .map(|s| s.index),
             );
+            let has_word = word_token.is_some_and(|w| state.terminal_entries.contains_key(&w));
             for (j, &a) in terminal_indices.iter().enumerate() {
                 for &b in &terminal_indices[j..] {
-                    let index = result.index(a, b);
-                    if result.entries[index].last().copied() != Some(i) {
-                        result.entries[index].push(i);
-                    }
-                    // Set both (a,b) and (b,a) bits so `contains()` needs
-                    // no min/max normalization.
+                    // Set both (a,b) and (b,a) bits so lookups need no
+                    // min/max normalization.
                     let ab = a * n + b;
-                    result.contains_bits[ab / 64] |= 1u64 << (ab % 64);
                     let ba = b * n + a;
+                    result.contains_bits[ab / 64] |= 1u64 << (ab % 64);
                     result.contains_bits[ba / 64] |= 1u64 << (ba % 64);
+                    if !has_word {
+                        result.without_word_bits[ab / 64] |= 1u64 << (ab % 64);
+                        result.without_word_bits[ba / 64] |= 1u64 << (ba % 64);
+                    }
                     // Also populate the word-aligned row bitsets.
                     result.row_bits[a * row_words + b / 64] |= 1u64 << (b % 64);
                     result.row_bits[b * row_words + a / 64] |= 1u64 << (a % 64);
@@ -64,24 +70,19 @@ impl<'a> CoincidentTokenIndex<'a> {
         result
     }
 
+    /// True iff every parse state where `a` and `b` are both valid lookaheads
+    /// also has the word token as a valid lookahead (vacuously true when the
+    /// tokens never coincide).
     #[must_use]
-    pub fn states_with(&self, a: Symbol, b: Symbol) -> &[ParseStateId] {
-        &self.entries[self.index(a.index, b.index)]
+    pub fn all_coincident_states_have_word(&self, a: Symbol, b: Symbol) -> bool {
+        let bit_index = a.index * self.n + b.index;
+        self.without_word_bits[bit_index / 64] & (1u64 << (bit_index % 64)) == 0
     }
 
     #[must_use]
     pub fn contains(&self, a: Symbol, b: Symbol) -> bool {
         let bit_index = a.index * self.n + b.index;
         self.contains_bits[bit_index / 64] & (1u64 << (bit_index % 64)) != 0
-    }
-
-    #[must_use]
-    const fn index(&self, a: usize, b: usize) -> usize {
-        if a < b {
-            a * self.n + b
-        } else {
-            b * self.n + a
-        }
     }
 }
 

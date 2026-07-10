@@ -363,6 +363,56 @@ impl<'a> ParseTableBuilder<'a> {
             diagnostics.push(Diagnostic::UnnecessaryConflicts(conflicts));
         }
 
+        // TEMP SPIKE: memory attribution of the structures retained across
+        // the build, to rank the perf-campaign levers.
+        {
+            let set_bytes = |s: &ParseItemSet| {
+                s.entries.len() * size_of::<ParseItemSetEntry>()
+                    + s.entries
+                        .iter()
+                        .map(|e| e.lookaheads.heap_bytes())
+                        .sum::<usize>()
+            };
+            let mb = |b: usize| b as f64 / 1e6;
+            let map_kernels: usize = self.state_ids_by_item_set.keys().map(set_bytes).sum();
+            let info_kernels: usize = self
+                .parse_state_info_by_id
+                .iter()
+                .map(|(_, s)| set_bytes(s))
+                .sum();
+            let info_syms: usize = self
+                .parse_state_info_by_id
+                .iter()
+                .map(|(syms, _)| syms.len() * size_of::<Symbol>())
+                .sum();
+            let cores: usize = self
+                .core_ids_by_core
+                .keys()
+                .map(|c| c.entries.len() * size_of::<ParseItem>())
+                .sum();
+            let mut table = 0usize;
+            for state in &self.parse_table.states {
+                table += state.reserved_words.heap_bytes();
+                table += state.nonterminal_entries.len() * (size_of::<(Symbol, GotoAction)>() + 16);
+                for entry in state.terminal_entries.values() {
+                    table += size_of::<(Symbol, ParseTableEntry)>() + 16;
+                    table += entry.actions.len() * size_of::<ParseAction>();
+                }
+            }
+            let (isb_sets, isb_additions) = self.item_set_builder.spike_cache_bytes();
+            eprintln!(
+                "[SPIKE mem] states {} | kernels: map {:.1}MB + info {:.1}MB (dup) | info syms {:.1}MB | cores {:.1}MB | table {:.1}MB | isb first/last {:.1}MB additions {:.1}MB",
+                self.parse_table.states.len(),
+                mb(map_kernels),
+                mb(info_kernels),
+                mb(info_syms),
+                mb(cores),
+                mb(table),
+                mb(isb_sets),
+                mb(isb_additions),
+            );
+        }
+
         Ok((self.parse_table, self.parse_state_info_by_id))
     }
 
