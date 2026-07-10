@@ -378,10 +378,27 @@ non-overlapping):
 | rust | 1.40 -> 0.91s (-35%) | 301.0 -> 175.7MB (-42%) |
 
 Note the coincident-index lever is IR-independent (would apply to master
-as-is); it composes with the port either way. Remaining cpp buckets:
-build_parse_table 2.0s / 498MB plateau (retained: table 173MB + kernels
-33MB; rest is closure churn + malloc slack - levers 1 and 3 below),
-minimize 1.75s (unattributed), render 154ms.
+as-is); user decision: extract and land it upstream BEFORE the IR port
+(extraction deferred; re-baseline the A/B when it lands).
+
+3. minimize token_conflicts bitsets (2026-07-10, also IR-independent):
+   attribution showed minimize's 1.75s was 1.06s in the first
+   split_state_id_groups pass, and op counters showed token_conflicts did
+   278M entry probes over 9.3M calls. Precomputed ConflictBits (per-state
+   terminal bits, per-token conflict rows, keyword bits, internal/external
+   mask) turn each call into a few word ANDs. cpp minimize 1.75 -> 1.40s
+   (split1 1.06 -> 0.78s). Remaining split1 floor is the states_conflict
+   merge-join itself (2.1M pairs, 101M steps); cutting it means cutting
+   pair count - algorithmic risk, parked.
+
+Standing after lever 3 (min-of-3 interleaved): cpp 5.73 -> 4.01s / 996 ->
+547MB; rust 1.41 -> 0.92s / 302 -> 176MB; c 0.54 -> 0.42s / 160 -> 93MB;
+js 0.58 -> 0.42s / 160 -> 100MB.
+
+Remaining cpp buckets: build_parse_table 2.08s / 498MB plateau (retained:
+table 173MB + kernels 33MB; rest is closure churn + malloc slack - the
+TokenSet-interning and ParseItem-shrink levers), minimize 1.40s (merge-join
+floor), render 154ms.
 
 Earlier honest reading (pre-campaign): end-to-end time was a modest real
 win; peak memory was flat because the peak was never the grammar
