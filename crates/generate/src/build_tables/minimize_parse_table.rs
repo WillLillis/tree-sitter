@@ -55,6 +55,7 @@ impl SymbolKey {
         (self.0 & KEY_INDEX_MASK) as usize
     }
 
+    #[expect(dead_code)]
     #[inline]
     const fn is_terminal(self) -> bool {
         (self.0 >> KEY_TAG_SHIFT) == SymbolType::Terminal as u64
@@ -84,12 +85,37 @@ pub fn minimize_parse_table(
         keywords,
         simple_aliases,
     };
+    // TEMP SPIKE: minimize sub-phase timing.
+    let t0 = std::time::Instant::now();
     if optimizations.contains(OptLevel::MergeStates) {
         minimizer.merge_compatible_states();
     }
+    let t_merge = t0.elapsed();
+    let t0 = std::time::Instant::now();
     minimizer.remove_unit_reductions();
+    let t_unit = t0.elapsed();
+    let t0 = std::time::Instant::now();
     minimizer.remove_unused_states();
+    let t_unused = t0.elapsed();
+    let t0 = std::time::Instant::now();
     minimizer.reorder_states_by_descending_size();
+    eprintln!(
+        "[SPIKE minimize] merge {t_merge:?} unit {t_unit:?} unused {t_unused:?} reorder {:?}",
+        t0.elapsed()
+    );
+}
+
+/// Word-aligned bitsets precomputed for `token_conflicts`, all indexed by
+/// terminal index.
+struct ConflictBits {
+    /// Per state: which terminals have entries.
+    state_terminals: Vec<Vec<u64>>,
+    /// Per token: which terminals it lexically conflicts with.
+    conflict_rows: Vec<Vec<u64>>,
+    /// The keyword set.
+    keywords: Vec<u64>,
+    /// Tokens that are also external tokens.
+    internal_external: Vec<u64>,
 }
 
 struct Minimizer<'a> {
@@ -178,6 +204,8 @@ impl Minimizer<'_> {
     }
 
     fn merge_compatible_states(&mut self) {
+        // TEMP SPIKE: sub-phase timing.
+        let t0 = std::time::Instant::now();
         let core_count = 1 + self
             .parse_table
             .states
@@ -216,13 +244,68 @@ impl Minimizer<'_> {
             })
             .collect::<Vec<_>>();
 
+        let t_prep1 = t0.elapsed();
+        let t0 = std::time::Instant::now();
+        // Precompute word-aligned bitsets so `token_conflicts` can test a
+        // candidate token against a whole state's terminals with a few word
+        // ANDs instead of a per-entry scan:
+        //   - per state: which terminal indices have entries
+        //   - per token: which terminal indices it lexically conflicts with
+        //   - the keyword set as bits
+        let n_terminals = self.lexical_grammar.variables.len();
+        let row_words = n_terminals.div_ceil(64);
+        let set = |bits: &mut Vec<u64>, index: usize| bits[index / 64] |= 1 << (index % 64);
+        let mut keywords = vec![0u64; row_words];
+        for symbol in self.keywords.iter() {
+            if symbol.is_terminal() {
+                set(&mut keywords, symbol.index);
+            }
+        }
+        let mut internal_external = vec![0u64; row_words];
+        for external in &self.syntax_grammar.external_tokens {
+            if let Some(token) = external.corresponding_internal_token {
+                set(&mut internal_external, token.index);
+            }
+        }
+        let bits = ConflictBits {
+            state_terminals: self
+                .parse_table
+                .states
+                .iter()
+                .map(|state| {
+                    let mut bits = vec![0u64; row_words];
+                    for symbol in state.terminal_entries.keys() {
+                        if symbol.is_terminal() {
+                            set(&mut bits, symbol.index);
+                        }
+                    }
+                    bits
+                })
+                .collect(),
+            conflict_rows: (0..n_terminals)
+                .map(|i| {
+                    let mut bits = vec![0u64; row_words];
+                    for j in 0..n_terminals {
+                        if self.token_conflict_map.does_conflict(i, j) {
+                            set(&mut bits, j);
+                        }
+                    }
+                    bits
+                })
+                .collect(),
+            keywords,
+            internal_external,
+        };
+
         split_state_id_groups(
             &self.parse_table.states,
             &mut state_ids_by_group_id,
             &mut group_ids_by_state_id,
             0,
-            |left, right, groups| self.states_conflict(left, right, groups, &entry_maps),
+            |left, right, groups| self.states_conflict(left, right, groups, &entry_maps, &bits),
         );
+        let t_split1 = t0.elapsed();
+        let t0 = std::time::Instant::now();
 
         // Precompute per-state sorted shift actions and nonterminal goto actions.
         // State actions are stable across loop iterations; only group assignments change.
@@ -266,6 +349,9 @@ impl Minimizer<'_> {
             })
             .collect::<Vec<_>>();
 
+        let t_prep2 = t0.elapsed();
+        let t0 = std::time::Instant::now();
+        let mut split2_rounds = 0u32;
         while split_state_id_groups(
             &self.parse_table.states,
             &mut state_ids_by_group_id,
@@ -274,7 +360,11 @@ impl Minimizer<'_> {
             |left, right, groups| {
                 self.state_successors_differ(left, right, groups, &shift_maps, &nonterminal_maps)
             },
-        ) {}
+        ) {
+            split2_rounds += 1;
+        }
+        let t_split2 = t0.elapsed();
+        let t0 = std::time::Instant::now();
 
         let error_group_index = state_ids_by_group_id
             .iter()
@@ -318,6 +408,10 @@ impl Minimizer<'_> {
         }
 
         self.parse_table.states = new_states;
+        eprintln!(
+            "[SPIKE minimize-merge] prep1 {t_prep1:?} split1 {t_split1:?} prep2 {t_prep2:?} split2 {t_split2:?} ({split2_rounds} rounds) rebuild {:?}",
+            t0.elapsed()
+        );
     }
 
     fn states_conflict(
@@ -326,6 +420,7 @@ impl Minimizer<'_> {
         state2: &ParseState,
         group_ids_by_state_id: &[ParseStateId],
         entry_maps: &[Vec<(SymbolKey, &ParseTableEntry)>],
+        bits: &ConflictBits,
     ) -> bool {
         let entries1 = &entry_maps[state1.id];
         let entries2 = &entry_maps[state2.id];
@@ -368,7 +463,7 @@ impl Minimizer<'_> {
                     // SAFETY: Less is only reachable when i < len1.
                     let e1 = unsafe { entries1.get_unchecked(i) };
                     let token = e1.0.symbol();
-                    if self.token_conflicts(state1.id, state2.id, state2, entries2, token) {
+                    if self.token_conflicts(state1.id, state2.id, state2, bits, token) {
                         return true;
                     }
                     i += 1;
@@ -377,7 +472,7 @@ impl Minimizer<'_> {
                     // SAFETY: Greater is only reachable when j < len2.
                     let e2 = unsafe { entries2.get_unchecked(j) };
                     let token = e2.0.symbol();
-                    if self.token_conflicts(state1.id, state2.id, state1, entries1, token) {
+                    if self.token_conflicts(state1.id, state2.id, state1, bits, token) {
                         return true;
                     }
                     j += 1;
@@ -521,7 +616,7 @@ impl Minimizer<'_> {
         left_id: ParseStateId,
         right_id: ParseStateId,
         right_state: &ParseState,
-        right_entry_map: &[(SymbolKey, &ParseTableEntry)],
+        bits: &ConflictBits,
         new_token: Symbol,
     ) -> bool {
         if new_token == Symbol::end_of_nonterminal_extra() {
@@ -545,12 +640,7 @@ impl Minimizer<'_> {
 
         // Do not add tokens which are both internal and external. Their validity could
         // influence the behavior of the external scanner.
-        if self
-            .syntax_grammar
-            .external_tokens
-            .iter()
-            .any(|external| external.corresponding_internal_token == Some(new_token))
-        {
+        if bits.internal_external[new_token.index / 64] & (1 << (new_token.index % 64)) != 0 {
             debug!(
                 "split states {left_id} {right_id} - internal/external token {}",
                 self.symbol_name(&new_token),
@@ -558,36 +648,35 @@ impl Minimizer<'_> {
             return true;
         }
 
-        // Hoist loop-invariant word-token comparisons.
         let word_token = self.syntax_grammar.word_token;
-        let word_key = word_token.map(SymbolKey::new);
-        let new_token_key = SymbolKey::new(new_token);
-        let new_token_is_word = word_key == Some(new_token_key);
+        let new_token_is_word = word_token == Some(new_token);
         let new_token_is_keyword = word_token.is_some() && self.keywords.contains(&new_token);
 
-        // Do not add a token if it conflicts with an existing token.
-        // Iterate the pre-sorted Vec instead of IndexMap keys for cache-friendlier access.
-        for &(key, _) in right_entry_map {
-            if !key.is_terminal() {
-                continue;
-            }
-            if new_token_is_keyword && word_key == Some(key) {
-                continue;
-            }
-            if new_token_is_word && self.keywords.contains(&key.symbol()) {
-                continue;
-            }
-
-            if self
-                .token_conflict_map
-                .does_conflict(new_token.index, key.index())
+        // Do not add a token if it conflicts with an existing token: test the
+        // candidate's conflict row against the state's terminal bits, masking
+        // out the word/keyword exemptions.
+        let row = &bits.conflict_rows[new_token.index];
+        let right_terminal_bits = &bits.state_terminals[right_state.id];
+        for (w, &row_word) in row.iter().enumerate() {
+            let mut candidates = right_terminal_bits[w] & row_word;
+            if new_token_is_keyword
+                && let Some(word) = word_token
+                && word.index / 64 == w
             {
+                candidates &= !(1u64 << (word.index % 64));
+            }
+            if new_token_is_word {
+                candidates &= !bits.keywords[w];
+            }
+            if candidates != 0 {
                 debug!(
                     "split states {} {} - token {} conflicts with {}",
                     left_id,
                     right_id,
                     self.symbol_name(&new_token),
-                    self.symbol_name(&key.symbol()),
+                    self.symbol_name(&Symbol::terminal(
+                        w * 64 + candidates.trailing_zeros() as usize
+                    )),
                 );
                 return true;
             }
