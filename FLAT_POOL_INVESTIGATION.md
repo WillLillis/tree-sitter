@@ -332,6 +332,22 @@ runtime stays out of RSS):
 | cpp | 6.08 -> 5.68s (-7%) | 996 -> 1004MB (+0.8%) |
 | rust | 1.54 -> 1.25s (-19%) | 302 -> 303MB (+0.4%) |
 
+Faithful re-measurement 2026-07-10 (after stage 3 portable half; item-op
+counters fully deleted from the branch; interleaved min-of-5, all six
+fixtures, vs a `git archive`-built local master @ 9fc2f486a, whose
+crates/generate is unchanged since aec288f83). parser.c and node-types.json
+are byte-identical master vs branch on all six. Run distributions do not
+overlap (cpp worst branch 5.58s < best master 5.93s):
+
+| grammar | wall master -> branch | peak RSS master -> branch |
+|---|---|---|
+| c | 0.56 -> 0.54s (-4%) | 160.5 -> 161.6MB (+0.7%) |
+| cpp | 5.93 -> 5.41s (-9%) | 996.3 -> 1004.1MB (+0.8%) |
+| python | 0.29 -> 0.25s (-14%) | 77.8 -> 78.5MB (+0.8%) |
+| go | 0.23 -> 0.20s (-13%) | 65.1 -> 66.3MB (+1.8%) |
+| javascript | 0.58 -> 0.49s (-16%) | 160.4 -> 162.1MB (+1.1%) |
+| rust | 1.42 -> 1.18s (-17%) | 301.6 -> 302.8MB (+0.4%) |
+
 Honest reading: end-to-end time is a modest real win; peak memory is flat
 because the peak was never the grammar representation. On cpp the ~1GB
 lives in build_tables' own structures: per-entry lookahead `TokenSet`s
@@ -532,10 +548,12 @@ stage times.
 
 ## Temp code inventory (all on `rule_ir`, remove/relocate before landing)
 
-- The `[POOL <pass>]` A/B blocks in `prepare_grammar.rs` (timing loops +
-  equality asserts) and the `[SPIKE prepare-stages]`/`[SPIKE
-  generate-stages]`/`[SPIKE tables-stages]`/`[SPIKE item-ops]` prints
-  (`prepare_grammar.rs`, `generate.rs`, `build_tables.rs`, `build_tables/item.rs`).
+- The `[SPIKE prepare-stages]`/`[SPIKE generate-stages]`/`[SPIKE
+  tables-stages]` prints (`prepare_grammar.rs`, `generate.rs`,
+  `build_tables.rs`). The `[SPIKE item-ops]` counters (hot-path atomics in
+  `ParseItem`'s Hash/Eq/Ord) were fully removed 2026-07-10 so A/B runs are
+  faithful; resurrect via `git log -S ITEM_HASHES` if the perf campaign
+  wants op counts again.
 - `materialize_interned`/`materialize_extracted`/`materialize_flattened` and
   the `add_rule`/`rule` pool<->Rule bridges (die at the flip).
 - TEMP derives: `Clone/Debug/PartialEq/Eq` on `IntermediateGrammar`,

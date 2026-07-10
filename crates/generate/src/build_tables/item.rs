@@ -582,14 +582,8 @@ impl fmt::Display for ParseItemSetDisplay<'_> {
     }
 }
 
-// TEMP SPIKE: identity-op counters (remove with the other spike blocks).
-pub static ITEM_HASHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static ITEM_EQS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub static ITEM_CMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 impl Hash for ParseItem<'_> {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
-        ITEM_HASHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         hasher.write_u32(self.variable_index);
         hasher.write_u32(self.step_index);
         // The already-matched children don't play any role in the parse state
@@ -611,7 +605,6 @@ impl Hash for ParseItem<'_> {
 impl PartialEq for ParseItem<'_> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        ITEM_EQS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if self.variable_index != other.variable_index
             || self.step_index != other.step_index
             || self.has_preceding_inherited_fields != other.has_preceding_inherited_fields
@@ -629,7 +622,6 @@ impl PartialEq for ParseItem<'_> {
 impl Ord for ParseItem<'_> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        ITEM_CMPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.step_index
             .cmp(&other.step_index)
             .then_with(|| self.variable_index.cmp(&other.variable_index))

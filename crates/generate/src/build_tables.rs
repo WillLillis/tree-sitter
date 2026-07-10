@@ -119,15 +119,6 @@ pub fn build_tables(
     eprintln!(
         "[SPIKE tables-stages] item_set_builder {t_isb:?} following {t_following:?} build_parse_table {t_parse_table:?} token_conflicts {t_conflicts:?} keywords+error+used {t_keywords_etc:?} minimize {t_minimize:?} lex {t_lex:?}"
     );
-    {
-        use std::sync::atomic::Ordering::Relaxed;
-        eprintln!(
-            "[SPIKE item-ops] hashes {} eqs {} cmps {}",
-            item::ITEM_HASHES.load(Relaxed),
-            item::ITEM_EQS.load(Relaxed),
-            item::ITEM_CMPS.load(Relaxed),
-        );
-    }
 
     if let Some(report_symbol_name) = report_symbol_name {
         report_state_info(
