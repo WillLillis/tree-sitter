@@ -348,8 +348,44 @@ overlap (cpp worst branch 5.58s < best master 5.93s):
 | javascript | 0.58 -> 0.49s (-16%) | 160.4 -> 162.1MB (+1.1%) |
 | rust | 1.42 -> 1.18s (-17%) | 301.6 -> 302.8MB (+0.4%) |
 
-Honest reading: end-to-end time is a modest real win; peak memory is flat
-because the peak was never the grammar representation. On cpp the ~1GB
+Perf campaign on `rule_ir` (2026-07-10, user decision: campaign runs here
+BEFORE the port). Per-stage RSS attribution (/proc/self/status marks between
+build_tables stages) found the peak was never where the levers assumed:
+on cpp, `keywords+error+used` added +458MB, all of it
+`CoincidentTokenIndex.entries` (a `Vec<ParseStateId>` per token pair, one
+push per coincident pair per state, sole consumer: one all-states-have-word
+boolean in `identify_keywords`). Two levers landed, both byte-identical on
+all six fixtures vs master:
+
+1. Coincident state lists -> a second n*n "coincident without word token"
+   bitset (commit b6a2bbc24). cpp keywords stage 1.18s -> 0.18s, peak RSS
+   1005 -> 541MB.
+2. parse_state_info kernel dedup (commit 87e15dbc3): every state's kernel
+   item set was cloned into `parse_state_info_by_id` while the identical
+   set is the state-dedup map key at the same index. `ParseStateInfo` now
+   carries preceding symbols + the moved-out dedup map. cpp -33MB retained.
+
+Standing after both (interleaved min-of-5 vs master, all runs
+non-overlapping):
+
+| grammar | wall master -> branch | peak RSS master -> branch |
+|---|---|---|
+| c | 0.56 -> 0.39s (-30%) | 160.1 -> 92.5MB (-42%) |
+| cpp | 5.65 -> 4.11s (-27%) | 996.2 -> 546.0MB (-45%) |
+| python | 0.28 -> 0.23s (-18%) | 77.7 -> 60.6MB (-22%) |
+| go | 0.22 -> 0.18s (-18%) | 64.8 -> 54.2MB (-16%) |
+| javascript | 0.57 -> 0.41s (-28%) | 160.4 -> 100.3MB (-37%) |
+| rust | 1.40 -> 0.91s (-35%) | 301.0 -> 175.7MB (-42%) |
+
+Note the coincident-index lever is IR-independent (would apply to master
+as-is); it composes with the port either way. Remaining cpp buckets:
+build_parse_table 2.0s / 498MB plateau (retained: table 173MB + kernels
+33MB; rest is closure churn + malloc slack - levers 1 and 3 below),
+minimize 1.75s (unattributed), render 154ms.
+
+Earlier honest reading (pre-campaign): end-to-end time was a modest real
+win; peak memory was flat because the peak was never the grammar
+representation. On cpp the ~1GB
 lives in build_tables' own structures: per-entry lookahead `TokenSet`s
 (cloned per transitive-closure addition), `parse_state_info` retaining a
 full `ParseItemSet` per state for conflict reporting, and the parse table.
