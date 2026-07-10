@@ -26,13 +26,11 @@ use thiserror::Error;
 pub use self::expand_tokens::expand_token_rules;
 #[cfg(test)]
 use super::{
-    grammars::{ExternalToken, ReservedWordContext, Variable},
+    grammars::{ExternalToken, InputGrammar, ReservedWordContext, Variable},
     rules::{Precedence, Rule, Symbol},
 };
 use super::{
-    grammars::{
-        InlinedProductionMap, InputGrammar, LexicalGrammar, PrecedenceEntry, SyntaxGrammar,
-    },
+    grammars::{InlinedProductionMap, LexicalGrammar, PrecedenceEntry, SyntaxGrammar},
     rules::AliasMap,
 };
 use crate::Diagnostic;
@@ -160,7 +158,7 @@ impl std::fmt::Display for ConflictingPrecedenceOrderingError {
 /// Transform an input grammar into separate components that are ready
 /// for parse table construction.
 pub fn prepare_grammar(
-    input_grammar: &InputGrammar,
+    mut g: crate::rule_pool::PoolGrammar,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> PrepareGrammarResult<(
     SyntaxGrammar,
@@ -168,10 +166,6 @@ pub fn prepare_grammar(
     InlinedProductionMap,
     AliasMap,
 )> {
-    // TEMP (until the frontend flip): the frontends still produce Rule-based
-    // grammars; convert once at the boundary.
-    let mut g = crate::rule_pool::PoolGrammar::from_input_grammar(input_grammar);
-
     let t0 = std::time::Instant::now();
     validate_precedences(&g)?;
     validate_indirect_recursion(&g)?;

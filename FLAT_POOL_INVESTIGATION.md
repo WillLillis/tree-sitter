@@ -472,6 +472,28 @@ of the new `SyntaxGrammar`.
    Remaining: **stage 3** (frontends emit pools; `InputGrammar` pool-owning;
    delete `Rule` + the `add_rule`/`rule`/`from_input_grammar` bridges + the
    `pool_from_*` test bridges; dsl-tests `pub mod rules` exposure resolved).
+   Stage 3 portable half DONE 2026-07-09: `RulePool` grew the `Rule`-mirroring
+   constructors (`metadata_with` merge = `add_metadata`, `choice` =
+   flatten+dedup), `parse_grammar` builds a `PoolGrammar` directly (`parse_rule`
+   returns `NodeId`), `PoolGrammar::normalize` ports the used-set DFS +
+   empty-string diagnostics + config cleanup, and `prepare_grammar`/
+   `generate_*` take `PoolGrammar` by value, so the JSON path is pool
+   end-to-end with zero grammar copies. Enabler: `intern_symbols`' dense-name
+   contract relaxed to a `StrId`-indexed `Vec<Option<Symbol>>` (normalize
+   drops variables from a parse-order pool, so names are no longer ids
+   `1..=n`; nothing else consumed the ordering - the one derived-`Ord` use,
+   the `shift_precedence` dedup, is order-insensitive). nativedsl still emits
+   `Rule` and bridges via `from_input_grammar` at its `generate.rs` call site
+   (TEMP; keeps the series separable for the master port). `to_input_grammar`
+   test bridge added for the nativedsl `json_roundtrip` test. Oracle:
+   parser.c + node-types.json byte-identical on all six (fresh HEAD baseline
+   via `git archive` build - the user vetoed worktrees); 604/604 generate
+   tests + `test_feature_corpus_files` (covers `unused_rules`, i.e. the
+   normalize drop path); interleaved min-of-3: cpp -0.9%, rust -2.4%, RSS
+   parity. Remaining stage-3 work (nativedsl half): lowering emits pool nodes
+   directly (deletes `build_rule`/`str_to_string`), then delete `Rule`, the
+   Rule-based `InputGrammar::normalize` (cfg-gated under `nativedsl` in
+   `parse_grammar.rs`), and all remaining bridges.
 3. ~~**Harden or drop the A/B blocks before corpus runs**~~ moot: the A/B
    blocks are gone with stage 1; corpus verification is now generate-and-diff
    against a master-built parser.c.

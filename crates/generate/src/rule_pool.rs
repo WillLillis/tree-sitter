@@ -170,6 +170,126 @@ impl RulePool {
         id
     }
 
+    pub fn set_params(&mut self, id: ParamsId, params: Params) {
+        self.params[id.0 as usize] = params;
+    }
+
+    // Rule-construction methods mirroring the `Rule` smart constructors, for
+    // frontends that build pool nodes directly. Metadata-bearing wrappers
+    // merge their params into an existing non-token `Metadata` node instead
+    // of nesting a second one.
+
+    fn metadata_with(&mut self, content: NodeId, f: impl FnOnce(&mut Params)) -> NodeId {
+        if let Node::Metadata { params, .. } = self.node(content) {
+            let mut p = self.params(params);
+            if !p.is_token {
+                f(&mut p);
+                self.set_params(params, p);
+                return content;
+            }
+        }
+        let mut p = Params::default();
+        f(&mut p);
+        let params = self.push_params(p);
+        self.push_node(Node::Metadata {
+            params,
+            rule: content,
+        })
+    }
+
+    pub fn blank(&mut self) -> NodeId {
+        self.push_node(Node::Blank)
+    }
+
+    pub fn string(&mut self, value: &str) -> NodeId {
+        let id = self.intern(value);
+        self.push_node(Node::String(id))
+    }
+
+    pub fn pattern(&mut self, value: &str, flags: &str) -> NodeId {
+        let value = self.intern(value);
+        let flags = self.intern(flags);
+        self.push_node(Node::Pattern(value, flags))
+    }
+
+    pub fn named_symbol(&mut self, name: &str) -> NodeId {
+        let id = self.intern(name);
+        self.push_node(Node::NamedSymbol(id))
+    }
+
+    pub fn field(&mut self, name: StrId, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| p.field = Some(name))
+    }
+
+    pub fn alias(&mut self, content: NodeId, value: StrId, is_named: bool) -> NodeId {
+        self.metadata_with(content, |p| p.alias = Some(Alias { value, is_named }))
+    }
+
+    pub fn token(&mut self, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| p.is_token = true)
+    }
+
+    pub fn immediate_token(&mut self, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| {
+            p.is_token = true;
+            p.is_main_token = true;
+        })
+    }
+
+    pub fn prec(&mut self, value: Prec, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| p.prec = value)
+    }
+
+    pub fn prec_left(&mut self, value: Prec, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| {
+            p.assoc = Some(Associativity::Left);
+            p.prec = value;
+        })
+    }
+
+    pub fn prec_right(&mut self, value: Prec, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| {
+            p.assoc = Some(Associativity::Right);
+            p.prec = value;
+        })
+    }
+
+    pub fn prec_dynamic(&mut self, value: i32, content: NodeId) -> NodeId {
+        self.metadata_with(content, |p| p.dynamic_precedence = value)
+    }
+
+    pub fn repeat(&mut self, content: NodeId) -> NodeId {
+        self.push_node(Node::Repeat(content))
+    }
+
+    pub fn seq(&mut self, ids: &[NodeId]) -> NodeId {
+        let range = self.push_children(ids);
+        self.push_node(Node::Seq(range))
+    }
+
+    /// Mirror of `Rule::choice`: flatten nested choices and dedup
+    /// structurally, keeping a `Choice` node even for a single element.
+    pub fn choice(&mut self, ids: &[NodeId]) -> NodeId {
+        let mut elements: Vec<NodeId> = Vec::with_capacity(ids.len());
+        let mut stack: Vec<NodeId> = Vec::with_capacity(ids.len());
+        stack.extend(ids.iter().rev());
+        while let Some(id) = stack.pop() {
+            if let Node::Choice(range) = self.node(id) {
+                let base = stack.len();
+                stack.extend_from_slice(self.child_slice(range));
+                stack[base..].reverse();
+            } else if !elements.iter().any(|&e| self.subtree_eq(e, id)) {
+                elements.push(id);
+            }
+        }
+        let range = self.push_children(&elements);
+        self.push_node(Node::Choice(range))
+    }
+
+    pub fn reserved(&mut self, content: NodeId, ctx: StrId) -> NodeId {
+        self.push_node(Node::Reserved { rule: content, ctx })
+    }
+
     pub fn intern(&mut self, s: &str) -> StrId {
         if let Some(&id) = self.str_ids.get(s) {
             return id;
@@ -579,17 +699,11 @@ pub struct PoolReservedSet {
     pub roots: Vec<NodeId>,
 }
 
-/// Pool-owning input grammar. Built from [`InputGrammar`] transitionally;
-/// frontends build this directly at series end.
-///
-/// Invariant: variable names are interned first (variable `i` holds
-/// `StrId(i + 1)`), then external token names, so name resolution is a dense
-/// index (see `intern_symbols_pool`). Both frontends guarantee unique
-/// variable names.
+/// Pool-owning input grammar. Both frontends guarantee unique variable
+/// names.
 #[derive(Clone)]
 pub struct PoolGrammar {
     pub pool: RulePool,
-    #[allow(dead_code)] // TEMP: unread until the container flip
     pub name: String,
     pub variables: Vec<PoolVariable>,
     pub external_roots: Vec<NodeId>,
@@ -608,15 +722,7 @@ impl PoolGrammar {
     #[must_use]
     pub fn from_input_grammar(g: &InputGrammar) -> Self {
         let mut pool = RulePool::default();
-        // Dense-name contract: variable names first, external names second,
-        // before any body or config string.
         let var_names: Vec<StrId> = g.variables.iter().map(|v| pool.intern(&v.name)).collect();
-        debug_assert!(var_names.iter().enumerate().all(|(i, s)| s.index() == i));
-        for e in &g.external_tokens {
-            if let Rule::NamedSymbol(n) = e {
-                pool.intern(n);
-            }
-        }
         let variables = g
             .variables
             .iter()
@@ -664,6 +770,53 @@ impl PoolGrammar {
             inline_names,
             word_name,
             precedence_orderings: g.precedence_orderings.clone(),
+        }
+    }
+
+    /// Test bridge: materialize back into a master [`InputGrammar`].
+    #[cfg(test)]
+    #[must_use]
+    pub fn to_input_grammar(&self) -> InputGrammar {
+        use crate::grammars::{ReservedWordContext, Variable, VariableType};
+        let resolve = |&s: &StrId| self.pool.resolve(s).to_string();
+        InputGrammar {
+            name: self.name.clone(),
+            variables: self
+                .variables
+                .iter()
+                .map(|v| Variable {
+                    name: resolve(&v.name),
+                    kind: VariableType::Named,
+                    rule: self.pool.rule(v.root),
+                })
+                .collect(),
+            extra_symbols: self
+                .extra_roots
+                .iter()
+                .map(|&r| self.pool.rule(r))
+                .collect(),
+            expected_conflicts: self
+                .conflict_names
+                .iter()
+                .map(|c| c.iter().map(resolve).collect())
+                .collect(),
+            precedence_orderings: self.precedence_orderings.clone(),
+            external_tokens: self
+                .external_roots
+                .iter()
+                .map(|&r| self.pool.rule(r))
+                .collect(),
+            variables_to_inline: self.inline_names.iter().map(resolve).collect(),
+            supertype_symbols: self.supertype_names.iter().map(resolve).collect(),
+            word_token: self.word_name.as_ref().map(resolve),
+            reserved_words: self
+                .reserved_sets
+                .iter()
+                .map(|set| ReservedWordContext {
+                    name: resolve(&set.name),
+                    reserved_words: set.roots.iter().map(|&r| self.pool.rule(r)).collect(),
+                })
+                .collect(),
         }
     }
 }

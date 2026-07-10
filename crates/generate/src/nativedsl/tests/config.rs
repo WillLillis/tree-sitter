@@ -157,7 +157,9 @@ fn json_roundtrip() {
     let json_str =
         serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
             .expect("grammar JSON serialization should not fail");
-    let reparsed = crate::parse_grammar::parse_grammar(&json_str, &mut Vec::new()).unwrap();
+    let reparsed = crate::parse_grammar::parse_grammar(&json_str, &mut Vec::new())
+        .unwrap()
+        .to_input_grammar();
     assert_eq!(grammar, reparsed);
 }
 

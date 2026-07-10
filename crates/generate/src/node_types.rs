@@ -2121,8 +2121,11 @@ mod tests {
     }
 
     fn get_node_types(grammar: &InputGrammar) -> SuperTypeCycleResult<Vec<NodeInfoJSON>> {
-        let (syntax_grammar, lexical_grammar, _, default_aliases) =
-            prepare_grammar(grammar, &mut Vec::new()).unwrap();
+        let (syntax_grammar, lexical_grammar, _, default_aliases) = prepare_grammar(
+            crate::rule_pool::PoolGrammar::from_input_grammar(grammar),
+            &mut Vec::new(),
+        )
+        .unwrap();
         let variable_info =
             get_variable_info(&syntax_grammar, &lexical_grammar, &default_aliases).unwrap();
         generate_node_types_json(

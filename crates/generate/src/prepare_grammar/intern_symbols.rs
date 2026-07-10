@@ -61,16 +61,18 @@ pub(super) fn intern_symbols(
         ..
     } = g;
 
-    // Dense name table: variable i holds StrId i+1 (PoolGrammar invariant);
-    // an external name not shadowing a variable got the next id in order. A
-    // name's StrId indexes this table directly; undefined names have larger
-    // ids and fall out via the bounds check.
-    let mut name_of_symbol: Vec<Symbol> = (0..variables.len()).map(Symbol::non_terminal).collect();
+    // Name table indexed by StrId: a slot holds the symbol for a variable or
+    // external-token name, `None` for every other interned string. An
+    // external whose name shadows a variable resolves to the variable.
+    let mut name_of_symbol: Vec<Option<Symbol>> = vec![None; pool.strs().len()];
+    for (i, v) in variables.iter().enumerate() {
+        name_of_symbol[v.name.index()] = Some(Symbol::non_terminal(i));
+    }
     for (i, &root) in external_roots.iter().enumerate() {
         if let PoolNode::NamedSymbol(sid) = pool.node(root)
-            && sid.index() == name_of_symbol.len()
+            && name_of_symbol[sid.index()].is_none()
         {
-            name_of_symbol.push(Symbol::external(i));
+            name_of_symbol[sid.index()] = Some(Symbol::external(i));
         }
     }
 
@@ -115,7 +117,7 @@ pub(super) fn intern_symbols(
         }
     }
 
-    let lookup = |sid: StrId| name_of_symbol.get(sid.index()).copied();
+    let lookup = |sid: StrId| name_of_symbol.get(sid.index()).copied().flatten();
     let supertypes = g
         .supertype_names
         .iter()
@@ -171,7 +173,7 @@ fn intern_root(
     pool: &mut RulePool,
     root: NodeId,
     var_name: Option<StrId>,
-    name_of_symbol: &[Symbol],
+    name_of_symbol: &[Option<Symbol>],
     diagnostics: &mut Vec<Diagnostic>,
     stack: &mut Vec<NodeId>,
 ) -> InternSymbolsResult<()> {
@@ -179,16 +181,18 @@ fn intern_root(
     stack.push(root);
     while let Some(id) = stack.pop() {
         match pool.node(id) {
-            PoolNode::NamedSymbol(sid) => match name_of_symbol.get(sid.index()) {
-                Some(&s) => pool.set_node(
-                    id,
-                    PoolNode::Sym {
-                        kind: s.kind,
-                        index: s.index as u32,
-                    },
-                ),
-                None => Err(InternSymbolsError::Undefined(pool.resolve(sid).to_string()))?,
-            },
+            PoolNode::NamedSymbol(sid) => {
+                match name_of_symbol.get(sid.index()).copied().flatten() {
+                    Some(s) => pool.set_node(
+                        id,
+                        PoolNode::Sym {
+                            kind: s.kind,
+                            index: s.index as u32,
+                        },
+                    ),
+                    None => Err(InternSymbolsError::Undefined(pool.resolve(sid).to_string()))?,
+                }
+            }
             PoolNode::Seq(range) | PoolNode::Choice(range) => {
                 let children = pool.child_slice(range);
                 if children.len() == 1
