@@ -29,7 +29,6 @@ const fn start_production() -> ProdRef<'static> {
     ProdRef {
         steps: &START_STEPS,
         dynamic_precedence: 0,
-        id: START_PRODUCTION_ID,
     }
 }
 
@@ -252,9 +251,12 @@ pub struct ParseItem<'a> {
     pub variable_index: u32,
     /// The number of symbols that have already been matched.
     pub step_index: u32,
-    /// The production being matched.
-    pub production: ProdRef<'a>,
-    /// The production's identity keys, indexed by `step_index`.
+    /// Id of the production being matched, in the pooled production table;
+    /// `START_PRODUCTION_ID` for the augmented start production, which lives
+    /// outside the table.
+    pub prod_id: u32,
+    /// The production's identity keys, indexed by dot position. There is one
+    /// key per dot, so `keys.len()` is the step count plus one.
     pub keys: &'a [DotKeys],
     /// A boolean indicating whether any of the already-matched children were
     /// hidden nodes and had fields. Ordinarily, a parse item's behavior is not
@@ -272,8 +274,6 @@ pub struct ParseItem<'a> {
     pub has_preceding_inherited_fields: bool,
 }
 
-/// Represents a set of in-progress matches of productions in a grammar.
-///
 /// Interned lookahead set: an index into a [`LookaheadSetPool`]. Ids are
 /// canonical, so id equality is exactly the underlying [`TokenSet`] equality.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -379,6 +379,8 @@ impl LookaheadSetPool {
     }
 }
 
+/// Represents a set of in-progress matches of productions in a grammar.
+///
 /// For each in-progress match, a set of "lookaheads" (tokens that are allowed to
 /// *follow* the in-progress rule) are included. This object corresponds directly
 /// to a state in the final parse table.
@@ -425,37 +427,51 @@ impl<'a> ParseItem<'a> {
     pub fn start(key_map: &'a ItemKeyMap) -> Self {
         ParseItem {
             variable_index: u32::MAX,
-            production: start_production(),
+            prod_id: START_PRODUCTION_ID,
             keys: key_map.start_keys(),
             step_index: 0,
             has_preceding_inherited_fields: false,
         }
     }
 
+    /// The production being matched.
     #[must_use]
-    pub fn step(&self) -> Option<FStep> {
-        self.production.steps.get(self.step_index as usize).copied()
+    pub fn production<'g>(&self, grammar: &'g SyntaxGrammar) -> ProdRef<'g> {
+        if self.prod_id == START_PRODUCTION_ID {
+            start_production()
+        } else {
+            grammar.production(self.prod_id)
+        }
     }
 
     #[must_use]
-    pub fn symbol(&self) -> Option<Symbol> {
-        self.step().map(FStep::symbol)
+    pub fn step(&self, grammar: &SyntaxGrammar) -> Option<FStep> {
+        self.production(grammar)
+            .steps
+            .get(self.step_index as usize)
+            .copied()
     }
 
     #[must_use]
-    pub fn associativity(&self) -> Option<Associativity> {
-        self.prev_step().and_then(FStep::associativity)
+    pub fn symbol(&self, grammar: &SyntaxGrammar) -> Option<Symbol> {
+        self.step(grammar).map(FStep::symbol)
     }
 
     #[must_use]
-    pub fn precedence(&self) -> Prec {
-        self.prev_step().map_or(Prec::None, FStep::precedence)
+    pub fn associativity(&self, grammar: &SyntaxGrammar) -> Option<Associativity> {
+        self.prev_step(grammar).and_then(FStep::associativity)
     }
 
     #[must_use]
-    pub fn prev_step(&self) -> Option<FStep> {
+    pub fn precedence(&self, grammar: &SyntaxGrammar) -> Prec {
+        self.prev_step(grammar)
+            .map_or(Prec::None, FStep::precedence)
+    }
+
+    #[must_use]
+    pub fn prev_step(&self, grammar: &SyntaxGrammar) -> Option<FStep> {
         if self.step_index > 0 {
-            Some(self.production.steps[self.step_index as usize - 1])
+            Some(self.production(grammar).steps[self.step_index as usize - 1])
         } else {
             None
         }
@@ -463,7 +479,7 @@ impl<'a> ParseItem<'a> {
 
     #[must_use]
     pub const fn is_done(&self) -> bool {
-        self.step_index as usize == self.production.steps.len()
+        self.step_index as usize + 1 == self.keys.len()
     }
 
     #[must_use]
@@ -476,7 +492,7 @@ impl<'a> ParseItem<'a> {
     pub const fn successor(&self) -> Self {
         ParseItem {
             variable_index: self.variable_index,
-            production: self.production,
+            prod_id: self.prod_id,
             keys: self.keys,
             step_index: self.step_index + 1,
             has_preceding_inherited_fields: self.has_preceding_inherited_fields,
@@ -486,13 +502,9 @@ impl<'a> ParseItem<'a> {
     /// Create an item identical to this one, but with a different production.
     /// This is used when dynamically "inlining" certain symbols in a production.
     #[must_use]
-    pub const fn substitute_production(
-        &self,
-        production: ProdRef<'a>,
-        keys: &'a [DotKeys],
-    ) -> Self {
+    pub const fn substitute_production(&self, prod_id: u32, keys: &'a [DotKeys]) -> Self {
         let mut result = *self;
-        result.production = production;
+        result.prod_id = prod_id;
         result.keys = keys;
         result
     }
@@ -552,7 +564,8 @@ impl fmt::Display for ParseItemDisplay<'_> {
             )?;
         }
 
-        for (i, step) in self.0.production.steps.iter().enumerate() {
+        let production = self.0.production(self.1);
+        for (i, step) in production.steps.iter().enumerate() {
             let symbol = step.symbol();
             if i == self.0.step_index as usize {
                 write!(f, " •")?;
@@ -594,7 +607,7 @@ impl fmt::Display for ParseItemDisplay<'_> {
 
         if self.0.is_done() {
             write!(f, " •")?;
-            if let Some(&step) = self.0.production.steps.last() {
+            if let Some(&step) = production.steps.last() {
                 if let Some(associativity) = step.associativity() {
                     if matches!(step.precedence(), Prec::None) {
                         write!(f, " ({associativity:?})")?;

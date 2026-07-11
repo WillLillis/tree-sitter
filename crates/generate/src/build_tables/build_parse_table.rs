@@ -329,7 +329,7 @@ impl<'a> ParseTableBuilder<'a> {
                     .or_insert_with(ParseItemSet::default)
                     .insert(ParseItem {
                         variable_index: extra_non_terminal.index as u32,
-                        production,
+                        prod_id,
                         keys: self.item_set_builder.key_map.keys_for(prod_id),
                         step_index: 1,
                         has_preceding_inherited_fields: false,
@@ -500,7 +500,7 @@ impl<'a> ParseTableBuilder<'a> {
             // If the item is unfinished, then this state has a transition for the item's
             // next symbol. Advance the item to its next step and insert the resulting
             // item into the successor item set.
-            if let Some(next_symbol) = item.symbol() {
+            if let Some(next_symbol) = item.symbol(self.syntax_grammar) {
                 let mut successor = item.successor();
                 let successor_set = if next_symbol.is_non_terminal() {
                     let variable = &self.syntax_grammar.variables[next_symbol.index];
@@ -566,13 +566,13 @@ impl<'a> ParseTableBuilder<'a> {
                     ParseAction::Reduce {
                         symbol,
                         child_count: item.step_index as u16,
-                        dynamic_precedence: item.production.dynamic_precedence,
+                        dynamic_precedence: item.production(self.syntax_grammar).dynamic_precedence,
                         production_id: production_id as u16,
                     }
                 };
 
-                let precedence = item.precedence();
-                let associativity = item.associativity();
+                let precedence = item.precedence(self.syntax_grammar);
+                let associativity = item.associativity(self.syntax_grammar);
                 for lookahead in self.item_set_builder.lookaheads.get(*lookaheads).iter() {
                     let table_entry = self.parse_table.states[state_id]
                         .terminal_entries
@@ -755,7 +755,7 @@ impl<'a> ParseTableBuilder<'a> {
                 .entries
                 .iter()
                 .filter_map(|entry| {
-                    if let Some(next_step) = entry.item.step() {
+                    if let Some(next_step) = entry.item.step(self.syntax_grammar) {
                         if next_step.symbol() == keyword_capture_token {
                             Some(ReservedWordSetId(next_step.reserved as usize))
                         } else {
@@ -809,7 +809,7 @@ impl<'a> ParseTableBuilder<'a> {
             item, lookaheads, ..
         } in &item_set.entries
         {
-            if let Some(step) = item.step() {
+            if let Some(step) = item.step(self.syntax_grammar) {
                 if item.step_index > 0
                     && self
                         .item_set_builder
@@ -821,7 +821,7 @@ impl<'a> ParseTableBuilder<'a> {
                     }
 
                     let p = (
-                        item.precedence(),
+                        item.precedence(self.syntax_grammar),
                         Symbol::non_terminal(item.variable_index as usize),
                     );
                     if let Err(i) = shift_precedence.binary_search(&p) {
@@ -972,18 +972,23 @@ impl<'a> ParseTableBuilder<'a> {
                     .clone();
 
                 let production_step_symbols = item
-                    .production
+                    .production(self.syntax_grammar)
                     .steps
                     .iter()
                     .map(|step| self.symbol_name(&step.symbol()))
                     .collect::<Vec<_>>();
 
-                let precedence = match item.precedence() {
+                let precedence = match item.precedence(self.syntax_grammar) {
                     Prec::None => None,
-                    _ => Some(prec_display(self.syntax_grammar, item.precedence())),
+                    _ => Some(prec_display(
+                        self.syntax_grammar,
+                        item.precedence(self.syntax_grammar),
+                    )),
                 };
 
-                let associativity = item.associativity().map(|assoc| format!("{assoc:?}"));
+                let associativity = item
+                    .associativity(self.syntax_grammar)
+                    .map(|assoc| format!("{assoc:?}"));
 
                 Interpretation {
                     preceding_symbols,
@@ -1132,7 +1137,7 @@ impl<'a> ParseTableBuilder<'a> {
             .iter()
             .filter_map(|ParseItemSetEntry { item, .. }| {
                 let variable_index = item.variable_index as usize;
-                if item.symbol() == Some(symbol)
+                if item.symbol(self.syntax_grammar) == Some(symbol)
                     && !self.syntax_grammar.variables[variable_index].is_auxiliary()
                 {
                     Some(Symbol::non_terminal(variable_index))
@@ -1153,7 +1158,8 @@ impl<'a> ParseTableBuilder<'a> {
             field_map: BTreeMap::new(),
         };
 
-        for (i, step) in item.production.steps.iter().enumerate() {
+        let production = item.production(self.syntax_grammar);
+        for (i, step) in production.steps.iter().enumerate() {
             production_info
                 .alias_sequence
                 .push(step.alias().map(|a| Alias {
@@ -1195,8 +1201,8 @@ impl<'a> ParseTableBuilder<'a> {
             production_info.alias_sequence.pop();
         }
 
-        if item.production.steps.len() > self.parse_table.max_aliased_production_length {
-            self.parse_table.max_aliased_production_length = item.production.steps.len();
+        if production.steps.len() > self.parse_table.max_aliased_production_length {
+            self.parse_table.max_aliased_production_length = production.steps.len();
         }
 
         if let Some(index) = self

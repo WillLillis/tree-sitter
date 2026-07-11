@@ -153,7 +153,6 @@ pub struct SyntaxGrammar {
 pub struct ProdRef<'a> {
     pub steps: &'a [FStep],
     pub dynamic_precedence: i32,
-    pub id: u32,
 }
 
 impl ProdRef<'_> {
@@ -175,7 +174,6 @@ impl SyntaxGrammar {
         ProdRef {
             steps: &self.steps[p.step_range()],
             dynamic_precedence: p.dynamic_precedence,
-            id,
         }
     }
 

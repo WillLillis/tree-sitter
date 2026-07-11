@@ -279,23 +279,20 @@ impl<'a> ParseItemSetBuilder<'a> {
                 for prod_id in syntax_grammar.variable_prod_ids(variable_index) {
                     let item = ParseItem {
                         variable_index: variable_index as u32,
-                        production: syntax_grammar.production(prod_id),
+                        prod_id,
                         keys: key_map.keys_for(prod_id),
                         step_index: 0,
                         has_preceding_inherited_fields: false,
                     };
 
                     if let Some(inlined_ids) =
-                        inlines.inlined_prod_ids(item.production.id, item.step_index)
+                        inlines.inlined_prod_ids(item.prod_id, item.step_index)
                     {
                         for &id in inlined_ids {
                             find_or_push(
                                 additions_for_non_terminal,
                                 TransitiveClosureAddition {
-                                    item: item.substitute_production(
-                                        syntax_grammar.production(id),
-                                        key_map.keys_for(id),
-                                    ),
+                                    item: item.substitute_production(id, key_map.keys_for(id)),
                                     info,
                                 },
                             );
@@ -319,16 +316,15 @@ impl<'a> ParseItemSetBuilder<'a> {
         for entry in &item_set.entries {
             if let Some(inlined_ids) = self
                 .inlines
-                .inlined_prod_ids(entry.item.production.id, entry.item.step_index)
+                .inlined_prod_ids(entry.item.prod_id, entry.item.step_index)
             {
                 for &id in inlined_ids {
                     self.add_item(
                         &mut result,
                         &ParseItemSetEntry {
-                            item: entry.item.substitute_production(
-                                self.syntax_grammar.production(id),
-                                self.key_map.keys_for(id),
-                            ),
+                            item: entry
+                                .item
+                                .substitute_production(id, self.key_map.keys_for(id)),
                             lookaheads: entry.lookaheads,
                             following_reserved_word_set: entry.following_reserved_word_set,
                         },
@@ -358,10 +354,10 @@ impl<'a> ParseItemSetBuilder<'a> {
     }
 
     fn add_item(&mut self, set: &mut ParseItemSet<'a>, entry: &ParseItemSetEntry<'a>) {
-        if let Some(step) = entry.item.step()
+        if let Some(step) = entry.item.step(self.syntax_grammar)
             && step.symbol().is_non_terminal()
         {
-            let next_step = entry.item.successor().step();
+            let next_step = entry.item.successor().step(self.syntax_grammar);
 
             // Determine which tokens can follow this non-terminal.
             let (following_tokens, following_reserved_tokens) = if let Some(next_step) = next_step {
