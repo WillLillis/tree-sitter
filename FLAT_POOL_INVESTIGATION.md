@@ -665,12 +665,10 @@ stage times.
 
 ## Temp code inventory (all on `rule_ir`, remove/relocate before landing)
 
-- The `[SPIKE prepare-stages]`/`[SPIKE generate-stages]`/`[SPIKE
-  tables-stages]` prints (`prepare_grammar.rs`, `generate.rs`,
-  `build_tables.rs`). The `[SPIKE item-ops]` counters (hot-path atomics in
-  `ParseItem`'s Hash/Eq/Ord) were fully removed 2026-07-10 so A/B runs are
-  faithful; resurrect via `git log -S ITEM_HASHES` if the perf campaign
-  wants op counts again.
+- ~~The `[SPIKE *]` prints and accounting~~ ALL instrumentation swept
+  2026-07-11 (stage timers, RSS marks, mem accounting, spike helper
+  methods); generate's stderr is silent. Resurrect any of it via
+  `git log -S SPIKE` if a later campaign wants it.
 - `materialize_interned`/`materialize_extracted`/`materialize_flattened` and
   the `add_rule`/`rule` pool<->Rule bridges (die at the flip).
 - TEMP derives: `Clone/Debug/PartialEq/Eq` on `IntermediateGrammar`,
