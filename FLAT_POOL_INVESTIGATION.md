@@ -431,6 +431,15 @@ CAMPAIGN STANDING after all five levers (min-of-5 interleaved vs master):
 | javascript | 0.62 -> 0.37s (-40%) | 160.4 -> 93.9MB (-41%) |
 | rust | 1.49 -> 0.82s (-45%) | 301.3 -> 166.9MB (-45%) |
 
+Levers 6 and 7 (2026-07-11): get_production_id memoized by prod_id (the
+info depends only on the production; was rebuilt with String allocs plus a
+linear deep-equality scan per reduce item per state; rust build_parse_table
+579 -> 417ms) and split1 signature bucketing (states identical under the
+frozen group ids are interchangeable in states_conflict; greedy loop runs
+over representatives; cpp split1 783 -> 615ms). Standing: cpp 5.78 ->
+3.18s (-45%) / 996 -> 521MB (-48%); rust 1.43 -> 0.77s (-46%) / 301 ->
+166MB (-45%).
+
 Byte-identical parser.c + node-types.json vs master on all six fixtures
 after every lever. Remaining known levers, unranked: minimize merge-join
 pair verification (equal-signature bucketing + union-row fast negatives -
