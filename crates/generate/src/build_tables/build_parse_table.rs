@@ -12,7 +12,7 @@ use thiserror::Error;
 use super::{
     item::{
         LookaheadSetPool, ParseItem, ParseItemSet, ParseItemSetCore, ParseItemSetEntry,
-        prec_display,
+        START_PRODUCTION_ID, prec_display,
     },
     item_set_builder::ParseItemSetBuilder,
 };
@@ -78,6 +78,9 @@ struct ParseTableBuilder<'a> {
     core_ids_by_core: FxHashMap<ParseItemSetCore<'a>, usize>,
     state_ids_by_item_set: IndexMap<ParseItemSet<'a>, ParseStateId, BuildHasherDefault<FxHasher>>,
     preceding_symbols_by_id: Vec<SymbolSequence>,
+    /// `get_production_id` result per production: the info depends only on
+    /// the production, but the query runs per reduce item per state.
+    production_info_ids_by_prod_id: Vec<Option<ProductionInfoId>>,
     parse_state_queue: VecDeque<ParseStateQueueEntry>,
     non_terminal_extra_states: Vec<(Symbol, usize)>,
     actual_conflicts: FxHashSet<Vec<Symbol>>,
@@ -273,6 +276,7 @@ impl<'a> ParseTableBuilder<'a> {
             state_ids_by_item_set: IndexMap::default(),
             core_ids_by_core: FxHashMap::default(),
             preceding_symbols_by_id: Vec::new(),
+            production_info_ids_by_prod_id: vec![None; syntax_grammar.productions.len()],
             parse_state_queue: VecDeque::new(),
             actual_conflicts: syntax_grammar.expected_conflicts.iter().cloned().collect(),
             parse_table: ParseTable {
@@ -1153,6 +1157,10 @@ impl<'a> ParseTableBuilder<'a> {
     }
 
     fn get_production_id(&mut self, item: &ParseItem) -> ProductionInfoId {
+        debug_assert!(item.prod_id != START_PRODUCTION_ID);
+        if let Some(id) = self.production_info_ids_by_prod_id[item.prod_id as usize] {
+            return id;
+        }
         let mut production_info = ProductionInfo {
             alias_sequence: Vec::new(),
             field_map: BTreeMap::new(),
@@ -1205,7 +1213,7 @@ impl<'a> ParseTableBuilder<'a> {
             self.parse_table.max_aliased_production_length = production.steps.len();
         }
 
-        if let Some(index) = self
+        let id = if let Some(index) = self
             .parse_table
             .production_infos
             .iter()
@@ -1215,7 +1223,9 @@ impl<'a> ParseTableBuilder<'a> {
         } else {
             self.parse_table.production_infos.push(production_info);
             self.parse_table.production_infos.len() - 1
-        }
+        };
+        self.production_info_ids_by_prod_id[item.prod_id as usize] = Some(id);
+        id
     }
 
     fn symbol_name(&self, symbol: &Symbol) -> String {
