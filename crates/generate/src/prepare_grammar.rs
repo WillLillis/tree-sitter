@@ -166,50 +166,32 @@ pub fn prepare_grammar(
     InlinedProductionMap,
     AliasMap,
 )> {
-    let t0 = std::time::Instant::now();
     validate_precedences(&g)?;
     validate_indirect_recursion(&g)?;
-    let t_validate = t0.elapsed();
 
-    let t0 = std::time::Instant::now();
     let interned_meta = intern_symbols::intern_symbols(&mut g, diagnostics)?;
-    let t_intern = t0.elapsed();
 
-    let t0 = std::time::Instant::now();
     let mut ext_meta = extract_tokens::extract_tokens(&mut g, &interned_meta)?;
-    let t_extract = t0.elapsed();
 
-    let t0 = std::time::Instant::now();
     expand_repeats::expand_repeats(&mut g, &mut ext_meta);
-    let t_expand = t0.elapsed();
 
-    let t0 = std::time::Instant::now();
     let mut state = flatten_grammar::FlattenState::default();
     let mut out = crate::rule_pool::FlatOut::default();
     flatten_grammar::flatten_grammar(&g, &ext_meta, &mut state, &mut out)?;
-    let t_flatten = t0.elapsed();
 
-    let t0 = std::time::Instant::now();
     let lexical_grammar = expand_tokens::expand_tokens(
         &mut g.pool,
         &ext_meta.lexical_variables,
         &ext_meta.separator_roots,
     )?;
-    let t_tokens = t0.elapsed();
 
-    let t0 = std::time::Instant::now();
     let default_aliases = extract_default_aliases::extract_default_aliases(&g, &ext_meta, &mut out);
     let inlines = process_inlines::process_inlines(&g, &ext_meta, &mut out)?;
-    let t_rest = t0.elapsed();
 
     let default_aliases =
         extract_default_aliases::materialize_default_aliases(&g.pool, &default_aliases);
     let syntax_grammar = flatten_grammar::assemble_syntax_grammar(&g, &ext_meta, out);
 
-    // TEMP SPIKE: real single-shot stage times.
-    eprintln!(
-        "[SPIKE prepare-stages] validate {t_validate:?} intern {t_intern:?} extract {t_extract:?} expand {t_expand:?} flatten {t_flatten:?} expand_tokens {t_tokens:?} aliases+inlines {t_rest:?}"
-    );
     Ok((syntax_grammar, lexical_grammar, inlines, default_aliases))
 }
 /// Perform a depth-first search to detect cycles in single state transitions.

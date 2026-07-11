@@ -342,12 +342,6 @@ impl TokenSet {
         }
     }
 
-    // TEMP SPIKE: memory attribution.
-    #[must_use]
-    pub const fn heap_bytes(&self) -> usize {
-        self.terminal_bits.heap_bytes() + self.external_bits.heap_bytes()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = Symbol> + '_ {
         SetBitsIter::new(self.terminal_bits.as_slice())
             .map(Symbol::terminal)

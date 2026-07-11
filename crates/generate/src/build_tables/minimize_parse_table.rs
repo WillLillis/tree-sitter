@@ -85,24 +85,12 @@ pub fn minimize_parse_table(
         keywords,
         simple_aliases,
     };
-    // TEMP SPIKE: minimize sub-phase timing.
-    let t0 = std::time::Instant::now();
     if optimizations.contains(OptLevel::MergeStates) {
         minimizer.merge_compatible_states();
     }
-    let t_merge = t0.elapsed();
-    let t0 = std::time::Instant::now();
     minimizer.remove_unit_reductions();
-    let t_unit = t0.elapsed();
-    let t0 = std::time::Instant::now();
     minimizer.remove_unused_states();
-    let t_unused = t0.elapsed();
-    let t0 = std::time::Instant::now();
     minimizer.reorder_states_by_descending_size();
-    eprintln!(
-        "[SPIKE minimize] merge {t_merge:?} unit {t_unit:?} unused {t_unused:?} reorder {:?}",
-        t0.elapsed()
-    );
 }
 
 /// Word-aligned bitsets precomputed for `token_conflicts`, all indexed by
@@ -204,8 +192,6 @@ impl Minimizer<'_> {
     }
 
     fn merge_compatible_states(&mut self) {
-        // TEMP SPIKE: sub-phase timing.
-        let t0 = std::time::Instant::now();
         let core_count = 1 + self
             .parse_table
             .states
@@ -244,8 +230,6 @@ impl Minimizer<'_> {
             })
             .collect::<Vec<_>>();
 
-        let t_prep1 = t0.elapsed();
-        let t0 = std::time::Instant::now();
         // Precompute word-aligned bitsets so `token_conflicts` can test a
         // candidate token against a whole state's terminals with a few word
         // ANDs instead of a per-entry scan:
@@ -309,8 +293,6 @@ impl Minimizer<'_> {
             &entry_maps,
             &bits,
         );
-        let t_split1 = t0.elapsed();
-        let t0 = std::time::Instant::now();
 
         // Precompute per-state sorted shift actions and nonterminal goto actions.
         // State actions are stable across loop iterations; only group assignments change.
@@ -354,9 +336,6 @@ impl Minimizer<'_> {
             })
             .collect::<Vec<_>>();
 
-        let t_prep2 = t0.elapsed();
-        let t0 = std::time::Instant::now();
-        let mut split2_rounds = 0u32;
         while split_state_id_groups(
             &self.parse_table.states,
             &mut state_ids_by_group_id,
@@ -365,11 +344,7 @@ impl Minimizer<'_> {
             |left, right, groups| {
                 self.state_successors_differ(left, right, groups, &shift_maps, &nonterminal_maps)
             },
-        ) {
-            split2_rounds += 1;
-        }
-        let t_split2 = t0.elapsed();
-        let t0 = std::time::Instant::now();
+        ) {}
 
         let error_group_index = state_ids_by_group_id
             .iter()
@@ -413,10 +388,6 @@ impl Minimizer<'_> {
         }
 
         self.parse_table.states = new_states;
-        eprintln!(
-            "[SPIKE minimize-merge] prep1 {t_prep1:?} split1 {t_split1:?} prep2 {t_prep2:?} split2 {t_split2:?} ({split2_rounds} rounds) rebuild {:?}",
-            t0.elapsed()
-        );
     }
 
     /// The first `split_state_id_groups` pass, specialized for

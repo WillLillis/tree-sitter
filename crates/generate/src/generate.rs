@@ -510,7 +510,6 @@ fn generate_parser_for_grammar_with_opts(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> GenerateResult<GeneratedParser> {
     let language_name = input_grammar.name.clone();
-    let t0 = std::time::Instant::now();
     let JSONOutput {
         syntax_grammar,
         lexical_grammar,
@@ -520,10 +519,8 @@ fn generate_parser_for_grammar_with_opts(
         #[cfg(feature = "load")]
         node_types_json,
     } = generate_node_types_from_grammar(input_grammar, diagnostics)?;
-    let t_prepare = t0.elapsed();
     let supertype_symbol_map =
         node_types::get_supertype_symbol_map(&syntax_grammar, &simple_aliases, &variable_info);
-    let t0 = std::time::Instant::now();
     let tables = build_tables(
         &syntax_grammar,
         &lexical_grammar,
@@ -534,8 +531,6 @@ fn generate_parser_for_grammar_with_opts(
         optimizations,
         diagnostics,
     )?;
-    let t_tables = t0.elapsed();
-    let t0 = std::time::Instant::now();
     let c_code = render_c_code(
         &language_name,
         tables,
@@ -546,13 +541,6 @@ fn generate_parser_for_grammar_with_opts(
         semantic_version,
         supertype_symbol_map,
     )?;
-    // TEMP SPIKE: top-level generate phases. prepare+node_types includes the
-    // spike A/B loops inside prepare_grammar; use [SPIKE prepare-stages] for
-    // the real stage costs.
-    eprintln!(
-        "[SPIKE generate-stages] prepare+node_types {t_prepare:?} build_tables {t_tables:?} render {:?}",
-        t0.elapsed()
-    );
     Ok(GeneratedParser {
         c_code,
         #[cfg(feature = "load")]

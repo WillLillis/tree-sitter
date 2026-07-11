@@ -368,15 +368,6 @@ impl LookaheadSetPool {
         self.union_memo.insert(key, result);
         result
     }
-
-    // TEMP SPIKE: (distinct sets, their heap bytes) for memory attribution.
-    #[must_use]
-    pub fn spike_stats(&self) -> (usize, usize) {
-        (
-            self.sets.len(),
-            self.sets.iter().map(TokenSet::heap_bytes).sum::<usize>() * 2,
-        )
-    }
 }
 
 /// Represents a set of in-progress matches of productions in a grammar.

@@ -391,46 +391,6 @@ impl<'a> ParseTableBuilder<'a> {
             diagnostics.push(Diagnostic::UnnecessaryConflicts(conflicts));
         }
 
-        // TEMP SPIKE: memory attribution of the structures retained across
-        // the build, to rank the perf-campaign levers.
-        {
-            let set_bytes = |s: &ParseItemSet| s.entries.len() * size_of::<ParseItemSetEntry>();
-            let mb = |b: usize| b as f64 / 1e6;
-            let map_kernels: usize = self.state_ids_by_item_set.keys().map(set_bytes).sum();
-            let info_syms: usize = self
-                .preceding_symbols_by_id
-                .iter()
-                .map(|syms| syms.len() * size_of::<Symbol>())
-                .sum();
-            let cores: usize = self
-                .core_ids_by_core
-                .keys()
-                .map(|c| c.entries.len() * size_of::<ParseItem>())
-                .sum();
-            let mut table = 0usize;
-            for state in &self.parse_table.states {
-                table += state.reserved_words.heap_bytes();
-                table += state.nonterminal_entries.len() * (size_of::<(Symbol, GotoAction)>() + 16);
-                for entry in state.terminal_entries.values() {
-                    table += size_of::<(Symbol, ParseTableEntry)>() + 16;
-                    table += entry.actions.len() * size_of::<ParseAction>();
-                }
-            }
-            let (isb_sets, isb_additions) = self.item_set_builder.spike_cache_bytes();
-            let (la_count, la_bytes) = self.item_set_builder.lookaheads.spike_stats();
-            eprintln!(
-                "[SPIKE mem] states {} | kernels: map {:.1}MB | lookahead sets {la_count} {:.1}MB | info syms {:.1}MB | cores {:.1}MB | table {:.1}MB | isb first/last {:.1}MB additions {:.1}MB",
-                self.parse_table.states.len(),
-                mb(map_kernels),
-                mb(la_bytes),
-                mb(info_syms),
-                mb(cores),
-                mb(table),
-                mb(isb_sets),
-                mb(isb_additions),
-            );
-        }
-
         Ok((
             self.parse_table,
             ParseStateInfo {
