@@ -246,7 +246,7 @@ fn populate_error_state(
 
     let recover_entry = ParseTableEntry {
         reusable: false,
-        actions: vec![ParseAction::Recover],
+        actions: crate::tables::ActionList::One(ParseAction::Recover),
     };
 
     // Exclude from the error-recovery state any token that conflicts with one of

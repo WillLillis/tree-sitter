@@ -36,9 +36,105 @@ pub enum GotoAction {
     ShiftExtra,
 }
 
+/// Action list for one parse-table entry. Most entries hold zero or one
+/// action; those live inline with no heap allocation, and only conflict
+/// entries spill to a `Vec`. Equality and hashing are content-based
+/// (`Many` holding one action equals `One`), and slice reads go through
+/// `Deref`.
+#[derive(Clone, Debug)]
+pub enum ActionList {
+    Empty,
+    One(ParseAction),
+    Many(Vec<ParseAction>),
+}
+
+impl ActionList {
+    pub fn push(&mut self, action: ParseAction) {
+        match self {
+            Self::Empty => *self = Self::One(action),
+            Self::One(first) => *self = Self::Many(vec![*first, action]),
+            Self::Many(actions) => actions.push(action),
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<ParseAction> {
+        match self {
+            Self::Empty => None,
+            Self::One(action) => {
+                let action = *action;
+                *self = Self::Empty;
+                Some(action)
+            }
+            Self::Many(actions) => actions.pop(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::Empty;
+    }
+
+    /// Drop every action except the last.
+    pub fn keep_last(&mut self) {
+        if let Self::Many(actions) = self
+            && let Some(&last) = actions.last()
+        {
+            *self = Self::One(last);
+        }
+    }
+}
+
+impl Default for ActionList {
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
+impl std::ops::Deref for ActionList {
+    type Target = [ParseAction];
+    fn deref(&self) -> &[ParseAction] {
+        match self {
+            Self::Empty => &[],
+            Self::One(action) => std::slice::from_ref(action),
+            Self::Many(actions) => actions,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ActionList {
+    fn deref_mut(&mut self) -> &mut [ParseAction] {
+        match self {
+            Self::Empty => &mut [],
+            Self::One(action) => std::slice::from_mut(action),
+            Self::Many(actions) => actions,
+        }
+    }
+}
+
+impl PartialEq for ActionList {
+    fn eq(&self, other: &Self) -> bool {
+        self[..] == other[..]
+    }
+}
+
+impl Eq for ActionList {}
+
+impl std::hash::Hash for ActionList {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self[..].hash(state);
+    }
+}
+
+impl<'a> IntoIterator for &'a ActionList {
+    type Item = &'a ParseAction;
+    type IntoIter = std::slice::Iter<'a, ParseAction>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ParseTableEntry {
-    pub actions: Vec<ParseAction>,
+    pub actions: ActionList,
     pub reusable: bool,
 }
 
@@ -98,7 +194,7 @@ impl ParseTableEntry {
     pub const fn new() -> Self {
         Self {
             reusable: true,
-            actions: Vec::new(),
+            actions: ActionList::Empty,
         }
     }
 }

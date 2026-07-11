@@ -23,7 +23,7 @@ use crate::{
     rule_pool::Prec,
     rules::{Alias, Associativity, Symbol, SymbolType, TokenSet},
     tables::{
-        FieldLocation, GotoAction, ParseAction, ParseState, ParseStateId, ParseTable,
+        ActionList, FieldLocation, GotoAction, ParseAction, ParseState, ParseStateId, ParseTable,
         ParseTableEntry, ProductionInfo, ProductionInfoId,
     },
 };
@@ -727,10 +727,10 @@ impl<'a> ParseTableBuilder<'a> {
                     .entry(*terminal)
                     .or_insert(ParseTableEntry {
                         reusable: true,
-                        actions: vec![ParseAction::Shift {
+                        actions: ActionList::One(ParseAction::Shift {
                             state: *state_id,
                             is_repetition: false,
-                        }],
+                        }),
                     });
             }
 
@@ -748,7 +748,7 @@ impl<'a> ParseTableBuilder<'a> {
                         .entry(*extra_token)
                         .or_insert(ParseTableEntry {
                             reusable: true,
-                            actions: vec![ParseAction::ShiftExtra],
+                            actions: ActionList::One(ParseAction::ShiftExtra),
                         });
                 }
             }
@@ -878,7 +878,7 @@ impl<'a> ParseTableBuilder<'a> {
             }
 
             if shift_is_more && !shift_is_less {
-                entry.actions.drain(0..entry.actions.len() - 1);
+                entry.actions.keep_last();
             }
             // If the REDUCE actions have higher precedence, remove the SHIFT action.
             else if shift_is_less && !shift_is_more {
@@ -902,7 +902,7 @@ impl<'a> ParseTableBuilder<'a> {
                         conflicting_items.retain(|item| item.is_done());
                     }
                     (false, false, true) => {
-                        entry.actions.drain(0..entry.actions.len() - 1);
+                        entry.actions.keep_last();
                     }
                     _ => {}
                 }
