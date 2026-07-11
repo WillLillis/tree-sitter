@@ -400,6 +400,21 @@ table 173MB + kernels 33MB; rest is closure churn + malloc slack - the
 TokenSet-interning and ParseItem-shrink levers), minimize 1.40s (merge-join
 floor), render 154ms.
 
+4. Lookahead TokenSet interning (2026-07-11, the pool-dependent lever):
+   `ParseItemSetEntry.lookaheads` is a `LookaheadSetId` into a
+   `LookaheadSetPool` (canonical ids via TokenSet's own Hash/Eq, so dedup
+   semantics are untouched); unions and single-token inserts memoized by
+   id; closure additions carry interned ids + precomputed word membership.
+   cpp: 3566 distinct sets serve 49992 states (0.2MB of set payload),
+   kernels map 33.4 -> 18.7MB, build_parse_table 2.08 -> 1.72s.
+
+Standing after lever 4 (min-of-5 interleaved vs master): cpp 5.95 -> 3.54s
+(-41%) / 996 -> 529MB (-47%); rust 1.43 -> 0.80s (-44%) / 302 -> 171MB
+(-43%); c 0.58 -> 0.37s (-36%) / 160 -> 90MB (-44%); js 0.58 -> 0.36s
+(-38%) / 160 -> 96MB (-40%). Remaining cpp: build_parse_table 1.72s / 479MB
+plateau (table 173MB accounted; ~300MB is IndexMap/action-vec malloc slack),
+minimize ~1.4-1.5s, ParseItem shrink still open.
+
 Earlier honest reading (pre-campaign): end-to-end time was a modest real
 win; peak memory was flat because the peak was never the grammar
 representation. On cpp the ~1GB
