@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    item::{ParseItem, ParseItemSet, ParseItemSetCore, ParseItemSetEntry, prec_display},
+    item::{
+        LookaheadSetPool, ParseItem, ParseItemSet, ParseItemSetCore, ParseItemSetEntry,
+        prec_display,
+    },
     item_set_builder::ParseItemSetBuilder,
 };
 use crate::{
@@ -37,6 +40,7 @@ type AuxiliarySymbolSequence = Vec<AuxiliarySymbolInfo>;
 pub struct ParseStateInfo<'a> {
     pub preceding_symbols_by_id: Vec<SymbolSequence>,
     item_sets_by_id: IndexMap<ParseItemSet<'a>, ParseStateId, BuildHasherDefault<FxHasher>>,
+    pub lookaheads: LookaheadSetPool,
 }
 
 impl<'a> ParseStateInfo<'a> {
@@ -294,13 +298,14 @@ impl<'a> ParseTableBuilder<'a> {
         self.add_parse_state(&Vec::new(), &Vec::new(), ParseItemSet::default());
 
         // Add the starting state at index 1.
+        let end_lookaheads = self.item_set_builder.lookaheads.singleton(Symbol::end());
         self.add_parse_state(
             &Vec::new(),
             &Vec::new(),
             ParseItemSet {
                 entries: vec![ParseItemSetEntry {
                     item: ParseItem::start(self.item_set_builder.key_map),
-                    lookaheads: std::iter::once(Symbol::end()).collect(),
+                    lookaheads: end_lookaheads,
                     following_reserved_word_set: ReservedWordSetId::default(),
                 }],
             },
@@ -319,7 +324,7 @@ impl<'a> ParseTableBuilder<'a> {
                 .variable_prod_ids(extra_non_terminal.index)
             {
                 let production = self.syntax_grammar.production(prod_id);
-                non_terminal_extra_item_sets_by_first_terminal
+                let entry = non_terminal_extra_item_sets_by_first_terminal
                     .entry(production.first_symbol().unwrap())
                     .or_insert_with(ParseItemSet::default)
                     .insert(ParseItem {
@@ -328,9 +333,11 @@ impl<'a> ParseTableBuilder<'a> {
                         keys: self.item_set_builder.key_map.keys_for(prod_id),
                         step_index: 1,
                         has_preceding_inherited_fields: false,
-                    })
+                    });
+                entry.lookaheads = self
+                    .item_set_builder
                     .lookaheads
-                    .insert(Symbol::end_of_nonterminal_extra());
+                    .insert(entry.lookaheads, Symbol::end_of_nonterminal_extra());
             }
         }
 
@@ -383,13 +390,7 @@ impl<'a> ParseTableBuilder<'a> {
         // TEMP SPIKE: memory attribution of the structures retained across
         // the build, to rank the perf-campaign levers.
         {
-            let set_bytes = |s: &ParseItemSet| {
-                s.entries.len() * size_of::<ParseItemSetEntry>()
-                    + s.entries
-                        .iter()
-                        .map(|e| e.lookaheads.heap_bytes())
-                        .sum::<usize>()
-            };
+            let set_bytes = |s: &ParseItemSet| s.entries.len() * size_of::<ParseItemSetEntry>();
             let mb = |b: usize| b as f64 / 1e6;
             let map_kernels: usize = self.state_ids_by_item_set.keys().map(set_bytes).sum();
             let info_syms: usize = self
@@ -412,10 +413,12 @@ impl<'a> ParseTableBuilder<'a> {
                 }
             }
             let (isb_sets, isb_additions) = self.item_set_builder.spike_cache_bytes();
+            let (la_count, la_bytes) = self.item_set_builder.lookaheads.spike_stats();
             eprintln!(
-                "[SPIKE mem] states {} | kernels: map {:.1}MB | info syms {:.1}MB | cores {:.1}MB | table {:.1}MB | isb first/last {:.1}MB additions {:.1}MB",
+                "[SPIKE mem] states {} | kernels: map {:.1}MB | lookahead sets {la_count} {:.1}MB | info syms {:.1}MB | cores {:.1}MB | table {:.1}MB | isb first/last {:.1}MB additions {:.1}MB",
                 self.parse_table.states.len(),
                 mb(map_kernels),
+                mb(la_bytes),
                 mb(info_syms),
                 mb(cores),
                 mb(table),
@@ -429,6 +432,7 @@ impl<'a> ParseTableBuilder<'a> {
             ParseStateInfo {
                 preceding_symbols_by_id: self.preceding_symbols_by_id,
                 item_sets_by_id: self.state_ids_by_item_set,
+                lookaheads: self.item_set_builder.lookaheads,
             },
         ))
     }
@@ -533,7 +537,10 @@ impl<'a> ParseTableBuilder<'a> {
                         .or_insert_with(ParseItemSet::default)
                 };
                 let successor_entry = successor_set.insert(successor);
-                successor_entry.lookaheads.insert_all(lookaheads);
+                successor_entry.lookaheads = self
+                    .item_set_builder
+                    .lookaheads
+                    .union(successor_entry.lookaheads, *lookaheads);
                 successor_entry.following_reserved_word_set = successor_entry
                     .following_reserved_word_set
                     .max(*reserved_lookaheads);
@@ -566,7 +573,7 @@ impl<'a> ParseTableBuilder<'a> {
 
                 let precedence = item.precedence();
                 let associativity = item.associativity();
-                for lookahead in lookaheads.iter() {
+                for lookahead in self.item_set_builder.lookaheads.get(*lookaheads).iter() {
                     let table_entry = self.parse_table.states[state_id]
                         .terminal_entries
                         .entry(lookahead)
@@ -754,7 +761,12 @@ impl<'a> ParseTableBuilder<'a> {
                         } else {
                             None
                         }
-                    } else if entry.lookaheads.contains(&keyword_capture_token) {
+                    } else if self
+                        .item_set_builder
+                        .lookaheads
+                        .get(entry.lookaheads)
+                        .contains(&keyword_capture_token)
+                    {
                         Some(entry.following_reserved_word_set)
                     } else {
                         None
@@ -816,7 +828,12 @@ impl<'a> ParseTableBuilder<'a> {
                         shift_precedence.insert(i, p);
                     }
                 }
-            } else if lookaheads.contains(&conflicting_lookahead) && item.variable_index != u32::MAX
+            } else if self
+                .item_set_builder
+                .lookaheads
+                .get(*lookaheads)
+                .contains(&conflicting_lookahead)
+                && item.variable_index != u32::MAX
             {
                 conflicting_items.insert(item);
             }
