@@ -415,6 +415,31 @@ Standing after lever 4 (min-of-5 interleaved vs master): cpp 5.95 -> 3.54s
 plateau (table 173MB accounted; ~300MB is IndexMap/action-vec malloc slack),
 minimize ~1.4-1.5s, ParseItem shrink still open.
 
+5. ParseItem shrink (2026-07-11): items store a u32 production id instead
+   of ProdRef (identity only reads the keys slice; `is_done` is
+   `step_index + 1 == keys.len()`); step content derefs through the grammar
+   at ~15 sites; dead `ProdRef.id` dropped. ParseItem 56 -> 32B, entries
+   72 -> 48B (halves closure-insert memmove). cpp build_parse_table
+   1.72 -> 1.53s, kernels map 18.7 -> 12.4MB, plateau 479 -> 471MB.
+
+CAMPAIGN STANDING after all five levers (min-of-5 interleaved vs master):
+
+| grammar | wall | peak RSS |
+|---|---|---|
+| c | 0.60 -> 0.38s (-37%) | 160.5 -> 88.3MB (-45%) |
+| cpp | 5.99 -> 3.53s (-41%) | 996.4 -> 522.1MB (-48%) |
+| javascript | 0.62 -> 0.37s (-40%) | 160.4 -> 93.9MB (-41%) |
+| rust | 1.49 -> 0.82s (-45%) | 301.3 -> 166.9MB (-45%) |
+
+Byte-identical parser.c + node-types.json vs master on all six fixtures
+after every lever. Remaining known levers, unranked: minimize merge-join
+pair verification (equal-signature bucketing + union-row fast negatives -
+needs a counter run to size; order-preservation is the risk), the parse
+table's 173MB representation (per-entry Vec<ParseAction> + IndexMap
+overhead), the ~300MB malloc slack (closure entry vecs + table maps), and
+the "better partitions" idea (upstream semantics change, post-port
+discussion only).
+
 Earlier honest reading (pre-campaign): end-to-end time was a modest real
 win; peak memory was flat because the peak was never the grammar
 representation. On cpp the ~1GB
