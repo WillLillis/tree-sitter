@@ -297,12 +297,17 @@ impl Minimizer<'_> {
             internal_external,
         };
 
-        split_state_id_groups(
-            &self.parse_table.states,
+        // First split pass: group states whose actions are compatible. Within
+        // one group visit the group ids are frozen, so members with identical
+        // signatures (terminal entries with shift targets mapped to groups,
+        // plus reserved words) are interchangeable in both roles of
+        // `states_conflict`; run the pairwise loop over one representative
+        // per signature and apply each verdict to the whole bucket.
+        self.split1_bucketed(
             &mut state_ids_by_group_id,
             &mut group_ids_by_state_id,
-            0,
-            |left, right, groups| self.states_conflict(left, right, groups, &entry_maps, &bits),
+            &entry_maps,
+            &bits,
         );
         let t_split1 = t0.elapsed();
         let t0 = std::time::Instant::now();
@@ -412,6 +417,196 @@ impl Minimizer<'_> {
             "[SPIKE minimize-merge] prep1 {t_prep1:?} split1 {t_split1:?} prep2 {t_prep2:?} split2 {t_split2:?} ({split2_rounds} rounds) rebuild {:?}",
             t0.elapsed()
         );
+    }
+
+    /// The first `split_state_id_groups` pass, specialized for
+    /// `states_conflict` with signature bucketing. Semantics are identical to
+    /// the generic splitter: greedy leaders in position order, rejects land
+    /// in `(leader, position)` order as one new group, and new groups are
+    /// re-processed within the same pass.
+    ///
+    /// Within one group visit the group ids are frozen, so states with equal
+    /// signatures (verified structurally, the hash only buckets) observe and
+    /// produce identical `states_conflict` verdicts in both roles; the
+    /// pairwise loop runs over one representative per signature and each
+    /// verdict applies to the whole bucket. Signatures are recomputed at
+    /// each group visit because group ids evolve between visits.
+    fn split1_bucketed(
+        &self,
+        state_ids_by_group_id: &mut Vec<Vec<usize>>,
+        group_ids_by_state_id: &mut [usize],
+        entry_maps: &[Vec<(SymbolKey, &ParseTableEntry)>],
+        bits: &ConflictBits,
+    ) {
+        let mut buckets_by_sig: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
+        let mut group_id = 0;
+        while group_id < state_ids_by_group_id.len() {
+            if state_ids_by_group_id[group_id].len() > 1 {
+                let members = mem::take(&mut state_ids_by_group_id[group_id]);
+
+                // Bucket member positions by signature. A bucket's
+                // representative is its first member, so it precedes all of
+                // its bucket-mates in position order.
+                buckets_by_sig.clear();
+                let mut buckets: Vec<Vec<usize>> = Vec::new();
+                let mut bucket_of_position = Vec::with_capacity(members.len());
+                for (position, &state_id) in members.iter().enumerate() {
+                    let sig = self.state_signature(state_id, entry_maps, group_ids_by_state_id);
+                    let candidates = buckets_by_sig.entry(sig).or_default();
+                    let bucket = candidates
+                        .iter()
+                        .copied()
+                        .find(|&b| {
+                            self.states_identical_for_split1(
+                                members[buckets[b][0]],
+                                state_id,
+                                entry_maps,
+                                group_ids_by_state_id,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            let b = buckets.len();
+                            candidates.push(b);
+                            buckets.push(Vec::new());
+                            b
+                        });
+                    buckets[bucket].push(position);
+                    bucket_of_position.push(bucket);
+                }
+
+                if buckets.len() == 1 {
+                    state_ids_by_group_id[group_id] = members;
+                    group_id += 1;
+                    continue;
+                }
+
+                // The generic greedy loop, over representatives.
+                let mut split = vec![false; buckets.len()];
+                let mut split_state_ids = Vec::new();
+                for i in 0..buckets.len() {
+                    if split[i] {
+                        continue;
+                    }
+                    let leader = &self.parse_table.states[members[buckets[i][0]]];
+                    let mut rejected_positions = Vec::new();
+                    for (j, bucket) in buckets.iter().enumerate().skip(i + 1) {
+                        if split[j] {
+                            continue;
+                        }
+                        if self.states_conflict(
+                            leader,
+                            &self.parse_table.states[members[bucket[0]]],
+                            group_ids_by_state_id,
+                            entry_maps,
+                            bits,
+                        ) {
+                            split[j] = true;
+                            rejected_positions.extend_from_slice(bucket);
+                        }
+                    }
+                    // The generic splitter's inner loop sweeps members in
+                    // position order, so one leader's rejects interleave by
+                    // position across its rejected buckets.
+                    rejected_positions.sort_unstable();
+                    split_state_ids.extend(rejected_positions.iter().map(|&p| members[p]));
+                }
+
+                if split_state_ids.is_empty() {
+                    state_ids_by_group_id[group_id] = members;
+                } else {
+                    let new_group_id = state_ids_by_group_id.len();
+                    for &state_id in &split_state_ids {
+                        group_ids_by_state_id[state_id] = new_group_id;
+                    }
+                    state_ids_by_group_id[group_id] = members
+                        .iter()
+                        .enumerate()
+                        .filter(|&(position, _)| !split[bucket_of_position[position]])
+                        .map(|(_, &state_id)| state_id)
+                        .collect();
+                    state_ids_by_group_id.push(split_state_ids);
+                }
+            }
+            group_id += 1;
+        }
+    }
+
+    /// Hash of everything `states_conflict` observes about a state under the
+    /// current group assignment. Buckets only; equality is verified by
+    /// `states_identical_for_split1`.
+    fn state_signature(
+        &self,
+        state_id: usize,
+        entry_maps: &[Vec<(SymbolKey, &ParseTableEntry)>],
+        group_ids_by_state_id: &[usize],
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        for (key, entry) in &entry_maps[state_id] {
+            h.write_u64(key.0);
+            entry.reusable.hash(&mut h);
+            h.write_usize(entry.actions.len());
+            for action in &entry.actions {
+                if let ParseAction::Shift {
+                    state,
+                    is_repetition,
+                } = action
+                {
+                    1u8.hash(&mut h);
+                    group_ids_by_state_id[*state].hash(&mut h);
+                    is_repetition.hash(&mut h);
+                } else {
+                    action.hash(&mut h);
+                }
+            }
+        }
+        self.parse_table.states[state_id]
+            .reserved_words
+            .hash(&mut h);
+        h.finish()
+    }
+
+    /// Structural equality of everything `states_conflict` observes, under
+    /// the current group assignment.
+    fn states_identical_for_split1(
+        &self,
+        a: usize,
+        b: usize,
+        entry_maps: &[Vec<(SymbolKey, &ParseTableEntry)>],
+        group_ids_by_state_id: &[usize],
+    ) -> bool {
+        let entries_a = &entry_maps[a];
+        let entries_b = &entry_maps[b];
+        if entries_a.len() != entries_b.len() {
+            return false;
+        }
+        for ((key_a, entry_a), (key_b, entry_b)) in entries_a.iter().zip(entries_b) {
+            if key_a != key_b
+                || entry_a.reusable != entry_b.reusable
+                || entry_a.actions.len() != entry_b.actions.len()
+            {
+                return false;
+            }
+            for (action_a, action_b) in entry_a.actions.iter().zip(&entry_b.actions) {
+                let same = match (action_a, action_b) {
+                    (
+                        ParseAction::Shift {
+                            state: s_a,
+                            is_repetition: r_a,
+                        },
+                        ParseAction::Shift {
+                            state: s_b,
+                            is_repetition: r_b,
+                        },
+                    ) => r_a == r_b && group_ids_by_state_id[*s_a] == group_ids_by_state_id[*s_b],
+                    _ => action_a == action_b,
+                };
+                if !same {
+                    return false;
+                }
+            }
+        }
+        self.parse_table.states[a].reserved_words == self.parse_table.states[b].reserved_words
     }
 
     fn states_conflict(
