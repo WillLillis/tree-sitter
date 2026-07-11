@@ -440,6 +440,21 @@ over representatives; cpp split1 783 -> 615ms). Standing: cpp 5.78 ->
 3.18s (-45%) / 996 -> 521MB (-48%); rust 1.43 -> 0.77s (-46%) / 301 ->
 166MB (-45%).
 
+Lever 8, the train finale (2026-07-11): ActionList inlines single-action
+parse table entries (Empty/One/Many; ~1.5M heap Vec<ParseAction> allocs on
+cpp eliminated). The malloc churn was also a large hidden time cost.
+
+FINAL TRAIN STANDING (min-of-5 interleaved vs master @ 9fc2f486a):
+
+| grammar | wall | peak RSS |
+|---|---|---|
+| c | 0.60 -> 0.30s (-50%) | 160 -> 56MB (-65%) |
+| cpp | 5.82 -> 2.52s (-57%) | 996 -> 308MB (-69%) |
+| python | 0.30 -> 0.17s (-43%) | 78 -> 41MB (-47%) |
+| go | 0.24 -> 0.13s (-46%) | 65 -> 37MB (-43%) |
+| javascript | 0.62 -> 0.29s (-53%) | 160 -> 62MB (-61%) |
+| rust | 1.47 -> 0.66s (-55%) | 302 -> 108MB (-64%) |
+
 Byte-identical parser.c + node-types.json vs master on all six fixtures
 after every lever. Remaining known levers, unranked: minimize merge-join
 pair verification (equal-signature bucketing + union-row fast negatives -
