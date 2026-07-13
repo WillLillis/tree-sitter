@@ -806,7 +806,12 @@ impl Minimizer<'_> {
 
         // Do not add tokens which are both internal and external. Their validity could
         // influence the behavior of the external scanner.
-        if bits.internal_external[new_token.index / 64] & (1 << (new_token.index % 64)) != 0 {
+        // `internal_external` is indexed by terminal index only, so gate on the kind:
+        // a non-terminal like `End` shares index 0 with a terminal and would otherwise
+        // spuriously match an external's corresponding internal token at index 0.
+        if new_token.is_terminal()
+            && bits.internal_external[new_token.index / 64] & (1 << (new_token.index % 64)) != 0
+        {
             debug!(
                 "split states {left_id} {right_id} - internal/external token {}",
                 self.symbol_name(&new_token),
