@@ -230,6 +230,46 @@ impl Minimizer<'_> {
             })
             .collect::<Vec<_>>();
 
+        // Precompute the group-independent part of each state's split1 signature
+        // once. Everything `state_signature` observes is stable across split
+        // passes except the group ids of a state's shift targets, so hash the
+        // stable part here and let `state_signature` reseed a hasher with it and
+        // mix in just the current shift-target groups, instead of re-walking
+        // every terminal entry and action on each bucketing probe.
+        let mut stable_sig = vec![0u64; self.parse_table.states.len()];
+        let mut shift_targets: Vec<Vec<ParseStateId>> =
+            Vec::with_capacity(self.parse_table.states.len());
+        {
+            use std::hash::{Hash, Hasher};
+            for (sid, entries) in entry_maps.iter().enumerate() {
+                let mut hasher = rustc_hash::FxHasher::default();
+                let mut targets = Vec::new();
+                for (key, entry) in entries {
+                    hasher.write_u64(key.0);
+                    entry.reusable.hash(&mut hasher);
+                    hasher.write_usize(entry.actions.len());
+                    for action in &entry.actions {
+                        if let ParseAction::Shift {
+                            state,
+                            is_repetition,
+                        } = action
+                        {
+                            1u8.hash(&mut hasher);
+                            is_repetition.hash(&mut hasher);
+                            targets.push(*state);
+                        } else {
+                            action.hash(&mut hasher);
+                        }
+                    }
+                }
+                self.parse_table.states[sid]
+                    .reserved_words
+                    .hash(&mut hasher);
+                stable_sig[sid] = hasher.finish();
+                shift_targets.push(targets);
+            }
+        }
+
         // Precompute word-aligned bitsets so `token_conflicts` can test a
         // candidate token against a whole state's terminals with a few word
         // ANDs instead of a per-entry scan:
@@ -292,6 +332,8 @@ impl Minimizer<'_> {
             &mut group_ids_by_state_id,
             &entry_maps,
             &bits,
+            &stable_sig,
+            &shift_targets,
         );
 
         // Precompute per-state sorted shift actions and nonterminal goto actions.
@@ -408,6 +450,8 @@ impl Minimizer<'_> {
         group_ids_by_state_id: &mut [usize],
         entry_maps: &[Vec<(SymbolKey, &ParseTableEntry)>],
         bits: &ConflictBits,
+        stable_sig: &[u64],
+        shift_targets: &[Vec<ParseStateId>],
     ) {
         let mut buckets_by_sig: FxHashMap<u64, Vec<usize>> = FxHashMap::default();
         let mut group_id = 0;
@@ -422,7 +466,12 @@ impl Minimizer<'_> {
                 let mut buckets: Vec<Vec<usize>> = Vec::new();
                 let mut bucket_of_position = Vec::with_capacity(members.len());
                 for (position, &state_id) in members.iter().enumerate() {
-                    let sig = self.state_signature(state_id, entry_maps, group_ids_by_state_id);
+                    let sig = Self::state_signature(
+                        state_id,
+                        stable_sig,
+                        shift_targets,
+                        group_ids_by_state_id,
+                    );
                     let candidates = buckets_by_sig.entry(sig).or_default();
                     let bucket = candidates
                         .iter()
@@ -502,38 +551,22 @@ impl Minimizer<'_> {
         }
     }
 
-    /// Hash of everything `states_conflict` observes about a state under the
-    /// current group assignment. Buckets only; equality is verified by
-    /// `states_identical_for_split1`.
+    /// Bucketing key for split1: the state's group-independent `stable_sig`
+    /// combined with the current group ids of its shift targets (the only part
+    /// of what `states_conflict` observes that changes between passes). Buckets
+    /// only; equality is verified by `states_identical_for_split1`.
     fn state_signature(
-        &self,
         state_id: usize,
-        entry_maps: &[Vec<(SymbolKey, &ParseTableEntry)>],
+        stable_sig: &[u64],
+        shift_targets: &[Vec<ParseStateId>],
         group_ids_by_state_id: &[usize],
     ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = rustc_hash::FxHasher::default();
-        for (key, entry) in &entry_maps[state_id] {
-            h.write_u64(key.0);
-            entry.reusable.hash(&mut h);
-            h.write_usize(entry.actions.len());
-            for action in &entry.actions {
-                if let ParseAction::Shift {
-                    state,
-                    is_repetition,
-                } = action
-                {
-                    1u8.hash(&mut h);
-                    group_ids_by_state_id[*state].hash(&mut h);
-                    is_repetition.hash(&mut h);
-                } else {
-                    action.hash(&mut h);
-                }
-            }
+        h.write_u64(stable_sig[state_id]);
+        for &target in &shift_targets[state_id] {
+            group_ids_by_state_id[target].hash(&mut h);
         }
-        self.parse_table.states[state_id]
-            .reserved_words
-            .hash(&mut h);
         h.finish()
     }
 
