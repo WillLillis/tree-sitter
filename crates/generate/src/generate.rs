@@ -27,6 +27,7 @@ mod prepare_grammar;
 #[cfg(feature = "qjs-rt")]
 mod quickjs;
 mod render;
+mod rule_pool;
 mod rules;
 mod tables;
 
