@@ -41,210 +41,115 @@ use crate::rule_pool::{
 };
 use crate::rules::SymbolType;
 
-/// One continuation frame, packed to 8 bytes (tag in the 2 high bits of `.0`).
-///   `Seq`:          tag 0, `.0` = next child (abs index into `children`), `.1` = end
-///   `MetaExit`:     tag 1, `.0` low bits = pushed-stack flags, `.1` = steps len at entry
-///   `ReservedExit`: tag 2
-#[derive(Clone, Copy)]
-struct Frame(u32, u32);
+#[derive(Clone, Copy, Default)]
+struct Context {
+    prec: Prec,
+    assoc: Option<Associativity>,
+    alias: Option<crate::rule_pool::Alias>,
+    field: Option<StrId>,
+    reserved: u16,
+}
 
-const _: () = assert!(std::mem::size_of::<Frame>() == 8);
+/// Selects one branch at each choice encountered during a root-to-leaf walk.
+/// After a production is emitted, `advance` increments this path like a
+/// mixed-radix counter. Later decisions are discarded because choosing an
+/// earlier branch can expose a different set of nested choices.
+#[derive(Default)]
+struct ChoiceCursor {
+    decisions: Vec<u32>,
+    arities: Vec<u32>,
+    depth: usize,
+}
 
-const FR_SEQ: u32 = 0;
-const FR_META: u32 = 1;
-const FR_RES: u32 = 2;
-const FR_PAYLOAD: u32 = (1 << 30) - 1;
+impl ChoiceCursor {
+    fn reset(&mut self) {
+        self.decisions.clear();
+        self.arities.clear();
+        self.depth = 0;
+    }
 
-const MP_PREC: u32 = 1;
-const MP_ASSOC: u32 = 2;
-const MP_ALIAS: u32 = 4;
-const MP_FIELD: u32 = 8;
+    fn begin_path(&mut self) {
+        self.arities.clear();
+        self.depth = 0;
+    }
 
-impl Frame {
-    fn seq(start: u32, end: u32) -> Self {
-        debug_assert!(end < (1 << 30));
-        Self(start, end)
+    fn select(&mut self, len: u32) -> u32 {
+        debug_assert!(len > 0);
+        let selected = self.decisions.get(self.depth).copied().unwrap_or(0);
+        debug_assert!(selected < len);
+        self.arities.push(len);
+        self.depth += 1;
+        selected
     }
-    const fn meta(flags: u32, steps_before: u32) -> Self {
-        Self((FR_META << 30) | flags, steps_before)
-    }
-    const fn reserved() -> Self {
-        Self(FR_RES << 30, 0)
-    }
-    const fn tag(self) -> u32 {
-        self.0 >> 30
-    }
-    const fn seq_exhausted(self) -> bool {
-        self.0 == self.1
+
+    fn advance(&mut self) -> bool {
+        for depth in (0..self.arities.len()).rev() {
+            let selected = self.decisions.get(depth).copied().unwrap_or(0);
+            if selected + 1 < self.arities[depth] {
+                self.decisions.resize(depth + 1, 0);
+                self.decisions[depth] = selected + 1;
+                return true;
+            }
+        }
+        false
     }
 }
 
-/// Reusable flatten scratch. Everything is truncate-restore or snapshot
-/// scratch; steady state allocates only output-pool growth.
+/// Reusable scratch for enumerating and flattening one production path at a
+/// time. Context is passed by value during the walk, so no traversal state has
+/// to be snapshotted or restored at choices.
 #[derive(Default)]
 pub(super) struct FlattenState {
-    frames: Vec<Frame>,
     steps: Vec<FStep>,
-    prec: Vec<Prec>,
-    assoc: Vec<Associativity>,
-    alias: Vec<crate::rule_pool::Alias>,
-    field: Vec<StrId>,
-    reserved: Vec<u16>,
-    /// Fork snapshots, stacked as segments. A branch can consume context
-    /// pushed BEFORE the fork (an enclosing Metadata/Reserved exit pops it),
-    /// so every stack that exits pop through needs a full snapshot; only
-    /// `steps` grows monotonically within a branch and truncates back.
-    snap_frames: Vec<Frame>,
-    snap_prec: Vec<Prec>,
-    snap_assoc: Vec<Associativity>,
-    snap_alias: Vec<crate::rule_pool::Alias>,
-    snap_field: Vec<StrId>,
-    snap_reserved: Vec<u16>,
-    dyn_prec: i32,
-}
-
-/// Snapshot offsets captured at a fork; lives on the Rust call stack.
-#[derive(Clone, Copy)]
-struct Mark {
-    steps: u32,
-    frames: u32,
-    prec: u32,
-    assoc: u32,
-    alias: u32,
-    field: u32,
-    reserved: u32,
+    choices: ChoiceCursor,
     dyn_prec: i32,
 }
 
 impl FlattenState {
-    fn reset(&mut self) {
-        self.frames.clear();
+    fn reset_variable(&mut self) {
+        self.choices.reset();
+        self.reset_path();
+    }
+
+    fn reset_path(&mut self) {
         self.steps.clear();
-        self.prec.clear();
-        self.assoc.clear();
-        self.alias.clear();
-        self.field.clear();
-        self.reserved.clear();
-        self.snap_frames.clear();
-        self.snap_prec.clear();
-        self.snap_assoc.clear();
-        self.snap_alias.clear();
-        self.snap_field.clear();
-        self.snap_reserved.clear();
         self.dyn_prec = 0;
+        self.choices.begin_path();
     }
 
-    fn fork_save(&mut self) -> Mark {
-        let mark = Mark {
-            steps: self.steps.len() as u32,
-            frames: self.snap_frames.len() as u32,
-            prec: self.snap_prec.len() as u32,
-            assoc: self.snap_assoc.len() as u32,
-            alias: self.snap_alias.len() as u32,
-            field: self.snap_field.len() as u32,
-            reserved: self.snap_reserved.len() as u32,
-            dyn_prec: self.dyn_prec,
-        };
-        self.snap_frames.extend_from_slice(&self.frames);
-        self.snap_prec.extend_from_slice(&self.prec);
-        self.snap_assoc.extend_from_slice(&self.assoc);
-        self.snap_alias.extend_from_slice(&self.alias);
-        self.snap_field.extend_from_slice(&self.field);
-        self.snap_reserved.extend_from_slice(&self.reserved);
-        mark
-    }
-
-    fn restore(&mut self, mark: Mark) {
-        self.steps.truncate(mark.steps as usize);
-        self.dyn_prec = mark.dyn_prec;
-        self.frames.clear();
-        self.frames
-            .extend_from_slice(&self.snap_frames[mark.frames as usize..]);
-        self.prec.clear();
-        self.prec
-            .extend_from_slice(&self.snap_prec[mark.prec as usize..]);
-        self.assoc.clear();
-        self.assoc
-            .extend_from_slice(&self.snap_assoc[mark.assoc as usize..]);
-        self.alias.clear();
-        self.alias
-            .extend_from_slice(&self.snap_alias[mark.alias as usize..]);
-        self.field.clear();
-        self.field
-            .extend_from_slice(&self.snap_field[mark.field as usize..]);
-        self.reserved.clear();
-        self.reserved
-            .extend_from_slice(&self.snap_reserved[mark.reserved as usize..]);
-    }
-
-    fn fork_done(&mut self, mark: Mark) {
-        self.snap_frames.truncate(mark.frames as usize);
-        self.snap_prec.truncate(mark.prec as usize);
-        self.snap_assoc.truncate(mark.assoc as usize);
-        self.snap_alias.truncate(mark.alias as usize);
-        self.snap_field.truncate(mark.field as usize);
-        self.snap_reserved.truncate(mark.reserved as usize);
-    }
-
-    fn push_step(&mut self, kind: SymbolType, index: u32) {
+    fn push_step(&mut self, kind: SymbolType, index: u32, context: Context) {
         self.steps.push(FStep::pack(
             Symbol {
                 kind,
                 index: index as usize,
             },
-            self.prec.last().copied().unwrap_or(Prec::None),
-            self.assoc.last().copied(),
-            self.alias.last().copied(),
-            self.field.last().copied(),
-            self.reserved.last().copied().unwrap_or(0),
+            context.prec,
+            context.assoc,
+            context.alias,
+            context.field,
+            context.reserved,
         ));
     }
 
-    /// `true` if nothing after the current point can push a step (computed
-    /// bottom-up from the remaining frames).
-    fn at_end(&self) -> bool {
-        self.frames
-            .iter()
-            .all(|f| f.tag() != FR_SEQ || f.seq_exhausted())
+    fn restore_outer_prec(&mut self, outer: Prec) {
+        let (bits, val) = match outer {
+            Prec::None => (0, 0),
+            Prec::Integer(n) => (FSTEP_PREC_INTEGER, n),
+            Prec::Name(sid) => (FSTEP_PREC_NAME, sid.raw() as i32),
+        };
+        let step = self.steps.last_mut().unwrap();
+        step.prec_val = val;
+        step.flags = (step.flags & !FSTEP_PREC_MASK) | bits;
     }
 
-    /// Metadata exit: pop what was pushed; if a step was pushed in the
-    /// subtree and more steps can follow, rewrite the last step's
-    /// precedence/associativity to the outer context.
-    fn meta_exit(&mut self, flags: u32, steps_before: u32) {
-        let did_push = self.steps.len() as u32 > steps_before;
-        let fixup = did_push && !self.at_end();
-        if flags & MP_PREC != 0 {
-            self.prec.pop();
-            if fixup {
-                let (bits, val) = match self.prec.last() {
-                    None | Some(Prec::None) => (0u8, 0i32),
-                    Some(Prec::Integer(n)) => (FSTEP_PREC_INTEGER, *n),
-                    Some(Prec::Name(sid)) => (FSTEP_PREC_NAME, sid.raw() as i32),
-                };
-                let step = self.steps.last_mut().unwrap();
-                step.prec_val = val;
-                step.flags = (step.flags & !FSTEP_PREC_MASK) | bits;
-            }
-        }
-        if flags & MP_ASSOC != 0 {
-            self.assoc.pop();
-            if fixup {
-                let bits = match self.assoc.last() {
-                    None => 0u8,
-                    Some(Associativity::Left) => FSTEP_ASSOC_LEFT,
-                    Some(Associativity::Right) => FSTEP_ASSOC_RIGHT,
-                };
-                let step = self.steps.last_mut().unwrap();
-                step.flags = (step.flags & !FSTEP_ASSOC_MASK) | bits;
-            }
-        }
-        if flags & MP_ALIAS != 0 {
-            self.alias.pop();
-        }
-        if flags & MP_FIELD != 0 {
-            self.field.pop();
-        }
+    fn restore_outer_assoc(&mut self, outer: Option<Associativity>) {
+        let bits = match outer {
+            None => 0,
+            Some(Associativity::Left) => FSTEP_ASSOC_LEFT,
+            Some(Associativity::Right) => FSTEP_ASSOC_RIGHT,
+        };
+        let step = self.steps.last_mut().unwrap();
+        step.flags = (step.flags & !FSTEP_ASSOC_MASK) | bits;
     }
 }
 
@@ -264,8 +169,15 @@ pub(super) fn flatten_grammar(
     out.clear();
     for v in &g.variables {
         let prod_start = out.productions.len() as u32;
-        st.reset();
-        run_path(&g.pool, &reserved_ids, v.root, st, out, prod_start)?;
+        st.reset_variable();
+        loop {
+            apply(&g.pool, &reserved_ids, v.root, Context::default(), true, st)?;
+            emit(st, out, prod_start);
+            if !st.choices.advance() {
+                break;
+            }
+            st.reset_path();
+        }
         out.var_prods
             .push((prod_start, out.productions.len() as u32));
     }
@@ -299,133 +211,86 @@ fn check(g: &PoolGrammar, meta: &PoolExtractedMeta, out: &FlatOut) -> FlattenGra
     Ok(())
 }
 
-/// Enter `node` and, unless it forked, drive the continuation to completion.
-fn run_path(
+/// Flatten one deterministic path. Choices only select a child here; the
+/// outer loop enumerates subsequent paths from the root.
+fn apply(
     pool: &RulePool,
     reserved_ids: &FxHashMap<StrId, u16>,
     node: NodeId,
+    context: Context,
+    at_end: bool,
     st: &mut FlattenState,
-    out: &mut FlatOut,
-    prod_start: u32,
-) -> FlattenGrammarResult<()> {
-    if enter(pool, reserved_ids, node, st, out, prod_start)? {
-        drive(pool, reserved_ids, st, out, prod_start)?;
-    }
-    Ok(())
-}
-
-/// Process one node. Returns `false` if it forked (a `Choice` drove every
-/// branch to completion; the caller's continuation is consumed). Unary
-/// chains iterate in place.
-fn enter(
-    pool: &RulePool,
-    reserved_ids: &FxHashMap<StrId, u16>,
-    mut node: NodeId,
-    st: &mut FlattenState,
-    out: &mut FlatOut,
-    prod_start: u32,
 ) -> FlattenGrammarResult<bool> {
-    loop {
-        match pool.node(node) {
-            PoolNode::Sym { kind, index } => {
-                st.push_step(kind, index);
-                return Ok(true);
-            }
-            PoolNode::Seq(range) => {
-                st.frames
-                    .push(Frame::seq(range.start, range.start + range.len));
-                return Ok(true);
-            }
-            PoolNode::Metadata { params, rule } => {
-                let p = pool.params(params);
-                let mut flags = 0;
-                if p.prec != Prec::None {
-                    st.prec.push(p.prec);
-                    flags |= MP_PREC;
-                }
-                if let Some(a) = p.assoc {
-                    st.assoc.push(a);
-                    flags |= MP_ASSOC;
-                }
-                if let Some(a) = p.alias {
-                    st.alias.push(a);
-                    flags |= MP_ALIAS;
-                }
-                if let Some(f) = p.field {
-                    st.field.push(f);
-                    flags |= MP_FIELD;
-                }
-                if p.dynamic_precedence.abs() > st.dyn_prec.abs() {
-                    st.dyn_prec = p.dynamic_precedence;
-                }
-                st.frames.push(Frame::meta(flags, st.steps.len() as u32));
-                node = rule;
-            }
-            PoolNode::Reserved { rule, ctx } => {
-                let Some(&set) = reserved_ids.get(&ctx) else {
-                    return Err(FlattenGrammarError::NoReservedWordSet(
-                        pool.resolve(ctx).to_string(),
-                    ));
-                };
-                st.reserved.push(set);
-                st.frames.push(Frame::reserved());
-                node = rule;
-            }
-            PoolNode::Choice(range) => {
-                let mark = st.fork_save();
-                for i in range.as_range() {
-                    let child = pool.child_slice(range)[i - range.start as usize];
-                    run_path(pool, reserved_ids, child, st, out, prod_start)?;
-                    st.restore(mark);
-                }
-                st.fork_done(mark);
-                return Ok(false);
-            }
-            // Blank pushes nothing; String/Pattern/NamedSymbol/Repeat cannot
-            // appear post-extract/expand.
-            _ => return Ok(true),
+    match pool.node(node) {
+        PoolNode::Sym { kind, index } => {
+            st.push_step(kind, index, context);
+            Ok(true)
         }
-    }
-}
+        PoolNode::Seq(range) => {
+            let children = pool.child_slice(range);
+            let mut did_push = false;
+            for (i, &child) in children.iter().enumerate() {
+                did_push |= apply(
+                    pool,
+                    reserved_ids,
+                    child,
+                    context,
+                    at_end && i + 1 == children.len(),
+                    st,
+                )?;
+            }
+            Ok(did_push)
+        }
+        PoolNode::Choice(range) => {
+            let selected = st.choices.select(range.len);
+            let child = pool.child_slice(range)[selected as usize];
+            apply(pool, reserved_ids, child, context, at_end, st)
+        }
+        PoolNode::Metadata { params, rule } => {
+            let params = pool.params(params);
+            let mut inner = context;
+            if params.prec != Prec::None {
+                inner.prec = params.prec;
+            }
+            if let Some(assoc) = params.assoc {
+                inner.assoc = Some(assoc);
+            }
+            if let Some(alias) = params.alias {
+                inner.alias = Some(alias);
+            }
+            if let Some(field) = params.field {
+                inner.field = Some(field);
+            }
+            if params.dynamic_precedence.abs() > st.dyn_prec.abs() {
+                st.dyn_prec = params.dynamic_precedence;
+            }
 
-/// Consume frames until the continuation is exhausted, then emit. Stops
-/// without emitting if a deeper fork took over.
-fn drive(
-    pool: &RulePool,
-    reserved_ids: &FxHashMap<StrId, u16>,
-    st: &mut FlattenState,
-    out: &mut FlatOut,
-    prod_start: u32,
-) -> FlattenGrammarResult<()> {
-    loop {
-        let Some(&top) = st.frames.last() else {
-            emit(st, out, prod_start);
-            return Ok(());
-        };
-        match top.tag() {
-            FR_SEQ => {
-                if top.seq_exhausted() {
-                    st.frames.pop();
-                } else {
-                    let cur = top.0 & FR_PAYLOAD;
-                    st.frames.last_mut().unwrap().0 += 1;
-                    let child =
-                        pool.child_slice(crate::rule_pool::NodeRange { start: cur, len: 1 })[0];
-                    if !enter(pool, reserved_ids, child, st, out, prod_start)? {
-                        return Ok(());
-                    }
+            let did_push = apply(pool, reserved_ids, rule, inner, at_end, st)?;
+            if did_push && !at_end {
+                if params.prec != Prec::None {
+                    st.restore_outer_prec(context.prec);
+                }
+                if params.assoc.is_some() {
+                    st.restore_outer_assoc(context.assoc);
                 }
             }
-            FR_META => {
-                let (flags, steps_before) = (top.0 & FR_PAYLOAD, top.1);
-                st.frames.pop();
-                st.meta_exit(flags, steps_before);
-            }
-            _ => {
-                st.frames.pop();
-                st.reserved.pop();
-            }
+            Ok(did_push)
         }
+        PoolNode::Reserved { rule, ctx } => {
+            let Some(&reserved) = reserved_ids.get(&ctx) else {
+                return Err(FlattenGrammarError::NoReservedWordSet(
+                    pool.resolve(ctx).to_string(),
+                ));
+            };
+            let inner = Context {
+                reserved,
+                ..context
+            };
+            apply(pool, reserved_ids, rule, inner, at_end, st)
+        }
+        // Blank pushes nothing; String/Pattern/NamedSymbol/Repeat cannot
+        // appear post-extract/expand.
+        _ => Ok(false),
     }
 }
 
