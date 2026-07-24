@@ -5,11 +5,12 @@ use regex_syntax::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::ExtractedLexicalGrammar;
 use crate::{
     grammars::{LexicalGrammar, LexicalVariable},
     nfa::{CharacterSet, Nfa, NfaState},
-    rules::{Precedence, Rule},
+    prepare_grammar::extract_tokens::PoolLexicalVariable,
+    rule_pool::{Node, NodeId, Prec, RulePool},
+    rules::Symbol,
 };
 
 struct NfaBuilder {
@@ -20,7 +21,7 @@ struct NfaBuilder {
 
 pub type ExpandTokensResult<T> = Result<T, ExpandTokensError>;
 
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpandTokensError {
     #[error(
         "The rule `{0}` matches the empty string.
@@ -35,7 +36,7 @@ unless they are used only as the grammar's start rule.
     ExpandRule(ExpandRuleError),
 }
 
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExpandTokensProcessingError {
     rule: String,
     error: ExpandRuleError,
@@ -43,74 +44,71 @@ pub struct ExpandTokensProcessingError {
 
 impl std::fmt::Display for ExpandTokensProcessingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "Error processing rule {}: Grammar error: Unexpected rule {:?}",
-            self.rule, self.error
-        )?;
-        Ok(())
+        writeln!(f, "Error processing rule {}: {}", self.rule, self.error)
     }
 }
 
-fn get_implicit_precedence(rule: &Rule) -> i32 {
-    match rule {
-        Rule::String(_) => 2,
-        Rule::Metadata { rule, params } => {
-            if params.is_main_token {
-                get_implicit_precedence(rule) + 1
-            } else {
-                get_implicit_precedence(rule)
+fn get_implicit_precedence(pool: &RulePool, root: NodeId) -> i32 {
+    let mut id = root;
+    let mut boost = 0;
+    loop {
+        match pool.node(id) {
+            Node::String(_) => return 2 + boost,
+            Node::Metadata { params, rule } => {
+                if pool.params(params).is_main_token {
+                    boost += 1;
+                }
+                id = rule
             }
+            _ => return boost,
         }
-        _ => 0,
     }
 }
 
-const fn get_completion_precedence(rule: &Rule) -> i32 {
-    if let Rule::Metadata { params, .. } = rule
-        && let Precedence::Integer(p) = params.precedence
+fn get_completion_precedence(pool: &RulePool, id: NodeId) -> i32 {
+    if let Node::Metadata { params, .. } = pool.node(id)
+        && let Prec::Integer(p) = pool.params(params).prec
     {
         return p;
     }
     0
 }
 
-pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult<LexicalGrammar> {
+pub fn expand_tokens(
+    pool: &mut RulePool,
+    lexical_variables: &[PoolLexicalVariable],
+    separator_roots: &[NodeId],
+) -> ExpandTokensResult<LexicalGrammar> {
     let mut builder = NfaBuilder {
         nfa: Nfa::new(),
         is_sep: true,
         precedence_stack: vec![0],
     };
+    let separator_root = build_separator(pool, separator_roots);
 
-    let separator_rule = if grammar.separators.is_empty() {
-        Rule::Blank
-    } else {
-        grammar.separators.push(Rule::Blank);
-        Rule::repeat(Rule::choice(grammar.separators))
-    };
-
-    let mut variables = Vec::with_capacity(grammar.variables.len());
-    for (i, variable) in grammar.variables.into_iter().enumerate() {
-        if variable.rule.is_empty() {
-            Err(ExpandTokensError::EmptyString(variable.name.clone()))?;
+    let mut variables = Vec::with_capacity(lexical_variables.len());
+    for (i, variable) in lexical_variables.iter().enumerate() {
+        if pool.subtree_matches_empty_str(variable.root) {
+            Err(ExpandTokensError::EmptyString(
+                pool.resolve(variable.name).to_string(),
+            ))?;
         }
-
-        let is_immediate_token = match &variable.rule {
-            Rule::Metadata { params, .. } => params.is_main_token,
+        let is_immediate_token = match pool.node(variable.root) {
+            Node::Metadata { params, .. } => pool.params(params).is_main_token,
             _ => false,
         };
 
         builder.is_sep = false;
         builder.nfa.states.push(NfaState::Accept {
             variable_index: i,
-            precedence: get_completion_precedence(&variable.rule),
+            precedence: get_completion_precedence(pool, variable.root),
         });
         let last_state_id = builder.nfa.last_state_id();
         builder
-            .expand_rule(&variable.rule, last_state_id)
+            .expand_rule(pool, variable.root, last_state_id)
             .map_err(|e| {
                 ExpandTokensError::Processing(ExpandTokensProcessingError {
-                    rule: variable.name.clone(),
+                    rule: pool.resolve(variable.name).to_string(),
                     error: e,
                 })
             })?;
@@ -119,14 +117,14 @@ pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult
             builder.is_sep = true;
             let last_state_id = builder.nfa.last_state_id();
             builder
-                .expand_rule(&separator_rule, last_state_id)
+                .expand_rule(pool, separator_root, last_state_id)
                 .map_err(ExpandTokensError::ExpandRule)?;
         }
 
         variables.push(LexicalVariable {
-            name: variable.name,
+            name: pool.resolve(variable.name).to_string(),
             kind: variable.kind,
-            implicit_precedence: get_implicit_precedence(&variable.rule),
+            implicit_precedence: get_implicit_precedence(pool, variable.root),
             start_state: builder.nfa.last_state_id(),
         });
     }
@@ -137,12 +135,37 @@ pub fn expand_tokens(mut grammar: ExtractedLexicalGrammar) -> ExpandTokensResult
     })
 }
 
+fn build_separator(pool: &mut RulePool, separator_roots: &[NodeId]) -> NodeId {
+    let blank = pool.push_node(Node::Blank);
+    if separator_roots.is_empty() {
+        return blank;
+    }
+    let mut elements = Vec::with_capacity(separator_roots.len() + 1);
+    let mut stack = Vec::with_capacity(separator_roots.len() + 1);
+    stack.push(blank);
+    stack.extend(separator_roots.iter().rev().copied());
+    while let Some(id) = stack.pop() {
+        if let Node::Choice(range) = pool.node(id) {
+            let base = stack.len();
+            stack.extend_from_slice(pool.child_slice(range));
+            stack[base..].reverse();
+        } else if !elements.iter().any(|&e| pool.subtree_eq(e, id)) {
+            elements.push(id);
+        }
+    }
+    let range = pool.push_children(&elements);
+    let choice = pool.push_node(Node::Choice(range));
+    pool.push_node(Node::Repeat(choice))
+}
+
 pub type ExpandRuleResult<T> = Result<T, ExpandRuleError>;
 
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpandRuleError {
-    #[error("Grammar error: Unexpected rule {0:?}")]
-    UnexpectedRule(Rule),
+    #[error("unexpected symbol {0:?}")]
+    UnexpectedSymbol(Symbol),
+    #[error("unexpected reserved-word context {0}")]
+    UnexpectedReserved(String),
     #[error("{0}")]
     Parse(String),
     #[error(transparent)]
@@ -151,7 +174,7 @@ pub enum ExpandRuleError {
 
 pub type ExpandRegexResult<T> = Result<T, ExpandRegexError>;
 
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExpandRegexError {
     #[error("{0}")]
     Utf8(String),
@@ -160,15 +183,21 @@ pub enum ExpandRegexError {
 }
 
 impl NfaBuilder {
-    fn expand_rule(&mut self, rule: &Rule, mut next_state_id: u32) -> ExpandRuleResult<bool> {
-        match rule {
-            Rule::Pattern(s, f) => {
+    fn expand_rule(
+        &mut self,
+        pool: &RulePool,
+        id: NodeId,
+        mut next_state_id: u32,
+    ) -> ExpandRuleResult<bool> {
+        match pool.node(id) {
+            Node::Pattern(s, f) => {
                 // With unicode enabled, `\w`, `\s` and `\d` expand to character sets that are much
                 // larger than intended, so we replace them with the actual
                 // character sets they should represent. If the full unicode range
                 // of `\w`, `\s` or `\d` are needed then `\p{L}`, `\p{Z}` and `\p{N}` should be
                 // used.
-                let s = s
+                let s = pool
+                    .resolve(s)
                     .replace(r"\w", r"[0-9A-Za-z_]")
                     .replace(r"\s", r"[\t-\r ]")
                     .replace(r"\d", r"[0-9]")
@@ -176,7 +205,7 @@ impl NfaBuilder {
                     .replace(r"\S", r"[^\t-\r ]")
                     .replace(r"\D", r"[^0-9]");
                 let mut parser = ParserBuilder::new()
-                    .case_insensitive(f.contains('i'))
+                    .case_insensitive(pool.resolve(f).contains('i'))
                     .unicode(true)
                     .utf8(false)
                     .build();
@@ -186,17 +215,19 @@ impl NfaBuilder {
                 self.expand_regex(&hir, next_state_id)
                     .map_err(ExpandRuleError::ExpandRegex)
             }
-            Rule::String(s) => {
+            Node::String(s) => {
+                let s = pool.resolve(s);
                 for c in s.chars().rev() {
                     self.push_advance(CharacterSet::from_char(c), next_state_id);
                     next_state_id = self.nfa.last_state_id();
                 }
                 Ok(!s.is_empty())
             }
-            Rule::Choice(elements) => {
+            Node::Choice(range) => {
+                let elements = pool.child_slice(range);
                 let mut alternative_state_ids = Vec::with_capacity(elements.len());
-                for element in elements {
-                    if self.expand_rule(element, next_state_id)? {
+                for &element in elements {
+                    if self.expand_rule(pool, element, next_state_id)? {
                         alternative_state_ids.push(self.nfa.last_state_id());
                     } else {
                         alternative_state_ids.push(next_state_id);
@@ -210,23 +241,23 @@ impl NfaBuilder {
                 }
                 Ok(true)
             }
-            Rule::Seq(elements) => {
+            Node::Seq(range) => {
                 let mut result = false;
-                for element in elements.iter().rev() {
-                    if self.expand_rule(element, next_state_id)? {
+                for &element in pool.child_slice(range).iter().rev() {
+                    if self.expand_rule(pool, element, next_state_id)? {
                         result = true;
                     }
                     next_state_id = self.nfa.last_state_id();
                 }
                 Ok(result)
             }
-            Rule::Repeat(rule) => {
+            Node::Repeat(rule) => {
                 self.nfa.states.push(NfaState::Accept {
                     variable_index: 0,
                     precedence: 0,
                 }); // Placeholder for split
                 let split_state_id = self.nfa.last_state_id();
-                if self.expand_rule(rule, split_state_id)? {
+                if self.expand_rule(pool, rule, next_state_id)? {
                     self.nfa.states[split_state_id as usize] =
                         NfaState::Split(self.nfa.last_state_id(), next_state_id);
                     Ok(true)
@@ -234,21 +265,29 @@ impl NfaBuilder {
                     Ok(false)
                 }
             }
-            Rule::Metadata { rule, params } => {
-                let has_precedence = if let Precedence::Integer(precedence) = &params.precedence {
-                    self.precedence_stack.push(*precedence);
+            Node::Metadata { params, rule } => {
+                let has_precedence = if let Prec::Integer(precedence) = pool.params(params).prec {
+                    self.precedence_stack.push(precedence);
                     true
                 } else {
                     false
                 };
-                let result = self.expand_rule(rule, next_state_id);
+                let result = self.expand_rule(pool, rule, next_state_id);
                 if has_precedence {
                     self.precedence_stack.pop();
                 }
                 result
             }
-            Rule::Blank => Ok(false),
-            _ => Err(ExpandRuleError::UnexpectedRule(rule.clone()))?,
+            Node::Blank => Ok(false),
+            Node::Sym { kind, index } => Err(ExpandRuleError::UnexpectedSymbol(Symbol {
+                kind,
+                index: index as usize,
+            }))?,
+            Node::Reserved { ctx, .. } => Err(ExpandRuleError::UnexpectedReserved(
+                pool.resolve(ctx).to_string(),
+            ))?,
+            // `NamedSymbol` is interned to `Sym` by intern_symbols
+            Node::NamedSymbol(_) => unreachable!(),
         }
     }
 
@@ -434,7 +473,7 @@ impl NfaBuilder {
 mod tests {
     use super::*;
     use crate::{
-        grammars::Variable,
+        grammars::VariableType,
         nfa::{NfaCursor, NfaTransition},
     };
 
@@ -482,370 +521,465 @@ mod tests {
         result
     }
 
+    fn check(
+        //                                   (token roots, separator roots)
+        build: impl FnOnce(&mut RulePool) -> (Vec<NodeId>, Vec<NodeId>),
+        examples: &[(&str, Option<(usize, &str)>)],
+    ) {
+        let mut pool = RulePool::default();
+        let (roots, separators) = build(&mut pool);
+        let vars = roots
+            .into_iter()
+            .enumerate()
+            .map(|(i, root)| PoolLexicalVariable {
+                name: pool.intern(&format!("tok{i}")),
+                kind: VariableType::Anonymous,
+                root,
+            })
+            .collect::<Vec<_>>();
+        let grammar = expand_tokens(&mut pool, &vars, &separators).unwrap();
+        for &(input, expected) in examples {
+            assert_eq!(simulate_nfa(&grammar, input), expected, "input {input}");
+        }
+    }
+
     #[test]
     fn test_rule_expansion() {
-        struct Row {
-            rules: Vec<Rule>,
-            separators: Vec<Rule>,
-            examples: Vec<(&'static str, Option<(usize, &'static str)>)>,
-        }
-
-        let table = [
-            // regex with sequences and alternatives
-            Row {
-                rules: vec![Rule::pattern("(a|b|c)d(e|f|g)h?", "")],
-                separators: vec![],
-                examples: vec![
-                    ("ade1", Some((0, "ade"))),
-                    ("bdf1", Some((0, "bdf"))),
-                    ("bdfh1", Some((0, "bdfh"))),
-                    ("ad1", None),
-                ],
+        // regex with sequences and alternatives
+        check(
+            |p| {
+                let (v, f) = (p.intern("(a|b|c)d(e|f|g)h?"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // regex with repeats
-            Row {
-                rules: vec![Rule::pattern("a*", "")],
-                separators: vec![],
-                examples: vec![("aaa1", Some((0, "aaa"))), ("b", Some((0, "")))],
+            &[
+                ("ade1", Some((0, "ade"))),
+                ("bdf1", Some((0, "bdf"))),
+                ("bdfh1", Some((0, "bdfh"))),
+                ("ad1", None),
+            ],
+        );
+        // regex with repeats
+        check(
+            |p| {
+                let (v, f) = (p.intern("a*"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // regex with repeats in sequences
-            Row {
-                rules: vec![Rule::pattern("a((bc)+|(de)*)f", "")],
-                separators: vec![],
-                examples: vec![
-                    ("af1", Some((0, "af"))),
-                    ("adedef1", Some((0, "adedef"))),
-                    ("abcbcbcf1", Some((0, "abcbcbcf"))),
-                    ("a", None),
-                ],
+            &[("aaa1", Some((0, "aaa"))), ("b", Some((0, "")))],
+        );
+        // regex with repeats in sequences
+        check(
+            |p| {
+                let (v, f) = (p.intern("a((bc)+|(de)*)f"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // regex with character ranges
-            Row {
-                rules: vec![Rule::pattern("[a-fA-F0-9]+", "")],
-                separators: vec![],
-                examples: vec![("A1ff0.", Some((0, "A1ff0")))],
+            &[
+                ("af1", Some((0, "af"))),
+                ("adedef1", Some((0, "adedef"))),
+                ("abcbcbcf1", Some((0, "abcbcbcf"))),
+                ("a", None),
+            ],
+        );
+        // regex with character ranges
+        check(
+            |p| {
+                let (v, f) = (p.intern("[a-fA-F0-9]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // regex with perl character classes
-            Row {
-                rules: vec![Rule::pattern("\\w\\d\\s", "")],
-                separators: vec![],
-                examples: vec![("_0  ", Some((0, "_0 ")))],
+            &[("A1ff0.", Some((0, "A1ff0")))],
+        );
+        // regex with perl character classes
+        check(
+            |p| {
+                let (v, f) = (p.intern("\\w\\d\\s"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // string
-            Row {
-                rules: vec![Rule::string("abc")],
-                separators: vec![],
-                examples: vec![("abcd", Some((0, "abc"))), ("ab", None)],
+            &[("_0  ", Some((0, "_0 ")))],
+        );
+        // string
+        check(
+            |p| {
+                let s = p.intern("abc");
+                (vec![p.string(s)], vec![])
             },
-            // complex rule containing strings and regexes
-            Row {
-                rules: vec![Rule::repeat(Rule::seq(vec![
-                    Rule::string("{"),
-                    Rule::pattern("[a-f]+", ""),
-                    Rule::string("}"),
-                ]))],
-                separators: vec![],
-                examples: vec![
-                    ("{a}{", Some((0, "{a}"))),
-                    ("{a}{d", Some((0, "{a}"))),
-                    ("ab", None),
-                ],
+            &[("abcd", Some((0, "abc"))), ("ab", None)],
+        );
+        // complex rule containing strings and regexes
+        check(
+            |p| {
+                let (reg, empty) = (p.intern("[a-f]+"), p.intern(""));
+                let (lb, pat, rb) = (p.intern("{"), p.pattern(reg, empty), p.intern("}"));
+                let (left, right) = (p.string(lb), p.string(rb));
+                let seq = p.seq(&[left, pat, right]);
+                (vec![p.repeat(seq)], vec![])
             },
-            // longest match rule
-            Row {
-                rules: vec![
-                    Rule::pattern("a|bc", ""),
-                    Rule::pattern("aa", ""),
-                    Rule::pattern("bcd", ""),
-                ],
-                separators: vec![],
-                examples: vec![
-                    ("a.", Some((0, "a"))),
-                    ("bc.", Some((0, "bc"))),
-                    ("aa.", Some((1, "aa"))),
-                    ("bcd?", Some((2, "bcd"))),
-                    ("b.", None),
-                    ("c.", None),
-                ],
+            &[
+                ("{a}{", Some((0, "{a}"))),
+                ("{a}{d", Some((0, "{a}"))),
+                ("ab", None),
+            ],
+        );
+        // longest match rule
+        check(
+            |p| {
+                let empty = p.intern("");
+                let (x, y, z) = (p.intern("a|bc"), p.intern("aa"), p.intern("bcd"));
+                (
+                    vec![
+                        p.pattern(x, empty),
+                        p.pattern(y, empty),
+                        p.pattern(z, empty),
+                    ],
+                    vec![],
+                )
             },
-            // regex with an alternative including the empty string
-            Row {
-                rules: vec![Rule::pattern("a(b|)+c", "")],
-                separators: vec![],
-                examples: vec![
-                    ("ac.", Some((0, "ac"))),
-                    ("abc.", Some((0, "abc"))),
-                    ("abbc.", Some((0, "abbc"))),
-                ],
+            &[
+                ("a.", Some((0, "a"))),
+                ("bc.", Some((0, "bc"))),
+                ("aa.", Some((1, "aa"))),
+                ("bcd?", Some((2, "bcd"))),
+                ("b.", None),
+                ("c.", None),
+            ],
+        );
+        // regex with an alternative including the empty string
+        check(
+            |p| {
+                let (v, f) = (p.intern("a(b|)+c"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // separators
-            Row {
-                rules: vec![Rule::pattern("[a-f]+", "")],
-                separators: vec![Rule::string("\\\n"), Rule::pattern("\\s", "")],
-                examples: vec![
-                    ("  a", Some((0, "a"))),
-                    ("  \nb", Some((0, "b"))),
-                    ("  \\a", None),
-                    ("  \\\na", Some((0, "a"))),
-                ],
+            &[
+                ("ac.", Some((0, "ac"))),
+                ("abc.", Some((0, "abc"))),
+                ("abbc.", Some((0, "abbc"))),
+            ],
+        );
+        // separators
+        check(
+            |p| {
+                let (v, f) = (p.intern("[a-f]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // shorter tokens with higher precedence
-            Row {
-                rules: vec![
-                    Rule::prec(Precedence::Integer(2), Rule::pattern("abc", "")),
-                    Rule::prec(Precedence::Integer(1), Rule::pattern("ab[cd]e", "")),
-                    Rule::pattern("[a-e]+", ""),
-                ],
-                separators: vec![Rule::string("\\\n"), Rule::pattern("\\s", "")],
-                examples: vec![
-                    ("abceef", Some((0, "abc"))),
-                    ("abdeef", Some((1, "abde"))),
-                    ("aeeeef", Some((2, "aeeee"))),
-                ],
+            &[
+                ("  a", Some((0, "a"))),
+                ("  \nb", Some((0, "b"))),
+                ("  \\a", None),
+                ("  \\\na", Some((0, "a"))),
+            ],
+        );
+        // shorter tokens with higher precedence
+        check(
+            |p| {
+                let f = p.intern("");
+                let (v1, v2, v3) = (p.intern("abc"), p.intern("ab[cd]e"), p.intern("[a-e]+"));
+                let (pat1, pat2, pat3) = (p.pattern(v1, f), p.pattern(v2, f), p.pattern(v3, f));
+                (
+                    vec![
+                        p.prec(Prec::Integer(2), pat1),
+                        p.prec(Prec::Integer(1), pat2),
+                        pat3,
+                    ],
+                    vec![],
+                )
             },
-            // immediate tokens with higher precedence
-            Row {
-                rules: vec![
-                    Rule::prec(Precedence::Integer(1), Rule::pattern("[^a]+", "")),
-                    Rule::immediate_token(Rule::prec(
-                        Precedence::Integer(2),
-                        Rule::pattern("[^ab]+", ""),
-                    )),
-                ],
-                separators: vec![Rule::pattern("\\s", "")],
-                examples: vec![("cccb", Some((1, "ccc")))],
+            &[
+                ("abceef", Some((0, "abc"))),
+                ("abdeef", Some((1, "abde"))),
+                ("aeeeef", Some((2, "aeeee"))),
+            ],
+        );
+        // immediate tokens with higher precedence
+        check(
+            |p| {
+                let f = p.intern("");
+                let (v1, v2) = (p.intern("[^a]+"), p.intern("[^ab]+"));
+                let (pat1, pat2) = (p.pattern(v1, f), p.pattern(v2, f));
+                let r1 = p.prec(Prec::Integer(1), pat1);
+                let r2 = {
+                    let imm = p.prec(Prec::Integer(2), pat2);
+                    p.immediate_token(imm)
+                };
+                let sep = {
+                    let s = p.intern("\\s");
+                    p.pattern(s, f)
+                };
+                (vec![r1, r2], vec![sep])
             },
-            Row {
-                rules: vec![Rule::seq(vec![
-                    Rule::string("a"),
-                    Rule::choice(vec![Rule::string("b"), Rule::string("c")]),
-                    Rule::string("d"),
-                ])],
-                separators: vec![],
-                examples: vec![
-                    ("abd", Some((0, "abd"))),
-                    ("acd", Some((0, "acd"))),
-                    ("abc", None),
-                    ("ad", None),
-                    ("d", None),
-                    ("a", None),
-                ],
+            &vec![("cccb", Some((1, "ccc")))],
+        );
+        check(
+            |p| {
+                let (a, b, c, d) = (p.intern("a"), p.intern("b"), p.intern("c"), p.intern("d"));
+                let r1 = p.string(a);
+                let r2 = {
+                    let (x, y) = (p.string(b), p.string(c));
+                    p.choice(&[x, y])
+                };
+                let r3 = p.string(d);
+                (vec![p.seq(&[r1, r2, r3])], vec![])
             },
-            // nested choices within sequences
-            Row {
-                rules: vec![Rule::seq(vec![
-                    Rule::pattern("[0-9]+", ""),
-                    Rule::choice(vec![
-                        Rule::Blank,
-                        Rule::choice(vec![Rule::seq(vec![
-                            Rule::choice(vec![Rule::string("e"), Rule::string("E")]),
-                            Rule::choice(vec![
-                                Rule::Blank,
-                                Rule::choice(vec![Rule::string("+"), Rule::string("-")]),
-                            ]),
-                            Rule::pattern("[0-9]+", ""),
-                        ])]),
-                    ]),
-                ])],
-                separators: vec![],
-                examples: vec![
-                    ("12", Some((0, "12"))),
-                    ("12e", Some((0, "12"))),
-                    ("12g", Some((0, "12"))),
-                    ("12e3", Some((0, "12e3"))),
-                    ("12e+", Some((0, "12"))),
-                    ("12E+34 +", Some((0, "12E+34"))),
-                    ("12e34", Some((0, "12e34"))),
-                ],
+            &[
+                ("abd", Some((0, "abd"))),
+                ("acd", Some((0, "acd"))),
+                ("abc", None),
+                ("ad", None),
+                ("d", None),
+                ("a", None),
+            ],
+        );
+        // nested choices within sequences
+        check(
+            |p| {
+                let r1 = {
+                    let (v, f) = (p.intern("[0-9]+"), p.intern(""));
+                    p.pattern(v, f)
+                };
+                let r2 = {
+                    let blank = p.blank();
+                    let inner_ch = {
+                        let ch1 = {
+                            let (e1, e2) = (p.intern("e"), p.intern("E"));
+                            let (e1, e2) = (p.string(e1), p.string(e2));
+                            p.choice(&[e1, e2])
+                        };
+                        let ch2 = {
+                            let blank = p.blank();
+                            let (plus, minus) = (p.intern("+"), p.intern("-"));
+                            let (plus, minus) = (p.string(plus), p.string(minus));
+                            let inner_ch = p.choice(&[plus, minus]);
+                            p.choice(&[blank, inner_ch])
+                        };
+                        let pat = {
+                            let (v, f) = (p.intern("[0-9]+"), p.intern(""));
+                            p.pattern(v, f)
+                        };
+                        let sq = p.seq(&[ch1, ch2, pat]);
+                        p.choice(&[sq])
+                    };
+                    p.choice(&[blank, inner_ch])
+                };
+                let seq = p.seq(&[r1, r2]);
+                (vec![seq], vec![])
             },
-            // nested groups
-            Row {
-                rules: vec![Rule::seq(vec![Rule::pattern(r"([^x\\]|\\(.|\n))+", "")])],
-                separators: vec![],
-                examples: vec![("abcx", Some((0, "abc"))), ("abc\\0x", Some((0, "abc\\0")))],
+            &[
+                ("12", Some((0, "12"))),
+                ("12e", Some((0, "12"))),
+                ("12g", Some((0, "12"))),
+                ("12e3", Some((0, "12e3"))),
+                ("12e+", Some((0, "12"))),
+                ("12E+34 +", Some((0, "12E+34"))),
+                ("12e34", Some((0, "12e34"))),
+            ],
+        );
+        // nested groups
+        check(
+            |p| {
+                let (v, f) = (p.intern(r"([^x\\]|\\(.|\n))+"), p.intern(""));
+                let pat = p.pattern(v, f);
+                let sq = p.seq(&[pat]);
+                (vec![sq], vec![])
             },
-            // allowing unrecognized escape sequences
-            Row {
-                rules: vec![
-                    // Escaped forward slash (used in JS because '/' is the regex delimiter)
-                    Rule::pattern(r"\/", ""),
-                    // Escaped quotes
-                    Rule::pattern(r#"\"\'"#, ""),
-                    // Quote preceded by a literal backslash
-                    Rule::pattern(r"[\\']+", ""),
-                ],
-                separators: vec![],
-                examples: vec![
-                    ("/", Some((0, "/"))),
-                    ("\"\'", Some((1, "\"\'"))),
-                    (r"'\'a", Some((2, r"'\'"))),
-                ],
+            &[("abcx", Some((0, "abc"))), ("abc\\0x", Some((0, "abc\\0")))],
+        );
+        // allowing unrecognized escape sequences
+        check(
+            |p| {
+                let f = p.intern("");
+                // Escaped forward slash (used in JS because '/' is the regex delimiter)
+                let v1 = p.intern(r"\/");
+                // Escaped quotes
+                let v2 = p.intern(r#"\"\'"#);
+                // Quote preceded by a literal backslash
+                let v3 = p.intern(r"[\\']+");
+                (
+                    vec![p.pattern(v1, f), p.pattern(v2, f), p.pattern(v3, f)],
+                    vec![],
+                )
             },
-            // unicode property escapes
-            Row {
-                rules: vec![
-                    Rule::pattern(r"\p{L}+\P{L}+", ""),
-                    Rule::pattern(r"\p{White_Space}+\P{White_Space}+[\p{White_Space}]*", ""),
-                ],
-                separators: vec![],
-                examples: vec![
-                    ("  123   abc", Some((1, "  123   "))),
-                    ("ბΨƁ___ƀƔ", Some((0, "ბΨƁ___"))),
-                ],
+            &[
+                ("/", Some((0, "/"))),
+                ("\"\'", Some((1, "\"\'"))),
+                (r"'\'a", Some((2, r"'\'"))),
+            ],
+        );
+        // unicode property escapes
+        check(
+            |p| {
+                let f = p.intern("");
+                let v1 = p.intern(r"\p{L}+\P{L}+");
+                let v2 = p.intern(r"\p{White_Space}+\P{White_Space}+[\p{White_Space}]*");
+                (vec![p.pattern(v1, f), p.pattern(v2, f)], vec![])
             },
-            // unicode property escapes in bracketed sets
-            Row {
-                rules: vec![Rule::pattern(r"[\p{L}\p{Nd}]+", "")],
-                separators: vec![],
-                examples: vec![("abΨ12٣٣, ok", Some((0, "abΨ12٣٣")))],
+            &[
+                ("  123   abc", Some((1, "  123   "))),
+                ("ბΨƁ___ƀƔ", Some((0, "ბΨƁ___"))),
+            ],
+        );
+        // unicode property escapes in bracketed sets
+        check(
+            |p| {
+                let (v, f) = (p.intern(r"[\p{L}\p{Nd}]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // unicode character escapes
-            Row {
-                rules: vec![
-                    Rule::pattern(r"\u{00dc}", ""),
-                    Rule::pattern(r"\U{000000dd}", ""),
-                    Rule::pattern(r"\u00de", ""),
-                    Rule::pattern(r"\U000000df", ""),
-                ],
-                separators: vec![],
-                examples: vec![
-                    ("\u{00dc}", Some((0, "\u{00dc}"))),
-                    ("\u{00dd}", Some((1, "\u{00dd}"))),
-                    ("\u{00de}", Some((2, "\u{00de}"))),
-                    ("\u{00df}", Some((3, "\u{00df}"))),
-                ],
+            &[("abΨ12٣٣, ok", Some((0, "abΨ12٣٣")))],
+        );
+        // unicode character escapes
+        check(
+            |p| {
+                let f = p.intern("");
+                let v1 = p.intern(r"\u{00dc}");
+                let v2 = p.intern(r"\U{000000dd}");
+                let v3 = p.intern(r"\u00de");
+                let v4 = p.intern(r"\U000000df");
+                (
+                    vec![
+                        p.pattern(v1, f),
+                        p.pattern(v2, f),
+                        p.pattern(v3, f),
+                        p.pattern(v4, f),
+                    ],
+                    vec![],
+                )
             },
-            Row {
-                rules: vec![
-                    Rule::pattern(r"u\{[0-9a-fA-F]+\}", ""),
-                    // Already-escaped curly braces
-                    Rule::pattern(r"\{[ab]{3}\}", ""),
-                    // Unicode codepoints
-                    Rule::pattern(r"\u{1000A}", ""),
-                    // Unicode codepoints (lowercase)
-                    Rule::pattern(r"\u{1000b}", ""),
-                ],
-                separators: vec![],
-                examples: vec![
-                    ("u{1234} ok", Some((0, "u{1234}"))),
-                    ("{aba}}", Some((1, "{aba}"))),
-                    ("\u{1000A}", Some((2, "\u{1000A}"))),
-                    ("\u{1000b}", Some((3, "\u{1000b}"))),
-                ],
+            &[
+                ("\u{00dc}", Some((0, "\u{00dc}"))),
+                ("\u{00dd}", Some((1, "\u{00dd}"))),
+                ("\u{00de}", Some((2, "\u{00de}"))),
+                ("\u{00df}", Some((3, "\u{00df}"))),
+            ],
+        );
+        check(
+            |p| {
+                let f = p.intern("");
+                let v1 = p.intern(r"u\{[0-9a-fA-F]+\}");
+                // Already-escaped curly braces
+                let v2 = p.intern(r"\{[ab]{3}\}");
+                // Unicode codepoints
+                let v3 = p.intern(r"\u{1000A}");
+                // Unicode codepoints (lowercase)
+                let v4 = p.intern(r"\u{1000b}");
+                (
+                    vec![
+                        p.pattern(v1, f),
+                        p.pattern(v2, f),
+                        p.pattern(v3, f),
+                        p.pattern(v4, f),
+                    ],
+                    vec![],
+                )
             },
-            // Case-insensitive patterns must not fold in the two non-ASCII code
-            // points that Unicode simple case folding maps onto ASCII letters:
-            // `ſ` (U+017F) onto `s`, and the Kelvin sign `K` (U+212A) onto `k`.
-            Row {
-                rules: vec![Rule::pattern("[sk]+", "i")],
-                separators: vec![],
-                examples: vec![
-                    ("sSkK.", Some((0, "sSkK"))),
-                    ("\u{017f}", None),              // long s, not matched by `s`
-                    ("\u{212a}", None),              // Kelvin sign, not matched by `k`
-                    ("sk\u{212a}", Some((0, "sk"))), // folded code point ends the token
-                ],
+            &[
+                ("u{1234} ok", Some((0, "u{1234}"))),
+                ("{aba}}", Some((1, "{aba}"))),
+                ("\u{1000A}", Some((2, "\u{1000A}"))),
+                ("\u{1000b}", Some((3, "\u{1000b}"))),
+            ],
+        );
+        // Case-insensitive patterns must not fold in the two non-ASCII code
+        // points that Unicode simple case folding maps onto ASCII letters:
+        // `ſ` (U+017F) onto `s`, and the Kelvin sign `K` (U+212A) onto `k`.
+        check(
+            |p| {
+                let (v, f) = (p.intern("[sk]+"), p.intern("i"));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // An intentionally-written `ſ`/`K` is preserved: the stripping above
-            // only fires when the ASCII pair it folds with is also present.
-            Row {
-                rules: vec![Rule::pattern("[\u{017f}\u{212a}]+", "")],
-                separators: vec![],
-                examples: vec![("\u{017f}\u{212a}.", Some((0, "\u{017f}\u{212a}")))],
+            &[
+                ("sSkK.", Some((0, "sSkK"))),
+                ("\u{017f}", None),              // long s, not matched by `s`
+                ("\u{212a}", None),              // Kelvin sign, not matched by `k`
+                ("sk\u{212a}", Some((0, "sk"))), // folded code point ends the token
+            ],
+        );
+        // An intentionally-written `ſ`/`K` is preserved: the stripping above
+        // only fires when the ASCII pair it folds with is also present.
+        check(
+            |p| {
+                let (v, f) = (p.intern("[\u{017f}\u{212a}]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // Emojis
-            Row {
-                rules: vec![Rule::pattern(r"\p{Emoji}+", "")],
-                separators: vec![],
-                examples: vec![
-                    ("🐎", Some((0, "🐎"))),
-                    ("🐴🐴", Some((0, "🐴🐴"))),
-                    ("#0", Some((0, "#0"))), // These chars are technically emojis!
-                    ("⻢", None),
-                    ("♞", None),
-                    ("horse", None),
-                ],
+            &[("\u{017f}\u{212a}.", Some((0, "\u{017f}\u{212a}")))],
+        );
+        // Emojis
+        check(
+            |p| {
+                let (v, f) = (p.intern(r"\p{Emoji}+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // Intersection
-            Row {
-                rules: vec![Rule::pattern(r"[[0-7]&&[4-9]]+", "")],
-                separators: vec![],
-                examples: vec![
-                    ("456", Some((0, "456"))),
-                    ("64", Some((0, "64"))),
-                    ("452", Some((0, "45"))),
-                    ("91", None),
-                    ("8", None),
-                    ("3", None),
-                ],
+            &[
+                ("🐎", Some((0, "🐎"))),
+                ("🐴🐴", Some((0, "🐴🐴"))),
+                ("#0", Some((0, "#0"))), // These chars are technically emojis!
+                ("⻢", None),
+                ("♞", None),
+                ("horse", None),
+            ],
+        );
+        // Intersection
+        check(
+            |p| {
+                let (v, f) = (p.intern(r"[[0-7]&&[4-9]]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // Difference
-            Row {
-                rules: vec![Rule::pattern(r"[[0-9]--[4-7]]+", "")],
-                separators: vec![],
-                examples: vec![
-                    ("123", Some((0, "123"))),
-                    ("83", Some((0, "83"))),
-                    ("9", Some((0, "9"))),
-                    ("124", Some((0, "12"))),
-                    ("67", None),
-                    ("4", None),
-                ],
+            &[
+                ("456", Some((0, "456"))),
+                ("64", Some((0, "64"))),
+                ("452", Some((0, "45"))),
+                ("91", None),
+                ("8", None),
+                ("3", None),
+            ],
+        );
+        // Difference
+        check(
+            |p| {
+                let (v, f) = (p.intern(r"[[0-9]--[4-7]]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // Symmetric difference
-            Row {
-                rules: vec![Rule::pattern(r"[[0-7]~~[4-9]]+", "")],
-                separators: vec![],
-                examples: vec![
-                    ("123", Some((0, "123"))),
-                    ("83", Some((0, "83"))),
-                    ("9", Some((0, "9"))),
-                    ("124", Some((0, "12"))),
-                    ("67", None),
-                    ("4", None),
-                ],
+            &[
+                ("123", Some((0, "123"))),
+                ("83", Some((0, "83"))),
+                ("9", Some((0, "9"))),
+                ("124", Some((0, "12"))),
+                ("67", None),
+                ("4", None),
+            ],
+        );
+        // Symmetric difference
+        check(
+            |p| {
+                let (v, f) = (p.intern(r"[[0-7]~~[4-9]]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-            // Nested set operations
-            Row {
-                //               0 1 2 3 4 5 6 7 8 9
-                // [0-5]:        y y y y y y
-                // [2-4]:            y y y
-                // [0-5]--[2-4]: y y       y
-                // [3-9]:              y y y y y y y
-                // [6-7]:                    y y
-                // [3-9]--[5-7]:       y y y     y y
-                // final regex:  y y   y y       y y
-                rules: vec![Rule::pattern(r"[[[0-5]--[2-4]]~~[[3-9]--[6-7]]]+", "")],
-                separators: vec![],
-                examples: vec![
-                    ("01", Some((0, "01"))),
-                    ("432", Some((0, "43"))),
-                    ("8", Some((0, "8"))),
-                    ("9", Some((0, "9"))),
-                    ("2", None),
-                    ("567", None),
-                ],
+            &[
+                ("123", Some((0, "123"))),
+                ("83", Some((0, "83"))),
+                ("9", Some((0, "9"))),
+                ("124", Some((0, "12"))),
+                ("67", None),
+                ("4", None),
+            ],
+        );
+        // Nested set operations
+        check(
+            //               0 1 2 3 4 5 6 7 8 9
+            // [0-5]:        y y y y y y
+            // [2-4]:            y y y
+            // [0-5]--[2-4]: y y       y
+            // [3-9]:              y y y y y y y
+            // [6-7]:                    y y
+            // [3-9]--[5-7]:       y y y     y y
+            // final regex:  y y   y y       y y
+            |p| {
+                let (v, f) = (p.intern(r"[[[0-5]--[2-4]]~~[[3-9]--[6-7]]]+"), p.intern(""));
+                (vec![p.pattern(v, f)], vec![])
             },
-        ];
-
-        for Row {
-            rules,
-            separators,
-            examples,
-        } in &table
-        {
-            let grammar = expand_tokens(ExtractedLexicalGrammar {
-                separators: separators.clone(),
-                variables: rules
-                    .iter()
-                    .map(|rule| Variable::named("", rule.clone()))
-                    .collect(),
-            })
-            .unwrap();
-
-            for (haystack, needle) in examples {
-                assert_eq!(simulate_nfa(&grammar, haystack), *needle);
-            }
-        }
+            &[
+                ("01", Some((0, "01"))),
+                ("432", Some((0, "43"))),
+                ("8", Some((0, "8"))),
+                ("9", Some((0, "9"))),
+                ("2", None),
+                ("567", None),
+            ],
+        );
     }
 }

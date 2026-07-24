@@ -2,33 +2,35 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    sync::LazyLock,
 };
 
 use rustc_hash::FxHashMap;
 
 use crate::{
     grammars::{
-        InlinedProductionMap, LexicalGrammar, NO_RESERVED_WORDS, Production, ProductionStep,
-        ReservedWordSetId, SyntaxGrammar,
+        LexicalGrammar, ProdRef, Production, ProductionStep, ReservedWordSetId, SyntaxGrammar,
     },
+    rule_pool::{FStep, Prec, StrPool},
     rules::{Associativity, Precedence, Symbol, SymbolType, TokenSet},
 };
 
-static START_PRODUCTION: LazyLock<Production> = LazyLock::new(|| Production {
-    dynamic_precedence: 0,
-    steps: vec![ProductionStep {
-        symbol: Symbol {
-            index: 0,
-            kind: SymbolType::NonTerminal,
-        },
-        precedence: Precedence::None,
-        associativity: None,
-        alias: None,
-        field_name: None,
-        reserved_word_set_id: NO_RESERVED_WORDS,
-    }],
-});
+const START_STEPS: [FStep; 1] = [FStep {
+    sym_index: 0,
+    prec_val: 0,
+    alias: 0,
+    field: 0,
+    reserved: FStep::NO_RESERVED_WORDS,
+    flags: SymbolType::NonTerminal as u8,
+}];
+
+pub const START_PRODUCTION_ID: u32 = u32::MAX;
+
+const fn start_production() -> ProdRef<'static> {
+    ProdRef {
+        steps: &START_STEPS,
+        dynamic_precedence: 0,
+    }
+}
 
 /// Precomputed identity keys for one `(production, dot)` pair.
 ///
@@ -47,40 +49,40 @@ pub struct DotKeys {
 /// Identity keys for every `(production, dot)` in a grammar (all grammar productions,
 /// every inlined production, and the augmented start production).
 pub struct ItemKeyMap {
-    keys: FxHashMap<*const Production, Box<[DotKeys]>>,
+    keys: Vec<Box<[DotKeys]>>,
     start: Box<[DotKeys]>,
 }
 
 impl ItemKeyMap {
-    pub fn new(grammar: &SyntaxGrammar, inlines: &InlinedProductionMap) -> Self {
-        let mut prods = Vec::<&Production>::with_capacity(
-            1 + grammar.variables.len() + inlines.productions.len(),
-        );
-        prods.push(&START_PRODUCTION);
-        for var in &grammar.variables {
-            prods.extend(var.productions.iter());
-        }
-        prods.extend(inlines.productions.iter());
+    pub fn new(grammar: &SyntaxGrammar) -> Self {
+        let prod = |slot: usize| -> ProdRef {
+            if slot == 0 {
+                start_production()
+            } else {
+                grammar.production(slot as u32 - 1)
+            }
+        };
+        let slot_count = grammar.productions.len() + 1;
 
-        let mut contents: Vec<(u32, u32)> = Vec::with_capacity(prods.len());
-        for (pi, p) in prods.iter().enumerate() {
-            for dot in 0..=p.steps.len() {
+        let mut contents: Vec<(u32, u32)> = Vec::with_capacity(slot_count);
+        for pi in 0..slot_count {
+            for dot in 0..=prod(pi).steps.len() {
                 contents.push((pi as u32, dot as u32));
             }
         }
         let content = |&(pi, dot): &(u32, u32)| ItemContent {
-            production: prods[pi as usize],
+            production: prod(pi as usize),
             dot: dot as usize,
+            interner: &grammar.interner,
         };
         contents.sort_unstable_by(|a, b| content(a).cmp(&content(b)));
 
-        let mut slot_keys: Vec<Box<[DotKeys]>> = prods
-            .iter()
-            .map(|p| vec![DotKeys::default(); p.steps.len() + 1].into_boxed_slice())
-            .collect();
+        let mut slot_keys: Vec<Box<[DotKeys]>> = (0..slot_count)
+            .map(|pi| vec![DotKeys::default(); prod(pi).steps.len() + 1].into_boxed_slice())
+            .collect::<Vec<_>>();
         // Dense ids in sorted order: equal content shares an id, distinct content gets the next up
-        let mut cmp_id = 0u32;
-        let mut prev: Option<(u32, u32)> = None;
+        let mut cmp_id = 0;
+        let mut prev = None;
         for &(pi, dot) in &contents {
             if let Some(p) = prev
                 && content(&p) != content(&(pi, dot))
@@ -91,33 +93,33 @@ impl ItemKeyMap {
             prev = Some((pi, dot));
         }
 
-        // Refine each cmp class by preceding symbols: read only under
+        // Refine each cmp class by preceding symbols:  read only under
         // `has_preceding_inherited_fields`.
-        let mut sym_classes: FxHashMap<(u32, Vec<Symbol>), u32> = FxHashMap::default();
+        let mut sym_classes = FxHashMap::default();
         for &(pi, dot) in &contents {
-            let syms: Vec<Symbol> = prods[pi as usize].steps[..dot as usize]
+            let syms = prod(pi as usize).steps[..dot as usize]
                 .iter()
-                .map(|s| s.symbol)
-                .collect();
+                .map(|s| s.symbol())
+                .collect::<Vec<_>>();
             let next = sym_classes.len() as u32;
             let keys = &mut slot_keys[pi as usize][dot as usize];
             keys.eq_with_syms = *sym_classes.entry((keys.cmp, syms)).or_insert(next);
         }
 
-        let mut slots = slot_keys.into_iter();
-        let start = slots.next().unwrap();
-        let keys = prods[1..]
-            .iter()
-            .zip(slots)
-            .map(|(p, ks)| (core::ptr::from_ref::<Production>(p), ks))
-            .collect();
-
-        Self { keys, start }
+        let start = slot_keys.remove(0);
+        Self {
+            keys: slot_keys,
+            start,
+        }
     }
 
     /// The keys slice (indexed by `dot`) for a production of this grammar.
-    pub fn keys_for(&self, production: &Production) -> &[DotKeys] {
-        &self.keys[&core::ptr::from_ref::<Production>(production)]
+    pub fn keys_for(&self, id: u32) -> &[DotKeys] {
+        if id == START_PRODUCTION_ID {
+            &self.start
+        } else {
+            &self.keys[id as usize]
+        }
     }
 
     pub fn start_keys(&self) -> &[DotKeys] {
@@ -129,24 +131,27 @@ impl ItemKeyMap {
 /// `(production, dot)` directly. Ranking the set of all keys by this order makes
 /// the dense `cmp` order-preserving. Item ordering only ever compares same-dot pairs,
 /// and the dot comparison keeps the order total across dots so ranks are well defined.
-#[derive(Eq)]
 struct ItemContent<'a> {
-    production: &'a Production,
+    production: ProdRef<'a>,
     dot: usize,
+    // TODO: Should this live here or be threaded through
+    interner: &'a StrPool,
 }
 
+impl Eq for ItemContent<'_> {}
+
 impl ItemContent<'_> {
-    fn prec(&self) -> &Precedence {
+    fn prec(&self) -> Prec {
         if self.dot > 0 {
-            &self.production.steps[self.dot - 1].precedence
+            self.production.steps[self.dot - 1].precedence()
         } else {
-            &Precedence::None
+            Prec::None
         }
     }
 
     fn assoc(&self) -> Option<Associativity> {
         if self.dot > 0 {
-            self.production.steps[self.dot - 1].associativity
+            self.production.steps[self.dot - 1].associativity()
         } else {
             None
         }

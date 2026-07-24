@@ -1,9 +1,11 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt,
-};
+use std::{collections::BTreeMap, fmt};
 
-use crate::node_types::ChildType;
+use rustc_hash::FxHashMap;
+
+use crate::{
+    node_types::ChildType,
+    rule_pool::{FProd, FStep, PoolPrecedenceEntry, StrId, StrPool},
+};
 
 use super::{
     nfa::Nfa,
@@ -110,17 +112,15 @@ pub struct Production {
     pub dynamic_precedence: i32,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct InlinedProductionMap {
-    pub productions: Vec<Production>,
-    pub production_map: HashMap<(*const Production, u32), Vec<usize>>,
+    pub map: FxHashMap<(u32, u32), Vec<u32>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyntaxVariable {
     pub name: String,
     pub kind: VariableType,
-    pub productions: Vec<Production>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,8 +139,51 @@ pub struct SyntaxGrammar {
     pub supertype_symbols: Vec<Symbol>,
     pub variables_to_inline: Vec<Symbol>,
     pub word_token: Option<Symbol>,
-    pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
+    pub precedence_orderings: Vec<Vec<PoolPrecedenceEntry>>,
     pub reserved_word_sets: Vec<TokenSet>,
+
+    pub steps: Vec<FStep>,
+    pub productions: Vec<FProd>,
+    pub var_prods: Vec<(u32, u32)>,
+    pub interner: StrPool,
+}
+
+impl SyntaxGrammar {
+    // NOTE: Still need to settle where the string pool lives
+    #[must_use]
+    pub fn resolve(&self, id: StrId) -> &str {
+        self.interner.resolve(id)
+    }
+
+    #[must_use]
+    pub fn production(&self, id: u32) -> ProdRef<'_> {
+        let p = self.productions[id as usize];
+        ProdRef {
+            steps: &self.steps[p.step_range()],
+            dynamic_precedence: p.dynamic_prec,
+        }
+    }
+
+    /// The pooled production ids belonging to a variable
+    #[must_use]
+    pub fn variable_prod_ids(&self, variable_index: usize) -> std::ops::Range<u32> {
+        let (start, end) = self.var_prods[variable_index];
+        start..end
+    }
+}
+
+/// A production in the pooled [`SyntaxGrammar`] storage
+#[derive(Clone, Copy, Debug)]
+pub struct ProdRef<'a> {
+    pub steps: &'a [FStep],
+    pub dynamic_precedence: i32,
+}
+
+impl ProdRef<'_> {
+    #[must_use]
+    pub fn first_symbol(&self) -> Option<Symbol> {
+        self.steps.first().map(|s| s.symbol())
+    }
 }
 
 #[cfg(test)]
@@ -278,19 +321,8 @@ impl SyntaxVariable {
 
 impl InlinedProductionMap {
     #[must_use]
-    pub fn inlined_productions<'a>(
-        &'a self,
-        production: &Production,
-        step_index: u32,
-    ) -> Option<impl Iterator<Item = &'a Production> + 'a> {
-        self.production_map
-            .get(&(std::ptr::from_ref::<Production>(production), step_index))
-            .map(|production_indices| {
-                production_indices
-                    .iter()
-                    .copied()
-                    .map(move |index| &self.productions[index])
-            })
+    pub fn inlined_prod_ids<'a>(&'a self, prod_id: u32, step_index: u32) -> Option<&[u32]> {
+        self.map.get(&(prod_id, step_index)).map(Vec::as_slice)
     }
 }
 

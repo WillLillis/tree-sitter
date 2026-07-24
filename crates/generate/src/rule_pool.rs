@@ -33,8 +33,7 @@ pub struct RulePool {
     nodes: Vec<Node>,
     children: Vec<NodeId>,
     params: Vec<Params>,
-    strs: Vec<Rc<str>>,
-    str_ids: FxHashMap<Rc<str>, StrId>,
+    intern: StrPool,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +52,30 @@ pub struct PoolReservedSet {
 pub enum PoolPrecedenceEntry {
     Name(StrId),
     Symbol(StrId),
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct StrPool {
+    strs: Vec<Rc<str>>,
+    str_ids: FxHashMap<Rc<str>, StrId>,
+}
+
+impl StrPool {
+    pub fn intern(&mut self, s: &str) -> StrId {
+        if let Some(&id) = self.str_ids.get(s) {
+            return id;
+        }
+        let owned: Rc<str> = Rc::from(s);
+        let id = StrId(NonZeroU32::new(self.strs.len() as u32 + 1).unwrap());
+        self.strs.push(Rc::clone(&owned));
+        self.str_ids.insert(owned, id);
+        id
+    }
+
+    #[must_use]
+    pub fn resolve(&self, id: StrId) -> &str {
+        &self.strs[id.index()]
+    }
 }
 
 impl RulePool {
@@ -207,25 +230,26 @@ impl RulePool {
         self.push_node(Node::Reserved { rule: content, ctx })
     }
 
+    #[inline]
+    #[must_use]
     pub fn intern(&mut self, s: &str) -> StrId {
-        if let Some(&id) = self.str_ids.get(s) {
-            return id;
-        }
-        let owned: Rc<str> = Rc::from(s);
-        let id = StrId(NonZeroU32::new(self.strs.len() as u32 + 1).unwrap());
-        self.strs.push(Rc::clone(&owned));
-        self.str_ids.insert(owned, id);
-        id
+        self.intern.intern(s)
     }
 
+    #[inline]
     #[must_use]
     pub fn resolve(&self, id: StrId) -> &str {
-        &self.strs[id.index()]
+        self.intern.resolve(id)
     }
 
     #[must_use]
-    pub fn strs(&self) -> &[Rc<str>] {
-        &self.strs
+    pub const fn str_count(&self) -> usize {
+        self.intern.strs.len()
+    }
+
+    #[must_use]
+    pub fn into_interner(self) -> StrPool {
+        self.intern
     }
 
     #[must_use]
@@ -321,6 +345,71 @@ impl RulePool {
         }
         true
     }
+
+    /// Whether the subtree at `id` can only match the empty string.
+    pub fn subtree_matches_empty_str(&self, id: NodeId) -> bool {
+        match self.node(id) {
+            Node::String(sid) => self.resolve(sid).is_empty(),
+            Node::Metadata { rule, .. } | Node::Repeat(rule) | Node::Reserved { rule, .. } => {
+                self.subtree_matches_empty_str(rule)
+            }
+            Node::Choice(range) => self
+                .child_slice(range)
+                .iter()
+                .any(|&c| self.subtree_matches_empty_str(c)),
+            Node::Seq(range) => self
+                .child_slice(range)
+                .iter()
+                .all(|&c| self.subtree_matches_empty_str(c)),
+            _ => false,
+        }
+    }
+
+    /// Check if a rule is referenced by another rule.
+    ///
+    /// This function is used to determine if a variable is used in a given rule,
+    /// and `is_external` indicates if the rule is an external, and if it is,
+    /// to not assume that a named symbol that is equal to itself means it's being referenced.
+    ///
+    /// For example, if we have an external rule **and** a normal rule both called `foo`,
+    /// `foo` should not be thought of as directly used unless it's used within another rule.
+    pub fn rule_is_referenced(&self, id: NodeId, target: StrId, is_external: bool) -> bool {
+        match self.node(id) {
+            Node::NamedSymbol(name) => name == target && !is_external,
+            Node::Choice(range) | Node::Seq(range) => self
+                .child_slice(range)
+                .iter()
+                .any(|&c| self.rule_is_referenced(c, target, false)),
+            Node::Metadata { rule, .. } | Node::Reserved { rule, .. } => {
+                self.rule_is_referenced(rule, target, is_external)
+            }
+            Node::Repeat(inner) => self.rule_is_referenced(inner, target, false),
+            Node::Blank | Node::String(_) | Node::Pattern(..) | Node::Sym { .. } => false,
+        }
+    }
+
+    /// Append every `NamedSymbol` name reachable in `id` to `out`. If
+    /// `skip_top_level` is true, a `NamedSymbol` at the root of `id` is
+    /// ignored (used for externals entries, which name themselves).
+    pub fn collect_referenced_ids(&self, id: NodeId, skip_top_level: bool, out: &mut Vec<StrId>) {
+        match self.node(id) {
+            Node::NamedSymbol(name) => {
+                if !skip_top_level {
+                    out.push(name);
+                }
+            }
+            Node::Choice(range) | Node::Seq(range) => {
+                for &c in self.child_slice(range) {
+                    self.collect_referenced_ids(c, false, out);
+                }
+            }
+            Node::Metadata { rule, .. } | Node::Reserved { rule, .. } => {
+                self.collect_referenced_ids(rule, skip_top_level, out);
+            }
+            Node::Repeat(inner) => self.collect_referenced_ids(inner, false, out),
+            Node::Blank | Node::String(_) | Node::Pattern(..) | Node::Sym { .. } => {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -392,6 +481,23 @@ pub enum Node {
 
 const _: () = assert!(std::mem::size_of::<Node>() <= 12);
 
+pub const fn sym(symbol: Symbol) -> Node {
+    Node::Sym {
+        kind: symbol.kind,
+        index: symbol.index as u32,
+    }
+}
+
+pub const fn node_symbol(node: Node) -> Option<Symbol> {
+    match node {
+        Node::Sym { kind, index } => Some(Symbol {
+            kind,
+            index: index as usize,
+        }),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum Prec {
     #[default]
@@ -417,6 +523,14 @@ pub struct Params {
     pub is_main_token: bool,
 }
 
+impl Params {
+    #[inline]
+    #[must_use]
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub struct FStep {
     pub sym_index: u32,
@@ -437,17 +551,17 @@ impl FStep {
     //     - 5-6 associativity  (None 00, Left 01, Right 10)
     //     - 7   alias `is_named`
     const KIND_MASK: u8    = 0b0000_0111;
-    pub const PREC_INTEGER: u8 = 0b0000_1000;
-    pub const PREC_NAME: u8    = 0b0001_0000;
-    pub const PREC_MASK: u8    = 0b0001_1000;
-    pub const ASSOC_LEFT: u8   = 0b0010_0000;
-    pub const ASSOC_RIGHT: u8  = 0b0100_0000;
-    pub const ASSOC_MASK: u8   = 0b0110_0000;
+    const PREC_INTEGER: u8 = 0b0000_1000;
+    const PREC_NAME: u8    = 0b0001_0000;
+    const PREC_MASK: u8    = 0b0001_1000;
+    const ASSOC_LEFT: u8   = 0b0010_0000;
+    const ASSOC_RIGHT: u8  = 0b0100_0000;
+    const ASSOC_MASK: u8   = 0b0110_0000;
     const ALIAS_NAMED: u8  = 0b1000_0000;
 
     /// `FStep::reserved` sentinel, meaning no reserved word set at all. Only the augmented
     /// start production carries it, and it must never index the reserved-sets table.
-    const NO_RESERVED_WORDS: u16 = u16::MAX;
+    pub const NO_RESERVED_WORDS: u16 = u16::MAX;
 }
 
 impl FStep {
