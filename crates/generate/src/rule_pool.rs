@@ -98,7 +98,7 @@ pub enum Prec {
 }
 
 /// [`crate::rules::Alias`] with the value interned. `Copy`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Alias {
     pub value: StrId,
     pub is_named: bool,

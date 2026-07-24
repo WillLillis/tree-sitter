@@ -2,14 +2,13 @@ use std::{
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
-    rc::Rc,
 };
 
 use rustc_hash::FxHashMap;
 
 use crate::{
     grammars::{LexicalGrammar, ProdRef, ReservedWordSetId, SyntaxGrammar},
-    rule_pool::{FStep, NO_RESERVED_WORDS, Prec, StrId},
+    rule_pool::{FStep, NO_RESERVED_WORDS, Prec},
     rules::{Associativity, Symbol, SymbolType, TokenSet},
 };
 
@@ -77,7 +76,6 @@ impl ItemKeyMap {
         let content = |&(pi, dot): &(u32, u32)| ItemContent {
             production: prod(pi as usize),
             dot: dot as usize,
-            strs: &grammar.strs,
         };
         contents.sort_unstable_by(|a, b| content(a).cmp(&content(b)));
 
@@ -131,15 +129,12 @@ impl ItemKeyMap {
 
 /// The content tuple that `ParseItem`'s `Ord` (and flagless `Eq`) observe,
 /// evaluated on `(production, dot)` directly. Ranking the key universe by
-/// this order is what makes the dense `cmp` ids order-preserving; every
-/// string-bearing field resolves and compares as a string here so the ranks
-/// reproduce the historical `String`-ordered comparisons exactly. Item
-/// ordering only ever compares same-dot pairs; the dot comparison keeps the
-/// order total across dots so ranks are well defined.
+/// this order is what makes the dense `cmp` ids order-preserving. Item
+/// ordering only ever compares same-dot pairs; the dot comparison keeps
+/// the order total across dots so ranks are well defined.
 struct ItemContent<'a> {
     production: ProdRef<'a>,
     dot: usize,
-    strs: &'a [Rc<str>],
 }
 
 impl ItemContent<'_> {
@@ -158,44 +153,23 @@ impl ItemContent<'_> {
             None
         }
     }
+}
 
-    fn resolve(&self, id: StrId) -> &str {
-        &self.strs[id.index()]
+impl Ord for FStep {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.symbol()
+            .cmp(&other.symbol())
+            .then_with(|| self.precedence().cmp(&other.precedence()))
+            .then_with(|| self.associativity().cmp(&other.associativity()))
+            .then_with(|| self.alias().cmp(&other.alias()))
+            .then_with(|| self.field().cmp(&other.field()))
+            .then_with(|| self.reserved.cmp(&other.reserved))
     }
+}
 
-    /// `Precedence` order: `None`, then `Integer`, then `Name` by string.
-    fn prec_cmp(&self, a: Prec, b: Prec) -> Ordering {
-        match (a, b) {
-            (Prec::None, Prec::None) => Ordering::Equal,
-            (Prec::Integer(x), Prec::Integer(y)) => x.cmp(&y),
-            (Prec::Name(x), Prec::Name(y)) => self.resolve(x).cmp(self.resolve(y)),
-            (Prec::None, _) | (Prec::Integer(_), Prec::Name(_)) => Ordering::Less,
-            (_, Prec::None) | (Prec::Name(_), Prec::Integer(_)) => Ordering::Greater,
-        }
-    }
-
-    /// `Option<Alias>` order: `None` first, then value string, then
-    /// `is_named`.
-    fn alias_cmp(&self, a: FStep, b: FStep) -> Ordering {
-        let key = |s: FStep| s.alias().map(|a| (self.resolve(a.value), a.is_named));
-        key(a).cmp(&key(b))
-    }
-
-    fn field_cmp(&self, a: FStep, b: FStep) -> Ordering {
-        let key = |s: FStep| s.field().map(|f| self.resolve(f));
-        key(a).cmp(&key(b))
-    }
-
-    /// `ProductionStep` order: symbol, precedence, associativity, alias,
-    /// field, reserved word set.
-    fn step_cmp(&self, a: FStep, b: FStep) -> Ordering {
-        a.symbol()
-            .cmp(&b.symbol())
-            .then_with(|| self.prec_cmp(a.precedence(), b.precedence()))
-            .then_with(|| a.associativity().cmp(&b.associativity()))
-            .then_with(|| self.alias_cmp(a, b))
-            .then_with(|| self.field_cmp(a, b))
-            .then_with(|| a.reserved.cmp(&b.reserved))
+impl PartialOrd for FStep {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -210,16 +184,16 @@ impl Ord for ItemContent<'_> {
                     .len()
                     .cmp(&other.production.steps.len())
             })
-            .then_with(|| self.prec_cmp(self.prec(), other.prec()))
+            .then_with(|| self.prec().cmp(&other.prec()))
             .then_with(|| self.assoc().cmp(&other.assoc()))
             .then_with(|| self.dot.cmp(&other.dot))
             .then_with(|| {
                 let steps = self.production.steps.iter().zip(other.production.steps);
                 for (i, (&sa, &sb)) in steps.enumerate() {
                     let o = if i < self.dot {
-                        self.alias_cmp(sa, sb).then_with(|| self.field_cmp(sa, sb))
+                        (sa.alias(), sa.field()).cmp(&(sb.alias(), sb.field()))
                     } else {
-                        self.step_cmp(sa, sb)
+                        sa.cmp(&sb)
                     };
                     if o != Ordering::Equal {
                         return o;
