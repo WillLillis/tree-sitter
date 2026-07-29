@@ -262,6 +262,100 @@ pub struct ParseItem<'a> {
     pub has_preceding_inherited_fields: bool,
 }
 
+/// Interned lookahead set. An index into a [`LookaheadPool`]. Ids are canonical,
+/// so id equality is equivalent to underlying [`TokenSet`] equality.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LookaheadSetId(u32);
+
+impl Default for LookaheadSetId {
+    fn default() -> Self {
+        LookaheadSetPool::EMPTY
+    }
+}
+
+/// Interner for lookahead [`TokenSet`]s. Item-set entries store ids.
+pub struct LookaheadSetPool {
+    sets: Vec<TokenSet>,
+    ids: FxHashMap<TokenSet, LookaheadSetId>,
+    union_memo: FxHashMap<(LookaheadSetId, LookaheadSetId), LookaheadSetId>,
+    insert_memo: FxHashMap<(LookaheadSetId, Symbol), LookaheadSetId>,
+}
+
+impl LookaheadSetPool {
+    pub const EMPTY: LookaheadSetId = LookaheadSetId(0);
+
+    #[must_use]
+    pub fn new() -> Self {
+        let mut pool = Self {
+            sets: Vec::new(),
+            ids: FxHashMap::default(),
+            union_memo: FxHashMap::default(),
+            insert_memo: FxHashMap::default(),
+        };
+        let empty = pool.intern(TokenSet::new());
+        debug_assert_eq!(empty, Self::EMPTY);
+        pool
+    }
+
+    #[must_use]
+    pub fn get(&self, id: LookaheadSetId) -> &TokenSet {
+        &self.sets[id.0 as usize]
+    }
+
+    pub fn intern(&mut self, set: TokenSet) -> LookaheadSetId {
+        if let Some(&id) = self.ids.get(&set) {
+            return id;
+        }
+        let id = LookaheadSetId(self.sets.len() as u32);
+        self.sets.push(set.clone());
+        self.ids.insert(set, id);
+        id
+    }
+
+    pub fn intern_ref(&mut self, set: &TokenSet) -> LookaheadSetId {
+        if let Some(&id) = self.ids.get(set) {
+            return id;
+        }
+        self.intern(set.clone())
+    }
+
+    pub fn singleton(&mut self, symbol: Symbol) -> LookaheadSetId {
+        self.insert(Self::EMPTY, symbol)
+    }
+
+    pub fn insert(&mut self, id: LookaheadSetId, symbol: Symbol) -> LookaheadSetId {
+        if self.get(id).contains(symbol) {
+            return id;
+        }
+        if let Some(&result) = self.insert_memo.get(&(id, symbol)) {
+            return result;
+        }
+        let mut set = self.get(id).clone();
+        set.insert(symbol);
+        let result = self.intern(set);
+        self.insert_memo.insert((id, symbol), result);
+        result
+    }
+
+    pub fn union(&mut self, left: LookaheadSetId, right: LookaheadSetId) -> LookaheadSetId {
+        if left == right || right == Self::EMPTY {
+            return left;
+        }
+        if left == Self::EMPTY {
+            return right;
+        }
+        let key = (left.min(right), left.max(right));
+        if let Some(&result) = self.union_memo.get(&key) {
+            return result;
+        }
+        let mut set = self.get(key.0).clone();
+        set.insert_all(self.get(key.1));
+        let result = self.intern(set);
+        self.union_memo.insert(key, result);
+        result
+    }
+}
+
 /// Represents a set of in-progress matches of productions in a grammar.
 ///
 /// For each in-progress match, a set of "lookaheads" (tokens that are allowed to
@@ -275,7 +369,7 @@ pub struct ParseItemSet<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseItemSetEntry<'a> {
     pub item: ParseItem<'a>,
-    pub lookaheads: TokenSet,
+    pub lookaheads: LookaheadSetId,
     pub following_reserved_word_set: ReservedWordSetId,
 }
 
@@ -305,6 +399,7 @@ pub struct ParseItemSetDisplay<'a>(
     pub &'a SyntaxGrammar,
     pub &'a LexicalGrammar,
     pub &'a StrPool,
+    pub &'a LookaheadSetPool,
 );
 
 impl<'a> ParseItem<'a> {
@@ -411,7 +506,7 @@ impl<'a> ParseItemSet<'a> {
                     i,
                     ParseItemSetEntry {
                         item,
-                        lookaheads: TokenSet::new(),
+                        lookaheads: LookaheadSetPool::EMPTY,
                         following_reserved_word_set: ReservedWordSetId::default(),
                     },
                 );
@@ -594,7 +689,7 @@ impl fmt::Display for ParseItemSetDisplay<'_> {
                 f,
                 "{}\t{}",
                 ParseItemDisplay(&entry.item, self.1, self.2, self.3),
-                TokenSetDisplay(&entry.lookaheads, self.1, self.2, self.3),
+                TokenSetDisplay(self.4.get(entry.lookaheads), self.1, self.2, self.3),
             )?;
             if entry.following_reserved_word_set != ReservedWordSetId::default() {
                 write!(
