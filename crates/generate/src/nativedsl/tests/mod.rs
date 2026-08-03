@@ -284,18 +284,7 @@ use super::{
     ResolveErrorKind, ScalarTy, TupleSig, Ty, TypeErrorKind, parse_native_dsl,
 };
 
-/// Generate tests that parse a grammar and assert on the first variable's rule.
-macro_rules! rule_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let g = dsl($input);
-            assert_eq!(g.variables[0].rule, $expected);
-        })*
-    };
-}
-
-/// Pool-native counterpart to `rule_tests`: expected rules remain a concise
-/// test-only pattern, while the actual rule is inspected directly in its pool.
+/// Parse a grammar and match the first variable's pooled rule.
 macro_rules! pooled_rule_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
@@ -308,7 +297,7 @@ macro_rules! pooled_rule_tests {
 /// Generate tests that just verify a grammar compiles without error.
 macro_rules! compile_tests {
     ($($name:ident { $input:expr })*) => {
-        $(#[test] fn $name() { dsl($input); })*
+        $(#[test] fn $name() { pooled_dsl($input); })*
     };
 }
 
@@ -328,6 +317,21 @@ macro_rules! rule_names_tests {
         $(#[test] fn $name() {
             let g = dsl($input);
             assert_eq!(rule_names(&g), $expected);
+        })*
+    };
+}
+
+macro_rules! pooled_rule_names_tests {
+    ($($name:ident { $input:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let g = pooled_dsl($input);
+            assert_eq!(
+                g.variables
+                    .iter()
+                    .map(|variable| g.pool.resolve(variable.name))
+                    .collect::<Vec<_>>(),
+                $expected,
+            );
         })*
     };
 }
@@ -499,6 +503,26 @@ pub(super) fn assert_rule(
     if let Err(reason) = mismatch(pool, actual, expected, "root") {
         panic!("pooled rule did not match expectation: {reason}\nexpected: {expected:#?}");
     }
+}
+
+pub(super) fn assert_rules(
+    pool: &crate::rules::RulePool,
+    actual: &[RuleId],
+    expected: &[RuleExpectation],
+) {
+    assert_eq!(actual.len(), expected.len(), "rule-list lengths differ");
+    for (&actual, expected) in actual.iter().zip(expected) {
+        assert_rule(pool, actual, expected);
+    }
+}
+
+pub(super) fn assert_named_rule(grammar: &PooledGrammar, name: &str, expected: &RuleExpectation) {
+    let variable = grammar
+        .variables
+        .iter()
+        .find(|variable| grammar.pool.resolve(variable.name) == name)
+        .unwrap_or_else(|| panic!("rule {name:?} not found"));
+    assert_rule(&grammar.pool, variable.root, expected);
 }
 
 pub(super) fn dsl_err(input: &str) -> DslError {

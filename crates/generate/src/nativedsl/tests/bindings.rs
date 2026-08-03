@@ -1,6 +1,6 @@
 use super::*;
 
-rule_tests! {
+pooled_rule_tests! {
     let_binding_int {
         r#"grammar { language: "test" }
         let P: int_t = 5
@@ -317,7 +317,7 @@ rule_tests! {
 
 // Keywords (seq/token/repeat) are contextual: usable as a rule, let, or macro
 // name. Each context is its own case; the lone rule is the only variable.
-rule_names_tests! {
+pooled_rule_names_tests! {
     keyword_seq_as_rule_name {
         r#"grammar { language: "test" } rule seq { "x" }"#,
         vec!["seq"]
@@ -335,17 +335,20 @@ rule_names_tests! {
 #[test]
 fn for_in_list_str_body_via_let() {
     // For-loop spreads its body into a list literal under a let binding.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
     let kws: list_t<str_t> = [for (kw: str_t) in ["if", "else", "while"] { kw }]
     grammar {
         language: "test",
         reserved: { global: kws },
     }
-    rule program { "x" }"#);
-    assert_eq!(g.reserved_words.len(), 1);
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![
+    rule program { "x" }"#,
+    );
+    assert_eq!(g.reserved_sets.len(), 1);
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[
             Rule::String("if".into()),
             Rule::String("else".into()),
             Rule::String("while".into()),
@@ -357,14 +360,17 @@ fn for_in_list_str_body_via_let() {
 fn for_in_list_rule_body() {
     // For-loop body builds rules (case-insensitive regexps), spread into the
     // grammar's extras. Mirrors the PHP keywords.tsg pattern.
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test",
         extras: [for (kw: str_t) in ["if", "else"] { regexp(kw, "i") }],
     }
-    rule program { "x" }"#);
-    assert_eq!(
-        g.extra_symbols,
-        vec![Rule::pattern("if", "i"), Rule::pattern("else", "i"),],
+    rule program { "x" }"#,
+    );
+    assert_rules(
+        &g.pool,
+        &g.extra_roots,
+        &[Rule::pattern("if", "i"), Rule::pattern("else", "i")],
     );
 }
 
@@ -372,7 +378,8 @@ fn for_in_list_rule_body() {
 fn for_in_list_tuple_destructure() {
     // Tuple destructuring inside a for-loop, spread into a list literal
     // consumed by reserved_words.
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test",
         reserved: {
             global: [
@@ -380,10 +387,12 @@ fn for_in_list_tuple_destructure() {
             ],
         },
     }
-    rule program { "x" }"#);
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![Rule::String("if".into()), Rule::String("else".into())],
+    rule program { "x" }"#,
+    );
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[Rule::String("if".into()), Rule::String("else".into())],
     );
 }
 
@@ -391,16 +400,19 @@ fn for_in_list_tuple_destructure() {
 fn for_in_list_mixed_with_concrete_elements() {
     // For-loop spread interleaved with concrete list elements; order is
     // preserved.
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test",
         reserved: {
             global: ["alpha", for (kw: str_t) in ["mid1", "mid2"] { kw }, "omega"],
         },
     }
-    rule program { "x" }"#);
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![
+    rule program { "x" }"#,
+    );
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[
             Rule::String("alpha".into()),
             Rule::String("mid1".into()),
             Rule::String("mid2".into()),
@@ -413,16 +425,19 @@ fn for_in_list_mixed_with_concrete_elements() {
 fn for_in_list_empty_iterable() {
     // A for-loop spread over an empty literal contributes zero elements; the
     // binding annotation makes the body type self-sufficient.
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test",
         reserved: {
             global: ["only", for (kw: str_t) in [] { kw }],
         },
     }
-    rule program { "x" }"#);
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![Rule::String("only".into())],
+    rule program { "x" }"#,
+    );
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[Rule::String("only".into())],
     );
 }
 
@@ -430,7 +445,8 @@ fn for_in_list_empty_iterable() {
 fn for_in_list_nested() {
     // A for-loop in spread position whose body contains another for-loop
     // spread expands the cartesian product into the surrounding list.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         let prefixes: list_t<str_t> = ["a", "b"]
         let suffixes: list_t<str_t> = ["1", "2", "3"]
         grammar {
@@ -442,10 +458,12 @@ fn for_in_list_nested() {
             },
         }
         rule program { "x" }
-    "#);
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![
+    "#,
+    );
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[
             Rule::String("a1".into()),
             Rule::String("a2".into()),
             Rule::String("a3".into()),
@@ -458,39 +476,45 @@ fn for_in_list_nested() {
 
 #[test]
 fn object_with_list_rule_values() {
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test",
         reserved: { global: ["if", "else"], props: ["get", "set"] },
     }
-    rule program { "x" }"#);
-    assert_eq!(g.reserved_words.len(), 2);
-    assert_eq!(g.reserved_words[0].name, "global");
-    assert_eq!(g.reserved_words[1].name, "props");
+    rule program { "x" }"#,
+    );
+    assert_eq!(g.reserved_sets.len(), 2);
+    assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
+    assert_eq!(g.pool.resolve(g.reserved_sets[1].name), "props");
 }
 
 #[test]
 fn function_multiple_calls() {
-    let g = dsl(r##"grammar { language: "test" }
+    let g = pooled_dsl(
+        r##"grammar { language: "test" }
         macro make_if(content: rule_t) rule_t { seq("#if", content, "#endif") }
         rule preproc_if { make_if(_statement) }
         rule preproc_block_if { make_if(_block_item) }
         rule _statement { "stmt" }
-        rule _block_item { "item" }"##);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::seq(vec![
+        rule _block_item { "item" }"##,
+    );
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &Rule::seq(vec![
             Rule::String("#if".into()),
             Rule::NamedSymbol("_statement".into()),
             Rule::String("#endif".into()),
-        ])
+        ]),
     );
-    assert_eq!(
-        g.variables[1].rule,
-        Rule::seq(vec![
+    assert_rule(
+        &g.pool,
+        g.variables[1].root,
+        &Rule::seq(vec![
             Rule::String("#if".into()),
             Rule::NamedSymbol("_block_item".into()),
             Rule::String("#endif".into()),
-        ])
+        ]),
     );
 }
 
@@ -514,9 +538,11 @@ fn plus_times_choice() -> Rule {
 fn tuple_in_object_annotation_checks() {
     // obj_t<tuple_t<...>> parses and checks: objects hold tuples, preserving the
     // InnerTy == DataTy - Object invariant.
-    dsl(r#"grammar { language: "test" }
+    pooled_dsl(
+        r#"grammar { language: "test" }
         let m: obj_t<tuple_t<str_t, int_t>> = { plus: ("+", 1) }
-        rule program { "x" }"#);
+        rule program { "x" }"#,
+    );
 }
 
 #[test]
@@ -552,17 +578,20 @@ fn error_for_binding_shadows_rule() {
 fn for_binding_shadows_macro_param() {
     // Locals may shadow enclosing locals (only top-level declarations are
     // protected); the innermost binding wins.
-    let g = dsl(r#"grammar { language: "test" }
+    let g = pooled_dsl(
+        r#"grammar { language: "test" }
         rule a { "x" }
         rule b { "y" }
         macro wrap(item: rule_t) rule_t { seq(for (item: rule_t) in [a, b] { item }) }
-        rule program { wrap("z") }"#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
+        rule program { wrap("z") }"#,
+    );
+    assert_named_rule(
+        &g,
+        "program",
+        &Rule::seq(vec![
             Rule::NamedSymbol("a".into()),
             Rule::NamedSymbol("b".into()),
-        ])
+        ]),
     );
 }
 
@@ -570,16 +599,19 @@ fn for_binding_shadows_macro_param() {
 fn nested_for_binding_shadows_outer() {
     // Inner binding shadows the outer within the body; the inner iterable is
     // parsed before the inner binding exists, so it still sees the outer one.
-    let g = dsl(r#"grammar { language: "test" }
+    let g = pooled_dsl(
+        r#"grammar { language: "test" }
         rule a { "x" }
         rule b { "y" }
-        rule program { seq(for (v: list_t<rule_t>) in [[a], [b]] { for (v: rule_t) in v { v } }) }"#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
+        rule program { seq(for (v: list_t<rule_t>) in [[a], [b]] { for (v: rule_t) in v { v } }) }"#,
+    );
+    assert_named_rule(
+        &g,
+        "program",
+        &Rule::seq(vec![
             Rule::NamedSymbol("a".into()),
             Rule::NamedSymbol("b".into()),
-        ])
+        ]),
     );
 }
 
