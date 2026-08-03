@@ -176,6 +176,72 @@ pub struct RulePool {
 }
 
 impl RulePool {
+    /// Copy a rule subtree from another pool, remapping both rule and string ids.
+    /// `rule_map` may be retained by the caller to avoid copying shared subtrees
+    /// more than once.
+    pub fn import_subtree(
+        &mut self,
+        source: &Self,
+        root: RuleId,
+        rule_map: &mut Vec<Option<RuleId>>,
+    ) -> RuleId {
+        fn copy(
+            target: &mut RulePool,
+            source: &RulePool,
+            id: RuleId,
+            map: &mut Vec<Option<RuleId>>,
+        ) -> RuleId {
+            if map.len() <= id.index() {
+                map.resize(id.index() + 1, None);
+            }
+            if let Some(mapped) = map[id.index()] {
+                return mapped;
+            }
+            let intern = |target: &mut RulePool, sid| target.intern(source.resolve(sid));
+            let node = match source.node(id) {
+                Rule::Blank => Rule::Blank,
+                Rule::String(s) => Rule::String(intern(target, s)),
+                Rule::Pattern(p, f) => Rule::Pattern(intern(target, p), intern(target, f)),
+                Rule::NamedSymbol(s) => Rule::NamedSymbol(intern(target, s)),
+                node @ Rule::Sym { .. } => node,
+                Rule::Seq(range) | Rule::Choice(range) => {
+                    let is_seq = matches!(source.node(id), Rule::Seq(_));
+                    let children: Vec<_> = source
+                        .child_slice(range)
+                        .iter()
+                        .map(|&child| copy(target, source, child, map))
+                        .collect();
+                    let range = target.push_children(&children);
+                    if is_seq { Rule::Seq(range) } else { Rule::Choice(range) }
+                }
+                Rule::Repeat(inner) => Rule::Repeat(copy(target, source, inner, map)),
+                Rule::Metadata { params, rule } => {
+                    let mut params = source.params(params);
+                    params.precedence = match params.precedence {
+                        Precedence::Name(s) => Precedence::Name(intern(target, s)),
+                        other => other,
+                    };
+                    params.alias = params.alias.map(|alias| Alias {
+                        value: intern(target, alias.value),
+                        is_named: alias.is_named,
+                    });
+                    params.field = params.field.map(|s| intern(target, s));
+                    let params = target.push_params(params);
+                    Rule::Metadata { params, rule: copy(target, source, rule, map) }
+                }
+                Rule::Reserved { rule, ctx } => Rule::Reserved {
+                    rule: copy(target, source, rule, map),
+                    ctx: intern(target, ctx),
+                },
+            };
+            let mapped = target.push_node(node);
+            map[id.index()] = Some(mapped);
+            mapped
+        }
+
+        copy(self, source, root, rule_map)
+    }
+
     #[must_use]
     pub fn node(&self, id: RuleId) -> Rule {
         self.nodes[id.index()]
