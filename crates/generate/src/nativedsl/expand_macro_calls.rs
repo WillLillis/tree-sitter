@@ -18,8 +18,8 @@ use super::{
     ExpandError, NoteMessage,
     ast::{Expansion, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
     lexer::{is_ident_str, unescape_string},
-    string_pool::{Str, StringPool},
 };
+use crate::{rules::RulePool, strpool::StrId as Str};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ExpandErrorKind {
@@ -44,7 +44,7 @@ pub enum ExpandErrorKind {
 
 pub fn expand_macro_calls(
     shared: &mut SharedAst,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     ctx: &mut ModuleContext,
 ) -> Result<(), ExpandError> {
     // A name declared by more than one top-level macro is rejected by resolve
@@ -96,7 +96,7 @@ fn collect_macros(
 
 fn expand_one_call(
     shared: &mut SharedAst,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     ctx: &mut ModuleContext,
     macros: &FxHashMap<String, MacroId>,
     call_id: NodeId,
@@ -167,7 +167,7 @@ fn expand_one_call(
                 is_override,
                 name,
                 body,
-            } => (is_override, strings.intern_owned(ctx.text(name)), body),
+            } => (is_override, strings.intern(ctx.text(name)), body),
             Node::ComputedRule {
                 is_override,
                 name_expr,
@@ -212,7 +212,7 @@ fn expand_one_call(
 /// compile-time evaluator subset (e.g. references to lets).
 fn eval_name(
     shared: &SharedAst,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     ctx: &ModuleContext,
     args_start: usize,
     node_id: NodeId,
@@ -226,7 +226,7 @@ fn eval_name(
             name_expr_span,
         ));
     }
-    Ok(strings.intern_owned(&buf))
+    Ok(strings.intern(&buf))
 }
 
 /// Build a computed rule name (`@<expr>`) at expand time, before resolve - so

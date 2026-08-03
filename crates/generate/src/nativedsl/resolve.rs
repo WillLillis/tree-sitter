@@ -10,6 +10,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::rules::RulePool;
 use crate::{
     grammars::InputGrammar,
     nativedsl::{
@@ -19,7 +20,6 @@ use crate::{
             Spanned,
         },
         diagnostic::suggest_name,
-        string_pool::StringPool,
     },
     rules::Rule,
 };
@@ -56,7 +56,7 @@ struct ResolveCtx<'a> {
 pub fn resolve(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
-    strings: &StringPool,
+    strings: &RulePool,
     modules: &[Module],
     base: Option<(&InputGrammar, Span)>,
     imported_rules: &[ImportedRule],
@@ -74,7 +74,7 @@ pub fn resolve(
     // Validate computed-name references (`@<expr>`), evaluated under each call's
     // args at expand, against the complete name table.
     for &Spanned { value: name, span } in &ctx.computed_refs {
-        let text = strings.resolve_local(name, &ctx.source);
+        let text = strings.resolve(name);
         // Must resolve to a rule: lower emits a NamedSymbol for whatever name
         // this is, so a let/macro match would lower a dangling symbol.
         match decls.get(text).map(|d| d.value) {
@@ -155,7 +155,7 @@ fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
 fn collect_decls<'a>(
     shared: &SharedAst,
     ctx: &'a ModuleContext,
-    strings: &'a StringPool,
+    strings: &'a RulePool,
     root_items: &[NodeId],
     base: Option<(&'a InputGrammar, Span)>,
     modules: &'a [Module],
@@ -181,7 +181,7 @@ fn collect_decls<'a>(
                 let exp = shared.pools.get_expansion(*expand_id);
                 let (name, is_override) = (exp.name, exp.is_override);
                 // Source entries from expand always reference ctx.source.
-                let name_text = strings.resolve_local(name, &ctx.source);
+                let name_text = strings.resolve(name);
                 insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
                 if is_override {
                     override_names.insert(name_text);
@@ -214,13 +214,14 @@ fn collect_decls<'a>(
     // Register inherited rule names. Collisions with local non-`override` rules error
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
+            let name = base_grammar.pool.resolve(var.name);
             // The first source of an overridden name coexists with the override
             // (claim it by removing). A later source is no longer skipped and so
             // collides as a duplicate, exactly as it would without the override.
-            if override_names.remove(var.name.as_str()) {
+            if override_names.remove(name) {
                 continue;
             }
-            insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
+            insert_decl(&mut decls, name, IdentKind::Rule, inherit_span, ctx)?;
         }
         // Inherited external tokens are referenceable by bare name too, just
         // like inherited rules). Anonymous externals (string/pattern) have no
@@ -228,11 +229,12 @@ fn collect_decls<'a>(
         // `externals` (an external-scanner token with a grammar-rule fallback),
         // putting the name in both lists; it's one symbol, already registered by
         // the rule loop, so skip it rather than colliding with ourselves.
-        for ext in &base_grammar.external_tokens {
-            if let Rule::NamedSymbol(name) = ext
-                && !override_names.contains(name.as_str())
-                && !base_grammar.variables.iter().any(|v| v.name == *name)
+        for &root in &base_grammar.external_roots {
+            if let Rule::NamedSymbol(name_id) = base_grammar.pool.node(root)
+                && !override_names.contains(base_grammar.pool.resolve(name_id))
+                && !base_grammar.variables.iter().any(|v| v.name == name_id)
             {
+                let name = base_grammar.pool.resolve(name_id);
                 insert_decl(&mut decls, name, IdentKind::Rule, inherit_span, ctx)?;
             }
         }
@@ -245,10 +247,10 @@ fn collect_decls<'a>(
             Module::Helper { lowered_rules, .. },
             &modules[usize::from(ir.module)]
         );
-        let name = &lowered_rules[ir.index as usize].0;
+        let name = strings.resolve(lowered_rules[ir.index as usize].0);
         // First source of an overridden name claims the override. A later
         // source is no longer skipped and collides (see the base loop above).
-        if !override_names.remove(name.as_str()) {
+        if !override_names.remove(name) {
             insert_decl(&mut decls, name, IdentKind::Rule, ir.ref_span, ctx)?;
         }
     }

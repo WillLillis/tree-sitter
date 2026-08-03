@@ -12,7 +12,7 @@ use crate::{
     strpool::StrId,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[expect(
     non_camel_case_types,
@@ -22,7 +22,7 @@ use crate::{
     clippy::upper_case_acronyms,
     reason = "variant names match JSON grammar format"
 )]
-enum RuleJSON {
+pub(crate) enum RuleJSON {
     ALIAS {
         content: Box<Self>,
         named: bool,
@@ -83,9 +83,9 @@ enum RuleJSON {
     },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged)]
-enum PrecedenceValueJSON {
+pub(crate) enum PrecedenceValueJSON {
     Integer(i32),
     Name(String),
 }

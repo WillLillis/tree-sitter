@@ -10,9 +10,9 @@ use crate::nativedsl::{
     ast::{ModuleContext, Node, SharedAst, Span},
     expand_macro_calls, lexer, lower, parser, resolve,
     resolve::ResolveErrorKind,
-    string_pool::StringPool,
     typecheck::{self, TypeEnv},
 };
+use crate::rules::RulePool;
 
 const MAX_MODULE_DEPTH: usize = 256;
 
@@ -22,7 +22,7 @@ pub struct Loader<'a> {
     pub modules: &'a mut Vec<Module>,
     pub env: &'a mut TypeEnv,
     pub state: &'a mut LoweringState,
-    pub strings: &'a mut StringPool,
+    pub strings: &'a mut RulePool,
     pub cfg: &'a mut CfgState,
     pub ancestor_paths: Vec<PathBuf>,
     /// Module dedup cache. Each (canonical path, kind) loads at most once
@@ -161,7 +161,7 @@ impl Loader<'_> {
                     &self.shared.arena,
                     &self.shared.pools,
                     &ctx,
-                    super::LoweredRef::Helper(&lowered_rules),
+                    super::LoweredRef::Helper(&lowered_rules, self.strings),
                 );
                 Module::Helper {
                     ctx,

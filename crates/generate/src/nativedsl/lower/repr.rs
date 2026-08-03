@@ -4,36 +4,8 @@ use rustc_hash::FxHashMap;
 
 use super::super::ModuleId;
 use super::super::ast::ChildRange;
-use super::super::string_pool::Str;
-
-/// Index into the lowering rule pool.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct RuleId(pub u32);
-
-#[derive(Clone, Copy)]
-pub enum APrec {
-    Integer(i32),
-    Name(Str),
-}
-
-/// Intermediate rule shape. Materialized into [`crate::rules::Rule`]
-/// at the end via `Evaluator::build_rule`.
-pub enum ARule {
-    Blank,
-    String(Str),
-    Pattern(Str, Option<Str>),
-    NamedSymbol(Str),
-    SeqOrChoice(bool, ChildRange),
-    Repeat(RuleId),
-    Prec(APrec, RuleId),
-    PrecLeft(APrec, RuleId),
-    PrecRight(APrec, RuleId),
-    PrecDynamic(i32, RuleId),
-    Field(Str, RuleId),
-    Alias(Str, bool, RuleId),
-    Token(bool, RuleId),
-    Reserved(Str, RuleId),
-}
+pub use crate::rules::RuleId;
+use crate::strpool::StrId as Str;
 
 /// Index into the lowering value pool.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,8 +32,6 @@ pub enum Value {
 #[derive(Default)]
 pub struct IrPools {
     pub values: Vec<Value>,
-    pub rules: Vec<ARule>,
     pub value_children: Vec<ValueId>,
-    pub rule_children: Vec<RuleId>,
     pub object_pool: Vec<FxHashMap<String, ValueId>>,
 }

@@ -1183,7 +1183,12 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 
 /// Bare member name of a module-qualified reference's source text.
 fn bare_name(ctx: &ModuleContext, span: Span) -> String {
-    ctx.text(span).rsplit("::").next().unwrap().trim().to_string()
+    ctx.text(span)
+        .rsplit("::")
+        .next()
+        .unwrap()
+        .trim()
+        .to_string()
 }
 
 const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {

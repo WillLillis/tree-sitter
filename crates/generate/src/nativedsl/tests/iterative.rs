@@ -9,8 +9,8 @@ use crate::nativedsl::LoweringState;
 use crate::nativedsl::ast::{GrammarConfig, ModuleContext, Node, SharedAst, Span};
 use crate::nativedsl::lower::{LowerErrorKind, lower_with_base};
 use crate::nativedsl::resolve::resolve;
-use crate::nativedsl::string_pool::StringPool;
 use crate::nativedsl::typecheck::{self, TypeEnv};
+use crate::rules::RulePool as StringPool;
 
 /// A `program` rule whose body is an `n`-deep `token(token(...blank...))` chain,
 /// plus a minimal grammar `ModuleContext` (config carries only `language`), built

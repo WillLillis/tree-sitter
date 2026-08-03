@@ -167,7 +167,7 @@ impl Rule {
 
 /// The arena: nodes, their pooled children/params, and the string interner.
 /// Storage is append-only, passes rewrite nodes in place and may orphan subtrees.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct RulePool {
     nodes: Vec<Rule>,
     children: Vec<RuleId>,
@@ -212,7 +212,11 @@ impl RulePool {
                         .map(|&child| copy(target, source, child, map))
                         .collect();
                     let range = target.push_children(&children);
-                    if is_seq { Rule::Seq(range) } else { Rule::Choice(range) }
+                    if is_seq {
+                        Rule::Seq(range)
+                    } else {
+                        Rule::Choice(range)
+                    }
                 }
                 Rule::Repeat(inner) => Rule::Repeat(copy(target, source, inner, map)),
                 Rule::Metadata { params, rule } => {
@@ -227,7 +231,10 @@ impl RulePool {
                     });
                     params.field = params.field.map(|s| intern(target, s));
                     let params = target.push_params(params);
-                    Rule::Metadata { params, rule: copy(target, source, rule, map) }
+                    Rule::Metadata {
+                        params,
+                        rule: copy(target, source, rule, map),
+                    }
                 }
                 Rule::Reserved { rule, ctx } => Rule::Reserved {
                     rule: copy(target, source, rule, map),

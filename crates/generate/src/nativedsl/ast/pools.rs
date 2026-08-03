@@ -3,8 +3,8 @@
 //! containers, and the element types they store.
 
 use super::{IdentKind, Node, NodeArena, NodeId, Span};
-use crate::nativedsl::string_pool::Str;
 use crate::nativedsl::typecheck::Ty;
+use crate::strpool::StrId as Str;
 
 macro_rules! id_type {
     ($name:ident) => {

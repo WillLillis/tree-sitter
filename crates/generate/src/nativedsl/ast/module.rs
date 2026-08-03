@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use rustc_hash::FxHashMap;
 
 use super::{Node, NodeArena, NodeId, Span, Spanned};
-use crate::nativedsl::string_pool::Str;
 use crate::nativedsl::typecheck::Ty;
 use crate::nativedsl::{ModuleId, Note, NoteMessage};
+use crate::strpool::StrId as Str;
 
 /// All grammar config fields. Used for parsing the grammar block, `grammar_config()`
 /// access (Language/Inherits excluded by the parser), and iterating config node fields.

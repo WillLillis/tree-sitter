@@ -14,7 +14,7 @@ mod repr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
+    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable},
     nativedsl::{ImportedRule, Module, ast::ModuleContext},
     rules::Rule,
 };
@@ -22,8 +22,8 @@ use crate::{
 use super::{
     LowerError, ModuleId, Note, NoteMessage,
     ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
-    string_pool::{Str, StringPool},
 };
+use crate::{rules::RulePool, strpool::StrId as Str};
 
 pub use error::{DisallowedItemKind, LowerErrorKind, LowerResult};
 
@@ -36,7 +36,7 @@ enum NameSource {
     Str(Str),   // Node::ExpandedRule
 }
 
-use evaluator::{BuildStep, Evaluator, Task};
+use evaluator::{Evaluator, Task};
 use repr::{IrPools, RuleId, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
@@ -94,14 +94,11 @@ struct Scratch {
     for_binding_frames: Vec<(ForId, usize)>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
+    import_map: Vec<Option<RuleId>>,
     /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
     /// this is a plain stack.
     combine_bases: Vec<u32>,
-    /// Reused work + output stacks for [`Evaluator::build_rule`]'s iterative
-    /// materialization, so it doesn't allocate fresh buffers per top-level rule.
-    build_work: Vec<BuildStep>,
-    build_out: Vec<Rule>,
 }
 
 impl Scratch {
@@ -115,9 +112,8 @@ impl Scratch {
         self.for_binding_frames.clear();
         self.val_scratch.clear();
         self.rule_scratch.clear();
+        self.import_map.clear();
         self.combine_bases.clear();
-        self.build_work.clear();
-        self.build_out.clear();
     }
 }
 
@@ -128,18 +124,18 @@ impl LoweringState {
 }
 
 struct EvalResult {
-    language: String,
-    rules: Vec<(String, Rule)>,
-    overrides: Vec<(String, Rule, Span)>,
-    extras: Option<Vec<Rule>>,
-    externals: Option<Vec<Rule>>,
-    inline: Option<Vec<String>>,
-    supertypes: Option<Vec<String>>,
-    word: Option<String>,
-    start: Option<(String, Span)>,
-    conflicts: Option<Vec<Vec<String>>>,
+    language: Str,
+    rules: Vec<(Str, RuleId)>,
+    overrides: Vec<(Str, RuleId, Span)>,
+    extras: Option<Vec<RuleId>>,
+    externals: Option<Vec<RuleId>>,
+    inline: Option<Vec<Str>>,
+    supertypes: Option<Vec<Str>>,
+    word: Option<Str>,
+    start: Option<(Str, Span)>,
+    conflicts: Option<Vec<Vec<Str>>>,
     precedences: Option<Vec<Vec<PrecedenceEntry>>>,
-    reserved: Option<Vec<ReservedWordContext<Rule>>>,
+    reserved: Option<Vec<ReservedWordContext>>,
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
@@ -148,7 +144,7 @@ struct EvalResult {
 /// - `state` persists across the whole `parse_native_dsl` pipeline.
 pub fn lower_with_base(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     shared: &SharedAst,
     previous: &[Module],
     current: &ModuleContext,
@@ -158,7 +154,14 @@ pub fn lower_with_base(
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
     let result = evaluate(state, strings, shared, previous, current)?;
-    let grammar = build_grammar(current, result, base_grammar, previous, imported_rules)?;
+    let grammar = build_grammar(
+        strings,
+        current,
+        result,
+        base_grammar,
+        previous,
+        imported_rules,
+    )?;
     check_symbol_completeness(shared, current, previous, &grammar)?;
     Ok(grammar)
 }
@@ -171,7 +174,7 @@ pub fn lower_with_base(
 #[doc(hidden)]
 pub fn eval_only_for_bench(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     shared: &SharedAst,
     previous: &[Module],
     current: &ModuleContext,
@@ -194,43 +197,29 @@ fn check_symbol_completeness(
     if !current.has_forward_decls && !previous.iter().any(|m| m.ctx().has_forward_decls) {
         return Ok(());
     }
-    let mut defined: FxHashSet<&str> = grammar.variables.iter().map(|v| v.name.as_str()).collect();
-    for ext in &grammar.external_tokens {
-        if let Rule::NamedSymbol(name) = ext {
-            defined.insert(name.as_str());
+    let mut defined: FxHashSet<Str> = grammar.variables.iter().map(|v| v.name).collect();
+    for &root in &grammar.external_roots {
+        if let Rule::NamedSymbol(name) = grammar.pool.node(root) {
+            defined.insert(name);
         }
     }
-    let mut undefined: Vec<&str> = Vec::new();
+    let mut referenced = Vec::new();
     for v in &grammar.variables {
-        collect_undefined(&v.rule, &defined, &mut undefined);
+        grammar
+            .pool
+            .collect_referenced_ids(v.root, false, &mut referenced);
     }
+    let undefined: Vec<&str> = referenced
+        .into_iter()
+        .filter(|name| !defined.contains(name))
+        .map(|name| grammar.pool.resolve(name))
+        .collect();
     if undefined.is_empty() {
         return Ok(());
     }
     Err(undefined_symbols_error(
         shared, current, previous, undefined,
     ))
-}
-
-/// Push every `NamedSymbol` in `root` whose name is absent from `defined` into
-/// `out`. Walks with an explicit stack (order is irrelevant - `out` is sorted and
-/// deduped by the caller) so a deeply nested rule cannot overflow the native stack.
-fn collect_undefined<'a>(root: &'a Rule, defined: &FxHashSet<&str>, out: &mut Vec<&'a str>) {
-    let mut stack = vec![root];
-    while let Some(rule) = stack.pop() {
-        match rule {
-            Rule::NamedSymbol(name) if !defined.contains(name.as_str()) => out.push(name.as_str()),
-            Rule::Seq(rules) | Rule::Choice(rules) => stack.extend(rules.iter()),
-            Rule::Metadata { rule, .. } | Rule::Repeat(rule) | Rule::Reserved { rule, .. } => {
-                stack.push(rule);
-            }
-            Rule::NamedSymbol(_)
-            | Rule::Blank
-            | Rule::String(_)
-            | Rule::Pattern(..)
-            | Rule::Symbol(_) => {}
-        }
-    }
 }
 
 /// Build the error for one or more dangling `names`.
@@ -361,11 +350,11 @@ fn lower_items(
 ///     reaching the top level via a called macro is rejected below.
 pub fn lower_helper(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     shared: &SharedAst,
     previous: &[super::Module],
     current: &super::ModuleContext,
-) -> LowerResult<Vec<(String, Rule)>> {
+) -> LowerResult<Vec<(Str, RuleId)>> {
     let mut eval = Evaluator::new(state, strings, shared, previous, current);
     let mut rules = Vec::new();
     for it in lower_items(&mut eval, shared, current)? {
@@ -379,24 +368,21 @@ pub fn lower_helper(
                 it.span,
             ));
         }
-        rules.push((
-            resolve_name(it.src, &eval, current),
-            eval.build_rule(it.rule_id)?,
-        ));
+        rules.push((resolve_name(it.src, &mut eval, current), it.rule_id));
     }
     Ok(rules)
 }
 
-fn resolve_name(src: NameSource, eval: &Evaluator, ctx: &super::ModuleContext) -> String {
+fn resolve_name(src: NameSource, eval: &mut Evaluator, ctx: &super::ModuleContext) -> Str {
     match src {
-        NameSource::Span(s) => ctx.text(s).to_string(),
-        NameSource::Str(s) => eval.strings.resolve_local(s, &ctx.source).to_string(),
+        NameSource::Span(s) => eval.strings.intern(ctx.text(s)),
+        NameSource::Str(s) => s,
     }
 }
 
 fn evaluate(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    strings: &mut RulePool,
     shared: &SharedAst,
     previous: &[super::Module],
     ctx: &super::ModuleContext,
@@ -414,19 +400,20 @@ fn evaluate(
     // grammar_config is guaranteed present by `validate_grammar`, language
     // is guaranteed present by the parser (`MissingLanguageField` error).
     let config = ctx.grammar_config.as_ref().unwrap();
-    let language = config.language.as_ref().unwrap();
+    let language = eval.strings.intern(config.language.as_ref().unwrap());
 
-    let rules: Vec<(String, Rule)> = rule_entries
+    let rules: Vec<(Str, RuleId)> = rule_entries
         .into_iter()
-        .map(|(src, rid)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?)))
-        .collect::<LowerResult<_>>()?;
-    let overrides: Vec<(String, Rule, Span)> = override_entries
+        .map(|(src, rid)| (src, rid))
+        .map(|(src, rid)| (resolve_name(src, &mut eval, ctx), rid))
+        .collect();
+    let overrides: Vec<(Str, RuleId, Span)> = override_entries
         .into_iter()
-        .map(|(src, rid, span)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?, span)))
-        .collect::<LowerResult<_>>()?;
+        .map(|(src, rid, span)| (resolve_name(src, &mut eval, ctx), rid, span))
+        .collect();
 
     Ok(EvalResult {
-        language: language.clone(),
+        language,
         rules,
         overrides,
         extras: config
@@ -465,73 +452,44 @@ fn evaluate(
     })
 }
 
-/// Inherit a config field: the child's value replaces the base's entirely if
-/// present, else the base's is inherited. Generic over the field via `field`,
-/// which is more concise than threading a slice through all five call sites.
-fn inherit<T: Clone>(
-    overridden: Option<Vec<T>>,
-    base: Option<&InputGrammar>,
-    field: fn(&InputGrammar) -> &[T],
-) -> Vec<T> {
-    overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).to_vec()))
-}
-
-/// Merge the child's `reserved` onto the base's, unlike the replace-by-default
-/// of every other field: keep base sets in base order (so the first/default set
-/// is preserved), override an existing set by name in place, and append the
-/// child's new sets. Matches dsl.js, which assigns `reserved[name] = ...` over a
-/// copy of the base's reserved object.
-fn merge_reserved(
-    overridden: Option<Vec<ReservedWordContext<Rule>>>,
-    base: Option<&[ReservedWordContext<Rule>]>,
-) -> Vec<ReservedWordContext<Rule>> {
-    let mut merged = base.unwrap_or(&[]).to_vec();
-    for child in overridden.into_iter().flatten() {
-        if let Some(existing) = merged.iter_mut().find(|c| c.name == child.name) {
-            *existing = child;
-        } else {
-            merged.push(child);
-        }
-    }
-    merged
-}
-
 fn build_grammar(
+    staging: &mut RulePool,
     ctx: &ModuleContext,
     result: EvalResult,
     base: Option<&InputGrammar>,
     previous: &[Module],
     imported_rules: &[ImportedRule],
 ) -> LowerResult<InputGrammar> {
-    let mut overrides: FxHashMap<String, Spanned<Rule>> = FxHashMap::default();
+    let mut overrides: FxHashMap<Str, Spanned<RuleId>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
         overrides.insert(name, Spanned::new(rule, span));
     }
 
+    let mut pool = RulePool::default();
+    let mut staging_map = Vec::new();
+    let mut base_map = Vec::new();
     let mut variables = Vec::new();
 
     // Base rules first - preserves the inherited grammar's start rule.
     if let Some(base) = base {
         variables.reserve(base.variables.len());
         for v in &base.variables {
-            if let Some(Spanned { value: rule, .. }) = overrides.remove(v.name.as_str()) {
-                variables.push(Variable {
-                    name: v.name.clone(),
-                    kind: v.kind,
-                    rule,
-                });
+            let base_name = base.pool.resolve(v.name);
+            let override_name = staging.intern(base_name);
+            let root = if let Some(Spanned { value: root, .. }) = overrides.remove(&override_name) {
+                pool.import_subtree(staging, root, &mut staging_map)
             } else {
-                variables.push(v.clone());
-            }
+                pool.import_subtree(&base.pool, v.root, &mut base_map)
+            };
+            let name = pool.intern(base_name);
+            variables.push(Variable { name, root });
         }
     }
 
-    for (name, rule) in result.rules {
-        variables.push(Variable {
-            name,
-            kind: VariableType::Named,
-            rule,
-        });
+    for (name, root) in result.rules {
+        let name = pool.intern(staging.resolve(name));
+        let root = pool.import_subtree(staging, root, &mut staging_map);
+        variables.push(Variable { name, root });
     }
 
     // Helper rules (materialized from the shared imported-rule list) can also be
@@ -541,15 +499,11 @@ fn build_grammar(
             Module::Helper { lowered_rules, .. },
             &previous[usize::from(ir.module)]
         );
-        let (name, rule) = &lowered_rules[ir.index as usize];
-        let final_rule = overrides
-            .remove(name)
-            .map_or_else(|| rule.clone(), |s| s.value);
-        variables.push(Variable {
-            name: name.clone(),
-            kind: VariableType::Named,
-            rule: final_rule,
-        });
+        let &(name, helper_root) = &lowered_rules[ir.index as usize];
+        let root = overrides.remove(&name).map_or(helper_root, |s| s.value);
+        let root = pool.import_subtree(staging, root, &mut staging_map);
+        let name = pool.intern(staging.resolve(name));
+        variables.push(Variable { name, root });
     }
 
     if !overrides.is_empty() {
@@ -559,7 +513,7 @@ fn build_grammar(
         // through the generic note machinery, no renderer special-casing.
         let mut entries: Vec<(String, Span)> = overrides
             .into_iter()
-            .map(|(name, s)| (name, s.span))
+            .map(|(name, s)| (staging.resolve(name).to_string(), s.span))
             .collect();
         entries.sort_unstable_by_key(|(_, span)| span.start);
         let mut names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
@@ -578,35 +532,159 @@ fn build_grammar(
     // valid rule reference but lives in `external_tokens`, not `variables`, so
     // it can't be the start symbol.
     if let Some((name, span)) = result.start {
+        let name_text = staging.resolve(name);
         let pos = variables
             .iter()
-            .position(|v| v.name == name)
-            .ok_or_else(|| LowerError::new(LowerErrorKind::ExternalCannotBeStart(name), span))?;
+            .position(|v| pool.resolve(v.name) == name_text)
+            .ok_or_else(|| {
+                LowerError::new(
+                    LowerErrorKind::ExternalCannotBeStart(name_text.to_string()),
+                    span,
+                )
+            })?;
         if pos != 0 {
             let v = variables.remove(pos);
             variables.insert(0, v);
         }
     }
 
-    Ok(InputGrammar {
-        name: result.language,
-        variables,
-        // Default extras matches grammar.js (dsl.js:254): `[/\s/]` applied
-        // when neither the grammar nor its base specifies extras.
-        extra_symbols: result.extras.unwrap_or_else(|| {
-            base.map_or_else(
-                || vec![Rule::Pattern("\\s".into(), String::new())],
-                |b| b.extra_symbols.clone(),
-            )
+    let import_staging_roots = |roots: Vec<RuleId>, pool: &mut RulePool, map: &mut Vec<_>| {
+        roots
+            .into_iter()
+            .map(|root| pool.import_subtree(staging, root, map))
+            .collect::<Vec<_>>()
+    };
+    let external_roots = if let Some(roots) = result.externals {
+        import_staging_roots(roots, &mut pool, &mut staging_map)
+    } else if let Some(base) = base {
+        base.external_roots
+            .iter()
+            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let extra_roots = if let Some(roots) = result.extras {
+        import_staging_roots(roots, &mut pool, &mut staging_map)
+    } else if let Some(base) = base {
+        base.extra_roots
+            .iter()
+            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+            .collect()
+    } else {
+        let pattern = pool.intern("\\s");
+        vec![pool.pattern(pattern, Default::default())]
+    };
+    let map_staging_strs = |ids: Vec<Str>, pool: &mut RulePool| {
+        ids.into_iter()
+            .map(|id| pool.intern(staging.resolve(id)))
+            .collect::<Vec<_>>()
+    };
+    let inline_names = match result.inline {
+        Some(ids) => map_staging_strs(ids, &mut pool),
+        None => base.map_or_else(Vec::new, |b| {
+            b.inline_names
+                .iter()
+                .map(|&s| pool.intern(b.pool.resolve(s)))
+                .collect()
         }),
-        expected_conflicts: inherit(result.conflicts, base, |b| &b.expected_conflicts),
-        precedence_orderings: inherit(result.precedences, base, |b| &b.precedence_orderings),
-        external_tokens: inherit(result.externals, base, |b| &b.external_tokens),
-        variables_to_inline: inherit(result.inline, base, |b| &b.variables_to_inline),
-        supertype_symbols: inherit(result.supertypes, base, |b| &b.supertype_symbols),
-        word_token: result
-            .word
-            .or_else(|| base.and_then(|b| b.word_token.clone())),
-        reserved_words: merge_reserved(result.reserved, base.map(|b| b.reserved_words.as_slice())),
+    };
+    let supertype_names = match result.supertypes {
+        Some(ids) => map_staging_strs(ids, &mut pool),
+        None => base.map_or_else(Vec::new, |b| {
+            b.supertype_names
+                .iter()
+                .map(|&s| pool.intern(b.pool.resolve(s)))
+                .collect()
+        }),
+    };
+    let conflict_names = match result.conflicts {
+        Some(groups) => groups
+            .into_iter()
+            .map(|g| map_staging_strs(g, &mut pool))
+            .collect(),
+        None => base.map_or_else(Vec::new, |b| {
+            b.conflict_names
+                .iter()
+                .map(|g| g.iter().map(|&s| pool.intern(b.pool.resolve(s))).collect())
+                .collect()
+        }),
+    };
+    let precedence_orderings = match result.precedences {
+        None => base.map_or_else(Vec::new, |b| {
+            b.precedence_orderings
+                .iter()
+                .map(|g| {
+                    g.iter()
+                        .map(|entry| match *entry {
+                            PrecedenceEntry::Name(s) => {
+                                PrecedenceEntry::Name(pool.intern(b.pool.resolve(s)))
+                            }
+                            PrecedenceEntry::Symbol(s) => {
+                                PrecedenceEntry::Symbol(pool.intern(b.pool.resolve(s)))
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        }),
+        Some(groups) => groups
+            .into_iter()
+            .map(|g| {
+                g.into_iter()
+                    .map(|entry| match entry {
+                        PrecedenceEntry::Name(s) => {
+                            PrecedenceEntry::Name(pool.intern(staging.resolve(s)))
+                        }
+                        PrecedenceEntry::Symbol(s) => {
+                            PrecedenceEntry::Symbol(pool.intern(staging.resolve(s)))
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    };
+    let word_name = match result.word {
+        Some(s) => Some(pool.intern(staging.resolve(s))),
+        None => base.and_then(|b| b.word_name.map(|s| pool.intern(b.pool.resolve(s)))),
+    };
+    let name = pool.intern(staging.resolve(result.language));
+
+    // Reserved-set inheritance is completed below once all roots share `pool`.
+    let reserved_sets = if let Some(sets) = result.reserved {
+        sets.into_iter()
+            .map(|set| ReservedWordContext {
+                name: pool.intern(staging.resolve(set.name)),
+                roots: import_staging_roots(set.roots, &mut pool, &mut staging_map),
+            })
+            .collect()
+    } else if let Some(base) = base {
+        base.reserved_sets
+            .iter()
+            .map(|set| ReservedWordContext {
+                name: pool.intern(base.pool.resolve(set.name)),
+                roots: set
+                    .roots
+                    .iter()
+                    .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+                    .collect(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(InputGrammar {
+        pool,
+        name,
+        variables,
+        external_roots,
+        extra_roots,
+        reserved_sets,
+        supertype_names,
+        conflict_names,
+        inline_names,
+        word_name,
+        precedence_orderings,
     })
 }

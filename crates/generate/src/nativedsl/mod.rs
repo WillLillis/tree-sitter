@@ -50,7 +50,6 @@ pub mod lower;
 pub mod parser;
 pub mod resolve;
 pub mod serialize;
-pub mod string_pool;
 #[cfg(test)]
 mod tests;
 pub mod typecheck;
@@ -76,7 +75,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::IoError;
-use crate::rules::Rule;
+use crate::{
+    rules::{Rule, RuleId, RulePool},
+    strpool::StrId,
+};
 
 use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
 use loader::Loader;
@@ -109,7 +111,7 @@ pub enum Module {
     /// bindings. Their rules are lowered eagerly into `lowered_rules`.
     Helper {
         ctx: ModuleContext,
-        lowered_rules: Vec<(String, Rule)>,
+        lowered_rules: Vec<(StrId, RuleId)>,
         exports: FxHashMap<Box<str>, Export>,
     },
     /// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
@@ -169,7 +171,7 @@ impl Module {
 #[derive(Clone, Copy)]
 pub enum LoweredRef<'a> {
     Grammar(&'a InputGrammar),
-    Helper(&'a [(String, Rule)]),
+    Helper(&'a [(StrId, RuleId)], &'a RulePool),
 }
 
 /// Build a module's export table: each name this module exposes to `mod::name` refs,
@@ -205,17 +207,26 @@ pub fn build_exports(
     match lowered {
         LoweredRef::Grammar(g) => {
             for (i, v) in g.variables.iter().enumerate() {
-                add(&v.name, Export::Rule(RuleTarget::GrammarRule(i as u32)));
+                add(
+                    g.pool.resolve(v.name),
+                    Export::Rule(RuleTarget::GrammarRule(i as u32)),
+                );
             }
-            for (i, r) in g.external_tokens.iter().enumerate() {
-                if let Rule::NamedSymbol(n) = r {
-                    add(n, Export::Rule(RuleTarget::GrammarExternal(i as u32)));
+            for (i, &root) in g.external_roots.iter().enumerate() {
+                if let Rule::NamedSymbol(n) = g.pool.node(root) {
+                    add(
+                        g.pool.resolve(n),
+                        Export::Rule(RuleTarget::GrammarExternal(i as u32)),
+                    );
                 }
             }
         }
-        LoweredRef::Helper(rules) => {
+        LoweredRef::Helper(rules, pool) => {
             for (i, (name, _)) in rules.iter().enumerate() {
-                add(name, Export::Rule(RuleTarget::HelperRule(i as u32)));
+                add(
+                    pool.resolve(*name),
+                    Export::Rule(RuleTarget::HelperRule(i as u32)),
+                );
             }
         }
     }
@@ -299,7 +310,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
-    let mut strings = string_pool::StringPool::default();
+    let mut strings = crate::rules::RulePool::default();
     let mut cfg = apply_cfg::CfgState::default();
     let mut dsl_loader = Loader {
         shared: &mut shared,
