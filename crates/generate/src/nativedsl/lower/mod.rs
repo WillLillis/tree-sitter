@@ -1,11 +1,10 @@
 //! Lowering pass: evaluates the typed AST into an [`InputGrammar`].
 //!
 //! Pipeline:
-//! 1. [`evaluate`] walks the root grammar's items, populating an
-//!    [`evaluator::Evaluator`] with intermediate IR (values + `ARule` pools).
-//! 2. [`build_grammar`] consumes the [`EvalResult`] and the optional
-//!    inherited base grammar, materializing a final [`InputGrammar`] with
-//!    overrides applied and unset fields inherited.
+//! 1. [`evaluate`] walks a grammar's items, emitting rules directly into the
+//!    loader-wide [`RulePool`] and retaining evaluated config values.
+//! 2. [`build_grammar`] combines those IDs with an optional inherited grammar,
+//!    applying overrides and inheriting unset configuration fields.
 
 mod error;
 mod evaluator;
@@ -28,7 +27,7 @@ use crate::{rules::RulePool, strpool::StrId as Str};
 pub use error::{DisallowedItemKind, LowerErrorKind, LowerResult};
 
 /// Rule-decl name source. Resolution is deferred to the final build step
-/// so the body-lowering loop doesn't hold a `StringPool` borrow across
+/// so the body-lowering loop doesn't hold a [`RulePool`] borrow across
 /// `lower_to_rule` calls (which may intern further entries).
 #[derive(Clone, Copy)]
 enum NameSource {
@@ -40,7 +39,7 @@ use evaluator::{Evaluator, Task};
 use repr::{IrPools, RuleId, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
-/// Maximum nesting depth of a materialized [`Rule`] tree. The evaluator builds
+/// Maximum nesting depth of a pooled [`Rule`] graph. The evaluator builds
 /// rules iteratively (no native-stack bound), but the resulting tree is consumed
 /// by the *recursive* shared grammar backend (`crate::prepare_grammar`, also used
 /// by the grammar.js front-end). This bounds the tree depth so a pathologically
@@ -196,11 +195,9 @@ pub fn lower_with_base(
     Ok(grammar)
 }
 
-/// Benchmark hook: run only the eval walk (AST -> `ARule`/value IR pool) over the
-/// root items, skipping the `build_rule` (`ARule` -> [`Rule`]) materialization.
-/// Isolates the permanent lowering pass from the transitional `Rule`-building
-/// bridge, so the iterative eval engine can be timed against the recursive one
-/// without the `Rule`-box allocation noise. Not part of the real pipeline.
+/// Benchmark hook: run only the AST evaluation walk, skipping grammar assembly
+/// and validation. Rules are still emitted into the same pool used by the real
+/// pipeline. Not part of the real pipeline.
 #[doc(hidden)]
 pub fn eval_only_for_bench(
     state: &mut LoweringState,
@@ -482,7 +479,7 @@ fn evaluate(
 }
 
 fn build_grammar(
-    staging: &mut RulePool,
+    pool: &mut RulePool,
     ctx: &ModuleContext,
     result: EvalResult,
     base: Option<&LoweredGrammar>,
@@ -533,7 +530,7 @@ fn build_grammar(
         // through the generic note machinery, no renderer special-casing.
         let mut entries: Vec<(String, Span)> = overrides
             .into_iter()
-            .map(|(name, s)| (staging.resolve(name).to_string(), s.span))
+            .map(|(name, s)| (pool.resolve(name).to_string(), s.span))
             .collect();
         entries.sort_unstable_by_key(|(_, span)| span.start);
         let mut names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
@@ -552,10 +549,10 @@ fn build_grammar(
     // valid rule reference but lives in `external_tokens`, not `variables`, so
     // it can't be the start symbol.
     if let Some((name, span)) = result.start {
-        let name_text = staging.resolve(name);
+        let name_text = pool.resolve(name);
         let pos = variables
             .iter()
-            .position(|v| staging.resolve(v.name) == name_text)
+            .position(|v| pool.resolve(v.name) == name_text)
             .ok_or_else(|| {
                 LowerError::new(
                     LowerErrorKind::ExternalCannotBeStart(name_text.to_string()),
@@ -580,8 +577,8 @@ fn build_grammar(
     } else if let Some(base) = base {
         base.extra_roots.clone()
     } else {
-        let pattern = staging.intern("\\s");
-        vec![staging.pattern(pattern, Default::default())]
+        let pattern = pool.intern("\\s");
+        vec![pool.pattern(pattern, Default::default())]
     };
     let inline_names = match result.inline {
         Some(ids) => ids,

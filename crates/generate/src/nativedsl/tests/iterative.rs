@@ -10,7 +10,7 @@ use crate::nativedsl::ast::{GrammarConfig, ModuleContext, Node, SharedAst, Span}
 use crate::nativedsl::lower::{LowerErrorKind, lower_with_base};
 use crate::nativedsl::resolve::resolve;
 use crate::nativedsl::typecheck::{self, TypeEnv};
-use crate::rules::RulePool as StringPool;
+use crate::rules::RulePool;
 
 /// A `program` rule whose body is an `n`-deep `token(token(...blank...))` chain,
 /// plus a minimal grammar `ModuleContext` (config carries only `language`), built
@@ -64,7 +64,7 @@ fn resolve_deep_nesting_does_not_overflow() {
     // 50k-deep nesting once overflowed resolve_expr's recursion; the iterative
     // walk handles it.
     let (mut shared, ctx) = deep_token_chain(50_000);
-    let strings = StringPool::default();
+    let strings = RulePool::default();
     resolve(&mut shared, &ctx, &strings, &[], None, &[]).unwrap();
 }
 
@@ -82,12 +82,12 @@ fn typecheck_deep_nesting_does_not_overflow() {
 fn lower_deep_nesting_errors_cleanly() {
     // The 50k-deep `token(token(...blank))` chain once overflowed the native stack
     // in eval (per-level recursion). The iterative engine builds the IR on the heap
-    // work stack without overflow; `build_rule` then walks that IR iteratively too,
+    // work stack without overflow; the pooled depth check then walks it iteratively,
     // and the MAX_RULE_DEPTH bound (protecting the recursive shared backend) turns
     // this into a clean error rather than a crash.
     let (shared, ctx) = deep_token_chain(50_000);
     let mut state = LoweringState::default();
-    let mut strings = StringPool::default();
+    let mut strings = RulePool::default();
     let err = lower_with_base(&mut state, &mut strings, &shared, &[], &ctx, &[]).unwrap_err();
     assert!(
         matches!(err.kind, LowerErrorKind::RuleNestingTooDeep),

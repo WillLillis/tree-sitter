@@ -1,5 +1,5 @@
-//!  Walks the typed AST into intermediate IR; [`super`] materializes it into
-//!  [`crate::grammars::InputGrammar`].
+//! Walks the typed AST, emitting pooled rules and evaluated configuration values
+//! for [`super`] to assemble into a grammar.
 
 use std::path::PathBuf;
 

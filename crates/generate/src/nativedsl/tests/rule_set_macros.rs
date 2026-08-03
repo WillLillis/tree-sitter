@@ -127,7 +127,7 @@ fn computed_ref_to_macro_name_rejected() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::ComputedNameNotARule("m".into()));
+    assert_eq!(e.kind, ResolveErrorKind::ComputedNameNotRule("m".into()));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn computed_ref_to_let_name_rejected() {
     let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,
-        ResolveErrorKind::ComputedNameNotARule("width".into())
+        ResolveErrorKind::ComputedNameNotRule("width".into())
     );
 }
 

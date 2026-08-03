@@ -80,7 +80,7 @@ pub fn resolve(
         match decls.get(text).map(|d| d.value) {
             Some(IdentKind::Rule) => {}
             Some(_) => Err(ResolveError::new(
-                ResolveErrorKind::ComputedNameNotARule(text.to_string()),
+                ResolveErrorKind::ComputedNameNotRule(text.to_string()),
                 span,
             ))?,
             None => Err(unknown_ident_error(ctx, &decls, text, span))?,
@@ -669,7 +669,7 @@ pub enum ResolveErrorKind {
     #[error("unknown identifier '{0}'")]
     UnknownIdentifier(String),
     #[error("computed rule name '{0}' does not name a rule")]
-    ComputedNameNotARule(String),
+    ComputedNameNotRule(String),
     #[error("'{0}' shadows an existing declaration")]
     ShadowedBinding(String),
     #[error("externals must be a list literal, append(), or variable reference")]
