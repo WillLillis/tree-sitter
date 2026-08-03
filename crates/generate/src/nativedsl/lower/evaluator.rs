@@ -401,21 +401,16 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         use ConfigField as C;
         let grammar = self.previous[usize::from(mod_idx)].lowered().unwrap();
         match field {
-            C::Language => {
-                let sid = self.strings.intern(grammar.pool.resolve(grammar.name));
-                Ok(self.alloc_val(Value::Str(sid)))
-            }
-            C::Extras => self.import_rules_as_list(&grammar.pool, &grammar.extra_roots, span),
-            C::Externals => self.import_rules_as_list(&grammar.pool, &grammar.external_roots, span),
-            C::Inline => self.import_names_as_list(&grammar.pool, &grammar.inline_names, span),
-            C::Supertypes => {
-                self.import_names_as_list(&grammar.pool, &grammar.supertype_names, span)
-            }
+            C::Language => Ok(self.alloc_val(Value::Str(grammar.name))),
+            C::Extras => self.rules_as_list(&grammar.extra_roots, span),
+            C::Externals => self.rules_as_list(&grammar.external_roots, span),
+            C::Inline => self.names_as_list(&grammar.inline_names, span),
+            C::Supertypes => self.names_as_list(&grammar.supertype_names, span),
             C::Conflicts => {
                 let vals: Vec<ValueId> = grammar
                     .conflict_names
                     .iter()
-                    .map(|g| self.import_names_as_list(&grammar.pool, g, span))
+                    .map(|g| self.names_as_list(g, span))
                     .collect::<LowerResult<_>>()?;
                 self.alloc_list(&vals, span)
             }
@@ -427,13 +422,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                         let inner_start = self.state.ir.value_children.len() as u32;
                         for entry in group {
                             let vid = match entry {
-                                PrecedenceEntry::Name(s) => {
-                                    let sid = self.strings.intern(grammar.pool.resolve(*s));
-                                    self.alloc_val(Value::Str(sid))
-                                }
+                                PrecedenceEntry::Name(s) => self.alloc_val(Value::Str(*s)),
                                 PrecedenceEntry::Symbol(s) => {
-                                    let name = self.strings.intern(grammar.pool.resolve(*s));
-                                    let rid = self.alloc_rule(Rule::NamedSymbol(name));
+                                    let rid = self.alloc_rule(Rule::NamedSymbol(*s));
                                     self.alloc_val(Value::Rule(rid))
                                 }
                             };
@@ -446,7 +437,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             C::Word => {
                 if let Some(name) = grammar.word_name {
-                    let name = self.strings.intern(grammar.pool.resolve(name));
                     let rid = self.alloc_rule(Rule::NamedSymbol(name));
                     Ok(self.alloc_val(Value::Rule(rid)))
                 } else {
@@ -455,8 +445,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             C::Start => match grammar.variables.first() {
                 Some(first) => {
-                    let name = self.strings.intern(grammar.pool.resolve(first.name));
-                    let rid = self.alloc_rule(Rule::NamedSymbol(name));
+                    let rid = self.alloc_rule(Rule::NamedSymbol(first.name));
                     Ok(self.alloc_val(Value::Rule(rid)))
                 }
                 None => Err(self.err(LowerErrorKind::ConfigFieldUnset, span)),
@@ -465,8 +454,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let n = grammar.reserved_sets.len();
                 let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
                 for rwc in &grammar.reserved_sets {
-                    let words_vid = self.import_rules_as_list(&grammar.pool, &rwc.roots, span)?;
-                    map.insert(grammar.pool.resolve(rwc.name).to_string(), words_vid);
+                    let words_vid = self.rules_as_list(&rwc.roots, span)?;
+                    map.insert(self.strings.resolve(rwc.name).to_string(), words_vid);
                 }
                 Ok(self.alloc_object(map))
             }
@@ -474,47 +463,23 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    fn import_rules_as_list(
-        &mut self,
-        source: &RulePool,
-        roots: &[RuleId],
-        span: Span,
-    ) -> LowerResult<ValueId> {
+    fn rules_as_list(&mut self, roots: &[RuleId], span: Span) -> LowerResult<ValueId> {
         let start = self.state.ir.value_children.len() as u32;
-        self.state.ir.value_children.reserve(roots.len());
         for &root in roots {
-            let rid = self.import_rule(source, root);
-            let vid = self.alloc_val(Value::Rule(rid));
-            self.state.ir.value_children.push(vid);
+            let value = self.alloc_val(Value::Rule(root));
+            self.state.ir.value_children.push(value);
         }
         self.finish_list(start, roots.len(), span)
     }
 
-    fn import_names_as_list(
-        &mut self,
-        source: &RulePool,
-        names: &[StrId],
-        span: Span,
-    ) -> LowerResult<ValueId> {
+    fn names_as_list(&mut self, names: &[Str], span: Span) -> LowerResult<ValueId> {
         let start = self.state.ir.value_children.len() as u32;
-        self.state.ir.value_children.reserve(names.len());
         for &name in names {
-            let name = self.strings.intern(source.resolve(name));
-            let rid = self.alloc_rule(Rule::NamedSymbol(name));
-            let vid = self.alloc_val(Value::Rule(rid));
-            self.state.ir.value_children.push(vid);
+            let rule = self.alloc_rule(Rule::NamedSymbol(name));
+            let value = self.alloc_val(Value::Rule(rule));
+            self.state.ir.value_children.push(value);
         }
         self.finish_list(start, names.len(), span)
-    }
-
-    fn import_rule(&mut self, source: &RulePool, root: RuleId) -> RuleId {
-        self.state.scratch.import_map.clear();
-        self.strings.import_subtree(
-            source,
-            root,
-            &mut self.state.scratch.import_map,
-            &mut self.state.scratch.import_scratch,
-        )
     }
 
     /// Evaluate an expression node to a [`ValueId`].
@@ -665,23 +630,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             RuleTarget::GrammarRule(i) => {
                 expect_pat!(Module::Grammar { lowered, .. }, target_module);
-                self.state.scratch.import_map.clear();
-                self.strings.import_subtree(
-                    &lowered.pool,
-                    lowered.variables[i as usize].root,
-                    &mut self.state.scratch.import_map,
-                    &mut self.state.scratch.import_scratch,
-                )
+                lowered.variables[i as usize].root
             }
             RuleTarget::GrammarExternal(i) => {
                 expect_pat!(Module::Grammar { lowered, .. }, target_module);
-                self.state.scratch.import_map.clear();
-                self.strings.import_subtree(
-                    &lowered.pool,
-                    lowered.external_roots[i as usize],
-                    &mut self.state.scratch.import_map,
-                    &mut self.state.scratch.import_scratch,
-                )
+                lowered.external_roots[i as usize]
             }
         }
     }

@@ -14,8 +14,8 @@ mod repr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable},
-    nativedsl::{ImportedRule, Module, ast::ModuleContext},
+    grammars::{PrecedenceEntry, ReservedWordContext, Variable},
+    nativedsl::{ImportedRule, LoweredGrammar, Module, ast::ModuleContext},
     rules::Rule,
 };
 
@@ -23,10 +23,7 @@ use super::{
     LowerError, ModuleId, Note, NoteMessage,
     ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
 };
-use crate::{
-    rules::{RuleImportScratch, RulePool},
-    strpool::StrId as Str,
-};
+use crate::{rules::RulePool, strpool::StrId as Str};
 
 pub use error::{DisallowedItemKind, LowerErrorKind, LowerResult};
 
@@ -101,8 +98,6 @@ struct Scratch {
     /// pooled rule depth.
     rule_walk: Vec<(RuleId, u16)>,
     rule_eq: Vec<(RuleId, RuleId)>,
-    import_map: Vec<Option<RuleId>>,
-    import_scratch: RuleImportScratch,
     /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
     /// this is a plain stack.
@@ -122,7 +117,6 @@ impl Scratch {
         self.rule_scratch.clear();
         self.rule_walk.clear();
         self.rule_eq.clear();
-        self.import_map.clear();
         self.combine_bases.clear();
     }
 }
@@ -159,7 +153,7 @@ pub fn lower_with_base(
     previous: &[Module],
     current: &ModuleContext,
     imported_rules: &[ImportedRule],
-) -> LowerResult<InputGrammar> {
+) -> LowerResult<LoweredGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
@@ -198,7 +192,7 @@ pub fn lower_with_base(
         previous,
         imported_rules,
     )?;
-    check_symbol_completeness(shared, current, previous, &grammar)?;
+    check_symbol_completeness(shared, current, previous, strings, &grammar)?;
     Ok(grammar)
 }
 
@@ -228,27 +222,26 @@ fn check_symbol_completeness(
     shared: &SharedAst,
     current: &ModuleContext,
     previous: &[Module],
-    grammar: &InputGrammar,
+    pool: &RulePool,
+    grammar: &LoweredGrammar,
 ) -> LowerResult<()> {
     if !current.has_forward_decls && !previous.iter().any(|m| m.ctx().has_forward_decls) {
         return Ok(());
     }
     let mut defined: FxHashSet<Str> = grammar.variables.iter().map(|v| v.name).collect();
     for &root in &grammar.external_roots {
-        if let Rule::NamedSymbol(name) = grammar.pool.node(root) {
+        if let Rule::NamedSymbol(name) = pool.node(root) {
             defined.insert(name);
         }
     }
     let mut referenced = Vec::new();
     for v in &grammar.variables {
-        grammar
-            .pool
-            .collect_referenced_ids(v.root, false, &mut referenced);
+        pool.collect_referenced_ids(v.root, false, &mut referenced);
     }
     let undefined: Vec<&str> = referenced
         .into_iter()
         .filter(|name| !defined.contains(name))
-        .map(|name| grammar.pool.resolve(name))
+        .map(|name| pool.resolve(name))
         .collect();
     if undefined.is_empty() {
         return Ok(());
@@ -492,40 +485,32 @@ fn build_grammar(
     staging: &mut RulePool,
     ctx: &ModuleContext,
     result: EvalResult,
-    base: Option<&InputGrammar>,
+    base: Option<&LoweredGrammar>,
     previous: &[Module],
     imported_rules: &[ImportedRule],
-) -> LowerResult<InputGrammar> {
+) -> LowerResult<LoweredGrammar> {
     let mut overrides: FxHashMap<Str, Spanned<RuleId>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
         overrides.insert(name, Spanned::new(rule, span));
     }
 
-    let mut pool = RulePool::default();
-    let mut staging_map = Vec::new();
-    let mut base_map = Vec::new();
-    let mut import_scratch = RuleImportScratch::default();
     let mut variables = Vec::new();
 
     // Base rules first - preserves the inherited grammar's start rule.
     if let Some(base) = base {
         variables.reserve(base.variables.len());
         for v in &base.variables {
-            let base_name = base.pool.resolve(v.name);
-            let override_name = staging.intern(base_name);
+            let override_name = v.name;
             let root = if let Some(Spanned { value: root, .. }) = overrides.remove(&override_name) {
-                pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch)
+                root
             } else {
-                pool.import_subtree(&base.pool, v.root, &mut base_map, &mut import_scratch)
+                v.root
             };
-            let name = pool.intern(base_name);
-            variables.push(Variable { name, root });
+            variables.push(Variable { name: v.name, root });
         }
     }
 
     for (name, root) in result.rules {
-        let name = pool.intern(staging.resolve(name));
-        let root = pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch);
         variables.push(Variable { name, root });
     }
 
@@ -538,8 +523,6 @@ fn build_grammar(
         );
         let &(name, helper_root) = &lowered_rules[ir.index as usize];
         let root = overrides.remove(&name).map_or(helper_root, |s| s.value);
-        let root = pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch);
-        let name = pool.intern(staging.resolve(name));
         variables.push(Variable { name, root });
     }
 
@@ -572,7 +555,7 @@ fn build_grammar(
         let name_text = staging.resolve(name);
         let pos = variables
             .iter()
-            .position(|v| pool.resolve(v.name) == name_text)
+            .position(|v| staging.resolve(v.name) == name_text)
             .ok_or_else(|| {
                 LowerError::new(
                     LowerErrorKind::ExternalCannotBeStart(name_text.to_string()),
@@ -585,144 +568,49 @@ fn build_grammar(
         }
     }
 
-    let import_staging_roots = |roots: Vec<RuleId>,
-                                pool: &mut RulePool,
-                                map: &mut Vec<_>,
-                                scratch: &mut RuleImportScratch| {
-        roots
-            .into_iter()
-            .map(|root| pool.import_subtree(staging, root, map, scratch))
-            .collect::<Vec<_>>()
-    };
     let external_roots = if let Some(roots) = result.externals {
-        import_staging_roots(roots, &mut pool, &mut staging_map, &mut import_scratch)
+        roots
     } else if let Some(base) = base {
-        base.external_roots
-            .iter()
-            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map, &mut import_scratch))
-            .collect()
+        base.external_roots.clone()
     } else {
         Vec::new()
     };
     let extra_roots = if let Some(roots) = result.extras {
-        import_staging_roots(roots, &mut pool, &mut staging_map, &mut import_scratch)
+        roots
     } else if let Some(base) = base {
-        base.extra_roots
-            .iter()
-            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map, &mut import_scratch))
-            .collect()
+        base.extra_roots.clone()
     } else {
-        let pattern = pool.intern("\\s");
-        vec![pool.pattern(pattern, Default::default())]
-    };
-    let map_staging_strs = |ids: Vec<Str>, pool: &mut RulePool| {
-        ids.into_iter()
-            .map(|id| pool.intern(staging.resolve(id)))
-            .collect::<Vec<_>>()
+        let pattern = staging.intern("\\s");
+        vec![staging.pattern(pattern, Default::default())]
     };
     let inline_names = match result.inline {
-        Some(ids) => map_staging_strs(ids, &mut pool),
-        None => base.map_or_else(Vec::new, |b| {
-            b.inline_names
-                .iter()
-                .map(|&s| pool.intern(b.pool.resolve(s)))
-                .collect()
-        }),
+        Some(ids) => ids,
+        None => base.map_or_else(Vec::new, |b| b.inline_names.clone()),
     };
     let supertype_names = match result.supertypes {
-        Some(ids) => map_staging_strs(ids, &mut pool),
-        None => base.map_or_else(Vec::new, |b| {
-            b.supertype_names
-                .iter()
-                .map(|&s| pool.intern(b.pool.resolve(s)))
-                .collect()
-        }),
+        Some(ids) => ids,
+        None => base.map_or_else(Vec::new, |b| b.supertype_names.clone()),
     };
     let conflict_names = match result.conflicts {
-        Some(groups) => groups
-            .into_iter()
-            .map(|g| map_staging_strs(g, &mut pool))
-            .collect(),
-        None => base.map_or_else(Vec::new, |b| {
-            b.conflict_names
-                .iter()
-                .map(|g| g.iter().map(|&s| pool.intern(b.pool.resolve(s))).collect())
-                .collect()
-        }),
+        Some(groups) => groups,
+        None => base.map_or_else(Vec::new, |b| b.conflict_names.clone()),
     };
     let precedence_orderings = match result.precedences {
-        None => base.map_or_else(Vec::new, |b| {
-            b.precedence_orderings
-                .iter()
-                .map(|g| {
-                    g.iter()
-                        .map(|entry| match *entry {
-                            PrecedenceEntry::Name(s) => {
-                                PrecedenceEntry::Name(pool.intern(b.pool.resolve(s)))
-                            }
-                            PrecedenceEntry::Symbol(s) => {
-                                PrecedenceEntry::Symbol(pool.intern(b.pool.resolve(s)))
-                            }
-                        })
-                        .collect()
-                })
-                .collect()
-        }),
-        Some(groups) => groups
-            .into_iter()
-            .map(|g| {
-                g.into_iter()
-                    .map(|entry| match entry {
-                        PrecedenceEntry::Name(s) => {
-                            PrecedenceEntry::Name(pool.intern(staging.resolve(s)))
-                        }
-                        PrecedenceEntry::Symbol(s) => {
-                            PrecedenceEntry::Symbol(pool.intern(staging.resolve(s)))
-                        }
-                    })
-                    .collect()
-            })
-            .collect(),
+        None => base.map_or_else(Vec::new, |b| b.precedence_orderings.clone()),
+        Some(groups) => groups,
     };
     let word_name = match result.word {
-        Some(s) => Some(pool.intern(staging.resolve(s))),
-        None => base.and_then(|b| b.word_name.map(|s| pool.intern(b.pool.resolve(s)))),
+        Some(s) => Some(s),
+        None => base.and_then(|b| b.word_name),
     };
-    let name = pool.intern(staging.resolve(result.language));
+    let name = result.language;
 
     // Reserved-set inheritance is completed below once all roots share `pool`.
     let reserved_sets = if let Some(sets) = result.reserved {
-        let mut merged = base.map_or_else(Vec::new, |base| {
-            base.reserved_sets
-                .iter()
-                .map(|set| ReservedWordContext {
-                    name: pool.intern(base.pool.resolve(set.name)),
-                    roots: set
-                        .roots
-                        .iter()
-                        .map(|&root| {
-                            pool.import_subtree(
-                                &base.pool,
-                                root,
-                                &mut base_map,
-                                &mut import_scratch,
-                            )
-                        })
-                        .collect(),
-                })
-                .collect()
-        });
+        let mut merged = base.map_or_else(Vec::new, |base| base.reserved_sets.clone());
         for set in sets {
-            let name = pool.intern(staging.resolve(set.name));
-            let replacement = ReservedWordContext {
-                name,
-                roots: import_staging_roots(
-                    set.roots,
-                    &mut pool,
-                    &mut staging_map,
-                    &mut import_scratch,
-                ),
-            };
+            let name = set.name;
+            let replacement = set;
             if let Some(index) = merged.iter().position(|old| old.name == name) {
                 merged[index] = replacement;
             } else {
@@ -731,25 +619,12 @@ fn build_grammar(
         }
         merged
     } else if let Some(base) = base {
-        base.reserved_sets
-            .iter()
-            .map(|set| ReservedWordContext {
-                name: pool.intern(base.pool.resolve(set.name)),
-                roots: set
-                    .roots
-                    .iter()
-                    .map(|&root| {
-                        pool.import_subtree(&base.pool, root, &mut base_map, &mut import_scratch)
-                    })
-                    .collect(),
-            })
-            .collect()
+        base.reserved_sets.clone()
     } else {
         Vec::new()
     };
 
-    Ok(InputGrammar {
-        pool,
+    Ok(LoweredGrammar {
         name,
         variables,
         external_roots,

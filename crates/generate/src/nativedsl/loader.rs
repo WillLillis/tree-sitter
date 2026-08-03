@@ -146,7 +146,7 @@ impl Loader<'_> {
                     &self.shared.arena,
                     &self.shared.pools,
                     &ctx,
-                    super::LoweredRef::Grammar(&lowered),
+                    super::LoweredRef::Grammar(&lowered, self.strings),
                 );
                 Module::Grammar {
                     ctx,

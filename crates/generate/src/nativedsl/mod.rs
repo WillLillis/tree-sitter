@@ -76,9 +76,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::IoError;
 use crate::{
+    grammars::{PrecedenceEntry, ReservedWordContext, Variable},
     rules::{Rule, RuleId, RulePool},
     strpool::StrId,
 };
+
+#[derive(Debug)]
+pub struct LoweredGrammar {
+    pub name: StrId,
+    pub variables: Vec<Variable>,
+    pub external_roots: Vec<RuleId>,
+    pub extra_roots: Vec<RuleId>,
+    pub reserved_sets: Vec<ReservedWordContext>,
+    pub supertype_names: Vec<StrId>,
+    pub conflict_names: Vec<Vec<StrId>>,
+    pub inline_names: Vec<StrId>,
+    pub word_name: Option<StrId>,
+    pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
+}
+
+impl LoweredGrammar {
+    fn into_input(self, pool: RulePool) -> InputGrammar {
+        InputGrammar {
+            pool,
+            name: self.name,
+            variables: self.variables,
+            external_roots: self.external_roots,
+            extra_roots: self.extra_roots,
+            reserved_sets: self.reserved_sets,
+            supertype_names: self.supertype_names,
+            conflict_names: self.conflict_names,
+            inline_names: self.inline_names,
+            word_name: self.word_name,
+            precedence_orderings: self.precedence_orderings,
+        }
+    }
+}
 
 use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
 use loader::Loader;
@@ -118,7 +151,7 @@ pub enum Module {
     /// a fully lowered grammar for rule merging and `grammar_config` access.
     Grammar {
         ctx: ModuleContext,
-        lowered: Box<InputGrammar>,
+        lowered: Box<LoweredGrammar>,
         exports: FxHashMap<Box<str>, Export>,
     },
 }
@@ -142,7 +175,7 @@ impl Module {
     }
 
     #[must_use]
-    pub fn lowered(&self) -> Option<&InputGrammar> {
+    pub fn lowered(&self) -> Option<&LoweredGrammar> {
         match self {
             Self::Grammar { lowered, .. } => Some(lowered),
             Self::Helper { .. } => None,
@@ -170,7 +203,7 @@ impl Module {
 /// The lowered output a module exposes, passed to [`build_exports`].
 #[derive(Clone, Copy)]
 pub enum LoweredRef<'a> {
-    Grammar(&'a InputGrammar),
+    Grammar(&'a LoweredGrammar, &'a RulePool),
     Helper(&'a [(StrId, RuleId)], &'a RulePool),
 }
 
@@ -205,17 +238,17 @@ pub fn build_exports(
 
     // Rules and externals
     match lowered {
-        LoweredRef::Grammar(g) => {
+        LoweredRef::Grammar(g, pool) => {
             for (i, v) in g.variables.iter().enumerate() {
                 add(
-                    g.pool.resolve(v.name),
+                    pool.resolve(v.name),
                     Export::Rule(RuleTarget::GrammarRule(i as u32)),
                 );
             }
             for (i, &root) in g.external_roots.iter().enumerate() {
-                if let Rule::NamedSymbol(n) = g.pool.node(root) {
+                if let Rule::NamedSymbol(n) = pool.node(root) {
                     add(
-                        g.pool.resolve(n),
+                        pool.resolve(n),
                         Export::Rule(RuleTarget::GrammarExternal(i as u32)),
                     );
                 }
@@ -334,5 +367,5 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
             .unwrap();
         Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, g_span))?;
     }
-    Ok(*lowered)
+    Ok(lowered.into_input(strings))
 }

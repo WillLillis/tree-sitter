@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::rules::RulePool;
 use crate::{
-    grammars::InputGrammar,
+    nativedsl::LoweredGrammar,
     nativedsl::{
         Export, ImportedRule, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
@@ -58,7 +58,7 @@ pub fn resolve(
     ctx: &ModuleContext,
     strings: &RulePool,
     modules: &[Module],
-    base: Option<(&InputGrammar, Span)>,
+    base: Option<(&LoweredGrammar, Span)>,
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<()> {
     let decls = collect_decls(
@@ -157,7 +157,7 @@ fn collect_decls<'a>(
     ctx: &'a ModuleContext,
     strings: &'a RulePool,
     root_items: &[NodeId],
-    base: Option<(&'a InputGrammar, Span)>,
+    base: Option<(&'a LoweredGrammar, Span)>,
     modules: &'a [Module],
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<Decls<'a>> {
@@ -214,7 +214,7 @@ fn collect_decls<'a>(
     // Register inherited rule names. Collisions with local non-`override` rules error
     if let Some((base_grammar, inherit_span)) = base {
         for var in &base_grammar.variables {
-            let name = base_grammar.pool.resolve(var.name);
+            let name = strings.resolve(var.name);
             // The first source of an overridden name coexists with the override
             // (claim it by removing). A later source is no longer skipped and so
             // collides as a duplicate, exactly as it would without the override.
@@ -230,11 +230,11 @@ fn collect_decls<'a>(
         // putting the name in both lists; it's one symbol, already registered by
         // the rule loop, so skip it rather than colliding with ourselves.
         for &root in &base_grammar.external_roots {
-            if let Rule::NamedSymbol(name_id) = base_grammar.pool.node(root)
-                && !override_names.contains(base_grammar.pool.resolve(name_id))
+            if let Rule::NamedSymbol(name_id) = strings.node(root)
+                && !override_names.contains(strings.resolve(name_id))
                 && !base_grammar.variables.iter().any(|v| v.name == name_id)
             {
-                let name = base_grammar.pool.resolve(name_id);
+                let name = strings.resolve(name_id);
                 insert_decl(&mut decls, name, IdentKind::Rule, inherit_span, ctx)?;
             }
         }
