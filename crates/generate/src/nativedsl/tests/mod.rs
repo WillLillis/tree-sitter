@@ -1,8 +1,283 @@
 use std::path::{Path, PathBuf};
 
-use crate::grammars::InputGrammar;
+use crate::grammars::InputGrammar as PooledGrammar;
 use crate::nativedsl::lexer::TokenKind;
-use crate::rules::{Precedence, Rule};
+use crate::rules::{Associativity, Rule as PooledRule, RuleId, SymbolType};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct InputGrammar {
+    name: String,
+    variables: Vec<Variable>,
+    external_tokens: Vec<Rule>,
+    extra_symbols: Vec<Rule>,
+    reserved_words: Vec<ReservedWordContext>,
+    supertype_symbols: Vec<String>,
+    expected_conflicts: Vec<Vec<String>>,
+    variables_to_inline: Vec<String>,
+    word_token: Option<String>,
+    precedence_orderings: Vec<Vec<PrecedenceEntry>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Variable {
+    name: String,
+    rule: Rule,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReservedWordContext {
+    name: String,
+    reserved_words: Vec<Rule>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PrecedenceEntry {
+    Name(String),
+    Symbol(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum Precedence {
+    #[default]
+    None,
+    Integer(i32),
+    Name(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Alias {
+    value: String,
+    is_named: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct MetadataParams {
+    precedence: Precedence,
+    dynamic_precedence: i32,
+    associativity: Option<Associativity>,
+    is_token: bool,
+    is_main_token: bool,
+    alias: Option<Alias>,
+    field_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Rule {
+    Blank,
+    String(String),
+    Pattern(String, String),
+    NamedSymbol(String),
+    Symbol {
+        kind: SymbolType,
+        index: u32,
+    },
+    Choice(Vec<Self>),
+    Metadata {
+        params: MetadataParams,
+        rule: Box<Self>,
+    },
+    Repeat(Box<Self>),
+    Seq(Vec<Self>),
+    Reserved {
+        rule: Box<Self>,
+        context_name: String,
+    },
+}
+
+impl Rule {
+    fn with_metadata(mut content: Self, update: impl FnOnce(&mut MetadataParams)) -> Self {
+        if let Self::Metadata { params, .. } = &mut content
+            && !params.is_token
+        {
+            update(params);
+            content
+        } else {
+            let mut params = MetadataParams::default();
+            update(&mut params);
+            Self::Metadata {
+                params,
+                rule: Box::new(content),
+            }
+        }
+    }
+    pub(super) fn field(name: String, content: Self) -> Self {
+        Self::with_metadata(content, |p| p.field_name = Some(name))
+    }
+    pub(super) fn alias(content: Self, value: String, is_named: bool) -> Self {
+        Self::with_metadata(content, |p| p.alias = Some(Alias { value, is_named }))
+    }
+    pub(super) fn token(content: Self) -> Self {
+        Self::with_metadata(content, |p| p.is_token = true)
+    }
+    pub(super) fn immediate_token(content: Self) -> Self {
+        Self::with_metadata(content, |p| {
+            p.is_token = true;
+            p.is_main_token = true;
+        })
+    }
+    pub(super) fn prec(value: Precedence, content: Self) -> Self {
+        Self::with_metadata(content, |p| p.precedence = value)
+    }
+    pub(super) fn prec_left(value: Precedence, content: Self) -> Self {
+        Self::with_metadata(content, |p| {
+            p.precedence = value;
+            p.associativity = Some(Associativity::Left);
+        })
+    }
+    pub(super) fn prec_right(value: Precedence, content: Self) -> Self {
+        Self::with_metadata(content, |p| {
+            p.precedence = value;
+            p.associativity = Some(Associativity::Right);
+        })
+    }
+    pub(super) fn prec_dynamic(value: i32, content: Self) -> Self {
+        Self::with_metadata(content, |p| p.dynamic_precedence = value)
+    }
+    pub(super) fn repeat(rule: Self) -> Self {
+        Self::Repeat(Box::new(rule))
+    }
+    pub(super) fn seq(rules: Vec<Self>) -> Self {
+        Self::Seq(rules)
+    }
+    pub(super) fn choice(rules: Vec<Self>) -> Self {
+        let mut result = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if let Self::Choice(children) = rule {
+                result.extend(children);
+            } else if !result.contains(&rule) {
+                result.push(rule);
+            }
+        }
+        Self::Choice(result)
+    }
+    pub(super) fn pattern(value: &'static str, flags: &'static str) -> Self {
+        Self::Pattern(value.into(), flags.into())
+    }
+}
+
+fn normalize_rule(grammar: &PooledGrammar, id: RuleId) -> Rule {
+    let strings = &grammar.pool;
+    match strings.node(id) {
+        PooledRule::Blank => Rule::Blank,
+        PooledRule::String(value) => Rule::String(strings.resolve(value).into()),
+        PooledRule::Pattern(value, flags) => {
+            Rule::Pattern(strings.resolve(value).into(), strings.resolve(flags).into())
+        }
+        PooledRule::NamedSymbol(name) => Rule::NamedSymbol(strings.resolve(name).into()),
+        PooledRule::Sym { kind, index } => Rule::Symbol { kind, index },
+        PooledRule::Seq(range) => Rule::Seq(
+            strings
+                .child_slice(range)
+                .iter()
+                .map(|&child| normalize_rule(grammar, child))
+                .collect(),
+        ),
+        PooledRule::Choice(range) => Rule::Choice(
+            strings
+                .child_slice(range)
+                .iter()
+                .map(|&child| normalize_rule(grammar, child))
+                .collect(),
+        ),
+        PooledRule::Repeat(rule) => Rule::Repeat(Box::new(normalize_rule(grammar, rule))),
+        PooledRule::Reserved { rule, ctx } => Rule::Reserved {
+            rule: Box::new(normalize_rule(grammar, rule)),
+            context_name: strings.resolve(ctx).into(),
+        },
+        PooledRule::Metadata { params, rule } => {
+            let params = strings.params(params);
+            Rule::Metadata {
+                params: MetadataParams {
+                    precedence: match params.precedence {
+                        crate::rules::Precedence::None => Precedence::None,
+                        crate::rules::Precedence::Integer(n) => Precedence::Integer(n),
+                        crate::rules::Precedence::Name(s) => {
+                            Precedence::Name(strings.resolve(s).into())
+                        }
+                    },
+                    dynamic_precedence: params.dynamic_precedence,
+                    associativity: params.associativity,
+                    is_token: params.is_token,
+                    is_main_token: params.is_main_token,
+                    alias: params.alias.map(|a| Alias {
+                        value: strings.resolve(a.value).into(),
+                        is_named: a.is_named,
+                    }),
+                    field_name: params.field.map(|s| strings.resolve(s).into()),
+                },
+                rule: Box::new(normalize_rule(grammar, rule)),
+            }
+        }
+    }
+}
+
+impl From<PooledGrammar> for InputGrammar {
+    fn from(grammar: PooledGrammar) -> Self {
+        let resolve = |id| grammar.pool.resolve(id).to_owned();
+        Self {
+            name: resolve(grammar.name),
+            variables: grammar
+                .variables
+                .iter()
+                .map(|v| Variable {
+                    name: resolve(v.name),
+                    rule: normalize_rule(&grammar, v.root),
+                })
+                .collect(),
+            external_tokens: grammar
+                .external_roots
+                .iter()
+                .map(|&r| normalize_rule(&grammar, r))
+                .collect(),
+            extra_symbols: grammar
+                .extra_roots
+                .iter()
+                .map(|&r| normalize_rule(&grammar, r))
+                .collect(),
+            reserved_words: grammar
+                .reserved_sets
+                .iter()
+                .map(|set| ReservedWordContext {
+                    name: resolve(set.name),
+                    reserved_words: set
+                        .roots
+                        .iter()
+                        .map(|&r| normalize_rule(&grammar, r))
+                        .collect(),
+                })
+                .collect(),
+            supertype_symbols: grammar
+                .supertype_names
+                .iter()
+                .map(|&s| resolve(s))
+                .collect(),
+            expected_conflicts: grammar
+                .conflict_names
+                .iter()
+                .map(|set| set.iter().map(|&s| resolve(s)).collect())
+                .collect(),
+            variables_to_inline: grammar.inline_names.iter().map(|&s| resolve(s)).collect(),
+            word_token: grammar.word_name.map(resolve),
+            precedence_orderings: grammar
+                .precedence_orderings
+                .iter()
+                .map(|ordering| {
+                    ordering
+                        .iter()
+                        .map(|entry| match entry {
+                            crate::grammars::PrecedenceEntry::Name(s) => {
+                                PrecedenceEntry::Name(resolve(*s))
+                            }
+                            crate::grammars::PrecedenceEntry::Symbol(s) => {
+                                PrecedenceEntry::Symbol(resolve(*s))
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
 
 use super::{
     Constraint, ContainerKind, DataTy, DisallowedItemKind, DslError, ElemTy, ExpandErrorKind,
@@ -117,7 +392,9 @@ pub(super) fn dsl_path(p: &std::path::Path) -> String {
 }
 
 pub(super) fn dsl(input: &str) -> InputGrammar {
-    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap()
+    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg"))
+        .unwrap()
+        .into()
 }
 
 pub(super) fn dsl_err(input: &str) -> DslError {
@@ -141,7 +418,7 @@ pub(super) fn parse_with_modules(
     // detection - even though parsing reads `root` directly.
     let root_path = dir.path().join("grammar.tsg");
     std::fs::write(&root_path, root).unwrap();
-    parse_native_dsl(root, &root_path)
+    parse_native_dsl(root, &root_path).map(Into::into)
 }
 
 /// Build the Rule tree for `comma_sep1(item)`:

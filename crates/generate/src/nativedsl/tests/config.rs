@@ -44,8 +44,8 @@ fn config_precedences() {
     assert_eq!(
         g.precedence_orderings,
         vec![vec![
-            crate::grammars::PrecedenceEntry::Name("add".into()),
-            crate::grammars::PrecedenceEntry::Symbol("multiply".into()),
+            PrecedenceEntry::Name("add".into()),
+            PrecedenceEntry::Symbol("multiply".into()),
         ]]
     );
 }
@@ -158,7 +158,7 @@ fn json_roundtrip() {
         serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
             .expect("grammar JSON serialization should not fail");
     let reparsed = crate::parse_grammar::parse_grammar(&json_str, &mut Vec::new()).unwrap();
-    assert_eq!(grammar, reparsed);
+    assert_eq!(InputGrammar::from(grammar), InputGrammar::from(reparsed));
 }
 
 #[test]

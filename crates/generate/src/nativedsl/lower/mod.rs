@@ -94,6 +94,10 @@ struct Scratch {
     for_binding_frames: Vec<(ForId, usize)>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
+    /// Retained traversal stack used while flattening choices and validating
+    /// pooled rule depth.
+    rule_walk: Vec<(RuleId, u16)>,
+    rule_eq: Vec<(RuleId, RuleId)>,
     import_map: Vec<Option<RuleId>>,
     /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
@@ -112,6 +116,8 @@ impl Scratch {
         self.for_binding_frames.clear();
         self.val_scratch.clear();
         self.rule_scratch.clear();
+        self.rule_walk.clear();
+        self.rule_eq.clear();
         self.import_map.clear();
         self.combine_bases.clear();
     }
@@ -154,6 +160,32 @@ pub fn lower_with_base(
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
     let result = evaluate(state, strings, shared, previous, current)?;
+    state.scratch.rule_walk.clear();
+    for &(_, root) in &result.rules {
+        state.scratch.rule_walk.push((root, 1));
+        while let Some((id, depth)) = state.scratch.rule_walk.pop() {
+            if depth > MAX_RULE_DEPTH {
+                return Err(LowerError::new(
+                    LowerErrorKind::RuleNestingTooDeep,
+                    Span::new(0, 0),
+                ));
+            }
+            match strings.node(id) {
+                Rule::Seq(range) | Rule::Choice(range) => state.scratch.rule_walk.extend(
+                    strings
+                        .child_slice(range)
+                        .iter()
+                        .map(|&child| (child, depth + 1)),
+                ),
+                Rule::Repeat(child)
+                | Rule::Metadata { rule: child, .. }
+                | Rule::Reserved { rule: child, .. } => {
+                    state.scratch.rule_walk.push((child, depth + 1))
+                }
+                _ => {}
+            }
+        }
+    }
     let grammar = build_grammar(
         strings,
         current,
@@ -652,12 +684,32 @@ fn build_grammar(
 
     // Reserved-set inheritance is completed below once all roots share `pool`.
     let reserved_sets = if let Some(sets) = result.reserved {
-        sets.into_iter()
-            .map(|set| ReservedWordContext {
-                name: pool.intern(staging.resolve(set.name)),
+        let mut merged = base.map_or_else(Vec::new, |base| {
+            base.reserved_sets
+                .iter()
+                .map(|set| ReservedWordContext {
+                    name: pool.intern(base.pool.resolve(set.name)),
+                    roots: set
+                        .roots
+                        .iter()
+                        .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+                        .collect(),
+                })
+                .collect()
+        });
+        for set in sets {
+            let name = pool.intern(staging.resolve(set.name));
+            let replacement = ReservedWordContext {
+                name,
                 roots: import_staging_roots(set.roots, &mut pool, &mut staging_map),
-            })
-            .collect()
+            };
+            if let Some(index) = merged.iter().position(|old| old.name == name) {
+                merged[index] = replacement;
+            } else {
+                merged.push(replacement);
+            }
+        }
+        merged
     } else if let Some(base) = base {
         base.reserved_sets
             .iter()

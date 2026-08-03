@@ -1,5 +1,5 @@
+use super::PrecedenceEntry;
 use super::*;
-use crate::grammars::PrecedenceEntry;
 
 #[test]
 fn inherit_rules_and_config() {

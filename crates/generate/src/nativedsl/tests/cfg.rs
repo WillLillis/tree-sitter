@@ -247,7 +247,9 @@ fn cfg_disabled_import_does_not_load_file() {
         let h = import("does-not-exist.tsg")
         rule program { "x" }
     "#;
-    let g = parse_native_dsl(input, std::path::Path::new(".")).unwrap();
+    let g: InputGrammar = parse_native_dsl(input, std::path::Path::new("."))
+        .unwrap()
+        .into();
     assert_eq!(rule_names(&g), vec!["program"]);
 }
 

@@ -198,6 +198,34 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn metadata(&mut self, inner: RuleId, params: MetadataParams) -> RuleId {
+        if let Rule::Metadata {
+            params: existing,
+            rule,
+        } = self.strings.node(inner)
+        {
+            let mut merged = self.strings.params(existing);
+            if !merged.is_token {
+                if !matches!(params.precedence, Precedence::None) {
+                    merged.precedence = params.precedence;
+                }
+                if params.dynamic_precedence != 0 {
+                    merged.dynamic_precedence = params.dynamic_precedence;
+                }
+                if params.associativity.is_some() {
+                    merged.associativity = params.associativity;
+                }
+                if params.alias.is_some() {
+                    merged.alias = params.alias;
+                }
+                if params.field.is_some() {
+                    merged.field = params.field;
+                }
+                merged.is_token |= params.is_token;
+                merged.is_main_token |= params.is_main_token;
+                let params = self.strings.push_params(merged);
+                return self.alloc_rule(Rule::Metadata { params, rule });
+            }
+        }
         let params = self.strings.push_params(params);
         self.alloc_rule(Rule::Metadata {
             params,
@@ -215,6 +243,30 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn finish_seq_or_choice(&mut self, seq: bool, base: usize) -> RuleId {
+        if !seq {
+            let rules = &mut self.state.scratch.rule_scratch;
+            let walk = &mut self.state.scratch.rule_walk;
+            walk.clear();
+            walk.extend(rules[base..].iter().rev().map(|&id| (id, 0)));
+            rules.truncate(base);
+            while let Some((id, _)) = walk.pop() {
+                if let Rule::Choice(range) = self.strings.node(id) {
+                    let mark = walk.len();
+                    walk.extend(
+                        self.strings
+                            .child_slice(range)
+                            .iter()
+                            .map(|&child| (child, 0)),
+                    );
+                    walk[mark..].reverse();
+                } else if !rules[base..].iter().any(|&old| {
+                    self.strings
+                        .subtree_eq_with_scratch(old, id, &mut self.state.scratch.rule_eq)
+                }) {
+                    rules.push(id);
+                }
+            }
+        }
         let scratch = &mut self.state.scratch.rule_scratch;
         let range = self.strings.push_children(&scratch[base..]);
         scratch.truncate(base);

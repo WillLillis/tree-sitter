@@ -466,6 +466,17 @@ impl RulePool {
 
     pub fn subtree_eq(&self, a: RuleId, b: RuleId) -> bool {
         let mut stack = vec![(a, b)];
+        self.subtree_eq_with_scratch(a, b, &mut stack)
+    }
+
+    pub fn subtree_eq_with_scratch(
+        &self,
+        a: RuleId,
+        b: RuleId,
+        stack: &mut Vec<(RuleId, RuleId)>,
+    ) -> bool {
+        stack.clear();
+        stack.push((a, b));
         while let Some((a, b)) = stack.pop() {
             match (self.node(a), self.node(b)) {
                 (Rule::Blank, Rule::Blank) => {}
