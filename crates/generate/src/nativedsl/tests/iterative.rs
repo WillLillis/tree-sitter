@@ -88,7 +88,7 @@ fn lower_deep_nesting_errors_cleanly() {
     let (shared, ctx) = deep_token_chain(50_000);
     let mut state = LoweringState::default();
     let mut strings = StringPool::default();
-    let err = lower_with_base(&mut state, &mut strings, &shared, &[], &ctx, &[], true).unwrap_err();
+    let err = lower_with_base(&mut state, &mut strings, &shared, &[], &ctx, &[]).unwrap_err();
     assert!(
         matches!(err.kind, LowerErrorKind::RuleNestingTooDeep),
         "expected RuleNestingTooDeep, got {:?}",

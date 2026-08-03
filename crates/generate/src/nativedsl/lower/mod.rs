@@ -159,7 +159,6 @@ pub fn lower_with_base(
     previous: &[Module],
     current: &ModuleContext,
     imported_rules: &[ImportedRule],
-    take_staging_pool: bool,
 ) -> LowerResult<InputGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
@@ -198,7 +197,6 @@ pub fn lower_with_base(
         base_grammar,
         previous,
         imported_rules,
-        take_staging_pool,
     )?;
     check_symbol_completeness(shared, current, previous, &grammar)?;
     Ok(grammar)
@@ -490,47 +488,6 @@ fn evaluate(
     })
 }
 
-fn transfer_staging_rule(
-    staging: &RulePool,
-    pool: &mut RulePool,
-    root: RuleId,
-    pool_was_taken: bool,
-    map: &mut Vec<Option<RuleId>>,
-    scratch: &mut RuleImportScratch,
-) -> RuleId {
-    if pool_was_taken {
-        root
-    } else {
-        pool.import_subtree(staging, root, map, scratch)
-    }
-}
-
-fn transfer_staging_str(
-    staging: &RulePool,
-    pool: &mut RulePool,
-    id: Str,
-    pool_was_taken: bool,
-) -> Str {
-    if pool_was_taken {
-        id
-    } else {
-        pool.intern(staging.resolve(id))
-    }
-}
-
-fn staging_text<'a>(
-    staging: &'a RulePool,
-    pool: &'a RulePool,
-    id: Str,
-    pool_was_taken: bool,
-) -> &'a str {
-    if pool_was_taken {
-        pool.resolve(id)
-    } else {
-        staging.resolve(id)
-    }
-}
-
 fn build_grammar(
     staging: &mut RulePool,
     ctx: &ModuleContext,
@@ -538,18 +495,13 @@ fn build_grammar(
     base: Option<&InputGrammar>,
     previous: &[Module],
     imported_rules: &[ImportedRule],
-    take_staging_pool: bool,
 ) -> LowerResult<InputGrammar> {
     let mut overrides: FxHashMap<Str, Spanned<RuleId>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
         overrides.insert(name, Spanned::new(rule, span));
     }
 
-    let mut pool = if take_staging_pool {
-        std::mem::take(staging)
-    } else {
-        RulePool::default()
-    };
+    let mut pool = RulePool::default();
     let mut staging_map = Vec::new();
     let mut base_map = Vec::new();
     let mut import_scratch = RuleImportScratch::default();
@@ -560,20 +512,9 @@ fn build_grammar(
         variables.reserve(base.variables.len());
         for v in &base.variables {
             let base_name = base.pool.resolve(v.name);
-            let override_name = if take_staging_pool {
-                pool.intern(base_name)
-            } else {
-                staging.intern(base_name)
-            };
+            let override_name = staging.intern(base_name);
             let root = if let Some(Spanned { value: root, .. }) = overrides.remove(&override_name) {
-                transfer_staging_rule(
-                    staging,
-                    &mut pool,
-                    root,
-                    take_staging_pool,
-                    &mut staging_map,
-                    &mut import_scratch,
-                )
+                pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch)
             } else {
                 pool.import_subtree(&base.pool, v.root, &mut base_map, &mut import_scratch)
             };
@@ -583,15 +524,8 @@ fn build_grammar(
     }
 
     for (name, root) in result.rules {
-        let name = transfer_staging_str(staging, &mut pool, name, take_staging_pool);
-        let root = transfer_staging_rule(
-            staging,
-            &mut pool,
-            root,
-            take_staging_pool,
-            &mut staging_map,
-            &mut import_scratch,
-        );
+        let name = pool.intern(staging.resolve(name));
+        let root = pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch);
         variables.push(Variable { name, root });
     }
 
@@ -604,15 +538,8 @@ fn build_grammar(
         );
         let &(name, helper_root) = &lowered_rules[ir.index as usize];
         let root = overrides.remove(&name).map_or(helper_root, |s| s.value);
-        let root = transfer_staging_rule(
-            staging,
-            &mut pool,
-            root,
-            take_staging_pool,
-            &mut staging_map,
-            &mut import_scratch,
-        );
-        let name = transfer_staging_str(staging, &mut pool, name, take_staging_pool);
+        let root = pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch);
+        let name = pool.intern(staging.resolve(name));
         variables.push(Variable { name, root });
     }
 
@@ -623,12 +550,7 @@ fn build_grammar(
         // through the generic note machinery, no renderer special-casing.
         let mut entries: Vec<(String, Span)> = overrides
             .into_iter()
-            .map(|(name, s)| {
-                (
-                    staging_text(staging, &pool, name, take_staging_pool).to_string(),
-                    s.span,
-                )
-            })
+            .map(|(name, s)| (staging.resolve(name).to_string(), s.span))
             .collect();
         entries.sort_unstable_by_key(|(_, span)| span.start);
         let mut names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
@@ -647,7 +569,7 @@ fn build_grammar(
     // valid rule reference but lives in `external_tokens`, not `variables`, so
     // it can't be the start symbol.
     if let Some((name, span)) = result.start {
-        let name_text = staging_text(staging, &pool, name, take_staging_pool);
+        let name_text = staging.resolve(name);
         let pos = variables
             .iter()
             .position(|v| pool.resolve(v.name) == name_text)
@@ -669,7 +591,7 @@ fn build_grammar(
                                 scratch: &mut RuleImportScratch| {
         roots
             .into_iter()
-            .map(|root| transfer_staging_rule(staging, pool, root, take_staging_pool, map, scratch))
+            .map(|root| pool.import_subtree(staging, root, map, scratch))
             .collect::<Vec<_>>()
     };
     let external_roots = if let Some(roots) = result.externals {
@@ -695,7 +617,7 @@ fn build_grammar(
     };
     let map_staging_strs = |ids: Vec<Str>, pool: &mut RulePool| {
         ids.into_iter()
-            .map(|id| transfer_staging_str(staging, pool, id, take_staging_pool))
+            .map(|id| pool.intern(staging.resolve(id)))
             .collect::<Vec<_>>()
     };
     let inline_names = match result.inline {
@@ -728,51 +650,45 @@ fn build_grammar(
                 .collect()
         }),
     };
-    let precedence_orderings =
-        match result.precedences {
-            None => base.map_or_else(Vec::new, |b| {
-                b.precedence_orderings
-                    .iter()
-                    .map(|g| {
-                        g.iter()
-                            .map(|entry| match *entry {
-                                PrecedenceEntry::Name(s) => {
-                                    PrecedenceEntry::Name(pool.intern(b.pool.resolve(s)))
-                                }
-                                PrecedenceEntry::Symbol(s) => {
-                                    PrecedenceEntry::Symbol(pool.intern(b.pool.resolve(s)))
-                                }
-                            })
-                            .collect()
-                    })
-                    .collect()
-            }),
-            Some(groups) => groups
-                .into_iter()
+    let precedence_orderings = match result.precedences {
+        None => base.map_or_else(Vec::new, |b| {
+            b.precedence_orderings
+                .iter()
                 .map(|g| {
-                    g.into_iter()
-                        .map(|entry| match entry {
-                            PrecedenceEntry::Name(s) => PrecedenceEntry::Name(
-                                transfer_staging_str(staging, &mut pool, s, take_staging_pool),
-                            ),
-                            PrecedenceEntry::Symbol(s) => PrecedenceEntry::Symbol(
-                                transfer_staging_str(staging, &mut pool, s, take_staging_pool),
-                            ),
+                    g.iter()
+                        .map(|entry| match *entry {
+                            PrecedenceEntry::Name(s) => {
+                                PrecedenceEntry::Name(pool.intern(b.pool.resolve(s)))
+                            }
+                            PrecedenceEntry::Symbol(s) => {
+                                PrecedenceEntry::Symbol(pool.intern(b.pool.resolve(s)))
+                            }
                         })
                         .collect()
                 })
-                .collect(),
-        };
+                .collect()
+        }),
+        Some(groups) => groups
+            .into_iter()
+            .map(|g| {
+                g.into_iter()
+                    .map(|entry| match entry {
+                        PrecedenceEntry::Name(s) => {
+                            PrecedenceEntry::Name(pool.intern(staging.resolve(s)))
+                        }
+                        PrecedenceEntry::Symbol(s) => {
+                            PrecedenceEntry::Symbol(pool.intern(staging.resolve(s)))
+                        }
+                    })
+                    .collect()
+            })
+            .collect(),
+    };
     let word_name = match result.word {
-        Some(s) => Some(transfer_staging_str(
-            staging,
-            &mut pool,
-            s,
-            take_staging_pool,
-        )),
+        Some(s) => Some(pool.intern(staging.resolve(s))),
         None => base.and_then(|b| b.word_name.map(|s| pool.intern(b.pool.resolve(s)))),
     };
-    let name = transfer_staging_str(staging, &mut pool, result.language, take_staging_pool);
+    let name = pool.intern(staging.resolve(result.language));
 
     // Reserved-set inheritance is completed below once all roots share `pool`.
     let reserved_sets = if let Some(sets) = result.reserved {
@@ -797,7 +713,7 @@ fn build_grammar(
                 .collect()
         });
         for set in sets {
-            let name = transfer_staging_str(staging, &mut pool, set.name, take_staging_pool);
+            let name = pool.intern(staging.resolve(set.name));
             let replacement = ReservedWordContext {
                 name,
                 roots: import_staging_roots(
