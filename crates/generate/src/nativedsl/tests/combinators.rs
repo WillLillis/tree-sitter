@@ -240,76 +240,95 @@ pooled_rule_tests! {
 
 #[test]
 fn raw_ident_emits_bare_name_in_grammar_json() {
-    let g = dsl(r#"grammar { language: "test" }
+    let g = pooled_dsl(
+        r#"grammar { language: "test" }
         rule program { r#let }
-        rule r#let { "in" }"#);
+        rule r#let { "in" }"#,
+    );
     // grammar.json rule names must match the bare identifier, not `r#let`.
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    let names: Vec<&str> = g.variables.iter().map(|v| g.pool.resolve(v.name)).collect();
     assert_eq!(names, vec!["program", "let"]);
 }
 
 #[test]
 fn prec_inside_token_immediate() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar { language: "test" }
         rule program { token_immediate(prec(1, regexp("[a-z]+"))) }
-    "#);
-    if let Rule::Metadata { params, .. } = &g.variables[0].rule {
-        assert_eq!(params.precedence, Precedence::Integer(1));
-        assert!(params.is_token && params.is_main_token);
-    } else {
-        panic!("expected Metadata, got {:?}", g.variables[0].rule);
-    }
+    "#,
+    );
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &Rule::immediate_token(Rule::prec(
+            Precedence::Integer(1),
+            Rule::pattern("[a-z]+", ""),
+        )),
+    );
 }
 
 #[test]
 fn reserved_combinator() {
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test", reserved: { default: [identifier] },
     }
     rule program { reserved("default", identifier) }
-    rule identifier { regexp("[a-z]+") }"#);
-    assert!(
-        matches!(&g.variables[0].rule, Rule::Reserved { context_name, .. } if context_name == "default")
+    rule identifier { regexp("[a-z]+") }"#,
+    );
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &Rule::Reserved {
+            context_name: "default".into(),
+            rule: Box::new(Rule::NamedSymbol("identifier".into())),
+        },
     );
 }
 
 #[test]
 fn reserved_multiple_sets() {
-    let g = dsl(r#"grammar {
+    let g = pooled_dsl(
+        r#"grammar {
         language: "test",
         reserved: { global: ["if", "else", "for"], properties: ["get", "set"] },
     }
-    rule program { reserved("global", regexp("[a-z]+")) }"#);
-    assert_eq!(g.reserved_words.len(), 2);
-    assert_eq!(g.reserved_words[0].name, "global");
-    assert_eq!(g.reserved_words[0].reserved_words.len(), 3);
-    assert_eq!(g.reserved_words[1].name, "properties");
-    assert_eq!(g.reserved_words[1].reserved_words.len(), 2);
+    rule program { reserved("global", regexp("[a-z]+")) }"#,
+    );
+    assert_eq!(g.reserved_sets.len(), 2);
+    assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
+    assert_eq!(g.reserved_sets[0].roots.len(), 3);
+    assert_eq!(g.pool.resolve(g.reserved_sets[1].name), "properties");
+    assert_eq!(g.reserved_sets[1].roots.len(), 2);
 }
 
 #[test]
 fn reserved_inherited() {
     // A child with no `reserved` inherits the base's sets in base order (default
     // set preserved), with no explicit grammar_config re-import needed.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
         grammar { language: "derived", inherits: base }
-    "#);
-    assert_eq!(g.reserved_words.len(), 2);
-    assert_eq!(g.reserved_words[0].name, "global");
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![
+    "#,
+    );
+    assert_eq!(g.reserved_sets.len(), 2);
+    assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[
             Rule::String("if".into()),
             Rule::String("else".into()),
-            Rule::String("for".into())
-        ]
+            Rule::String("for".into()),
+        ],
     );
-    assert_eq!(g.reserved_words[1].name, "properties");
-    assert_eq!(
-        g.reserved_words[1].reserved_words,
-        vec![Rule::String("get".into()), Rule::String("set".into())]
+    assert_eq!(g.pool.resolve(g.reserved_sets[1].name), "properties");
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[1].roots,
+        &[Rule::String("get".into()), Rule::String("set".into())],
     );
 }
 
@@ -317,35 +336,40 @@ fn reserved_inherited() {
 fn reserved_child_merges_with_base() {
     // The child adds a set and overrides one: base order is preserved (global
     // stays default), overridden sets keep position, new sets append.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
         grammar {
             language: "derived",
             inherits: base,
             reserved: { global: ["if"], extra: ["new"] },
         }
-    "#);
-    assert_eq!(g.reserved_words.len(), 3);
+    "#,
+    );
+    assert_eq!(g.reserved_sets.len(), 3);
     // Base "global" stays first (default), with the child's overriding words.
-    assert_eq!(g.reserved_words[0].name, "global");
-    assert_eq!(
-        g.reserved_words[0].reserved_words,
-        vec![Rule::String("if".into())]
+    assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
+    assert_rules(
+        &g.pool,
+        &g.reserved_sets[0].roots,
+        &[Rule::String("if".into())],
     );
     // Base "properties" kept (not redefined by the child).
-    assert_eq!(g.reserved_words[1].name, "properties");
+    assert_eq!(g.pool.resolve(g.reserved_sets[1].name), "properties");
     // Child's new set appended.
-    assert_eq!(g.reserved_words[2].name, "extra");
+    assert_eq!(g.pool.resolve(g.reserved_sets[2].name), "extra");
 }
 
 #[test]
 fn reserved_empty_inherited() {
     // A base with no reserved contributes none; the child inherits an empty set.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-    "#);
-    assert!(g.reserved_words.is_empty());
+    "#,
+    );
+    assert!(g.reserved_sets.is_empty());
 }
 
 #[test]
@@ -371,7 +395,7 @@ fn trailing_comma_in_builtins() {
         g!(r#"regexp("pat",)"#),
         g!(r#"regexp("pat", "flags",)"#),
     ] {
-        dsl(src);
+        pooled_dsl(src);
     }
-    dsl(r#"grammar { language: "test", extras: append(["x"], ["y"],) } rule foo { "x" }"#);
+    pooled_dsl(r#"grammar { language: "test", extras: append(["x"], ["y"],) } rule foo { "x" }"#);
 }
