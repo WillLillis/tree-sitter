@@ -141,6 +141,7 @@ impl Loader<'_> {
                     self.modules,
                     &ctx,
                     &imported_rules,
+                    self.ancestor_paths.len() == 1,
                 )?);
                 let exports = super::build_exports(
                     &self.shared.arena,
