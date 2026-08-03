@@ -23,7 +23,10 @@ use super::{
     LowerError, ModuleId, Note, NoteMessage,
     ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
 };
-use crate::{rules::RulePool, strpool::StrId as Str};
+use crate::{
+    rules::{RuleImportScratch, RulePool},
+    strpool::StrId as Str,
+};
 
 pub use error::{DisallowedItemKind, LowerErrorKind, LowerResult};
 
@@ -99,6 +102,7 @@ struct Scratch {
     rule_walk: Vec<(RuleId, u16)>,
     rule_eq: Vec<(RuleId, RuleId)>,
     import_map: Vec<Option<RuleId>>,
+    import_scratch: RuleImportScratch,
     /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
     /// this is a plain stack.
@@ -500,6 +504,7 @@ fn build_grammar(
     let mut pool = RulePool::default();
     let mut staging_map = Vec::new();
     let mut base_map = Vec::new();
+    let mut import_scratch = RuleImportScratch::default();
     let mut variables = Vec::new();
 
     // Base rules first - preserves the inherited grammar's start rule.
@@ -509,9 +514,9 @@ fn build_grammar(
             let base_name = base.pool.resolve(v.name);
             let override_name = staging.intern(base_name);
             let root = if let Some(Spanned { value: root, .. }) = overrides.remove(&override_name) {
-                pool.import_subtree(staging, root, &mut staging_map)
+                pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch)
             } else {
-                pool.import_subtree(&base.pool, v.root, &mut base_map)
+                pool.import_subtree(&base.pool, v.root, &mut base_map, &mut import_scratch)
             };
             let name = pool.intern(base_name);
             variables.push(Variable { name, root });
@@ -520,7 +525,7 @@ fn build_grammar(
 
     for (name, root) in result.rules {
         let name = pool.intern(staging.resolve(name));
-        let root = pool.import_subtree(staging, root, &mut staging_map);
+        let root = pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch);
         variables.push(Variable { name, root });
     }
 
@@ -533,7 +538,7 @@ fn build_grammar(
         );
         let &(name, helper_root) = &lowered_rules[ir.index as usize];
         let root = overrides.remove(&name).map_or(helper_root, |s| s.value);
-        let root = pool.import_subtree(staging, root, &mut staging_map);
+        let root = pool.import_subtree(staging, root, &mut staging_map, &mut import_scratch);
         let name = pool.intern(staging.resolve(name));
         variables.push(Variable { name, root });
     }
@@ -580,28 +585,31 @@ fn build_grammar(
         }
     }
 
-    let import_staging_roots = |roots: Vec<RuleId>, pool: &mut RulePool, map: &mut Vec<_>| {
+    let import_staging_roots = |roots: Vec<RuleId>,
+                                pool: &mut RulePool,
+                                map: &mut Vec<_>,
+                                scratch: &mut RuleImportScratch| {
         roots
             .into_iter()
-            .map(|root| pool.import_subtree(staging, root, map))
+            .map(|root| pool.import_subtree(staging, root, map, scratch))
             .collect::<Vec<_>>()
     };
     let external_roots = if let Some(roots) = result.externals {
-        import_staging_roots(roots, &mut pool, &mut staging_map)
+        import_staging_roots(roots, &mut pool, &mut staging_map, &mut import_scratch)
     } else if let Some(base) = base {
         base.external_roots
             .iter()
-            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map, &mut import_scratch))
             .collect()
     } else {
         Vec::new()
     };
     let extra_roots = if let Some(roots) = result.extras {
-        import_staging_roots(roots, &mut pool, &mut staging_map)
+        import_staging_roots(roots, &mut pool, &mut staging_map, &mut import_scratch)
     } else if let Some(base) = base {
         base.extra_roots
             .iter()
-            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+            .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map, &mut import_scratch))
             .collect()
     } else {
         let pattern = pool.intern("\\s");
@@ -692,7 +700,14 @@ fn build_grammar(
                     roots: set
                         .roots
                         .iter()
-                        .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+                        .map(|&root| {
+                            pool.import_subtree(
+                                &base.pool,
+                                root,
+                                &mut base_map,
+                                &mut import_scratch,
+                            )
+                        })
                         .collect(),
                 })
                 .collect()
@@ -701,7 +716,12 @@ fn build_grammar(
             let name = pool.intern(staging.resolve(set.name));
             let replacement = ReservedWordContext {
                 name,
-                roots: import_staging_roots(set.roots, &mut pool, &mut staging_map),
+                roots: import_staging_roots(
+                    set.roots,
+                    &mut pool,
+                    &mut staging_map,
+                    &mut import_scratch,
+                ),
             };
             if let Some(index) = merged.iter().position(|old| old.name == name) {
                 merged[index] = replacement;
@@ -718,7 +738,9 @@ fn build_grammar(
                 roots: set
                     .roots
                     .iter()
-                    .map(|&root| pool.import_subtree(&base.pool, root, &mut base_map))
+                    .map(|&root| {
+                        pool.import_subtree(&base.pool, root, &mut base_map, &mut import_scratch)
+                    })
                     .collect(),
             })
             .collect()

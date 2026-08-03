@@ -175,6 +175,13 @@ pub struct RulePool {
     str_pool: StrPool,
 }
 
+/// Retained temporary storage for copying rule DAGs between pools.
+#[derive(Default)]
+pub struct RuleImportScratch {
+    work: Vec<(RuleId, bool)>,
+    children: Vec<RuleId>,
+}
+
 impl RulePool {
     /// Copy a rule subtree from another pool, remapping both rule and string ids.
     /// `rule_map` may be retained by the caller to avoid copying shared subtrees
@@ -184,69 +191,84 @@ impl RulePool {
         source: &Self,
         root: RuleId,
         rule_map: &mut Vec<Option<RuleId>>,
+        scratch: &mut RuleImportScratch,
     ) -> RuleId {
-        fn copy(
-            target: &mut RulePool,
-            source: &RulePool,
-            id: RuleId,
-            map: &mut Vec<Option<RuleId>>,
-        ) -> RuleId {
-            if map.len() <= id.index() {
-                map.resize(id.index() + 1, None);
+        scratch.work.clear();
+        scratch.work.push((root, false));
+        while let Some((id, expanded)) = scratch.work.pop() {
+            if rule_map.len() <= id.index() {
+                rule_map.resize(id.index() + 1, None);
             }
-            if let Some(mapped) = map[id.index()] {
-                return mapped;
+            if rule_map[id.index()].is_some() {
+                continue;
             }
+            if !expanded {
+                scratch.work.push((id, true));
+                match source.node(id) {
+                    Rule::Seq(range) | Rule::Choice(range) => scratch.work.extend(
+                        source
+                            .child_slice(range)
+                            .iter()
+                            .rev()
+                            .map(|&child| (child, false)),
+                    ),
+                    Rule::Repeat(child)
+                    | Rule::Metadata { rule: child, .. }
+                    | Rule::Reserved { rule: child, .. } => scratch.work.push((child, false)),
+                    _ => {}
+                }
+                continue;
+            }
+
             let intern = |target: &mut RulePool, sid| target.intern(source.resolve(sid));
             let node = match source.node(id) {
                 Rule::Blank => Rule::Blank,
-                Rule::String(s) => Rule::String(intern(target, s)),
-                Rule::Pattern(p, f) => Rule::Pattern(intern(target, p), intern(target, f)),
-                Rule::NamedSymbol(s) => Rule::NamedSymbol(intern(target, s)),
+                Rule::String(s) => Rule::String(intern(self, s)),
+                Rule::Pattern(p, f) => Rule::Pattern(intern(self, p), intern(self, f)),
+                Rule::NamedSymbol(s) => Rule::NamedSymbol(intern(self, s)),
                 node @ Rule::Sym { .. } => node,
                 Rule::Seq(range) | Rule::Choice(range) => {
                     let is_seq = matches!(source.node(id), Rule::Seq(_));
-                    let children: Vec<_> = source
-                        .child_slice(range)
-                        .iter()
-                        .map(|&child| copy(target, source, child, map))
-                        .collect();
-                    let range = target.push_children(&children);
+                    scratch.children.clear();
+                    scratch.children.extend(
+                        source.child_slice(range).iter().map(|child| {
+                            rule_map[child.index()].expect("child copied before parent")
+                        }),
+                    );
+                    let range = self.push_children(&scratch.children);
                     if is_seq {
                         Rule::Seq(range)
                     } else {
                         Rule::Choice(range)
                     }
                 }
-                Rule::Repeat(inner) => Rule::Repeat(copy(target, source, inner, map)),
+                Rule::Repeat(inner) => Rule::Repeat(rule_map[inner.index()].unwrap()),
                 Rule::Metadata { params, rule } => {
                     let mut params = source.params(params);
                     params.precedence = match params.precedence {
-                        Precedence::Name(s) => Precedence::Name(intern(target, s)),
+                        Precedence::Name(s) => Precedence::Name(intern(self, s)),
                         other => other,
                     };
                     params.alias = params.alias.map(|alias| Alias {
-                        value: intern(target, alias.value),
+                        value: intern(self, alias.value),
                         is_named: alias.is_named,
                     });
-                    params.field = params.field.map(|s| intern(target, s));
-                    let params = target.push_params(params);
+                    params.field = params.field.map(|s| intern(self, s));
+                    let params = self.push_params(params);
                     Rule::Metadata {
                         params,
-                        rule: copy(target, source, rule, map),
+                        rule: rule_map[rule.index()].unwrap(),
                     }
                 }
                 Rule::Reserved { rule, ctx } => Rule::Reserved {
-                    rule: copy(target, source, rule, map),
-                    ctx: intern(target, ctx),
+                    rule: rule_map[rule.index()].unwrap(),
+                    ctx: intern(self, ctx),
                 },
             };
-            let mapped = target.push_node(node);
-            map[id.index()] = Some(mapped);
-            mapped
+            let mapped = self.push_node(node);
+            rule_map[id.index()] = Some(mapped);
         }
-
-        copy(self, source, root, rule_map)
+        rule_map[root.index()].unwrap()
     }
 
     #[must_use]
@@ -618,6 +640,32 @@ impl RuleIdRange {
     #[must_use]
     pub const fn as_range(self) -> std::ops::Range<usize> {
         self.start as usize..(self.start + self.len) as usize
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    #[test]
+    fn import_subtree_handles_deep_rules_iteratively() {
+        let mut source = RulePool::default();
+        let mut root = source.blank();
+        for _ in 0..50_000 {
+            root = source.repeat(root);
+        }
+
+        let mut target = RulePool::default();
+        let mut map = Vec::new();
+        let mut scratch = RuleImportScratch::default();
+        let mut imported = target.import_subtree(&source, root, &mut map, &mut scratch);
+        for _ in 0..50_000 {
+            let Rule::Repeat(child) = target.node(imported) else {
+                panic!("expected repeat");
+            };
+            imported = child;
+        }
+        assert_eq!(target.node(imported), Rule::Blank);
     }
 }
 

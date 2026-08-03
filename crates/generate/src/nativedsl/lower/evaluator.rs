@@ -509,8 +509,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn import_rule(&mut self, source: &RulePool, root: RuleId) -> RuleId {
         self.state.scratch.import_map.clear();
-        self.strings
-            .import_subtree(source, root, &mut self.state.scratch.import_map)
+        self.strings.import_subtree(
+            source,
+            root,
+            &mut self.state.scratch.import_map,
+            &mut self.state.scratch.import_scratch,
+        )
     }
 
     /// Evaluate an expression node to a [`ValueId`].
@@ -666,6 +670,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     &lowered.pool,
                     lowered.variables[i as usize].root,
                     &mut self.state.scratch.import_map,
+                    &mut self.state.scratch.import_scratch,
                 )
             }
             RuleTarget::GrammarExternal(i) => {
@@ -675,6 +680,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     &lowered.pool,
                     lowered.external_roots[i as usize],
                     &mut self.state.scratch.import_map,
+                    &mut self.state.scratch.import_scratch,
                 )
             }
         }
