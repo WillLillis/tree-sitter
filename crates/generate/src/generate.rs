@@ -20,6 +20,8 @@ mod bitvec;
 mod build_tables;
 mod dedup;
 mod grammars;
+#[cfg(feature = "nativedsl")]
+pub mod nativedsl;
 mod nfa;
 mod node_types;
 pub mod parse_grammar;

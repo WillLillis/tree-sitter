@@ -30,8 +30,9 @@ harness = false
 name    = "benchmark"
 
 [features]
-default = [ "qjs-rt" ]
+default = [ "qjs-rt", "nativedsl" ]
 qjs-rt  = [ "tree-sitter-generate/qjs-rt" ]
+nativedsl = [ "tree-sitter-generate/nativedsl" ]
 wasm    = [ "tree-sitter/wasm", "tree-sitter-loader/wasm" ]
 
 [dependencies]
@@ -68,7 +69,7 @@ webbrowser.workspace            = true
 
 tree-sitter.workspace           = true
 tree-sitter-config.workspace    = true
-tree-sitter-generate            = { workspace = true, features = ["load"] }
+tree-sitter-generate            = { workspace = true, features = ["load", "nativedsl"] }
 tree-sitter-highlight.workspace = true
 tree-sitter-loader.workspace    = true
 tree-sitter-tags.workspace      = true
