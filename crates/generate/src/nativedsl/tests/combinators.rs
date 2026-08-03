@@ -1,6 +1,6 @@
 use super::*;
 
-rule_tests! {
+pooled_rule_tests! {
     seq_and_choice {
         r#"grammar { language: "test" } rule program { seq(choice("a", "b"), "c") }"#,
         Rule::seq(vec![

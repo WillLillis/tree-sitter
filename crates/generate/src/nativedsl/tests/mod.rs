@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar as PooledGrammar;
 use crate::nativedsl::lexer::TokenKind;
-use crate::rules::{Associativity, Rule as PooledRule, RuleId, SymbolType};
+use crate::rules::{Associativity, Rule as PooledRule, RuleId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct InputGrammar {
@@ -62,15 +62,11 @@ pub(super) struct MetadataParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Rule {
+pub(super) enum RuleExpectation {
     Blank,
     String(String),
     Pattern(String, String),
     NamedSymbol(String),
-    Symbol {
-        kind: SymbolType,
-        index: u32,
-    },
     Choice(Vec<Self>),
     Metadata {
         params: MetadataParams,
@@ -84,7 +80,10 @@ pub(super) enum Rule {
     },
 }
 
-impl Rule {
+// Temporary migration alias for test files that still use the legacy name.
+pub(super) type Rule = RuleExpectation;
+
+impl RuleExpectation {
     fn with_metadata(mut content: Self, update: impl FnOnce(&mut MetadataParams)) -> Self {
         if let Self::Metadata { params, .. } = &mut content
             && !params.is_token
@@ -164,7 +163,7 @@ fn normalize_rule(grammar: &PooledGrammar, id: RuleId) -> Rule {
             Rule::Pattern(strings.resolve(value).into(), strings.resolve(flags).into())
         }
         PooledRule::NamedSymbol(name) => Rule::NamedSymbol(strings.resolve(name).into()),
-        PooledRule::Sym { kind, index } => Rule::Symbol { kind, index },
+        PooledRule::Sym { .. } => panic!("native DSL lowering emitted an interned symbol"),
         PooledRule::Seq(range) => Rule::Seq(
             strings
                 .child_slice(range)
@@ -295,6 +294,17 @@ macro_rules! rule_tests {
     };
 }
 
+/// Pool-native counterpart to `rule_tests`: expected rules remain a concise
+/// test-only pattern, while the actual rule is inspected directly in its pool.
+macro_rules! pooled_rule_tests {
+    ($($name:ident { $input:expr, $expected:expr })*) => {
+        $(#[test] fn $name() {
+            let g = pooled_dsl($input);
+            assert_rule(&g.pool, g.variables[0].root, &$expected);
+        })*
+    };
+}
+
 /// Generate tests that just verify a grammar compiles without error.
 macro_rules! compile_tests {
     ($($name:ident { $input:expr })*) => {
@@ -395,6 +405,100 @@ pub(super) fn dsl(input: &str) -> InputGrammar {
     parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg"))
         .unwrap()
         .into()
+}
+
+pub(super) fn pooled_dsl(input: &str) -> PooledGrammar {
+    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap()
+}
+
+pub(super) fn assert_rule(
+    pool: &crate::rules::RulePool,
+    actual: RuleId,
+    expected: &RuleExpectation,
+) {
+    fn mismatch(
+        pool: &crate::rules::RulePool,
+        actual: RuleId,
+        expected: &RuleExpectation,
+        path: &str,
+    ) -> Result<(), String> {
+        match (pool.node(actual), expected) {
+            (PooledRule::Blank, Rule::Blank) => Ok(()),
+            (PooledRule::String(a), Rule::String(e))
+            | (PooledRule::NamedSymbol(a), Rule::NamedSymbol(e))
+                if pool.resolve(a) == e =>
+            {
+                Ok(())
+            }
+            (PooledRule::Pattern(a, af), Rule::Pattern(e, ef))
+                if pool.resolve(a) == e && pool.resolve(af) == ef =>
+            {
+                Ok(())
+            }
+            (PooledRule::Seq(range), Rule::Seq(expected))
+            | (PooledRule::Choice(range), Rule::Choice(expected)) => {
+                let actual = pool.child_slice(range);
+                if actual.len() != expected.len() {
+                    return Err(format!(
+                        "{path}: child count {} != {}",
+                        actual.len(),
+                        expected.len()
+                    ));
+                }
+                for (index, (&actual, expected)) in actual.iter().zip(expected).enumerate() {
+                    mismatch(pool, actual, expected, &format!("{path}[{index}]"))?;
+                }
+                Ok(())
+            }
+            (PooledRule::Repeat(actual), Rule::Repeat(expected)) => {
+                mismatch(pool, actual, expected, &format!("{path}.repeat"))
+            }
+            (
+                PooledRule::Reserved { rule, ctx },
+                Rule::Reserved {
+                    rule: expected,
+                    context_name,
+                },
+            ) if pool.resolve(ctx) == context_name => {
+                mismatch(pool, rule, expected, &format!("{path}.reserved"))
+            }
+            (
+                PooledRule::Metadata { params, rule },
+                Rule::Metadata {
+                    params: expected_params,
+                    rule: expected_rule,
+                },
+            ) => {
+                let params = pool.params(params);
+                let precedence = match params.precedence {
+                    crate::rules::Precedence::None => Precedence::None,
+                    crate::rules::Precedence::Integer(n) => Precedence::Integer(n),
+                    crate::rules::Precedence::Name(s) => Precedence::Name(pool.resolve(s).into()),
+                };
+                let equal = precedence == expected_params.precedence
+                    && params.dynamic_precedence == expected_params.dynamic_precedence
+                    && params.associativity == expected_params.associativity
+                    && params.is_token == expected_params.is_token
+                    && params.is_main_token == expected_params.is_main_token
+                    && params.alias.map(|a| (pool.resolve(a.value), a.is_named))
+                        == expected_params
+                            .alias
+                            .as_ref()
+                            .map(|a| (a.value.as_str(), a.is_named))
+                    && params.field.map(|s| pool.resolve(s))
+                        == expected_params.field_name.as_deref();
+                if !equal {
+                    return Err(format!("{path}.metadata: parameters differ"));
+                }
+                mismatch(pool, rule, expected_rule, &format!("{path}.metadata.rule"))
+            }
+            (actual, expected) => Err(format!("{path}: {actual:?} != {expected:?}")),
+        }
+    }
+
+    if let Err(reason) = mismatch(pool, actual, expected, "root") {
+        panic!("pooled rule did not match expectation: {reason}\nexpected: {expected:#?}");
+    }
 }
 
 pub(super) fn dsl_err(input: &str) -> DslError {
