@@ -3,12 +3,14 @@ use super::*;
 #[test]
 fn extras_mixed_rule_and_str() {
     // extras is list_t<rule_t> - should accept a mix of rule refs and strings
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar { language: "test", extras: [ws, "\n"] }
         rule program { "x" }
         rule ws { regexp(r"\s") }
-    "#);
-    assert_eq!(g.extra_symbols.len(), 2);
+    "#,
+    );
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 compile_tests! {
