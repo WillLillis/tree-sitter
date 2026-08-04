@@ -2,52 +2,57 @@ use super::*;
 
 #[test]
 fn rule_set_macro_single_rule() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         rules make_program() {
             rule program { "x" }
         }
         grammar { language: "test" }
         @make_program()
-        "#);
+        "#,
+    );
     assert_eq!(g.variables.len(), 1);
-    assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+    assert_eq!(g.pool.resolve(g.variables[0].name), "program");
+    assert_rule(&g.pool, g.variables[0].root, &Rule::String("x".into()));
 }
 
 #[test]
 fn rule_set_macro_str_param_substitution() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         rules lit(s: str_t) {
             rule program { s }
         }
         grammar { language: "test" }
         @lit("hello")
-        "#);
-    assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("hello".into()));
+        "#,
+    );
+    assert_eq!(g.pool.resolve(g.variables[0].name), "program");
+    assert_rule(&g.pool, g.variables[0].root, &Rule::String("hello".into()));
 }
 
 #[test]
 fn rule_set_macro_symref_in_expr_position() {
     // pair("foo") produces a_foo and b_foo; b_foo's body references
     // a_foo by computed name via @concat(...) in expression position.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         rules pair(s: str_t) {
             rule @concat("a_", s) { "x" }
             rule @concat("b_", s) { seq(@concat("a_", s), "y") }
         }
         grammar { language: "test", start: a_foo }
         @pair("foo")
-        "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
-    assert_eq!(names, vec!["a_foo", "b_foo"]);
-    let b = g.variables.iter().find(|v| v.name == "b_foo").unwrap();
-    assert_eq!(
-        b.rule,
-        Rule::seq(vec![
+        "#,
+    );
+    assert_eq!(pooled_rule_names(&g), ["a_foo", "b_foo"]);
+    assert_named_rule(
+        &g,
+        "b_foo",
+        &Rule::seq(vec![
             Rule::NamedSymbol("a_foo".into()),
             Rule::String("y".into()),
-        ])
+        ]),
     );
 }
 
@@ -55,29 +60,33 @@ fn rule_set_macro_symref_in_expr_position() {
 fn rule_set_macro_literal_name_via_at_string() {
     // `@"foo"` evaluates the StringLit to "foo" and produces a rule named foo.
     // Pins behavior - shape is unusual but parser+expand accept it.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         rules emit() {
             rule @"foo" { "x" }
         }
         grammar { language: "test", start: foo }
         @emit()
-    "#);
-    assert_eq!(g.variables[0].name, "foo");
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+    "#,
+    );
+    assert_eq!(g.pool.resolve(g.variables[0].name), "foo");
+    assert_rule(&g.pool, g.variables[0].root, &Rule::String("x".into()));
 }
 
 #[test]
 fn rule_set_macro_at_string_name_unescapes() {
     // `@"..."` decodes escapes like any string literal: \u{41} is 'A', so the
     // rule is named "aA" - consistent with rule-body string decoding.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         rules emit() {
             rule @"a\u{41}" { "x" }
         }
         grammar { language: "test", start: aA }
         @emit()
-    "#);
-    assert_eq!(g.variables[0].name, "aA");
+    "#,
+    );
+    assert_eq!(g.pool.resolve(g.variables[0].name), "aA");
 }
 
 #[test]
@@ -177,7 +186,7 @@ fn computed_ref_unknown_gets_suggestion() {
     );
 }
 
-rule_names_tests! {
+pooled_rule_names_tests! {
     rule_set_macro_empty_body_is_noop {
         // An empty `rules` body is allowed; calling it contributes no rules.
         r#"
@@ -279,7 +288,7 @@ rule_names_tests! {
     }
 }
 
-find_rule_tests! {
+pooled_find_rule_tests! {
     rule_set_macro_rule_param_substitution {
         r#"
         rules wrap(inner: rule_t) {

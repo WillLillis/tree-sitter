@@ -311,12 +311,11 @@ macro_rules! find_rule_tests {
     };
 }
 
-/// Generate tests that parse a grammar and assert on its full rule-name list.
-macro_rules! rule_names_tests {
-    ($($name:ident { $input:expr, $expected:expr })*) => {
+macro_rules! pooled_find_rule_tests {
+    ($($name:ident { $input:expr, $rule:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
-            let g = dsl($input);
-            assert_eq!(rule_names(&g), $expected);
+            let g = pooled_dsl($input);
+            assert_named_rule(&g, $rule, &$expected);
         })*
     };
 }
@@ -546,6 +545,26 @@ pub(super) fn parse_with_modules(
     let root_path = dir.path().join("grammar.tsg");
     std::fs::write(&root_path, root).unwrap();
     parse_native_dsl(root, &root_path).map(Into::into)
+}
+
+pub(super) fn pooled_parse_with_modules(
+    modules: &[(&str, &str)],
+    root: &str,
+) -> Result<PooledGrammar, DslError> {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, src) in modules {
+        std::fs::write(dir.path().join(name), src).unwrap();
+    }
+    let root_path = dir.path().join("grammar.tsg");
+    std::fs::write(&root_path, root).unwrap();
+    parse_native_dsl(root, &root_path)
+}
+
+pub(super) fn pooled_rule_names(g: &PooledGrammar) -> Vec<&str> {
+    g.variables
+        .iter()
+        .map(|variable| g.pool.resolve(variable.name))
+        .collect()
 }
 
 /// Build the Rule tree for `comma_sep1(item)`:
