@@ -336,12 +336,11 @@ macro_rules! pooled_rule_names_tests {
     };
 }
 
-/// Generate tests that parse a grammar and assert on its full external-token list.
-macro_rules! externals_tests {
+macro_rules! pooled_externals_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
-            let g = dsl($input);
-            assert_eq!(g.external_tokens, $expected);
+            let g = pooled_dsl($input);
+            assert_rules(&g.pool, &g.external_roots, &$expected);
         })*
     };
 }

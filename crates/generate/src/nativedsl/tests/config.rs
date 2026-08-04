@@ -2,7 +2,8 @@ use super::*;
 
 #[test]
 fn grammar_config_all_fields() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             extras: [regexp(r"\s"), comment],
@@ -19,40 +20,61 @@ fn grammar_config_all_fields() {
         rule arrow { "->" }
         rule comment { regexp(r"\/\/.*") }
         rule identifier { regexp("[a-z]+") }
-    "#);
-    assert_eq!(g.extra_symbols.len(), 2);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(g.supertype_symbols, vec!["_expression"]);
-    assert_eq!(g.variables_to_inline, vec!["_statement"]);
-    assert_eq!(
-        g.expected_conflicts,
-        vec![vec!["primary".to_string(), "arrow".to_string()]]
+    "#,
     );
-    assert_eq!(g.word_token, Some("identifier".into()));
+    assert_eq!(g.extra_roots.len(), 2);
+    assert_eq!(g.external_roots.len(), 1);
+    assert_eq!(
+        g.supertype_names
+            .iter()
+            .map(|&name| g.pool.resolve(name))
+            .collect::<Vec<_>>(),
+        ["_expression"],
+    );
+    assert_eq!(
+        g.inline_names
+            .iter()
+            .map(|&name| g.pool.resolve(name))
+            .collect::<Vec<_>>(),
+        ["_statement"],
+    );
+    assert_eq!(
+        g.conflict_names[0]
+            .iter()
+            .map(|&name| g.pool.resolve(name))
+            .collect::<Vec<_>>(),
+        ["primary", "arrow"],
+    );
+    assert_eq!(
+        g.word_name.map(|name| g.pool.resolve(name)),
+        Some("identifier")
+    );
 }
 
 #[test]
 fn config_precedences() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             precedences: [["add", multiply]],
         }
         rule program { "x" }
         rule multiply { "y" }
-    "#);
-    assert_eq!(
-        g.precedence_orderings,
-        vec![vec![
-            PrecedenceEntry::Name("add".into()),
-            PrecedenceEntry::Symbol("multiply".into()),
-        ]]
+    "#,
     );
+    assert_eq!(g.precedence_orderings.len(), 1);
+    assert!(matches!(
+        g.precedence_orderings[0].as_slice(),
+        [crate::grammars::PrecedenceEntry::Name(add), crate::grammars::PrecedenceEntry::Symbol(multiply)]
+            if g.pool.resolve(*add) == "add" && g.pool.resolve(*multiply) == "multiply"
+    ));
 }
 
 #[test]
 fn conflicts_accepts_appended_list() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             conflicts: append([[a, b]], [[a, c]]),
@@ -61,26 +83,33 @@ fn conflicts_accepts_appended_list() {
         rule a { "a" }
         rule b { "b" }
         rule c { "c" }
-    "#);
-    assert_eq!(
-        g.expected_conflicts,
-        vec![
-            vec!["a".to_string(), "b".to_string()],
-            vec!["a".to_string(), "c".to_string()],
-        ]
+    "#,
     );
+    let conflicts = g
+        .conflict_names
+        .iter()
+        .map(|conflict| {
+            conflict
+                .iter()
+                .map(|&name| g.pool.resolve(name))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conflicts, [["a", "b"], ["a", "c"]]);
 }
 
 #[test]
 fn precedences_mixed_names_and_idents() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             precedences: [["member", call, "binary"]],
         }
         rule program { "x" }
         rule call { "c" }
-    "#);
+    "#,
+    );
     assert_eq!(g.precedence_orderings.len(), 1);
     assert_eq!(g.precedence_orderings[0].len(), 3);
 }
@@ -88,44 +117,58 @@ fn precedences_mixed_names_and_idents() {
 #[test]
 fn empty_list_compatible_with_any_list_type() {
     // Empty list in extras (list_t<rule_t> context)
-    dsl(r#"
+    pooled_dsl(
+        r#"
         grammar { language: "test", extras: [] }
         rule foo { "x" }
-    "#);
+    "#,
+    );
     // Empty list in a let with explicit list_t<str_t> annotation
-    dsl(r#"
+    pooled_dsl(
+        r#"
         grammar { language: "test" }
         let x: list_t<str_t> = []
         rule foo { "x" }
-    "#);
+    "#,
+    );
 }
 
 #[test]
 fn empty_list_append() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar { language: "test", extras: append([], [regexp("\\s")]) }
         rule foo { "x" }
-    "#);
-    assert_eq!(g.extra_symbols.len(), 1);
+    "#,
+    );
+    assert_eq!(g.extra_roots.len(), 1);
 }
 
 #[test]
 fn raw_string_literal() {
     #[expect(clippy::needless_raw_string_hashes, reason = "false positive")]
-    let g = dsl(r##"
+    let g = pooled_dsl(
+        r##"
         grammar { language: "test" }
         rule program { regexp(r#""[^"]*""#) }
-    "##);
-    assert!(matches!(&g.variables[0].rule, Rule::Pattern(p, _) if p == r#""[^"]*""#));
+    "##,
+    );
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &Rule::pattern(r#""[^"]*""#, ""),
+    );
 }
 
 #[test]
 fn string_with_escapes() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar { language: "test" }
         rule program { "\n\t\\" }
-    "#);
-    assert_eq!(g.variables[0].rule, Rule::String("\n\t\\".into()));
+    "#,
+    );
+    assert_rule(&g.pool, g.variables[0].root, &Rule::String("\n\t\\".into()));
 }
 
 #[test]
@@ -154,16 +197,20 @@ fn json_roundtrip() {
     let grammar = parse_native_dsl(input, &path)
         .unwrap()
         .normalize(&mut Vec::new());
+    let json = crate::nativedsl::serialize::grammar_to_json(&grammar);
     let json_str =
-        serde_json::to_string_pretty(&crate::nativedsl::serialize::grammar_to_json(&grammar))
-            .expect("grammar JSON serialization should not fail");
+        serde_json::to_string_pretty(&json).expect("grammar JSON serialization should not fail");
     let reparsed = crate::parse_grammar::parse_grammar(&json_str, &mut Vec::new()).unwrap();
-    assert_eq!(InputGrammar::from(grammar), InputGrammar::from(reparsed));
+    assert_eq!(
+        json,
+        crate::nativedsl::serialize::grammar_to_json(&reparsed)
+    );
 }
 
 #[test]
 fn config_word_with_conflicts() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             word: identifier,
@@ -172,14 +219,25 @@ fn config_word_with_conflicts() {
         rule program { choice(identifier, keyword) }
         rule identifier { regexp(r"[a-z]+") }
         rule keyword { "if" }
-    "#);
-    assert_eq!(g.word_token.as_deref(), Some("identifier"));
-    assert_eq!(g.expected_conflicts, vec![vec!["identifier", "keyword"]]);
+    "#,
+    );
+    assert_eq!(
+        g.word_name.map(|name| g.pool.resolve(name)),
+        Some("identifier")
+    );
+    assert_eq!(
+        g.conflict_names[0]
+            .iter()
+            .map(|&name| g.pool.resolve(name))
+            .collect::<Vec<_>>(),
+        ["identifier", "keyword"],
+    );
 }
 
 #[test]
 fn config_extras_with_inline() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             extras: [_ws],
@@ -187,14 +245,16 @@ fn config_extras_with_inline() {
         }
         rule program { "x" }
         rule _ws { regexp(r"\s") }
-    "#);
-    assert_eq!(g.extra_symbols.len(), 1);
-    assert_eq!(g.variables_to_inline, vec!["_ws"]);
+    "#,
+    );
+    assert_eq!(g.extra_roots.len(), 1);
+    assert_eq!(g.pool.resolve(g.inline_names[0]), "_ws");
 }
 
 #[test]
 fn config_all_fields_at_once() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             extras: [regexp(r"\s")],
@@ -211,41 +271,46 @@ fn config_all_fields_at_once() {
         rule kw { "if" }
         rule _inline { "x" }
         rule heredoc { "<<" }
-    "#);
-    assert_eq!(g.extra_symbols.len(), 1);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(g.variables_to_inline, vec!["_inline"]);
-    assert_eq!(g.supertype_symbols, vec!["_expr"]);
-    assert_eq!(g.word_token.as_deref(), Some("ident"));
-    assert_eq!(g.expected_conflicts.len(), 1);
+    "#,
+    );
+    assert_eq!(g.extra_roots.len(), 1);
+    assert_eq!(g.external_roots.len(), 1);
+    assert_eq!(g.pool.resolve(g.inline_names[0]), "_inline");
+    assert_eq!(g.pool.resolve(g.supertype_names[0]), "_expr");
+    assert_eq!(g.word_name.map(|name| g.pool.resolve(name)), Some("ident"));
+    assert_eq!(g.conflict_names.len(), 1);
     assert_eq!(g.precedence_orderings.len(), 1);
 }
 
 #[test]
 fn externals_used_in_extras() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             externals: [_newline],
             extras: [regexp(r"\s"), _newline],
         }
         rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(g.extra_symbols.len(), 2);
+    "#,
+    );
+    assert_eq!(g.external_roots.len(), 1);
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 #[test]
 fn externals_used_in_conflicts() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar {
             language: "test",
             externals: [heredoc],
             conflicts: [[program, heredoc]],
         }
         rule program { "x" }
-    "#);
-    assert_eq!(g.expected_conflicts.len(), 1);
+    "#,
+    );
+    assert_eq!(g.conflict_names.len(), 1);
 }
 
 #[test]
@@ -260,16 +325,19 @@ fn externals_via_let_bindings() {
         grammar { language: "test", externals: b }
         rule program { "x" }"#,
     ] {
-        assert_eq!(
-            dsl(src).external_tokens,
-            vec![Rule::NamedSymbol("heredoc".into())]
+        let g = pooled_dsl(src);
+        assert_rules(
+            &g.pool,
+            &g.external_roots,
+            &[Rule::NamedSymbol("heredoc".into())],
         );
     }
 }
 
 #[test]
 fn externals_used_in_extras_via_let() {
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         let ext: list_t<rule_t> = [_newline]
         grammar {
             language: "test",
@@ -277,21 +345,28 @@ fn externals_used_in_extras_via_let() {
             extras: [regexp(r"\s"), _newline],
         }
         rule program { "x" }
-    "#);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(g.extra_symbols.len(), 2);
+    "#,
+    );
+    assert_eq!(g.external_roots.len(), 1);
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 #[test]
 fn external_and_rule_same_name_is_valid() {
     // A rule can also be an external token - the rule is registered first,
     // then the externals walk sees it's already declared and skips re-registration.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         grammar { language: "test", externals: [foo] }
         rule program { "x" }
         rule foo { "y" }
-    "#);
-    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("foo".into())]);
+    "#,
+    );
+    assert_rules(
+        &g.pool,
+        &g.external_roots,
+        &[Rule::NamedSymbol("foo".into())],
+    );
     assert_eq!(g.variables.len(), 2);
 }
 
@@ -314,30 +389,31 @@ fn error_externals_via_function_call() {
 fn expect_decl_in_grammar_file() {
     // A top-level `expect` forward-declares a name (usable in rule bodies); the
     // grammar block's externals list still does the actual registration.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         expect _foo
         grammar { language: "test", externals: [_foo] }
         rule program { _foo }
-    "#);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(*find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
+    "#,
+    );
+    assert_eq!(g.external_roots.len(), 1);
+    assert_named_rule(&g, "program", &Rule::NamedSymbol("_foo".into()));
 }
 
 #[test]
 fn expect_fulfilled_by_same_file_rule() {
     // A forward-decl is fulfilled by a later same-file definition, not collided
     // with: the `rule` claims the name the `expect` declared.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         expect helper
         grammar { language: "test" }
         rule program { helper }
         rule helper { "x" }
-    "#);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::NamedSymbol("helper".into())
+    "#,
     );
-    assert_eq!(*find_rule(&g, "helper"), Rule::String("x".into()));
+    assert_named_rule(&g, "program", &Rule::NamedSymbol("helper".into()));
+    assert_named_rule(&g, "helper", &Rule::String("x".into()));
 }
 
 #[test]
@@ -363,26 +439,30 @@ fn expect_referenced_but_not_defined_is_rejected() {
 fn expect_decl_repeated_is_idempotent() {
     // Forward-decls are idempotent (like C): repeating `expect` for a name is
     // redundant, not a duplicate - only definitions collide.
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         expect _foo
         expect _foo
         grammar { language: "test", externals: [_foo] }
         rule program { _foo }
-    "#);
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(*find_rule(&g, "program"), Rule::NamedSymbol("_foo".into()));
+    "#,
+    );
+    assert_eq!(g.external_roots.len(), 1);
+    assert_named_rule(&g, "program", &Rule::NamedSymbol("_foo".into()));
 }
 
 #[test]
 fn expect_decl_redundant_with_grammar_block() {
     // `expect _foo` and `externals: [_foo]` declare the same name; the grammar
     // block's pre-registration skips already-declared names (contains_key check).
-    let g = dsl(r#"
+    let g = pooled_dsl(
+        r#"
         expect _foo
         grammar { language: "test", externals: [_foo, _bar] }
         rule program { seq(_foo, _bar) }
-    "#);
-    assert_eq!(g.external_tokens.len(), 2);
+    "#,
+    );
+    assert_eq!(g.external_roots.len(), 2);
 }
 
 #[test]
@@ -404,7 +484,7 @@ fn error_start_unknown_rule() {
     );
 }
 
-externals_tests! {
+pooled_externals_tests! {
     externals_inline_list {
         r#"grammar { language: "test", externals: [heredoc, _eof] } rule program { "x" }"#,
         vec![
@@ -495,7 +575,7 @@ externals_tests! {
     }
 }
 
-rule_names_tests! {
+pooled_rule_names_tests! {
     start_picks_named_rule {
         // `start: third` rotates `third` to position 0, overriding the default
         // "first declared rule is the start symbol" convention.
