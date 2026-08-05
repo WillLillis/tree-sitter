@@ -140,7 +140,7 @@ fn raw_string_literal() {
     assert_rule(
         &g.pool,
         g.variables[0].root,
-        &Rule::pattern(r#""[^"]*""#, ""),
+        &ExpectedRule::pattern(r#""[^"]*""#, ""),
     );
 }
 
@@ -150,7 +150,11 @@ fn string_with_escapes() {
         grammar { language: "test" }
         rule program { "\n\t\\" }
     "#);
-    assert_rule(&g.pool, g.variables[0].root, &Rule::String("\n\t\\".into()));
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &ExpectedRule::String("\n\t\\".into()),
+    );
 }
 
 #[test]
@@ -301,7 +305,7 @@ fn externals_via_let_bindings() {
         assert_rules(
             &g.pool,
             &g.external_roots,
-            &[Rule::NamedSymbol("heredoc".into())],
+            &[ExpectedRule::NamedSymbol("heredoc".into())],
         );
     }
 }
@@ -333,7 +337,7 @@ fn external_and_rule_same_name_is_valid() {
     assert_rules(
         &g.pool,
         &g.external_roots,
-        &[Rule::NamedSymbol("foo".into())],
+        &[ExpectedRule::NamedSymbol("foo".into())],
     );
     assert_eq!(g.variables.len(), 2);
 }
@@ -363,7 +367,7 @@ fn expect_decl_in_grammar_file() {
         rule program { _foo }
     "#);
     assert_eq!(g.external_roots.len(), 1);
-    assert_named_rule(&g, "program", &Rule::NamedSymbol("_foo".into()));
+    assert_named_rule(&g, "program", &ExpectedRule::NamedSymbol("_foo".into()));
 }
 
 #[test]
@@ -376,8 +380,8 @@ fn expect_fulfilled_by_same_file_rule() {
         rule program { helper }
         rule helper { "x" }
     "#);
-    assert_named_rule(&g, "program", &Rule::NamedSymbol("helper".into()));
-    assert_named_rule(&g, "helper", &Rule::String("x".into()));
+    assert_named_rule(&g, "program", &ExpectedRule::NamedSymbol("helper".into()));
+    assert_named_rule(&g, "helper", &ExpectedRule::String("x".into()));
 }
 
 #[test]
@@ -410,7 +414,7 @@ fn expect_decl_repeated_is_idempotent() {
         rule program { _foo }
     "#);
     assert_eq!(g.external_roots.len(), 1);
-    assert_named_rule(&g, "program", &Rule::NamedSymbol("_foo".into()));
+    assert_named_rule(&g, "program", &ExpectedRule::NamedSymbol("_foo".into()));
 }
 
 #[test]
@@ -448,37 +452,37 @@ externals_tests! {
     externals_inline_list {
         r#"grammar { language: "test", externals: [heredoc, _eof] } rule program { "x" }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("_eof".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("_eof".into()),
         ]
     }
     externals_with_string_literals {
         // String literals in externals (anonymous tokens) don't need pre-registration.
         r#"grammar { language: "test", externals: [heredoc, "||"] } rule program { "x" }"#,
-        vec![Rule::NamedSymbol("heredoc".into()), Rule::String("||".into())]
+        vec![ExpectedRule::NamedSymbol("heredoc".into()), ExpectedRule::String("||".into())]
     }
     externals_mixed_with_declared_rules {
         r#"grammar { language: "test", externals: [heredoc, comment] }
         rule program { "x" }
         rule comment { regexp("//.*") }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("comment".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("comment".into()),
         ]
     }
     externals_with_regexp_literal {
         r#"grammar { language: "test", externals: [regexp(r"\n")] } rule program { "x" }"#,
-        vec![Rule::Pattern(r"\n".into(), String::new())]
+        vec![ExpectedRule::Pattern(r"\n".into(), String::new())]
     }
     externals_used_in_rule_body {
         r#"grammar { language: "test", externals: [heredoc] } rule program { choice("x", heredoc) }"#,
-        vec![Rule::NamedSymbol("heredoc".into())]
+        vec![ExpectedRule::NamedSymbol("heredoc".into())]
     }
     externals_append_inline_lists {
         r#"grammar { language: "test", externals: append([heredoc], [_eof]) } rule program { "x" }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("_eof".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("_eof".into()),
         ]
     }
     externals_empty_list {
@@ -490,8 +494,8 @@ externals_tests! {
         grammar { language: "test", externals: ext }
         rule program { "x" }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("_eof".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("_eof".into()),
         ]
     }
     externals_dag_let_referenced_twice_via_append {
@@ -500,8 +504,8 @@ externals_tests! {
         grammar { language: "test", externals: append(ext, ext) }
         rule program { "x" }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
         ]
     }
     externals_via_let_mixed_declared_and_undeclared {
@@ -510,8 +514,8 @@ externals_tests! {
         rule program { "x" }
         rule comment { regexp("//.*") }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("comment".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("comment".into()),
         ]
     }
     externals_via_append_let_and_inline {
@@ -519,8 +523,8 @@ externals_tests! {
         grammar { language: "test", externals: append(base_ext, [_eof]) }
         rule program { "x" }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("_eof".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("_eof".into()),
         ]
     }
     externals_via_chained_let_with_append {
@@ -529,8 +533,8 @@ externals_tests! {
         grammar { language: "test", externals: b }
         rule program { "x" }"#,
         vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("_eof".into()),
+            ExpectedRule::NamedSymbol("heredoc".into()),
+            ExpectedRule::NamedSymbol("_eof".into()),
         ]
     }
 }

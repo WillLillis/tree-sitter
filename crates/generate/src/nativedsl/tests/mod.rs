@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::grammars::InputGrammar;
 use crate::nativedsl::lexer::TokenKind;
-use crate::rules::{Associativity, Rule as RuleNode, RuleId};
+use crate::rules::{Associativity, Rule, RuleId};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum Precedence {
@@ -30,7 +30,7 @@ pub(super) struct MetadataParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum RuleExpectation {
+pub(super) enum ExpectedRule {
     Blank,
     String(String),
     Pattern(String, String),
@@ -48,10 +48,7 @@ pub(super) enum RuleExpectation {
     },
 }
 
-// Keep expected-rule expressions compact throughout the test suite.
-pub(super) type Rule = RuleExpectation;
-
-impl RuleExpectation {
+impl ExpectedRule {
     fn with_metadata(mut content: Self, update: impl FnOnce(&mut MetadataParams)) -> Self {
         if let Self::Metadata { params, .. } = &mut content
             && !params.is_token
@@ -241,32 +238,28 @@ pub(super) fn dsl(input: &str) -> InputGrammar {
     parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap()
 }
 
-pub(super) fn assert_rule(
-    pool: &crate::rules::RulePool,
-    actual: RuleId,
-    expected: &RuleExpectation,
-) {
+pub(super) fn assert_rule(pool: &crate::rules::RulePool, actual: RuleId, expected: &ExpectedRule) {
     fn mismatch(
         pool: &crate::rules::RulePool,
         actual: RuleId,
-        expected: &RuleExpectation,
+        expected: &ExpectedRule,
         path: &str,
     ) -> Result<(), String> {
         match (pool.node(actual), expected) {
-            (RuleNode::Blank, Rule::Blank) => Ok(()),
-            (RuleNode::String(a), Rule::String(e))
-            | (RuleNode::NamedSymbol(a), Rule::NamedSymbol(e))
+            (Rule::Blank, ExpectedRule::Blank) => Ok(()),
+            (Rule::String(a), ExpectedRule::String(e))
+            | (Rule::NamedSymbol(a), ExpectedRule::NamedSymbol(e))
                 if pool.resolve(a) == e =>
             {
                 Ok(())
             }
-            (RuleNode::Pattern(a, af), Rule::Pattern(e, ef))
+            (Rule::Pattern(a, af), ExpectedRule::Pattern(e, ef))
                 if pool.resolve(a) == e && pool.resolve(af) == ef =>
             {
                 Ok(())
             }
-            (RuleNode::Seq(range), Rule::Seq(expected))
-            | (RuleNode::Choice(range), Rule::Choice(expected)) => {
+            (Rule::Seq(range), ExpectedRule::Seq(expected))
+            | (Rule::Choice(range), ExpectedRule::Choice(expected)) => {
                 let actual = pool.child_slice(range);
                 if actual.len() != expected.len() {
                     return Err(format!(
@@ -280,12 +273,12 @@ pub(super) fn assert_rule(
                 }
                 Ok(())
             }
-            (RuleNode::Repeat(actual), Rule::Repeat(expected)) => {
+            (Rule::Repeat(actual), ExpectedRule::Repeat(expected)) => {
                 mismatch(pool, actual, expected, &format!("{path}.repeat"))
             }
             (
-                RuleNode::Reserved { rule, ctx },
-                Rule::Reserved {
+                Rule::Reserved { rule, ctx },
+                ExpectedRule::Reserved {
                     rule: expected,
                     context_name,
                 },
@@ -293,8 +286,8 @@ pub(super) fn assert_rule(
                 mismatch(pool, rule, expected, &format!("{path}.reserved"))
             }
             (
-                RuleNode::Metadata { params, rule },
-                Rule::Metadata {
+                Rule::Metadata { params, rule },
+                ExpectedRule::Metadata {
                     params: expected_params,
                     rule: expected_rule,
                 },
@@ -334,7 +327,7 @@ pub(super) fn assert_rule(
 pub(super) fn assert_rules(
     pool: &crate::rules::RulePool,
     actual: &[RuleId],
-    expected: &[RuleExpectation],
+    expected: &[ExpectedRule],
 ) {
     assert_eq!(actual.len(), expected.len(), "rule-list lengths differ");
     for (&actual, expected) in actual.iter().zip(expected) {
@@ -342,7 +335,7 @@ pub(super) fn assert_rules(
     }
 }
 
-pub(super) fn assert_named_rule(grammar: &InputGrammar, name: &str, expected: &RuleExpectation) {
+pub(super) fn assert_named_rule(grammar: &InputGrammar, name: &str, expected: &ExpectedRule) {
     let root = rule_id(grammar, name);
     assert_rule(&grammar.pool, root, expected);
 }
@@ -387,27 +380,27 @@ pub(super) fn rule_names(g: &InputGrammar) -> Vec<&str> {
 
 /// Build the Rule tree for `comma_sep1(item)`:
 /// `seq(item, choice(repeat(seq(",", item)), blank))`
-pub(super) fn comma_sep1_rule(item: &str) -> Rule {
+pub(super) fn comma_sep1_rule(item: &str) -> ExpectedRule {
     sep_by1_rule(",", item)
 }
 
 /// Build the Rule tree for `comma_sep(item)`:
 /// `choice(comma_sep1(item), blank)`
-pub(super) fn comma_sep_rule(item: &str) -> Rule {
-    Rule::choice(vec![comma_sep1_rule(item), Rule::Blank])
+pub(super) fn comma_sep_rule(item: &str) -> ExpectedRule {
+    ExpectedRule::choice(vec![comma_sep1_rule(item), ExpectedRule::Blank])
 }
 
 /// Build the Rule tree for `sep_by1(sep, item)`:
 /// `seq(item, choice(repeat(seq(sep, item)), blank))`
-pub(super) fn sep_by1_rule(sep: &str, item: &str) -> Rule {
-    Rule::seq(vec![
-        Rule::NamedSymbol(item.into()),
-        Rule::choice(vec![
-            Rule::repeat(Rule::seq(vec![
-                Rule::String(sep.into()),
-                Rule::NamedSymbol(item.into()),
+pub(super) fn sep_by1_rule(sep: &str, item: &str) -> ExpectedRule {
+    ExpectedRule::seq(vec![
+        ExpectedRule::NamedSymbol(item.into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::repeat(ExpectedRule::seq(vec![
+                ExpectedRule::String(sep.into()),
+                ExpectedRule::NamedSymbol(item.into()),
             ])),
-            Rule::Blank,
+            ExpectedRule::Blank,
         ]),
     ])
 }

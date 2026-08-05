@@ -5,38 +5,38 @@ rule_tests! {
         r#"grammar { language: "test" }
         let P: int_t = 5
         rule program { prec(P, "x") }"#,
-        Rule::prec(Precedence::Integer(5), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(5), ExpectedRule::String("x".into()))
     }
     let_binding_negative_int {
         r#"grammar { language: "test" }
         let P: int_t = -1
         rule program { prec(P, "x") }"#,
-        Rule::prec(Precedence::Integer(-1), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(-1), ExpectedRule::String("x".into()))
     }
     let_binding_i32_min {
         r#"grammar { language: "test" }
         let P: int_t = -2147483648
         rule program { prec(P, "x") }"#,
-        Rule::prec(Precedence::Integer(i32::MIN), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(i32::MIN), ExpectedRule::String("x".into()))
     }
     let_binding_i32_max {
         r#"grammar { language: "test" }
         let P: int_t = 2147483647
         rule program { prec(P, "x") }"#,
-        Rule::prec(Precedence::Integer(i32::MAX), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(i32::MAX), ExpectedRule::String("x".into()))
     }
     int_double_negation {
         r#"grammar { language: "test" }
         let P: int_t = --5
         rule program { prec(P, "x") }"#,
-        Rule::prec(Precedence::Integer(5), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(5), ExpectedRule::String("x".into()))
     }
     let_binding_typed_str {
         r#"grammar { language: "test" }
         let SEP: str_t = ","
         rule program { seq("a", SEP, "b") }"#,
-        Rule::seq(vec![
-            Rule::String("a".into()), Rule::String(",".into()), Rule::String("b".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::String("a".into()), ExpectedRule::String(",".into()), ExpectedRule::String("b".into()),
         ])
     }
     let_binding_object_field_access {
@@ -45,12 +45,12 @@ rule_tests! {
         rule add { prec_left(PREC.ADD, seq(expr, "+", expr)) }
         rule mul { prec_left(PREC.MUL, seq(expr, "*", expr)) }
         rule expr { choice(add, mul) }"#,
-        Rule::prec_left(
+        ExpectedRule::prec_left(
             Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::NamedSymbol("expr".into()),
-                Rule::String("+".into()),
-                Rule::NamedSymbol("expr".into()),
+            ExpectedRule::seq(vec![
+                ExpectedRule::NamedSymbol("expr".into()),
+                ExpectedRule::String("+".into()),
+                ExpectedRule::NamedSymbol("expr".into()),
             ])
         )
     }
@@ -58,7 +58,7 @@ rule_tests! {
     // the parse_postfix `.field` loop, distinct from parse_ident_expr's path.
     object_literal_field_access {
         r#"grammar { language: "test" } rule program { prec({ P: 1 }.P, "x") }"#,
-        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(1), ExpectedRule::String("x".into()))
     }
     // A single for-binding over a list of tuples binds the WHOLE tuple (regression:
     // it once took element 0); a later multi-binding loop then destructures it.
@@ -66,9 +66,9 @@ rule_tests! {
         r#"grammar { language: "test" }
         let copy = [for (p: tuple_t<str_t, int_t>) in [("kw_a", 1), ("kw_b", 2)] { p }]
         rule program { choice(for (name: str_t, n: int_t) in copy { prec(n, name) }) }"#,
-        Rule::choice(vec![
-            Rule::prec(Precedence::Integer(1), Rule::String("kw_a".into())),
-            Rule::prec(Precedence::Integer(2), Rule::String("kw_b".into())),
+        ExpectedRule::choice(vec![
+            ExpectedRule::prec(Precedence::Integer(1), ExpectedRule::String("kw_a".into())),
+            ExpectedRule::prec(Precedence::Integer(2), ExpectedRule::String("kw_b".into())),
         ])
     }
     object_field_access_list_value {
@@ -80,29 +80,29 @@ rule_tests! {
                 for (o: str_t) in GROUPS.ops { o },
             )
         }"#,
-        Rule::choice(vec![
-            Rule::String("if".into()), Rule::String("else".into()),
-            Rule::String("+".into()), Rule::String("-".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::String("if".into()), ExpectedRule::String("else".into()),
+            ExpectedRule::String("+".into()), ExpectedRule::String("-".into()),
         ])
     }
     object_with_str_values {
         r#"grammar { language: "test" }
         let ALIASES = { plus: "+", minus: "-" }
         rule program { seq(ALIASES.plus, ALIASES.minus) }"#,
-        Rule::seq(vec![Rule::String("+".into()), Rule::String("-".into())])
+        ExpectedRule::seq(vec![ExpectedRule::String("+".into()), ExpectedRule::String("-".into())])
     }
     function_expansion {
         r#"grammar { language: "test" }
         macro comma_sep(item: rule_t) rule_t { seq(item, repeat(seq(",", item))) }
         rule program { comma_sep(identifier) }
         rule identifier { regexp("[a-z]+") }"#,
-        Rule::seq(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![
-                    Rule::String(",".into()), Rule::NamedSymbol("identifier".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::NamedSymbol("identifier".into()),
+            ExpectedRule::choice(vec![
+                ExpectedRule::repeat(ExpectedRule::seq(vec![
+                    ExpectedRule::String(",".into()), ExpectedRule::NamedSymbol("identifier".into()),
                 ])),
-                Rule::Blank,
+                ExpectedRule::Blank,
             ]),
         ])
     }
@@ -113,15 +113,15 @@ rule_tests! {
         }
         rule program { wrap("(", identifier, ")") }
         rule identifier { regexp("[a-z]+") }"#,
-        Rule::seq(vec![
-            Rule::String("(".into()), Rule::NamedSymbol("identifier".into()), Rule::String(")".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::String("(".into()), ExpectedRule::NamedSymbol("identifier".into()), ExpectedRule::String(")".into()),
         ])
     }
     for_single_binding {
         r#"grammar { language: "test" }
         rule keywords { choice(for (kw: str_t) in ["if", "else", "while"] { kw }) }"#,
-        Rule::choice(vec![
-            Rule::String("if".into()), Rule::String("else".into()), Rule::String("while".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::String("if".into()), ExpectedRule::String("else".into()), ExpectedRule::String("while".into()),
         ])
     }
     forward_reference_let {
@@ -130,7 +130,7 @@ rule_tests! {
         r#"grammar { language: "test" }
         rule program { MY_VAR }
         let MY_VAR: str_t = "x""#,
-        Rule::String("x".into())
+        ExpectedRule::String("x".into())
     }
     for_in_choice_nested {
         // Nested for-loop spread inside choice() (seq/choice path), confirming
@@ -145,11 +145,11 @@ rule_tests! {
             })
         }
     "#,
-        Rule::choice(vec![
-            Rule::String("a1".into()),
-            Rule::String("a2".into()),
-            Rule::String("b1".into()),
-            Rule::String("b2".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::String("a1".into()),
+            ExpectedRule::String("a2".into()),
+            ExpectedRule::String("b1".into()),
+            ExpectedRule::String("b2".into()),
         ])
     }
     nested_function_calls {
@@ -168,21 +168,21 @@ rule_tests! {
             })
         }
         rule expr { "x" }"#,
-        Rule::choice(vec![
-            Rule::prec_left(
+        ExpectedRule::choice(vec![
+            ExpectedRule::prec_left(
                 Precedence::Integer(1),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("+".into()),
-                    Rule::NamedSymbol("expr".into()),
+                ExpectedRule::seq(vec![
+                    ExpectedRule::NamedSymbol("expr".into()),
+                    ExpectedRule::String("+".into()),
+                    ExpectedRule::NamedSymbol("expr".into()),
                 ])
             ),
-            Rule::prec_left(
+            ExpectedRule::prec_left(
                 Precedence::Integer(2),
-                Rule::seq(vec![
-                    Rule::NamedSymbol("expr".into()),
-                    Rule::String("*".into()),
-                    Rule::NamedSymbol("expr".into()),
+                ExpectedRule::seq(vec![
+                    ExpectedRule::NamedSymbol("expr".into()),
+                    ExpectedRule::String("*".into()),
+                    ExpectedRule::NamedSymbol("expr".into()),
                 ])
             ),
         ])
@@ -275,16 +275,16 @@ rule_tests! {
         rule program {
             choice("fallback", for (op: str_t, p: int_t) in [] { prec(p, op) })
         }"#,
-        Rule::choice(vec![Rule::String("fallback".into())])
+        ExpectedRule::choice(vec![ExpectedRule::String("fallback".into())])
     }
     for_with_rule_items {
         r#"grammar { language: "test" }
         rule program {
             choice(for (r: rule_t) in [seq("a", "b"), seq("c", "d")] { r })
         }"#,
-        Rule::choice(vec![
-            Rule::seq(vec![Rule::String("a".into()), Rule::String("b".into())]),
-            Rule::seq(vec![Rule::String("c".into()), Rule::String("d".into())]),
+        ExpectedRule::choice(vec![
+            ExpectedRule::seq(vec![ExpectedRule::String("a".into()), ExpectedRule::String("b".into())]),
+            ExpectedRule::seq(vec![ExpectedRule::String("c".into()), ExpectedRule::String("d".into())]),
         ])
     }
     for_empty_list {
@@ -293,7 +293,7 @@ rule_tests! {
         rule program {
             choice("fallback", for (s: str_t) in ops { s })
         }"#,
-        Rule::choice(vec![Rule::String("fallback".into())])
+        ExpectedRule::choice(vec![ExpectedRule::String("fallback".into())])
     }
     macro_reads_let_defined_after_call_site {
         // A macro expanded at an early call site reads a let defined later, so lower
@@ -302,7 +302,7 @@ rule_tests! {
         rule prog { m() }
         let b = "x"
         macro m() str_t { b }"#,
-        Rule::String("x".into())
+        ExpectedRule::String("x".into())
     }
     macro_for_loop_iterates_let_defined_after_call_site {
         // Same forward reference, but the macro body iterates the later let rather
@@ -311,7 +311,7 @@ rule_tests! {
         rule prog { m() }
         let items: list_t<str_t> = ["a", "b"]
         macro m() rule_t { choice(for (x: str_t) in items { x }) }"#,
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("b".into())])
+        ExpectedRule::choice(vec![ExpectedRule::String("a".into()), ExpectedRule::String("b".into())])
     }
 }
 
@@ -347,9 +347,9 @@ fn for_in_list_str_body_via_let() {
         &g.pool,
         &g.reserved_sets[0].roots,
         &[
-            Rule::String("if".into()),
-            Rule::String("else".into()),
-            Rule::String("while".into()),
+            ExpectedRule::String("if".into()),
+            ExpectedRule::String("else".into()),
+            ExpectedRule::String("while".into()),
         ],
     );
 }
@@ -366,7 +366,10 @@ fn for_in_list_rule_body() {
     assert_rules(
         &g.pool,
         &g.extra_roots,
-        &[Rule::pattern("if", "i"), Rule::pattern("else", "i")],
+        &[
+            ExpectedRule::pattern("if", "i"),
+            ExpectedRule::pattern("else", "i"),
+        ],
     );
 }
 
@@ -386,7 +389,10 @@ fn for_in_list_tuple_destructure() {
     assert_rules(
         &g.pool,
         &g.reserved_sets[0].roots,
-        &[Rule::String("if".into()), Rule::String("else".into())],
+        &[
+            ExpectedRule::String("if".into()),
+            ExpectedRule::String("else".into()),
+        ],
     );
 }
 
@@ -405,10 +411,10 @@ fn for_in_list_mixed_with_concrete_elements() {
         &g.pool,
         &g.reserved_sets[0].roots,
         &[
-            Rule::String("alpha".into()),
-            Rule::String("mid1".into()),
-            Rule::String("mid2".into()),
-            Rule::String("omega".into()),
+            ExpectedRule::String("alpha".into()),
+            ExpectedRule::String("mid1".into()),
+            ExpectedRule::String("mid2".into()),
+            ExpectedRule::String("omega".into()),
         ],
     );
 }
@@ -427,7 +433,7 @@ fn for_in_list_empty_iterable() {
     assert_rules(
         &g.pool,
         &g.reserved_sets[0].roots,
-        &[Rule::String("only".into())],
+        &[ExpectedRule::String("only".into())],
     );
 }
 
@@ -452,12 +458,12 @@ fn for_in_list_nested() {
         &g.pool,
         &g.reserved_sets[0].roots,
         &[
-            Rule::String("a1".into()),
-            Rule::String("a2".into()),
-            Rule::String("a3".into()),
-            Rule::String("b1".into()),
-            Rule::String("b2".into()),
-            Rule::String("b3".into()),
+            ExpectedRule::String("a1".into()),
+            ExpectedRule::String("a2".into()),
+            ExpectedRule::String("a3".into()),
+            ExpectedRule::String("b1".into()),
+            ExpectedRule::String("b2".into()),
+            ExpectedRule::String("b3".into()),
         ],
     );
 }
@@ -485,37 +491,37 @@ fn function_multiple_calls() {
     assert_rule(
         &g.pool,
         g.variables[0].root,
-        &Rule::seq(vec![
-            Rule::String("#if".into()),
-            Rule::NamedSymbol("_statement".into()),
-            Rule::String("#endif".into()),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::String("#if".into()),
+            ExpectedRule::NamedSymbol("_statement".into()),
+            ExpectedRule::String("#endif".into()),
         ]),
     );
     assert_rule(
         &g.pool,
         g.variables[1].root,
-        &Rule::seq(vec![
-            Rule::String("#if".into()),
-            Rule::NamedSymbol("_block_item".into()),
-            Rule::String("#endif".into()),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::String("#if".into()),
+            ExpectedRule::NamedSymbol("_block_item".into()),
+            ExpectedRule::String("#endif".into()),
         ]),
     );
 }
 
 /// The lowered `choice` of two `prec_left` binary rules for the `("+", 1)` /
 /// `("*", 2)` table - the shared expected output for the tuple tests.
-fn plus_times_choice() -> Rule {
+fn plus_times_choice() -> ExpectedRule {
     let binop = |op: &str, p: i32| {
-        Rule::prec_left(
+        ExpectedRule::prec_left(
             Precedence::Integer(p),
-            Rule::seq(vec![
-                Rule::NamedSymbol("expr".into()),
-                Rule::String(op.into()),
-                Rule::NamedSymbol("expr".into()),
+            ExpectedRule::seq(vec![
+                ExpectedRule::NamedSymbol("expr".into()),
+                ExpectedRule::String(op.into()),
+                ExpectedRule::NamedSymbol("expr".into()),
             ]),
         )
     };
-    Rule::choice(vec![binop("+", 1), binop("*", 2)])
+    ExpectedRule::choice(vec![binop("+", 1), binop("*", 2)])
 }
 
 #[test]
@@ -568,9 +574,9 @@ fn for_binding_shadows_macro_param() {
     assert_named_rule(
         &g,
         "program",
-        &Rule::seq(vec![
-            Rule::NamedSymbol("a".into()),
-            Rule::NamedSymbol("b".into()),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::NamedSymbol("a".into()),
+            ExpectedRule::NamedSymbol("b".into()),
         ]),
     );
 }
@@ -586,9 +592,9 @@ fn nested_for_binding_shadows_outer() {
     assert_named_rule(
         &g,
         "program",
-        &Rule::seq(vec![
-            Rule::NamedSymbol("a".into()),
-            Rule::NamedSymbol("b".into()),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::NamedSymbol("a".into()),
+            ExpectedRule::NamedSymbol("b".into()),
         ]),
     );
 }

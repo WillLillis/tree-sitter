@@ -156,7 +156,11 @@ fn cfg_dropped_macro_keeps_same_named_survivor() {
         @dup()
     "#);
     assert_eq!(g.pool.resolve(g.variables[0].name), "program");
-    assert_rule(&g.pool, g.variables[0].root, &Rule::String("stable".into()));
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &ExpectedRule::String("stable".into()),
+    );
 }
 
 #[test]
@@ -217,10 +221,10 @@ fn helper_module_inherits_cfg_from_importer() {
     assert_named_rule(
         &g,
         "program",
-        &Rule::choice(vec![
-            Rule::String("a".into()),
-            Rule::String("b".into()),
-            Rule::String("c".into()),
+        &ExpectedRule::choice(vec![
+            ExpectedRule::String("a".into()),
+            ExpectedRule::String("b".into()),
+            ExpectedRule::String("c".into()),
         ]),
     );
 }
@@ -566,10 +570,10 @@ find_rule_tests! {
         rule program { choice("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::String("a".into()),
-            Rule::String("b".into()),
-            Rule::String("c".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::String("a".into()),
+            ExpectedRule::String("b".into()),
+            ExpectedRule::String("c".into()),
         ])
     }
     cfg_choice_member_disabled {
@@ -579,7 +583,7 @@ find_rule_tests! {
         rule program { choice("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("c".into())])
+        ExpectedRule::choice(vec![ExpectedRule::String("a".into()), ExpectedRule::String("c".into())])
     }
     cfg_concat_member_disabled {
         // walk_children's Concat arm once only recursed without filtering, leaving
@@ -589,7 +593,7 @@ find_rule_tests! {
         rule program { concat("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::String("ac".into())
+        ExpectedRule::String("ac".into())
     }
     cfg_seq_member_disabled {
         r#"
@@ -597,7 +601,7 @@ find_rule_tests! {
         rule program { seq("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::seq(vec![Rule::String("a".into()), Rule::String("c".into())])
+        ExpectedRule::seq(vec![ExpectedRule::String("a".into()), ExpectedRule::String("c".into())])
     }
     cfg_nested_both_active {
         r#"
@@ -605,10 +609,10 @@ find_rule_tests! {
         rule program { choice("x", #[cfg(A)] #[cfg(B)] "y", "z") }
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::String("x".into()),
-            Rule::String("y".into()),
-            Rule::String("z".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::String("x".into()),
+            ExpectedRule::String("y".into()),
+            ExpectedRule::String("z".into()),
         ])
     }
     cfg_nested_inner_off {
@@ -618,7 +622,7 @@ find_rule_tests! {
         rule program { choice("x", #[cfg(A)] #[cfg(B)] "y", "z") }
     "#,
         "program",
-        Rule::choice(vec![Rule::String("x".into()), Rule::String("z".into())])
+        ExpectedRule::choice(vec![ExpectedRule::String("x".into()), ExpectedRule::String("z".into())])
     }
 }
 

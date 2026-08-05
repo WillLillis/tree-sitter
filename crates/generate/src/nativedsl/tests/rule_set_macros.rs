@@ -11,7 +11,11 @@ fn rule_set_macro_single_rule() {
         "#);
     assert_eq!(g.variables.len(), 1);
     assert_eq!(g.pool.resolve(g.variables[0].name), "program");
-    assert_rule(&g.pool, g.variables[0].root, &Rule::String("x".into()));
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &ExpectedRule::String("x".into()),
+    );
 }
 
 #[test]
@@ -24,7 +28,11 @@ fn rule_set_macro_str_param_substitution() {
         @lit("hello")
         "#);
     assert_eq!(g.pool.resolve(g.variables[0].name), "program");
-    assert_rule(&g.pool, g.variables[0].root, &Rule::String("hello".into()));
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &ExpectedRule::String("hello".into()),
+    );
 }
 
 #[test]
@@ -43,9 +51,9 @@ fn rule_set_macro_symref_in_expr_position() {
     assert_named_rule(
         &g,
         "b_foo",
-        &Rule::seq(vec![
-            Rule::NamedSymbol("a_foo".into()),
-            Rule::String("y".into()),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::NamedSymbol("a_foo".into()),
+            ExpectedRule::String("y".into()),
         ]),
     );
 }
@@ -62,7 +70,11 @@ fn rule_set_macro_literal_name_via_at_string() {
         @emit()
     "#);
     assert_eq!(g.pool.resolve(g.variables[0].name), "foo");
-    assert_rule(&g.pool, g.variables[0].root, &Rule::String("x".into()));
+    assert_rule(
+        &g.pool,
+        g.variables[0].root,
+        &ExpectedRule::String("x".into()),
+    );
 }
 
 #[test]
@@ -289,10 +301,10 @@ find_rule_tests! {
         @wrap(digit)
         "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::NamedSymbol("digit".into()),
-            Rule::String(")".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::String("(".into()),
+            ExpectedRule::NamedSymbol("digit".into()),
+            ExpectedRule::String(")".into()),
         ])
     }
     rule_set_macro_with_for_loop_over_param {
@@ -311,9 +323,9 @@ find_rule_tests! {
         @with_choices([a, b])
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::NamedSymbol("a".into()),
-            Rule::NamedSymbol("b".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::NamedSymbol("a".into()),
+            ExpectedRule::NamedSymbol("b".into()),
         ])
     }
     rule_set_macro_param_in_combinator_positions {
@@ -336,13 +348,13 @@ find_rule_tests! {
         @wrap(digit, pretty)
     "#,
         "program",
-        Rule::prec(
+        ExpectedRule::prec(
             Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::repeat(Rule::NamedSymbol("digit".into())),
-                Rule::choice(vec![Rule::NamedSymbol("digit".into()), Rule::Blank]),
-                Rule::field("label".into(), Rule::NamedSymbol("digit".into())),
-                Rule::alias(Rule::NamedSymbol("digit".into()), "pretty".into(), true),
+            ExpectedRule::seq(vec![
+                ExpectedRule::repeat(ExpectedRule::NamedSymbol("digit".into())),
+                ExpectedRule::choice(vec![ExpectedRule::NamedSymbol("digit".into()), ExpectedRule::Blank]),
+                ExpectedRule::field("label".into(), ExpectedRule::NamedSymbol("digit".into())),
+                ExpectedRule::alias(ExpectedRule::NamedSymbol("digit".into()), "pretty".into(), true),
             ]),
         )
     }

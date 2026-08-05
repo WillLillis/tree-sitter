@@ -255,16 +255,19 @@ fn import_function_receives_complex_expr() {
         rule program { h::comma_sep1(seq(identifier, ":", identifier)) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    let id = || Rule::NamedSymbol("identifier".into());
-    let pair = Rule::seq(vec![id(), Rule::String(":".into()), id()]);
+    let id = || ExpectedRule::NamedSymbol("identifier".into());
+    let pair = ExpectedRule::seq(vec![id(), ExpectedRule::String(":".into()), id()]);
     assert_named_rule(
         &g,
         "program",
-        &Rule::seq(vec![
+        &ExpectedRule::seq(vec![
             pair.clone(),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![Rule::String(",".into()), pair])),
-                Rule::Blank,
+            ExpectedRule::choice(vec![
+                ExpectedRule::repeat(ExpectedRule::seq(vec![
+                    ExpectedRule::String(",".into()),
+                    pair,
+                ])),
+                ExpectedRule::Blank,
             ]),
         ]),
     );
@@ -296,9 +299,9 @@ fn import_diamond() {
     assert_named_rule(
         &g,
         "program",
-        &Rule::choice(vec![
-            Rule::prec(Precedence::Integer(10), Rule::String("a".into())),
-            Rule::prec(Precedence::Integer(10), Rule::String("b".into())),
+        &ExpectedRule::choice(vec![
+            ExpectedRule::prec(Precedence::Integer(10), ExpectedRule::String("a".into())),
+            ExpectedRule::prec(Precedence::Integer(10), ExpectedRule::String("b".into())),
         ]),
     );
 }
@@ -370,9 +373,9 @@ fn override_helper_rule() {
     assert_named_rule(
         &g,
         "digit",
-        &Rule::choice(vec![
-            Rule::Pattern(r"[0-9]".into(), String::new()),
-            Rule::String("x".into()),
+        &ExpectedRule::choice(vec![
+            ExpectedRule::Pattern(r"[0-9]".into(), String::new()),
+            ExpectedRule::String("x".into()),
         ]),
     );
 }
@@ -395,7 +398,7 @@ fn helper_rule_transitive_promotion() {
     .unwrap();
     assert!(rule_names(&g).contains(&"inner"));
     assert!(rule_names(&g).contains(&"middle"));
-    assert_named_rule(&g, "inner", &Rule::String("leaf".into()));
+    assert_named_rule(&g, "inner", &ExpectedRule::String("leaf".into()));
 }
 
 #[test]
@@ -416,7 +419,10 @@ fn helper_rule_qualified_inlines() {
     assert_named_rule(
         &g,
         "program",
-        &Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())]),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::String("hello".into()),
+            ExpectedRule::String("!".into()),
+        ]),
     );
 }
 
@@ -437,9 +443,9 @@ fn helper_rule_materialized_into_grammar() {
     assert_named_rule(
         &g,
         "program",
-        &Rule::repeat(Rule::NamedSymbol("digit".into())),
+        &ExpectedRule::repeat(ExpectedRule::NamedSymbol("digit".into())),
     );
-    assert_named_rule(&g, "digit", &Rule::pattern(r"[0-9]", ""));
+    assert_named_rule(&g, "digit", &ExpectedRule::pattern(r"[0-9]", ""));
 }
 
 #[test]
@@ -503,9 +509,9 @@ fn helper_rule_uses_grammar_registered_external() {
     assert_named_rule(
         &g,
         "wrapped",
-        &Rule::seq(vec![
-            Rule::NamedSymbol("_tok".into()),
-            Rule::NamedSymbol("_tok".into()),
+        &ExpectedRule::seq(vec![
+            ExpectedRule::NamedSymbol("_tok".into()),
+            ExpectedRule::NamedSymbol("_tok".into()),
         ]),
     );
 }
@@ -543,7 +549,7 @@ fn import_empty_module() {
     "#,
     )
     .unwrap();
-    assert_named_rule(&g, "program", &Rule::String("x".into()));
+    assert_named_rule(&g, "program", &ExpectedRule::String("x".into()));
 }
 
 #[test]
@@ -560,7 +566,10 @@ fn import_value_in_config_extras() {
     assert_rules(
         &g.pool,
         &g.extra_roots,
-        &[Rule::pattern(r"\s", ""), Rule::pattern(r"//[^\n]*", "")],
+        &[
+            ExpectedRule::pattern(r"\s", ""),
+            ExpectedRule::pattern(r"//[^\n]*", ""),
+        ],
     );
 }
 
@@ -586,8 +595,8 @@ fn import_helper_rule_set_macro_expands_locally() {
     let names = rule_names(&g);
     assert!(names.contains(&"a_helper"), "missing a_helper in {names:?}");
     assert!(names.contains(&"b_helper"), "missing b_helper in {names:?}");
-    assert_named_rule(&g, "a_helper", &Rule::String("x".into()));
-    assert_named_rule(&g, "b_helper", &Rule::String("y".into()));
+    assert_named_rule(&g, "a_helper", &ExpectedRule::String("x".into()));
+    assert_named_rule(&g, "b_helper", &ExpectedRule::String("y".into()));
 }
 
 #[test]
@@ -732,14 +741,14 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::seq(vec![
-                Rule::NamedSymbol("identifier".into()),
-                Rule::String(",".into()),
-                Rule::NamedSymbol("identifier".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::String("(".into()),
+            ExpectedRule::seq(vec![
+                ExpectedRule::NamedSymbol("identifier".into()),
+                ExpectedRule::String(",".into()),
+                ExpectedRule::NamedSymbol("identifier".into()),
             ]),
-            Rule::String(")".into()),
+            ExpectedRule::String(")".into()),
         ])
     }
     import_string_value {
@@ -749,7 +758,7 @@ find_rule_tests! {
         rule program { h::GREETING }
     "#,
         "program",
-        Rule::String("hello".into())
+        ExpectedRule::String("hello".into())
     }
     import_let_name_does_not_collide_with_local {
         r#"
@@ -759,9 +768,9 @@ find_rule_tests! {
         rule program { seq(h::GREETING, GREETING) }
     "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("hello".into()),
-            Rule::String("goodbye".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::String("hello".into()),
+            ExpectedRule::String("goodbye".into()),
         ])
     }
     import_int_value_in_prec {
@@ -773,12 +782,12 @@ find_rule_tests! {
         }
     "#,
         "program",
-        Rule::prec_left(
+        ExpectedRule::prec_left(
             Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::NamedSymbol("program".into()),
-                Rule::String("+".into()),
-                Rule::NamedSymbol("program".into()),
+            ExpectedRule::seq(vec![
+                ExpectedRule::NamedSymbol("program".into()),
+                ExpectedRule::String("+".into()),
+                ExpectedRule::NamedSymbol("program".into()),
             ])
         )
     }
@@ -792,12 +801,12 @@ find_rule_tests! {
         }
     "#,
         "program",
-        Rule::prec_left(
+        ExpectedRule::prec_left(
             Precedence::Integer(2),
-            Rule::seq(vec![
-                Rule::NamedSymbol("program".into()),
-                Rule::String("*".into()),
-                Rule::NamedSymbol("program".into()),
+            ExpectedRule::seq(vec![
+                ExpectedRule::NamedSymbol("program".into()),
+                ExpectedRule::String("*".into()),
+                ExpectedRule::NamedSymbol("program".into()),
             ])
         )
     }
@@ -818,7 +827,7 @@ find_rule_tests! {
         rule program { prec(n::NESTED_VAL, "x") }
     "#,
         "program",
-        Rule::prec(Precedence::Integer(42), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(42), ExpectedRule::String("x".into()))
     }
     import_multiple_modules_body {
         r#"
@@ -834,7 +843,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        Rule::choice(vec![
+        ExpectedRule::choice(vec![
             sep_by1_rule(",", "identifier"),
             sep_by1_rule(";", "identifier")
         ])
@@ -847,10 +856,10 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("{".into()),
+        ExpectedRule::seq(vec![
+            ExpectedRule::String("{".into()),
             comma_sep1_rule("identifier"),
-            Rule::String("}".into()),
+            ExpectedRule::String("}".into()),
         ])
     }
     import_module_values_only {
@@ -860,7 +869,7 @@ find_rule_tests! {
         rule program { prec(m::X, "x") }
     "#,
         "program",
-        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+        ExpectedRule::prec(Precedence::Integer(1), ExpectedRule::String("x".into()))
     }
     import_function_receives_caller_let_binding {
         r#"
@@ -892,9 +901,9 @@ find_rule_tests! {
         rule program { choice(h1::GREETING, h2::GREETING) }
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::String("hello".into()),
-            Rule::String("hello".into()),
+        ExpectedRule::choice(vec![
+            ExpectedRule::String("hello".into()),
+            ExpectedRule::String("hello".into()),
         ])
     }
     chained_let_alias_to_import_module {
@@ -905,7 +914,7 @@ find_rule_tests! {
         rule program { h2::GREETING }
     "#,
         "program",
-        Rule::String("hello".into())
+        ExpectedRule::String("hello".into())
     }
 }
 
