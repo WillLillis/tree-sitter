@@ -1,6 +1,6 @@
 use super::*;
 
-pooled_rule_tests! {
+rule_tests! {
     seq_and_choice {
         r#"grammar { language: "test" } rule program { seq(choice("a", "b"), "c") }"#,
         Rule::seq(vec![
@@ -240,11 +240,9 @@ pooled_rule_tests! {
 
 #[test]
 fn raw_ident_emits_bare_name_in_grammar_json() {
-    let g = pooled_dsl(
-        r#"grammar { language: "test" }
+    let g = dsl(r#"grammar { language: "test" }
         rule program { r#let }
-        rule r#let { "in" }"#,
-    );
+        rule r#let { "in" }"#);
     // grammar.json rule names must match the bare identifier, not `r#let`.
     let names: Vec<&str> = g.variables.iter().map(|v| g.pool.resolve(v.name)).collect();
     assert_eq!(names, vec!["program", "let"]);
@@ -252,12 +250,10 @@ fn raw_ident_emits_bare_name_in_grammar_json() {
 
 #[test]
 fn prec_inside_token_immediate() {
-    let g = pooled_dsl(
-        r#"
+    let g = dsl(r#"
         grammar { language: "test" }
         rule program { token_immediate(prec(1, regexp("[a-z]+"))) }
-    "#,
-    );
+    "#);
     assert_rule(
         &g.pool,
         g.variables[0].root,
@@ -270,13 +266,11 @@ fn prec_inside_token_immediate() {
 
 #[test]
 fn reserved_combinator() {
-    let g = pooled_dsl(
-        r#"grammar {
+    let g = dsl(r#"grammar {
         language: "test", reserved: { default: [identifier] },
     }
     rule program { reserved("default", identifier) }
-    rule identifier { regexp("[a-z]+") }"#,
-    );
+    rule identifier { regexp("[a-z]+") }"#);
     assert_rule(
         &g.pool,
         g.variables[0].root,
@@ -289,13 +283,11 @@ fn reserved_combinator() {
 
 #[test]
 fn reserved_multiple_sets() {
-    let g = pooled_dsl(
-        r#"grammar {
+    let g = dsl(r#"grammar {
         language: "test",
         reserved: { global: ["if", "else", "for"], properties: ["get", "set"] },
     }
-    rule program { reserved("global", regexp("[a-z]+")) }"#,
-    );
+    rule program { reserved("global", regexp("[a-z]+")) }"#);
     assert_eq!(g.reserved_sets.len(), 2);
     assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
     assert_eq!(g.reserved_sets[0].roots.len(), 3);
@@ -307,12 +299,10 @@ fn reserved_multiple_sets() {
 fn reserved_inherited() {
     // A child with no `reserved` inherits the base's sets in base order (default
     // set preserved), with no explicit grammar_config re-import needed.
-    let g = pooled_dsl(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
         grammar { language: "derived", inherits: base }
-    "#,
-    );
+    "#);
     assert_eq!(g.reserved_sets.len(), 2);
     assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
     assert_rules(
@@ -336,16 +326,14 @@ fn reserved_inherited() {
 fn reserved_child_merges_with_base() {
     // The child adds a set and overrides one: base order is preserved (global
     // stays default), overridden sets keep position, new sets append.
-    let g = pooled_dsl(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_reserved.tsg")
         grammar {
             language: "derived",
             inherits: base,
             reserved: { global: ["if"], extra: ["new"] },
         }
-    "#,
-    );
+    "#);
     assert_eq!(g.reserved_sets.len(), 3);
     // Base "global" stays first (default), with the child's overriding words.
     assert_eq!(g.pool.resolve(g.reserved_sets[0].name), "global");
@@ -363,12 +351,10 @@ fn reserved_child_merges_with_base() {
 #[test]
 fn reserved_empty_inherited() {
     // A base with no reserved contributes none; the child inherits an empty set.
-    let g = pooled_dsl(
-        r#"
+    let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
-    "#,
-    );
+    "#);
     assert!(g.reserved_sets.is_empty());
 }
 
@@ -395,7 +381,7 @@ fn trailing_comma_in_builtins() {
         g!(r#"regexp("pat",)"#),
         g!(r#"regexp("pat", "flags",)"#),
     ] {
-        pooled_dsl(src);
+        dsl(src);
     }
-    pooled_dsl(r#"grammar { language: "test", extras: append(["x"], ["y"],) } rule foo { "x" }"#);
+    dsl(r#"grammar { language: "test", extras: append(["x"], ["y"],) } rule foo { "x" }"#);
 }

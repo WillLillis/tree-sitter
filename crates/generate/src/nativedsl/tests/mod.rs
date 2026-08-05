@@ -1,40 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::grammars::InputGrammar as PooledGrammar;
+use crate::grammars::InputGrammar;
 use crate::nativedsl::lexer::TokenKind;
-use crate::rules::{Associativity, Rule as PooledRule, RuleId};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct InputGrammar {
-    name: String,
-    variables: Vec<Variable>,
-    external_tokens: Vec<Rule>,
-    extra_symbols: Vec<Rule>,
-    reserved_words: Vec<ReservedWordContext>,
-    supertype_symbols: Vec<String>,
-    expected_conflicts: Vec<Vec<String>>,
-    variables_to_inline: Vec<String>,
-    word_token: Option<String>,
-    precedence_orderings: Vec<Vec<PrecedenceEntry>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Variable {
-    name: String,
-    rule: Rule,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ReservedWordContext {
-    name: String,
-    reserved_words: Vec<Rule>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum PrecedenceEntry {
-    Name(String),
-    Symbol(String),
-}
+use crate::rules::{Associativity, Rule as RuleNode, RuleId};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) enum Precedence {
@@ -80,7 +48,7 @@ pub(super) enum RuleExpectation {
     },
 }
 
-// Temporary migration alias for test files that still use the legacy name.
+// Keep expected-rule expressions compact throughout the test suite.
 pub(super) type Rule = RuleExpectation;
 
 impl RuleExpectation {
@@ -154,141 +122,17 @@ impl RuleExpectation {
     }
 }
 
-fn normalize_rule(grammar: &PooledGrammar, id: RuleId) -> Rule {
-    let strings = &grammar.pool;
-    match strings.node(id) {
-        PooledRule::Blank => Rule::Blank,
-        PooledRule::String(value) => Rule::String(strings.resolve(value).into()),
-        PooledRule::Pattern(value, flags) => {
-            Rule::Pattern(strings.resolve(value).into(), strings.resolve(flags).into())
-        }
-        PooledRule::NamedSymbol(name) => Rule::NamedSymbol(strings.resolve(name).into()),
-        PooledRule::Sym { .. } => panic!("native DSL lowering emitted an interned symbol"),
-        PooledRule::Seq(range) => Rule::Seq(
-            strings
-                .child_slice(range)
-                .iter()
-                .map(|&child| normalize_rule(grammar, child))
-                .collect(),
-        ),
-        PooledRule::Choice(range) => Rule::Choice(
-            strings
-                .child_slice(range)
-                .iter()
-                .map(|&child| normalize_rule(grammar, child))
-                .collect(),
-        ),
-        PooledRule::Repeat(rule) => Rule::Repeat(Box::new(normalize_rule(grammar, rule))),
-        PooledRule::Reserved { rule, ctx } => Rule::Reserved {
-            rule: Box::new(normalize_rule(grammar, rule)),
-            context_name: strings.resolve(ctx).into(),
-        },
-        PooledRule::Metadata { params, rule } => {
-            let params = strings.params(params);
-            Rule::Metadata {
-                params: MetadataParams {
-                    precedence: match params.precedence {
-                        crate::rules::Precedence::None => Precedence::None,
-                        crate::rules::Precedence::Integer(n) => Precedence::Integer(n),
-                        crate::rules::Precedence::Name(s) => {
-                            Precedence::Name(strings.resolve(s).into())
-                        }
-                    },
-                    dynamic_precedence: params.dynamic_precedence,
-                    associativity: params.associativity,
-                    is_token: params.is_token,
-                    is_main_token: params.is_main_token,
-                    alias: params.alias.map(|a| Alias {
-                        value: strings.resolve(a.value).into(),
-                        is_named: a.is_named,
-                    }),
-                    field_name: params.field.map(|s| strings.resolve(s).into()),
-                },
-                rule: Box::new(normalize_rule(grammar, rule)),
-            }
-        }
-    }
-}
-
-impl From<PooledGrammar> for InputGrammar {
-    fn from(grammar: PooledGrammar) -> Self {
-        let resolve = |id| grammar.pool.resolve(id).to_owned();
-        Self {
-            name: resolve(grammar.name),
-            variables: grammar
-                .variables
-                .iter()
-                .map(|v| Variable {
-                    name: resolve(v.name),
-                    rule: normalize_rule(&grammar, v.root),
-                })
-                .collect(),
-            external_tokens: grammar
-                .external_roots
-                .iter()
-                .map(|&r| normalize_rule(&grammar, r))
-                .collect(),
-            extra_symbols: grammar
-                .extra_roots
-                .iter()
-                .map(|&r| normalize_rule(&grammar, r))
-                .collect(),
-            reserved_words: grammar
-                .reserved_sets
-                .iter()
-                .map(|set| ReservedWordContext {
-                    name: resolve(set.name),
-                    reserved_words: set
-                        .roots
-                        .iter()
-                        .map(|&r| normalize_rule(&grammar, r))
-                        .collect(),
-                })
-                .collect(),
-            supertype_symbols: grammar
-                .supertype_names
-                .iter()
-                .map(|&s| resolve(s))
-                .collect(),
-            expected_conflicts: grammar
-                .conflict_names
-                .iter()
-                .map(|set| set.iter().map(|&s| resolve(s)).collect())
-                .collect(),
-            variables_to_inline: grammar.inline_names.iter().map(|&s| resolve(s)).collect(),
-            word_token: grammar.word_name.map(resolve),
-            precedence_orderings: grammar
-                .precedence_orderings
-                .iter()
-                .map(|ordering| {
-                    ordering
-                        .iter()
-                        .map(|entry| match entry {
-                            crate::grammars::PrecedenceEntry::Name(s) => {
-                                PrecedenceEntry::Name(resolve(*s))
-                            }
-                            crate::grammars::PrecedenceEntry::Symbol(s) => {
-                                PrecedenceEntry::Symbol(resolve(*s))
-                            }
-                        })
-                        .collect()
-                })
-                .collect(),
-        }
-    }
-}
-
 use super::{
     Constraint, ContainerKind, DataTy, DisallowedItemKind, DslError, ElemTy, ExpandErrorKind,
     InnerTy, LexErrorKind, LowerErrorKind, NativeDslError, NoteMessage, ParseErrorKind,
     ResolveErrorKind, ScalarTy, TupleSig, Ty, TypeErrorKind, parse_native_dsl,
 };
 
-/// Parse a grammar and match the first variable's pooled rule.
-macro_rules! pooled_rule_tests {
+/// Parse a grammar and match the first variable's rule directly in its pool.
+macro_rules! rule_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
-            let g = pooled_dsl($input);
+            let g = dsl($input);
             assert_rule(&g.pool, g.variables[0].root, &$expected);
         })*
     };
@@ -297,33 +141,23 @@ macro_rules! pooled_rule_tests {
 /// Generate tests that just verify a grammar compiles without error.
 macro_rules! compile_tests {
     ($($name:ident { $input:expr })*) => {
-        $(#[test] fn $name() { pooled_dsl($input); })*
+        $(#[test] fn $name() { dsl($input); })*
     };
 }
 
-/// Generate tests that parse a grammar and assert on a named rule's body.
 macro_rules! find_rule_tests {
     ($($name:ident { $input:expr, $rule:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
             let g = dsl($input);
-            assert_eq!(*find_rule(&g, $rule), $expected);
-        })*
-    };
-}
-
-macro_rules! pooled_find_rule_tests {
-    ($($name:ident { $input:expr, $rule:expr, $expected:expr })*) => {
-        $(#[test] fn $name() {
-            let g = pooled_dsl($input);
             assert_named_rule(&g, $rule, &$expected);
         })*
     };
 }
 
-macro_rules! pooled_rule_names_tests {
+macro_rules! rule_names_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
-            let g = pooled_dsl($input);
+            let g = dsl($input);
             assert_eq!(
                 g.variables
                     .iter()
@@ -335,10 +169,10 @@ macro_rules! pooled_rule_names_tests {
     };
 }
 
-macro_rules! pooled_externals_tests {
+macro_rules! externals_tests {
     ($($name:ident { $input:expr, $expected:expr })*) => {
         $(#[test] fn $name() {
-            let g = pooled_dsl($input);
+            let g = dsl($input);
             assert_rules(&g.pool, &g.external_roots, &$expected);
         })*
     };
@@ -404,12 +238,6 @@ pub(super) fn dsl_path(p: &std::path::Path) -> String {
 }
 
 pub(super) fn dsl(input: &str) -> InputGrammar {
-    parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg"))
-        .unwrap()
-        .into()
-}
-
-pub(super) fn pooled_dsl(input: &str) -> PooledGrammar {
     parse_native_dsl(input, &test_fixtures_dir().join("grammar.tsg")).unwrap()
 }
 
@@ -425,20 +253,20 @@ pub(super) fn assert_rule(
         path: &str,
     ) -> Result<(), String> {
         match (pool.node(actual), expected) {
-            (PooledRule::Blank, Rule::Blank) => Ok(()),
-            (PooledRule::String(a), Rule::String(e))
-            | (PooledRule::NamedSymbol(a), Rule::NamedSymbol(e))
+            (RuleNode::Blank, Rule::Blank) => Ok(()),
+            (RuleNode::String(a), Rule::String(e))
+            | (RuleNode::NamedSymbol(a), Rule::NamedSymbol(e))
                 if pool.resolve(a) == e =>
             {
                 Ok(())
             }
-            (PooledRule::Pattern(a, af), Rule::Pattern(e, ef))
+            (RuleNode::Pattern(a, af), Rule::Pattern(e, ef))
                 if pool.resolve(a) == e && pool.resolve(af) == ef =>
             {
                 Ok(())
             }
-            (PooledRule::Seq(range), Rule::Seq(expected))
-            | (PooledRule::Choice(range), Rule::Choice(expected)) => {
+            (RuleNode::Seq(range), Rule::Seq(expected))
+            | (RuleNode::Choice(range), Rule::Choice(expected)) => {
                 let actual = pool.child_slice(range);
                 if actual.len() != expected.len() {
                     return Err(format!(
@@ -452,11 +280,11 @@ pub(super) fn assert_rule(
                 }
                 Ok(())
             }
-            (PooledRule::Repeat(actual), Rule::Repeat(expected)) => {
+            (RuleNode::Repeat(actual), Rule::Repeat(expected)) => {
                 mismatch(pool, actual, expected, &format!("{path}.repeat"))
             }
             (
-                PooledRule::Reserved { rule, ctx },
+                RuleNode::Reserved { rule, ctx },
                 Rule::Reserved {
                     rule: expected,
                     context_name,
@@ -465,7 +293,7 @@ pub(super) fn assert_rule(
                 mismatch(pool, rule, expected, &format!("{path}.reserved"))
             }
             (
-                PooledRule::Metadata { params, rule },
+                RuleNode::Metadata { params, rule },
                 Rule::Metadata {
                     params: expected_params,
                     rule: expected_rule,
@@ -514,13 +342,18 @@ pub(super) fn assert_rules(
     }
 }
 
-pub(super) fn assert_named_rule(grammar: &PooledGrammar, name: &str, expected: &RuleExpectation) {
-    let variable = grammar
+pub(super) fn assert_named_rule(grammar: &InputGrammar, name: &str, expected: &RuleExpectation) {
+    let root = rule_id(grammar, name);
+    assert_rule(&grammar.pool, root, expected);
+}
+
+pub(super) fn rule_id(grammar: &InputGrammar, name: &str) -> RuleId {
+    grammar
         .variables
         .iter()
         .find(|variable| grammar.pool.resolve(variable.name) == name)
-        .unwrap_or_else(|| panic!("rule {name:?} not found"));
-    assert_rule(&grammar.pool, variable.root, expected);
+        .unwrap_or_else(|| panic!("rule {name:?} not found"))
+        .root
 }
 
 pub(super) fn dsl_err(input: &str) -> DslError {
@@ -540,27 +373,12 @@ pub(super) fn parse_with_modules(
     for (name, src) in modules {
         std::fs::write(dir.path().join(name), src).unwrap();
     }
-    // The root path must exist on disk - it's canonicalized to seed cycle
-    // detection - even though parsing reads `root` directly.
-    let root_path = dir.path().join("grammar.tsg");
-    std::fs::write(&root_path, root).unwrap();
-    parse_native_dsl(root, &root_path).map(Into::into)
-}
-
-pub(super) fn pooled_parse_with_modules(
-    modules: &[(&str, &str)],
-    root: &str,
-) -> Result<PooledGrammar, DslError> {
-    let dir = tempfile::tempdir().unwrap();
-    for (name, src) in modules {
-        std::fs::write(dir.path().join(name), src).unwrap();
-    }
     let root_path = dir.path().join("grammar.tsg");
     std::fs::write(&root_path, root).unwrap();
     parse_native_dsl(root, &root_path)
 }
 
-pub(super) fn pooled_rule_names(g: &PooledGrammar) -> Vec<&str> {
+pub(super) fn rule_names(g: &InputGrammar) -> Vec<&str> {
     g.variables
         .iter()
         .map(|variable| g.pool.resolve(variable.name))
@@ -608,16 +426,4 @@ pub(super) fn inherit_err(base_content: &str) -> (DslError, PathBuf) {
     std::fs::write(&parent_path, parent_src).unwrap();
     let err = parse_native_dsl(parent_src, &parent_path).unwrap_err();
     (err, base_path)
-}
-
-pub(super) fn rule_names(g: &InputGrammar) -> Vec<&str> {
-    g.variables.iter().map(|v| v.name.as_str()).collect()
-}
-
-pub(super) fn find_rule<'a>(g: &'a InputGrammar, name: &str) -> &'a Rule {
-    &g.variables
-        .iter()
-        .find(|v| v.name == name)
-        .unwrap_or_else(|| panic!("rule '{name}' not found"))
-        .rule
 }

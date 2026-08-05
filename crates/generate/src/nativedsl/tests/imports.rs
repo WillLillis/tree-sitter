@@ -20,7 +20,7 @@ macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
     "#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
+    assert_named_rule(&g, "program", &sep_by1_rule(",", "identifier"));
 }
 
 #[test]
@@ -257,15 +257,16 @@ fn import_function_receives_complex_expr() {
     "#);
     let id = || Rule::NamedSymbol("identifier".into());
     let pair = Rule::seq(vec![id(), Rule::String(":".into()), id()]);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
+    assert_named_rule(
+        &g,
+        "program",
+        &Rule::seq(vec![
             pair.clone(),
             Rule::choice(vec![
                 Rule::repeat(Rule::seq(vec![Rule::String(",".into()), pair])),
                 Rule::Blank,
             ]),
-        ])
+        ]),
     );
 }
 
@@ -292,12 +293,13 @@ fn import_diamond() {
     "#,
     )
     .unwrap();
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::choice(vec![
+    assert_named_rule(
+        &g,
+        "program",
+        &Rule::choice(vec![
             Rule::prec(Precedence::Integer(10), Rule::String("a".into())),
             Rule::prec(Precedence::Integer(10), Rule::String("b".into())),
-        ])
+        ]),
     );
 }
 
@@ -365,12 +367,13 @@ fn override_helper_rule() {
     )
     .unwrap();
     // Final `digit` is the override body, with h::digit inlined to the original.
-    assert_eq!(
-        *find_rule(&g, "digit"),
-        Rule::choice(vec![
+    assert_named_rule(
+        &g,
+        "digit",
+        &Rule::choice(vec![
             Rule::Pattern(r"[0-9]".into(), String::new()),
             Rule::String("x".into()),
-        ])
+        ]),
     );
 }
 
@@ -392,7 +395,7 @@ fn helper_rule_transitive_promotion() {
     .unwrap();
     assert!(rule_names(&g).contains(&"inner"));
     assert!(rule_names(&g).contains(&"middle"));
-    assert_eq!(*find_rule(&g, "inner"), Rule::String("leaf".into()));
+    assert_named_rule(&g, "inner", &Rule::String("leaf".into()));
 }
 
 #[test]
@@ -410,9 +413,10 @@ fn helper_rule_qualified_inlines() {
     .unwrap();
     // h::greeting inlined - program body has the literal "hello", not a
     // NamedSymbol reference.
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
+    assert_named_rule(
+        &g,
+        "program",
+        &Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())]),
     );
 }
 
@@ -430,14 +434,12 @@ fn helper_rule_materialized_into_grammar() {
     )
     .unwrap();
     assert_eq!(rule_names(&g), vec!["program", "digit"]);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::repeat(Rule::NamedSymbol("digit".into()))
+    assert_named_rule(
+        &g,
+        "program",
+        &Rule::repeat(Rule::NamedSymbol("digit".into())),
     );
-    assert_eq!(
-        *find_rule(&g, "digit"),
-        Rule::Pattern(r"[0-9]".into(), String::new())
-    );
+    assert_named_rule(&g, "digit", &Rule::pattern(r"[0-9]", ""));
 }
 
 #[test]
@@ -497,13 +499,14 @@ fn helper_rule_uses_grammar_registered_external() {
     "#,
     )
     .unwrap();
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(
-        *find_rule(&g, "wrapped"),
-        Rule::seq(vec![
+    assert_eq!(g.external_roots.len(), 1);
+    assert_named_rule(
+        &g,
+        "wrapped",
+        &Rule::seq(vec![
             Rule::NamedSymbol("_tok".into()),
             Rule::NamedSymbol("_tok".into()),
-        ])
+        ]),
     );
 }
 
@@ -540,7 +543,7 @@ fn import_empty_module() {
     "#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "program"), Rule::String("x".into()));
+    assert_named_rule(&g, "program", &Rule::String("x".into()));
 }
 
 #[test]
@@ -554,14 +557,10 @@ fn import_value_in_config_extras() {
     "#,
     )
     .unwrap();
-    assert_eq!(g.extra_symbols.len(), 2);
-    assert_eq!(
-        g.extra_symbols[0],
-        Rule::Pattern(r"\s".into(), String::new())
-    );
-    assert_eq!(
-        g.extra_symbols[1],
-        Rule::Pattern(r"//[^\n]*".into(), String::new())
+    assert_rules(
+        &g.pool,
+        &g.extra_roots,
+        &[Rule::pattern(r"\s", ""), Rule::pattern(r"//[^\n]*", "")],
     );
 }
 
@@ -572,7 +571,7 @@ fn import_keyword_as_rule_name() {
         rule program { import }
         rule import { "import_stmt" }
     "#);
-    assert_eq!(g.variables[1].name, "import");
+    assert_eq!(g.pool.resolve(g.variables[1].name), "import");
 }
 
 #[test]
@@ -584,11 +583,11 @@ fn import_helper_rule_set_macro_expands_locally() {
         grammar { language: "test", start: program }
         rule program { seq(a_helper, b_helper) }
     "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    let names = rule_names(&g);
     assert!(names.contains(&"a_helper"), "missing a_helper in {names:?}");
     assert!(names.contains(&"b_helper"), "missing b_helper in {names:?}");
-    assert_eq!(*find_rule(&g, "a_helper"), Rule::String("x".into()));
-    assert_eq!(*find_rule(&g, "b_helper"), Rule::String("y".into()));
+    assert_named_rule(&g, "a_helper", &Rule::String("x".into()));
+    assert_named_rule(&g, "b_helper", &Rule::String("y".into()));
 }
 
 #[test]
@@ -628,8 +627,14 @@ fn import_rule_preserves_metadata_and_reserved() {
         rule res_direct { reserved("ctx", "rw") }
         rule res_via_import { h::reserved_rule }
     "#);
-    assert_eq!(find_rule(&g, "via_import"), find_rule(&g, "direct"));
-    assert_eq!(find_rule(&g, "res_via_import"), find_rule(&g, "res_direct"));
+    assert!(
+        g.pool
+            .subtree_eq(rule_id(&g, "via_import"), rule_id(&g, "direct"))
+    );
+    assert!(
+        g.pool
+            .subtree_eq(rule_id(&g, "res_via_import"), rule_id(&g, "res_direct"))
+    );
 }
 
 #[test]
@@ -647,7 +652,7 @@ fn helper_rules_materialize_in_import_source_order() {
     "#,
     )
     .unwrap();
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    let names = rule_names(&g);
     // ha imports before hb, so its rules materialize first.
     assert_eq!(names, vec!["program", "a_rule", "b_rule"]);
 }
