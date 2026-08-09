@@ -61,11 +61,26 @@ over-familiar with the code.
 
 Three consequences worth designing around:
 
-- **The corpus must include real ecosystem query files**, not just `test/fixtures`. With no
-  reviewer pushing back on behaviour changes, downstream users *are* the review — so pull
-  their queries in before they get to find the regressions. nvim-treesitter, Helix, and Zed
-  ship large, adversarial, real-world `.scm` corpora. Add them to the differential rig in
-  Phase 0. This is cheap and it is the highest-value single addition to the safety net.
+- **Extend `crates/cli/src/tests/query_test.rs`; do not build a second test mechanism.** It is
+  already 125 tests and ~6,500 lines of intentional, minimal, diagnostic cases — when one
+  fails you know exactly what broke. That is the safety net, and the differential rig should
+  be *a way of running it* (execute the existing suite against both engines and diff), not a
+  parallel corpus runner with its own notion of authority.
+
+  An earlier draft of this doc proposed vendoring downstream `.scm` files from
+  nvim-treesitter/Helix/Zed. **Withdrawn.** It imports a dependency to solve a coverage
+  problem: those files target grammar versions we do not ship, they churn for reasons
+  unrelated to us, a failure gives low signal (our bug or their odd query?), and the project
+  should stand alone. It was also partly redundant — `test/fixtures/grammars/*/queries/`
+  already holds **39 real query files across 15 grammars**, in-tree and maintained here, which
+  `crates/cli/benches/benchmark.rs` already walks.
+
+  The legitimate worry underneath it — hand-written tests only cover shapes someone thought of
+  — is better answered by **generative testing**: synthesize queries from a grammar's own node
+  types and fields, run them against synthesized or corpus trees, and assert invariants
+  (compiles ⇒ terminates; every returned capture is within its match; old engine ≡ new
+  engine). That is adversarial like real-world files, needs no external dependency, and there
+  is precedent in `test/fuzz`.
 - **The occasional upstream review is a scarce resource — spend it on the irreversible
   things.** Batch the four decisions below into a small number of written proposals with
   measurements attached, rather than dribbling questions across months. Do not spend it on
@@ -137,15 +152,36 @@ All independently landable, none touching the matching algorithm. From
 
 Plus the Tier-A correctness fixes from [`03-correctness.md`](03-correctness.md):
 
-- **A2** the `MISSING` prefix bug — one line, unambiguous
-- **A1 / A3** capture and negated-field overflow — **raise the limits rather than adding a
-  diagnostic.** `MAX_STEP_CAPTURE_COUNT` 3 → 8 and `MAX_NEGATED_FIELD_COUNT` 8 → 16 are
-  one-character changes. `QueryStep` grows from 20 to ~30 bytes, so a real query's step array
-  goes from ~5 KiB to ~7.5 KiB — irrelevant. This fixes the bug *forward* (the query starts
-  working) instead of turning working-if-wrong queries into compile errors, which would break
-  users. Keep the overflow path as a hard error for the genuinely absurd case. The structural
-  fix — unbounded lists — comes free with the IR in Phase 2.
+- **A2** the `MISSING` prefix bug — one line, unambiguous, no interaction with anything else
+- **A1 / A3** capture and negated-field overflow — **test now, fix after Phase 4.** See below.
 - Write the B1–B4 tests; confirm or dismiss each suspicion
+
+### Why the limit bumps are deferred, not "one character"
+
+An earlier draft proposed raising `MAX_STEP_CAPTURE_COUNT` 3 → 8 and
+`MAX_NEGATED_FIELD_COUNT` 8 → 16 immediately, on the grounds that the struct growth is
+negligible. That reasoning was wrong on two counts, and the limits are load-bearing today:
+
+1. **They are multipliers on the quadratic pass.** Capture-list *length* is the inner
+   dimension of `ts_query_cursor__compare_captures` — the dedup pass is
+   O(group² × capture_list_len). Raising the per-node capture ceiling from 3 to 8 scales the
+   inner loop of the exact thing that already costs 322 M steps on
+   `queries/two-quant.scm`. Likewise the negated-field loop (`query.c:4305-4319`) calls
+   `ts_node_child_by_field_id` once per negated field, per state, per node. These caps are
+   currently acting as a blast radius limiter on explosive queries, whether or not that was
+   their original intent.
+2. **`QueryStep` cache density is not free.** 20 bytes gives 3.2 steps per 64-byte cache
+   line; 30 bytes gives 2.1 — a ~35% drop in step density in a struct that is read once per
+   live state per node. "The array is only 5 KiB" was the wrong measure.
+
+So the sequencing is inverted from the earlier draft: **fix the explosion first, then raise
+the limits once they are no longer the thing holding it back.** In the interim, land a test
+that pins the current behaviour explicitly — so the truncation is a known, intentional,
+documented limitation rather than an accident — and revisit in Phase 5, with the pathological
+suite as the acceptance gate.
+
+The structural fix (unbounded lists in the HIR) still arrives with Phase 2, but it should not
+be *exposed* through the step encoding until the matching algorithm can absorb it.
 
 Exit criterion: measurable compile-time reduction, no match-stream diffs, three real bugs
 closed.
@@ -160,7 +196,7 @@ answer for each:
 | **P2** capture-pool free list | `CaptureListPool` | nothing — capture storage is still needed | **fully durable** |
 | **P1** language-only analysis cache | new side table on `TSLanguage` | nothing — the analysis stage survives as stage 3 | **fully durable** (the walk gets ported; the cache keying/invalidation carries verbatim) |
 | **P3** depth-bucketed state list | VM state management | Phase 4 VM | code thrown away, *insight* carries — but it is what keeps the engine usable in the interim |
-| **A1/A3** limit bumps | `QueryStep` + parser | Phase 2 (unbounded lists) | one character each; thrown away, irrelevant |
+| **A1/A3** limit bumps | `QueryStep` + parser | deferred to Phase 5 — the caps currently limit blast radius on explosive queries | the *test* pinning current behaviour is durable; the bump waits |
 | **A2** `MISSING` prefix | parser | Phase 2 front end | one line thrown away; **the test survives** |
 | **P5** hash the symbol tables | parser | Phase 2 | **skip it** — on measured data (21 captures per query) this is noise. Listing it in `04` was over-eager |
 | harness, corpus, conformance suite, every test | — | nothing | **the most durable artifact in the project** |

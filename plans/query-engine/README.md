@@ -84,11 +84,9 @@ tree automata — see [`05-database-angle.md`](05-database-angle.md) and
 ## If you only do three things
 
 1. **Land the measurement harness and a differential-testing rig** (`09`, `08`). Months of
-   engine work without these is not survivable. The differential rig — old engine vs new,
-   same corpus, same expected captures — is what makes the rest of this safe. **Seed the
-   corpus with real ecosystem query files** (nvim-treesitter, Helix, Zed), not just
-   `test/fixtures`: with effectively one maintainer there is no reviewer to catch a behaviour
-   change, so downstream queries have to be in the test set rather than in the bug reports.
+   engine work without these is not survivable. Build the rig as *a way of running
+   `crates/cli/src/tests/query_test.rs` against two engines* — that suite is already the
+   safety net, and a second parallel test mechanism would only compete with it for authority.
 2. **Cache the language-only half of query analysis** (`04`, opportunity P1). It is a
    contained change, it does not touch semantics, and it removes 0.7–2.8 ms from every
    `ts_query_new` call.

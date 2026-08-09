@@ -96,9 +96,16 @@ Static structure dump (no instrumentation needed, just struct access): pattern/s
    `dedup_capture_steps / matches`. Today it is ~40,000:1 on the pathological case. A healthy
    engine keeps it bounded by a small constant. Track it explicitly; it is the number that
    says whether the rewrite achieved its goal.
-4. **Differential mode.** Run old and new engines over the corpus and diff the match streams
-   (id, pattern index, capture ids, node ranges). This is the single most important piece of
-   infrastructure for the whole project — see [`09-roadmap.md`](09-roadmap.md).
+4. **Differential mode.** Run old and new engines and diff the match streams (pattern index,
+   capture ids, node ranges). This is the single most important piece of infrastructure for
+   the whole project — see [`09-roadmap.md`](09-roadmap.md).
+
+   Build it as **a second backend for `crates/cli/src/tests/query_test.rs`**, not as a
+   standalone corpus runner. That suite (125 tests, ~6,500 lines) is already the authoritative
+   safety net; the rig's job is to run it twice and compare, plus sweep the 39 real query
+   files already in `test/fixtures/grammars/*/queries/`. Adding a competing test mechanism
+   with its own corpus would split authority over "what is correct" — the one thing a
+   single-maintainer project cannot afford.
 
 ## Reproducing the headline numbers
 
