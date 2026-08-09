@@ -19,8 +19,8 @@ SRCS     := $(foreach g,$(AVAIL),$(ROOT)/test/fixtures/grammars/$(g)/src/parser.
 CFLAGS  := -O2 -D_DEFAULT_SOURCE=1 -I$(ROOT)/lib/include -I$(ROOT)/lib/src -I$(ROOT) -Wno-unused-function
 LANGDEF := $(foreach g,$(AVAIL),-DHAVE_$(shell echo $(g) | tr a-z A-Z))
 
-.PHONY: all clean check
-all: $(OUT)/qprobe $(OUT)/bugs
+.PHONY: all clean check bench
+all: $(OUT)/qprobe $(OUT)/bugs $(OUT)/bench
 
 $(INSTR): $(ROOT)/lib/src/query.c patch.py
 	cd $(ROOT) && python3 $(HERE)/patch.py
@@ -38,5 +38,13 @@ check: all
 	@echo "grammars available: $(AVAIL)"
 	@$(OUT)/bugs
 
+# Build only the uninstrumented timer -- useful for A/B'ing a query.c change,
+# since it does not depend on patch.py's anchors still matching.
+bench: $(OUT)/bench
+
 clean:
 	rm -rf $(OUT) $(INSTR)
+
+# Uninstrumented A/B timer: links lib/src/query.c directly, no counters.
+$(OUT)/bench: bench.c $(ROOT)/lib/src/query.c | $(OUT)
+	cd $(ROOT) && $(CC) $(CFLAGS) $(LANGDEF) -o $@ $(HERE)/bench.c $(SRCS)
