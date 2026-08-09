@@ -98,6 +98,11 @@ Child = { node: Node, immediate: bool }
 
 Properties that matter:
 
+- **Adjacency is an explicit axis, not an implicit depth delta.** Today a step's relationship
+  to its parent is encoded solely as `depth`, and "child of" is inferred from `depth + 1`.
+  The HIR should name the relation — `Child`, `Descendant`, and whatever else the language
+  grows — as an edge kind on `Child { node, immediate, axis }`. This is a requirement, not a
+  nicety: see the `#880` discussion below.
 - **Captures live on nodes, as a list with no fixed bound** — A1 in
   [`03-correctness.md`](03-correctness.md) disappears structurally.
 - **Negated fields are a list, unbounded** — A3 disappears structurally.
@@ -208,6 +213,67 @@ lower(plan)                       -> Bytecode
 serialize/deserialize(bytecode)   -> bytes
 verify(bytecode)                  -> Result
 ```
+
+### The feature that forces the axis question: `#880`, the descendant axis
+
+[tree-sitter#880](https://github.com/tree-sitter/tree-sitter/issues/880) — "Specify descendant
+or ancestor in query" — is the longest-running query-language request, and it is the same gap
+identified independently in [`03-correctness.md`](03-correctness.md) §C3 and
+[`05-database-angle.md`](05-database-angle.md). Users currently enumerate nesting levels by
+hand:
+
+```scheme
+(declaration declarator: [
+  (identifier) @name
+  (_ declarator: (identifier) @name)
+  (_ declarator: (_ declarator: (identifier) @name))
+  ...                                    ; "manual recursion hell", per the thread
+])
+```
+
+There is a draft PR, [#5403](https://github.com/tree-sitter/tree-sitter/pull/5403), adding
+`(^)` back-references inside alternations — De Bruijn-indexed recursive descent (`(^^)` for the
+next outer alternation), implemented by reusing the dead-end step mechanism with a *backward*
+`alternative_index`. +1,844/-50, three files.
+
+Two structural reasons to take a different route, both of which are about this document's
+thesis rather than about that PR's quality:
+
+1. **It adds a fifth meaning to `alternative_index`.** That field already encodes four distinct
+   control-flow constructs through flag combinations
+   ([`01-current-state.md`](01-current-state.md) §"Control flow is encoded in flag
+   combinations"), and that overloading is the direct cause of the back-patching bugs and of
+   the peephole repair pass at `query.c:3144-3189`. The PR notes "no new fields on QueryStep or
+   QueryState" as a virtue; in this codebase, *not* adding a field means overloading one that
+   is already carrying four jobs.
+
+2. **Recursive descent as control flow multiplies depth-scoped threads.** Query states are
+   depth-scoped — a state matches only when `start_depth + step->depth == self->depth`
+   (`query.c:4263`). Expressing descent as a backward jump means a thread re-enters the same
+   steps at successively greater depths, so a candidate ancestor spawns work per descendant
+   level. That is the same mechanism that produces the M² live-state growth measured in
+   [`02-execution-model.md`](02-execution-model.md), applied to a construct users would reach
+   for constantly. **This is a hypothesis, not a measurement** — the profiler could be pointed
+   at that branch over a deeply-nested corpus to settle it, and doing so would be a genuinely
+   useful contribution to the PR discussion either way.
+
+The route this architecture implies instead: **a descendant axis is a relation between HIR
+nodes, not a jump in the instruction stream.** With region encoding — which tree-sitter already
+has, since every node carries a byte range — ancestor/descendant is an O(1) containment test,
+and matching a descendant edge becomes a structural join rather than a per-depth thread
+([`05-database-angle.md`](05-database-angle.md) §1). It composes with everything else and it
+does not need new control flow.
+
+That has three consequences worth recording now:
+
+- **the HIR needs the explicit axis field** described above, from the start;
+- **the semantics need deciding alongside the disambiguation policy**: what does `.` mean under
+  a descendant axis (probably an error), how does `is_rooted` interact with a pattern that
+  spans arbitrary depth, and what happens to `max_start_depth` and range restriction;
+- **it should land after the matcher can merge threads**, not before. Implementing `#880` on
+  the current engine means shipping the pathological shape as a first-class language feature.
+  Another reason the sequencing in [`09-roadmap.md`](09-roadmap.md) puts language growth in
+  Phase 5.
 
 ### A real consumer to design against: `ts_query_ls`
 

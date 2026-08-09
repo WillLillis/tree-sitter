@@ -34,6 +34,25 @@ done once, late, with the strongest possible net under it.
 
 Hence: **strangle the front end, one-shot the back end.**
 
+### The IR is not the goal
+
+Worth stating plainly, because it is easy to lose: the new IR, the staged compiler, and the
+bytecode are **infrastructure for the disambiguation fix and for tooling**. They are not the
+deliverable. The deliverable is that idiomatic queries stop being quadratic and that match
+semantics become specified.
+
+This matters because the front-end work is both the *safest* part (bit-exact oracle) and the
+most enjoyable part (greenfield, clean design, no legacy semantics to preserve), while the
+disambiguation change is the riskiest and least pleasant. The natural failure mode for a solo
+effort is to spend a year building a beautiful compiler while `((attr)* (doc)* (fn))` still
+takes 4.2 seconds. Phase 1.5 exists partly as a guard against exactly that.
+
+The mitigating fact is that Phase 2's payoff is real and user-visible on its own — spans,
+multiple diagnostics per compile, and the API that
+[`ts_query_ls`](https://github.com/ribru17/ts_query_ls) currently has to work around
+([`06-compiler-architecture.md`](06-compiler-architecture.md)). It is not pure scaffolding. But
+it is not the point either.
+
 ## The constraint that decides this: one maintainer, no safety net but the tests
 
 Practical reality as of this writing: **maintenance is effectively one person**, with the
@@ -205,6 +224,43 @@ Roughly half of Phase 1 is permanent infrastructure; the disposable half is five
 and closes live bugs. Carrying a known silent-data-loss defect for six months to avoid writing
 a line that later gets deleted is the wrong trade.
 
+## Phase 1.5 — spec the semantics, then spike the matcher (3–4 weeks)
+
+Inserted after review. Phases 2 and 3 build an IR and a bytecode whose most important
+consumer is the *new matching algorithm* from Phase 4. Designing them without knowing what
+that algorithm needs is how you get an IR that has to be reworked once its real consumer
+arrives.
+
+Two deliverables, neither of which is production code.
+
+**1. The disambiguation policy, written down** — decision 1 above. This is a writing task, not
+a coding one: derive it from current behaviour where current behaviour is sane, choose
+deliberately where it is not, and land it as a conformance suite in `query_test.rs`. It blocks
+Phase 4 and it costs nothing but thought, so there is no reason to defer it.
+
+**2. A time-boxed, deliberately throwaway spike** of merge-based matching. The unknown worth
+buying down is *not* "can a tagged automaton be implemented" — the regex literature answers
+that ([`07-references.md`](07-references.md) §1). It is:
+
+> Does thread merging survive **tree-shaped input**? The literature is about strings. Our input
+> is a depth-scoped tree walk with sibling anchors, `!field` assertions, non-rooted patterns,
+> and quantifiers whose zero-match case transfers anchor obligations across steps
+> (`query.c:4453-4501`). No paper answers whether tag registers can be merged soundly under
+> those rules.
+
+That is the single largest technical risk in the whole plan, and it is answerable in a few
+weeks by a prototype that is allowed to be ugly — over the *existing* `QueryStep` encoding,
+possibly in Rust, possibly not even complete. The deliverable is a written answer to:
+
+- Does merging preserve the anchor and quantifier semantics pinned by the conformance suite?
+- What state identity makes two threads mergeable?
+- What must the IR expose for this — and what is it therefore wrong to hide?
+- Does the `((attr)* (doc)* (fn))` case actually become linear?
+
+If the answer is "merging does not work here", that is worth knowing **before** spending three
+months on an IR designed to serve it. If it works, Phase 2's design lands with its hardest
+requirement already known.
+
 ## Phase 2 — the front end (4–8 weeks)
 
 Build stages 1–2 from [`06-compiler-architecture.md`](06-compiler-architecture.md) — parse →
@@ -253,7 +309,7 @@ The disambiguation rewrite. This is where the cliff dies.
 This is the phase most likely to slip. Budget accordingly, and keep the old VM behind a flag
 until downstream users have shipped a release on the new one.
 
-## Phase 5 — the optimizer and tooling (ongoing)
+## Phase 5 — the optimizer, tooling, and language growth (ongoing)
 
 Now that a plan stage exists, these become incremental work rather than rewrites:
 
@@ -263,7 +319,12 @@ Now that a plan stage exists, these become incremental work rather than rewrites
 - query LSP, formatter, linter (the "known-quadratic quantifier shape" lint would have caught
   the 4.2 s query at authoring time)
 - predicate pushdown, if decision 2 said yes
-- descendant axis, if decision 4 said yes
+- descendant axis ([#880](https://github.com/tree-sitter/tree-sitter/issues/880)), if
+  decision 4 said yes — deliberately *after* the matcher can merge threads, since implementing
+  it on the current engine would ship the pathological shape as a language feature. See
+  [`06-compiler-architecture.md`](06-compiler-architecture.md) for why the draft PR's
+  control-flow approach is the wrong layer, and [`11-data-oriented-design.md`](11-data-oriented-design.md)
+  for where DoD does and does not pay.
 
 ## Phase 6 — incrementality (speculative)
 
