@@ -80,13 +80,16 @@ tree automata — see [`05-database-angle.md`](05-database-angle.md) and
 | [`07-references.md`](07-references.md) | Annotated bibliography — what to read and why |
 | [`08-measurement-harness.md`](08-measurement-harness.md) | The profiler used here; recommend landing it in-tree |
 | [`09-roadmap.md`](09-roadmap.md) | Sequencing, risk, and what to do first |
+| [`10-differential-rig.md`](10-differential-rig.md) | What the testing oracle actually is at each phase, and what to build when |
 
 ## If you only do three things
 
-1. **Land the measurement harness and a differential-testing rig** (`09`, `08`). Months of
-   engine work without these is not survivable. Build the rig as *a way of running
-   `crates/cli/src/tests/query_test.rs` against two engines* — that suite is already the
-   safety net, and a second parallel test mechanism would only compete with it for authority.
+1. **Land the measurement harness, then pin today's behaviour with goldens** (`08`, `10`).
+   The harness is done (`tools/query-profiler/`). The goldens are ~100 lines of dumper plus
+   one `#[test]` in the existing suite, and taking them *before* P1/P2 land is what turns
+   "these changes are semantics-preserving" from a claim into a check. Note `10` walks back
+   the earlier "build a differential rig in Phase 0" advice: the oracle differs per phase and
+   most of it is not needed yet.
 2. **Cache the language-only half of query analysis** (`04`, opportunity P1). It is a
    contained change, it does not touch semantics, and it removes 0.7–2.8 ms from every
    `ts_query_new` call.

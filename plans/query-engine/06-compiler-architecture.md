@@ -209,6 +209,44 @@ serialize/deserialize(bytecode)   -> bytes
 verify(bytecode)                  -> Result
 ```
 
+### A real consumer to design against: `ts_query_ls`
+
+[`ts_query_ls`](https://github.com/ribru17/ts_query_ls) (ribru17) is a language server for
+`.scm` files: diagnostics for impossible patterns and invalid node names, completion for node
+names / fields / captures / predicates, nvim-treesitter-compatible formatting, and
+go-to-definition, references, and rename for captures. It is the closest thing to a real-world
+test of the API this document proposes.
+
+Worth treating as a **design data point, not a requirement** — nothing here should gate on it.
+But three things about how it is built are direct evidence for the diagnosis in
+[`01-current-state.md`](01-current-state.md):
+
+1. **It parses `.scm` with a tree-sitter grammar for the query language**, not with
+   tree-sitter's own query parser. That is the only option available: `ts_query_new` either
+   returns an opaque `TSQuery` or one byte offset, and neither is something a language server
+   can build on. The ecosystem's answer to "there is no AST" was to write a second parser for
+   the same language. Stage 1 of the pipeline above is exactly the thing that would not have
+   needed writing.
+
+2. **Its documented limitation is our §C5.** Impossible-pattern detection "requires expensive
+   full query file execution". The library *already computes this* — that is what the
+   `analysis.finished_parent_symbols.size == 0` path in `ts_query__analyze_patterns`
+   (2013-2049 region) decides — but the only way to consume it is to compile the whole file
+   and get back a single `TSQueryErrorStructure` at a single byte offset. Finding the *second*
+   bad pattern means editing it out and compiling again. The information exists and is thrown
+   away at the API boundary.
+
+3. **It implements `; inherits:` module imports itself**, because the query language has no
+   composition ([`03-correctness.md`](03-correctness.md) §C4). Another capability the ecosystem
+   built around the library rather than in it.
+
+This gives a concrete acceptance test for the staged API, worth checking before committing to
+a shape: **could `ts_query_ls` replace its expensive impossible-pattern path with a single
+`resolve()` + `analyze()` call returning every diagnostic with a span?** If yes, the stage
+boundaries are drawn in the right places. If it still needs to compile repeatedly, they are
+not. Validating a design against an existing consumer is much cheaper than discovering the
+boundaries are wrong after shipping them.
+
 Consumers this immediately unlocks, none of which are possible today:
 
 - **query LSP** — completion of node types and fields from the grammar, go-to-definition on
