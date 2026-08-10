@@ -193,6 +193,60 @@ argument for the IR ([`06-compiler-architecture.md`](06-compiler-architecture.md
 semantics live in the interaction between fields, so a faithful reimplementation is archaeology
 rather than translation.
 
+## 7b. Measurement hazards — read this before trusting any number you produce
+
+Every item below is a mistake actually made while producing this document, each of which
+generated a confident, wrong, load-bearing conclusion before being caught. A patch validated
+through any of them cannot land.
+
+**Counter magnitudes are not evidence of cost.** `(block (_)* @stmt)` was called pathological
+on the strength of 23× state fan-out and "98.4% of state visits wasted". It costs **1.3×** the
+trivial `(block) @b` and returns the correct match count. Three of four queries in the original
+pathological set were misjudged this way. *Always pair a counter with wall clock and a match
+count.*
+
+**Check the match count before benchmarking.** An early attempt to measure whether the analysis
+abort degrades execution ran two queries that returned `0` matches on the test file, so it timed
+the tree walk and nothing else. *A benchmark whose output count is zero, or unchanged across the
+variable under test, is measuring the wrong thing.*
+
+**A missing input can look exactly like a timeout.** `w9.scm` and `w11.scm` were never
+generated, and a `|| echo TIMEOUT` fallback in the harness turned "file not found" into an
+apparent >45 s compile cliff, which then became a headline finding. *Make harnesses distinguish
+"no result" from "bad result"; never let a fallback branch print a plausible measurement.*
+
+**Silent build failures leave a stale binary.** `make ... >/dev/null 2>&1 && run` ran the
+*previous* binary when `patch.py` failed its anchor assertions, producing numbers identical to
+the previous run — which read as "the fix had no effect". *Check that the build actually
+produced a new artifact, or drop the output redirection.*
+
+**Say which build produced the number.** The "195× parent-symbol spread" was measured with
+`MAX_ANALYSIS_ITERATION_COUNT` raised to 20,000 and reported without that caveat. At the shipped
+256 the spread is **4.7×**. *Record the build configuration next to every measurement.*
+
+**Interpret a divergence only after characterising it.** The spike's first 120 → 240 divergence
+was announced as the longest-match rule asserting itself — a significant finding. The
+capture-count histogram showed identical shapes, just doubled: a plumbing bug. *Look at the
+shape of a difference, not just its size.*
+
+**Text-scanning query corpora is full of traps.** Three separate errors in one analysis:
+scanning the wrong directory (45 files instead of 1,672, yielding "0 occurrences" of a shape
+that occurs 18 times); counting regex quantifiers inside string literals as query quantifiers
+(`"^[A-Z_][A-Z0-9_]*"` → `]*`), inflating 18 to 47; and treating
+`tree-sitter-typst/test/corpus/typst.scm` — a 2.8 MB parser test corpus that happens to end in
+`.scm` — as a query file, which manufactured a violation of the 3-capture limit. *Strip strings
+and comments before scanning, restrict to `queries/`, and confirm the file is what you think it
+is.*
+
+**Watch for accidental O(n) in the harness itself.** `MIndex` is 256 KB; an early version
+swapped it by value once per sibling position, and the resulting speedup read as `0.0×`. Also:
+the dense bitset's width scales with sibling count, which is why per-match cost kept growing —
+the *representation*, not the algorithm.
+
+**The engine's own guards are load-bearing, and so are the harness's.** `patch.py` asserts each
+anchor matches exactly once, and it caught `query.c` drift twice. Keep that property in anything
+new.
+
 ## 8. How to run it
 
 ```sh
