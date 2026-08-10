@@ -175,6 +175,18 @@ Plus the Tier-A correctness fixes from [`03-correctness.md`](03-correctness.md):
 - **A1 / A3** capture and negated-field overflow — **test now, fix after Phase 4.** See below.
 - Write the B1–B4 tests; confirm or dismiss each suspicion
 
+### The analysis blow-up outranks `insert_sorted`
+
+`analysis_state_set__insert_sorted` is 10% of total instructions on a realistic run, and a
+fix there is worth an estimated 15-20% of compile time on well-behaved queries — real, and
+worth doing. But it is a constant factor sitting on top of a much larger effect: insert counts
+grow from 1,562 to 617,034 across `(arguments (identifier) x 1..7)`
+([`04-performance.md`](04-performance.md) §1b). Reduce the state churn and the constant factor
+matters proportionally less; optimize the constant factor first and the cliff is untouched.
+
+Sequence: characterize why `perform_analysis` generates ~96% duplicate states over broad
+parent symbols, fix that, then revisit `insert_sorted` against the new profile.
+
 ### Why the limit bumps are deferred, not "one character"
 
 An earlier draft proposed raising `MAX_STEP_CAPTURE_COUNT` 3 → 8 and

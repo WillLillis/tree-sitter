@@ -90,6 +90,89 @@ and genuinely query-dependent, but:
   Deferring analysis until the first `next_capture` call would make `next_match`-only
   workloads (most non-editor uses: linters, codemods, `tree-sitter query`) skip it entirely.
 
+## Problem 1b: the compile cliff is parent-subgraph breadth, not query size
+
+Compilation and execution are **separate budgets with separate pathological inputs**, and they
+should be optimized separately. The one place they couple is the analysis abort — see below.
+
+Compile cost is well-behaved along the axes you would expect:
+
+| axis | behaviour |
+|---|---|
+| pattern count | **linear**, ~0.44 ms per *analyzed* pattern (1 → 256 patterns: 0.49 → 113.73 ms) |
+| nesting depth | **linear**, ~0.67 ms per level (139 analysis iterations per level) |
+| sibling width | saturates — for `(source_file (function_item) × W)`, flat from W=7 through W=16 |
+
+The cost is driven by something else entirely: **how much of the parse table the pattern's
+parent symbol can span.** Same shape, six identical children, one grammar:
+
+| pattern | perform_analysis | set inserts | peak set |
+|---|---|---|---|
+| `(declaration_list (function_item) × 6)` | 0.35 ms | 3,408 | 10 |
+| `(source_file (function_item) × 6)` | 0.70 ms | 2,563 | 11 |
+| `(field_declaration_list … × 6)` | 2.20 ms | 10,933 | 136 |
+| `(block (let_declaration) × 6)` | 10.66 ms | 65,862 | 52 |
+| `(parameters (parameter) × 6)` | 11.38 ms | 95,497 | 155 |
+| **`(arguments (identifier) × 6)`** | **68.22 ms** | **342,573** | **444** |
+
+**A 195× spread for the same query shape.** `arguments` can contain any expression, so its
+analysis subgraph spans a large fraction of the parse table and every hypothetical child
+multiplies the reachable state set. `declaration_list` admits only items, so it barely moves.
+
+Growth for the expensive parent, with the iteration cap lifted to 20,000:
+
+| W | perform_analysis | inserts | peak set |
+|---|---|---|---|
+| 1 | 0.31 ms | 1,562 | 11 |
+| 2 | 1.12 ms | 6,877 | 36 |
+| 3 | 1.34 ms | 8,847 | 40 |
+| 4 | 6.30 ms | 36,476 | 107 |
+| 5 | 25.26 ms | 137,579 | 254 |
+| 6 | 68.87 ms | 342,573 | 444 |
+| 7 | 127.67 ms | 617,034 | 575 |
+| 8 | 126.20 ms | 614,850 | 594 |
+
+Roughly 3–4× per added child through the middle, then saturating near W=7 as the analysis
+state space is exhausted. Not unbounded — but 127 ms for **one pattern** is already a cliff,
+and a query file with a handful of such patterns is seconds.
+
+### What the shipped build actually does, and why it is worse than it looks
+
+At the shipped `MAX_ANALYSIS_ITERATION_COUNT = 256`:
+
+| W | `ts_query_new` | perform_analysis | **aborts** |
+|---|---|---|---|
+| 2 | 3.87 ms | 1.01 ms | 0 |
+| 4 | 9.22 ms | 6.20 ms | 0 |
+| 6 | 9.01 ms | 6.10 ms | **1** |
+| 8 | 8.83 ms | 5.81 ms | **1** |
+
+The cap converts an unbounded cost into ~9 ms — so, like `MAX_STEP_CAPTURE_COUNT`
+([`03-correctness.md`](03-correctness.md) §A1), it is **load-bearing blast-radius containment,
+not a tuning knob**. But the price is that from W≥6 the analysis *gives up*, and
+`did_abort` marks every step in the pattern fallible (1964-1977). That means:
+
+- `root_pattern_guaranteed` is false everywhere in the pattern, so `next_capture` can never
+  stream a capture early for it;
+- `ts_query__step_is_fallible` returns true more often, so `advance` splits more states.
+
+**So the compile-side failure mode leaks into execution**: a pattern over a broad parent
+symbol is penalized at compile time *and* runs slower forever after. This is the one place the
+two budgets are genuinely coupled, and it is an argument for fixing the analysis rather than
+just bounding it.
+
+Note also `(arguments (identifier) × 4)` costs **9.22 ms of compile for a single pattern** with
+no abort at all — this is not an exotic query.
+
+### Correction to an earlier draft
+
+An earlier version of this document reported "width 9 does not finish in 45 seconds". That was
+an artifact: `w9.scm` and `w11.scm` were never generated, and a `|| echo TIMEOUT` fallback in
+the measurement script turned *file not found* into an apparent timeout. There is no width
+cliff on `source_file`; the real driver is parent-subgraph breadth, measured above. Recorded
+here because the failure mode — a harness reporting a missing input as a result — is one to
+watch for in the benchmark suite.
+
 ## Problem 2: the execution cliff
 
 Full analysis in [`02-execution-model.md`](02-execution-model.md). Summary of the cost model:
