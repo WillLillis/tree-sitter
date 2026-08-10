@@ -213,6 +213,14 @@ static void run_one(const char *lang_name, const TSLanguage *lang,
   printf("    pool: acquires=%lu scan_steps=%lu (avg scan %.1f)\n",
          qprobe.pool_acquires, qprobe.pool_scan_steps,
          qprobe.pool_acquires ? (double)qprobe.pool_scan_steps / qprobe.pool_acquires : 0.0);
+  printf("    MERGE OPPORTUNITY: samples=%lu live_states=%lu  distinct(step,depth)=%lu  distinct(+flags)=%lu\n",
+         qprobe.mp_nodes, qprobe.mp_states, qprobe.mp_key_si_sd, qprobe.mp_key_si_sd_flags);
+  printf("      collapse factor: %.2fx by (step,depth)   %.2fx by (step,depth,flags)   largest group=%lu\n",
+         qprobe.mp_key_si_sd ? (double)qprobe.mp_states / qprobe.mp_key_si_sd : 0.0,
+         qprobe.mp_key_si_sd_flags ? (double)qprobe.mp_states / qprobe.mp_key_si_sd_flags : 0.0,
+         qprobe.mp_max_group);
+  printf("      flags cost: %.1f%% of the collapse is lost by including the thread flags\n",
+         qprobe.mp_key_si_sd ? 100.0 * (qprobe.mp_key_si_sd_flags - qprobe.mp_key_si_sd) / qprobe.mp_key_si_sd : 0.0);
   printf("    should_descend scan_steps=%lu (%.1f per node)\n", qprobe.descend_scan_steps,
          qprobe.nodes_entered ? (double)qprobe.descend_scan_steps / qprobe.nodes_entered : 0.0);
 

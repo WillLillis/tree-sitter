@@ -220,6 +220,44 @@ This is a free-list waiting to be written — a singly-linked list threaded thro
 entries makes acquire and release both O(1). It is a ~20-line change with no semantic effect,
 and it is one of the highest ratio-of-value-to-risk items in this whole document.
 
+## Measured: how much merging is actually available
+
+Before writing a merge-based matcher, the question of whether merging is worth anything is
+answerable by instrumenting the *existing* engine — bucket the live states at each node by a
+candidate merge key and see how much collapses. If the answer were ~1 state per key, the whole
+approach would be dead.
+
+Live states bucketed by `(step_index, start_depth)`, and by that plus the thread-local flags
+(`seeking_immediate_match`, `skipped_quantifier`, `needs_parent`,
+`has_in_progress_alternatives`):
+
+| query | live states sampled | collapse by (step, depth) | collapse by (step, depth, **flags**) | largest group |
+|---|---|---|---|---|
+| **unanchored two-quant** (the 34× target) | 5,897,144 | **56.67×** | **54.11×** | 545 |
+| anchored two-quant (already fast) | — | 1.17× | 1.03× | 2 |
+| `rust/highlights.scm` | — | 1.00× | 1.00× | 1 |
+
+Three conclusions, all favourable:
+
+1. **The available collapse is 56× exactly where the cost is.** On the pathological case, 545
+   threads share a single `(step_index, start_depth)` at peak. That is the O(n²) dedup pass's
+   entire input.
+2. **It is a no-op everywhere else.** 1.00× on a real query file, 1.17× on the anchored form.
+   So a merge-based matcher targets the bad case precisely and cannot regress the good ones —
+   the best possible profile for a risky change.
+3. **The thread flags are nearly free to include in the merge key**: 54.11× versus 56.67×, so
+   keeping them costs **4.7%** of the available collapse. That settles the first design
+   question in favour of the safe option — put the flags in the key, keep the thread-local
+   semantics exactly, and give up almost nothing.
+
+The 54× collapse and the measured 34× per-match cost gap are consistent with each other, which
+is the first independent corroboration that the merge approach can deliver the target.
+
+**What remains open is captures.** Merging 54 threads that agree on `(step, depth, flags)` and
+differ only in capture history is precisely the tagged-automaton problem
+([`05-database-angle.md`](05-database-angle.md) §2). That is the spike's real work, and it is
+where the disambiguation policy stops being abstract.
+
 ## The disambiguation question
 
 This is the part that matters most, and it is not primarily about performance.

@@ -37,6 +37,13 @@ typedef struct {
   unsigned long max_finished;       // peak finished states
   unsigned long capture_drops;      // captures silently dropped: step already had 3
   unsigned long matches;            // finished states pushed
+  // Merge-opportunity probe: at each node, bucket the live states by candidate
+  // merge keys and see how much collapsing is actually available.
+  unsigned long mp_nodes;           // samples taken
+  unsigned long mp_states;          // live states seen across samples
+  unsigned long mp_key_si_sd;       // distinct (step_index, start_depth)
+  unsigned long mp_key_si_sd_flags; // distinct (step_index, start_depth, flags)
+  unsigned long mp_max_group;       // largest group under the loose key
   unsigned long analysis_inserts;   // analysis_state_set__insert_sorted calls
   unsigned long analysis_dedup_hits;// ... of those, already present (no insert)
   unsigned long analysis_hit_at_back;// ... of those, matching the LAST element
@@ -390,6 +397,50 @@ sub1(
     if (index == self->size - 1) QP(analysis_hit_at_back);
   }""",
     "analysis insert_sorted",
+)
+
+# ---- merge-opportunity probe ----
+
+sub1(
+    """        // Order states by capture position so the dedup pass below can stop scanning a
+        // group once the remaining states are disjoint from the current one.
+        ts_query_cursor__sort_states_by_capture(self);""",
+    """        // PROBE: how many live states would collapse under a merge key?
+        if (self->states.size > 0) {
+          enum { QP_TBL = 8192 };
+          static uint64_t k1[QP_TBL], k2[QP_TBL];
+          static uint16_t c1[QP_TBL];
+          static uint32_t stamp[QP_TBL], stamp2[QP_TBL], qp_epoch = 0;
+          qp_epoch++;
+          unsigned d1 = 0, d2 = 0, maxg = 0;
+          for (unsigned qi = 0; qi < self->states.size; qi++) {
+            QueryState *qs = array_get(&self->states, qi);
+            uint64_t loose = ((uint64_t)qs->step_index << 20) | (uint64_t)qs->start_depth;
+            uint64_t tight = (loose << 8)
+              | ((uint64_t)qs->seeking_immediate_match << 0)
+              | ((uint64_t)qs->skipped_quantifier << 1)
+              | ((uint64_t)qs->needs_parent << 2)
+              | ((uint64_t)qs->has_in_progress_alternatives << 3);
+            unsigned h = (unsigned)((loose * 0x9E3779B97F4A7C15ull) >> 51) & (QP_TBL - 1);
+            while (stamp[h] == qp_epoch && k1[h] != loose) h = (h + 1) & (QP_TBL - 1);
+            if (stamp[h] != qp_epoch) { stamp[h] = qp_epoch; k1[h] = loose; c1[h] = 0; d1++; }
+            c1[h]++;
+            if (c1[h] > maxg) maxg = c1[h];
+            unsigned h2 = (unsigned)((tight * 0x9E3779B97F4A7C15ull) >> 51) & (QP_TBL - 1);
+            while (stamp2[h2] == qp_epoch && k2[h2] != tight) h2 = (h2 + 1) & (QP_TBL - 1);
+            if (stamp2[h2] != qp_epoch) { stamp2[h2] = qp_epoch; k2[h2] = tight; d2++; }
+          }
+          qprobe.mp_nodes++;
+          QPADD(mp_states, self->states.size);
+          QPADD(mp_key_si_sd, d1);
+          QPADD(mp_key_si_sd_flags, d2);
+          QPMAX(mp_max_group, maxg);
+        }
+
+        // Order states by capture position so the dedup pass below can stop scanning a
+        // group once the remaining states are disjoint from the current one.
+        ts_query_cursor__sort_states_by_capture(self);""",
+    "merge probe",
 )
 
 open(p, "w").write(src)

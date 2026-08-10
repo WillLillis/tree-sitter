@@ -114,6 +114,23 @@ Three consequences worth designing around:
   [`06-compiler-architecture.md`](06-compiler-architecture.md) and this doc set are actually
   for; treat writing them as part of the work, not overhead on it.
 
+## Standing conclusion: the IR is the real next step
+
+Repeated across this investigation, and worth stating as a conclusion rather than a plan item:
+**the recurring obstacle has been the inability to reason about the code.** Control flow
+encoded in flag combinations, analysis results interleaved with instructions, an ordering
+invariant that turned out not to hold (§A5), and a measurement session in which most
+hypotheses were rejected because the structure made the real behaviour hard to predict.
+
+Every micro-optimisation attempted against the current design capped out — 0.6%, 1.2×, ~2×,
+negligible. That is the signature of a local maximum, and the way out is a representation that
+can be reasoned about, not more measurement of the current one.
+
+The merge spike below is worth doing first because it is cheap and it answers a question that
+constrains the IR's design. But the IR remains the strong next step after it, on core grounds
+(matcher rewrite, analysis reformulation, precompiled queries, structural fixes to A1/A3), not
+on tooling grounds.
+
 ## The four decisions that are hard to reverse
 
 Make these deliberately and early, before writing engine code. Everything else is
