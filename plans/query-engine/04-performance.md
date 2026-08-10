@@ -164,6 +164,45 @@ just bounding it.
 Note also `(arguments (identifier) × 4)` costs **9.22 ms of compile for a single pattern** with
 no abort at all — this is not an exotic query.
 
+### Why: the cost is inherent to what the analysis computes
+
+Three hypotheses for the blow-up, each tested against `(arguments (identifier) × 6)` and each
+**rejected by measurement**. Recorded because the negative results are what rule out the cheap
+fixes and force the architectural one.
+
+Measured shape of the hot loop (uncapped, one pattern): **4,649,167 lookahead-symbol
+iterations**, producing 366,798 candidate states, of which 342,573 reach the sorted set and
+86% of those are already present. Roughly 12,700 state-processings × ~370 lookahead symbols
+each.
+
+| hypothesis | prediction | measured | verdict |
+|---|---|---|---|
+| The `array_search_sorted_with` over `subgraph->nodes`, run 4.6 M times, dominates | removing it should be a large win | a one-element memo eliminated **45%** of those searches (4.65 M → 2.57 M) and moved wall time **63.71 → 63.34 ms, 0.6%** | **rejected** — the search is not the cost |
+| Many lookahead symbols are redundant; grouping by their *effect* `(successor, visible_symbol)` collapses the loop | large redundancy factor | 93 raw symbols per state-processing → **80 distinct effects**, a redundancy of only **1.2×** | **rejected** — each symbol genuinely leads to a different outcome |
+| Collapsing merely by `successor` (ignoring which symbol) helps | large factor | 93 raw → **44.3 distinct successors** per processing | **~2× at best**, and only for the non-matching symbols |
+
+So the loop is not doing redundant work per symbol. The redundancy is further downstream —
+86% of *constructed* states are duplicates — because many distinct `(successor, symbol)` pairs
+collapse to the same `AnalysisState` once `does_match` comes out false and only
+`(parse_state, child_index, field_id, done, step_index)` is retained.
+
+The conclusion that matters: **`perform_analysis` explores the cross product of hypothetical
+tree positions × possible next tokens, and for a broad parent symbol that product is genuinely
+large.** There is no cheap trick inside the loop. A large win requires changing *what* the
+analysis computes or *when* it runs — not optimizing how it runs.
+
+That reorders the compile-side work:
+
+1. **Laziness — skip analysis when nothing consumes it.** Now clearly the biggest lever. A
+   `next_match`-only consumer never reads `root_pattern_guaranteed`. Avoiding an inherently
+   expensive computation beats speeding it up. Caveat: analysis also rejects impossible
+   patterns, so this changes when that error surfaces.
+2. **Caching** — by `(language)` for the parse-table half (P1), and by
+   `(language ABI, pattern text)` for `perform_analysis`, which is per-pattern and independent.
+3. **`insert_sorted`** — the 15–20% constant factor, worth having, once the above are in.
+4. **Micro-optimizing the lookahead loop** — measured ceiling of ~2×, and only on the
+   pathological shapes. Lowest priority.
+
 ### Correction to an earlier draft
 
 An earlier version of this document reported "width 9 does not finish in 45 seconds". That was
