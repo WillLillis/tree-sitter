@@ -19,7 +19,7 @@ SRCS     := $(foreach g,$(AVAIL),$(ROOT)/test/fixtures/grammars/$(g)/src/parser.
 CFLAGS  := -O2 -D_DEFAULT_SOURCE=1 -I$(ROOT)/lib/include -I$(ROOT)/lib/src -I$(ROOT) -Wno-unused-function
 LANGDEF := $(foreach g,$(AVAIL),-DHAVE_$(shell echo $(g) | tr a-z A-Z))
 
-.PHONY: all clean check bench joinproto
+.PHONY: all clean check bench joinproto spike
 all: $(OUT)/qprobe $(OUT)/bugs $(OUT)/bench
 
 $(INSTR): $(ROOT)/lib/src/query.c patch.py
@@ -43,6 +43,10 @@ check: all
 bench: $(OUT)/bench
 
 # Structural-join prototype (throwaway; sizes the prize for the pathological pattern).
+spike: $(OUT)/merge_spike
+$(OUT)/merge_spike: merge_spike.c $(ROOT)/lib/src/query.c | $(OUT)
+	cd $(ROOT) && $(CC) $(CFLAGS) $(LANGDEF) -o $@ $(HERE)/merge_spike.c $(SRCS)
+
 joinproto: $(OUT)/join_proto
 $(OUT)/join_proto: join_proto.c $(ROOT)/lib/src/query.c | $(OUT)
 	cd $(ROOT) && $(CC) $(CFLAGS) $(LANGDEF) -o $@ $(HERE)/join_proto.c $(SRCS)
