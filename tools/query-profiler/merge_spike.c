@@ -173,14 +173,33 @@ static double run_stock(const TSQuery *q, TSTree *tree, Stream2 *out) {
 // A capture history is a singly-linked list through an arena, newest first.
 // Sharing is automatic: two continuations that agree on a prefix point at the
 // same cell, so carrying N alternatives costs N pointers, not N arrays.
-typedef struct { TSNode node; uint16_t capture_id; uint32_t prev; } CapCell;
+typedef struct { TSNode node; uint16_t capture_id; uint32_t prev; uint32_t len; } CapCell;
 #define CAP_NIL UINT32_MAX
 
 typedef Array(CapCell) CapArena;
 
 static uint32_t cap_push(CapArena *a, uint32_t prev, TSNode node, uint16_t id) {
-  array_push(a, ((CapCell){ .node = node, .capture_id = id, .prev = prev }));
+  uint32_t len = (prev == CAP_NIL) ? 1 : a->contents[prev].len + 1;
+  array_push(a, ((CapCell){ .node = node, .capture_id = id, .prev = prev, .len = len }));
   return a->size - 1;
+}
+
+static inline uint32_t cap_len(const CapArena *a, uint32_t h) {
+  return h == CAP_NIL ? 0 : a->contents[h].len;
+}
+
+// Is `shorter`'s chain a suffix of `longer`'s? Continuations that reach the same
+// control state differ by how many quantifier repetitions they took, and taking
+// more only ever appends cells -- so a strict superset of captures shows up as a
+// strict suffix-extension. Walking up the length difference and comparing one
+// pointer decides it, rather than comparing two capture sets pairwise.
+static bool cap_is_suffix(const CapArena *a, uint32_t longer, uint32_t shorter) {
+  uint32_t ll = cap_len(a, longer), ls = cap_len(a, shorter);
+  if (ls > ll) return false;
+  if (shorter == CAP_NIL) return true;
+  uint32_t h = longer;
+  for (uint32_t k = 0; k < ll - ls; k++) h = a->contents[h].prev;
+  return h == shorter;
 }
 
 // Materialize newest-first chain into oldest-first order for emission.
@@ -223,12 +242,33 @@ static MergedState *merged_find(MergedSet *set, uint16_t step, uint16_t depth, u
 
 // The merge point: an existing control state absorbs the new continuation
 // instead of becoming a second thread.
-static void merged_add(MergedSet *set, uint16_t step, uint16_t depth, uint16_t pat,
-                       uint8_t flags, uint32_t head, unsigned long *merge_count) {
+// When PRUNE is on, longest-match is enforced here -- at merge time, in work
+// proportional to the chain-length difference -- instead of by the stock
+// engine's pairwise capture-set comparison afterwards. All heads in a MergedState
+// already share step_index and flags, so the stock engine's guard conditions on
+// those hold by construction.
+static bool g_prune = false;
+static unsigned long g_pruned = 0;
+
+static void merged_add_a(MergedSet *set, const CapArena *arena, uint16_t step, uint16_t depth,
+                         uint16_t pat, uint8_t flags, uint32_t head, unsigned long *merge_count) {
   MergedState *s = merged_find(set, step, depth, pat, flags);
   if (s) {
     for (uint32_t i = 0; i < s->heads.size; i++) {
       if (*array_get(&s->heads, i) == head) return;   // identical continuation
+    }
+    if (g_prune) {
+      // Drop the newcomer if an existing continuation already subsumes it.
+      for (uint32_t i = 0; i < s->heads.size; i++) {
+        if (cap_is_suffix(arena, *array_get(&s->heads, i), head)) { g_pruned++; return; }
+      }
+      // Otherwise evict any existing continuation the newcomer subsumes.
+      for (uint32_t i = 0; i < s->heads.size; i++) {
+        if (cap_is_suffix(arena, head, *array_get(&s->heads, i))) {
+          *array_get(&s->heads, i) = *array_back(&s->heads);
+          s->heads.size--; i--; g_pruned++;
+        }
+      }
     }
     array_push(&s->heads, head);
     (*merge_count)++;
@@ -239,6 +279,9 @@ static void merged_add(MergedSet *set, uint16_t step, uint16_t depth, uint16_t p
   array_push(&ns.heads, head);
   array_push(set, ns);
 }
+
+#define merged_add(set, step, depth, pat, flags, head, mc) \
+  merged_add_a((set), &ctx->arena, (step), (depth), (pat), (flags), (head), (mc))
 
 static void merged_clear(MergedSet *set) {
   for (uint32_t i = 0; i < set->size; i++) array_delete(&array_get(set, i)->heads);
@@ -476,9 +519,11 @@ int main(int argc, char **argv) {
 
   Stream2 b = { .caps = array_new(), .matches = array_new() };
   MergeCtx ctx;
+  g_prune = getenv("SPIKE_PRUNE") != NULL;
   double tb = run_merge(q, tree, &b, &ctx);
-  printf("merge matcher: %8.2f ms   %u matches   (node_tests=%lu, continuations merged=%lu, arena=%u cells)\n",
-         tb, b.matches.size, ctx.node_tests, ctx.merges, ctx.arena.size);
+  printf("merge matcher: %8.2f ms   %u matches   (node_tests=%lu, merged=%lu, arena=%u cells, pruned=%lu, prune=%s)\n",
+         tb, b.matches.size, ctx.node_tests, ctx.merges, ctx.arena.size, g_pruned,
+         g_prune ? "ON" : "off");
 
   // Diagnostic: capture-count histogram per engine. If the merge matcher is
   // retaining alternatives the stock engine's longest-match pass discards, the

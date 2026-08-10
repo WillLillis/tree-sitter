@@ -310,6 +310,61 @@ continuation per control state" does not work, because the 22,100 stock matches 
 distinct maximal matches, not one per control state. The rule has to prune strict subsets while
 retaining incomparable alternatives — cheaply, on a shared-prefix representation.
 
+### Merge-time pruning: partially works, and the failure names the real requirement
+
+The follow-up experiment asked whether longest-match can be enforced *at merge time* in bounded
+work. Hypothesis: continuations reaching the same control state differ by how many quantifier
+repetitions they took, and taking more only appends cells — so "A's captures ⊃ B's" should show
+up as "B's chain is a **suffix** of A's", decidable by walking up the length difference and
+comparing one pointer.
+
+| | matches | time | arena |
+|---|---|---|---|
+| stock | 22,100 (all 7 captures) | 3,993 ms | — |
+| merge, no pruning | 428,700 | 4,735 ms | 881,100 cells |
+| **merge + suffix pruning** | **74,100** | **2,383 ms** | 156,250 cells |
+
+It works **partially**: 5.8× fewer matches, 2× faster, and — notably — **faster than the stock
+engine** (2,383 ms vs 3,993 ms) while still emitting 3.4× more matches. So the merged
+representation with even imperfect pruning is already competitive.
+
+But it does not reproduce 22,100, and the reason is structural. In
+`(attr)* (doc)* (fn)`, a continuation that took **more `attr` repetitions** has its extra cells
+in the *middle* of the chain — the `doc` and `fn` cells were appended afterwards. Only extra
+repetitions at the **last** quantifier appear as a suffix extension. So suffix-testing catches
+the final quantifier's subsets and misses every earlier one.
+
+**Subset does not reduce to suffix-extension on a cons-list.** That is the answer to the
+question the spike was built for.
+
+(Two caveats on this run. The 7-capture population also differs — 24,700 versus stock's 22,100
+— so the matcher over-generates somewhere beyond the pruning question and is not yet faithful
+on the unanchored case. And `has_in_progress_alternatives`, which defers completion in the
+stock engine and is part of the same longest-match machinery, is not modelled at all.)
+
+### The requirement this places on the IR
+
+The crux is **the capture representation**, not the control-state merging. Merging is settled:
+56× collapse, 2.9M continuations absorbed, 1,645 control-state tests, and it is already faster
+than stock. What is unsettled is representing capture histories so that **subset testing is
+structural rather than a set comparison**. A cons-list makes suffix-extension O(difference) and
+general subset O(n·m), which is the same pairwise cost the stock engine pays, just relocated.
+
+Candidates worth evaluating when the IR is designed:
+
+- a **bitset over capture sites** per continuation, making subset a word-wise AND — O(1) for
+  realistic capture counts, at the cost of losing node identity, which would have to live
+  elsewhere;
+- a **canonical ordering** in which every superset is a prefix or suffix by construction, so
+  the cheap test becomes complete;
+- **changing the disambiguation policy** so subset-pruning is not required at all — a specified
+  greedy or POSIX rule resolved per quantifier at merge time, which is what tagged automata do
+  and what [`07-references.md`](07-references.md) §1 is about.
+
+That third option is the one the literature actually supports, and this experiment is the
+argument for taking it seriously: the first two try to make the *current* emergent semantics
+cheap, and the current semantics are what make it expensive.
+
 ### Lessons for the IR
 
 Recorded because they are the reason to build one, learned from writing a matcher against the
