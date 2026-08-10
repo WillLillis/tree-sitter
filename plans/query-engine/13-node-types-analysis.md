@@ -69,15 +69,34 @@ design — the schema describes the named tree shape. So there is no way to lear
 `type_arguments` illustrates it: `children.types` lists six named types and neither delimiter.
 `lifetime` has no `children` entry at all.
 
-### What `generate` would need to emit
+### What `generate` would need to emit — and it recovers all 11
 
 Not ordering — just **the set of children that appear in every production of a rule, including
-anonymous ones**. A "mandatory children" set. That is derivable at generation time and is far
-simpler than positional/sequence information, and it plausibly recovers all 11 cases above,
-since every one is mandatory punctuation.
+anonymous ones**. A "mandatory children" set, computed over the rule expression: union across
+`SEQ`, **intersection across `CHOICE`**, empty for `REPEAT`/`BLANK`, recurse through
+`PREC`/`TOKEN`/`FIELD`/`ALIAS`.
 
-Worth checking whether that also subsumes the field case, which would let one mechanism cover
-both.
+**Verified: 11/11.** Running that evaluator over `grammar.json` for each lost case:
+
+| parent | needs | recovered |
+|---|---|---|
+| rust `scoped_identifier` | `::` | ✅ |
+| rust `macro_invocation` | `!` | ✅ |
+| rust `type_arguments` | `<`, `>` | ✅ ✅ |
+| rust `type_parameters` | `<`, `>` | ✅ ✅ |
+| rust `lifetime` | `identifier` | ✅ |
+| javascript `template_substitution` | `${`, `}` | ✅ ✅ |
+| python `interpolation` | `{`, `}` | ✅ ✅ |
+
+Sample sets: `rust/type_arguments → ['<','>']`, `rust/lifetime → ["'", 'identifier']`,
+`python/interpolation → ['_f_expression','{','}']`.
+
+Combined with the 10 the field rule already recovers, that is **21/21 — full parity with the C
+analyzer on this sample**, from a ~30-line evaluator over data `generate` already holds in
+memory.
+
+For **impossible-pattern rejection** a second set is needed: the *possible* children including
+anonymous ones (union rather than intersection). Same evaluator, same pass.
 
 ### A hazard to design around
 
@@ -87,28 +106,52 @@ child would find that child absent from the parent's `children` set and be wrong
 impossible. **Do not use the schema for rejection until anonymous children are represented** —
 or keep rejection on the existing path.
 
-## Persistence and consumption: the open decision
+## Expected saving: the ceiling is ~30×
 
-Three options, and they are not equivalent in who benefits.
+From the existing breakdown of `rust/highlights.scm` (16.26 ms total):
 
-**A. In the language ABI**, as a static table in `parser.c` beside the parse table.
-*For:* every consumer benefits automatically — C, Rust, WASM, editors — with no user action,
-which is the only option that actually achieves the stated goal. *Against:* ABI addition,
-binary size, version coordination, and it is the largest commitment.
+| component | cost | fate under a schema-driven analyzer |
+|---|---|---|
+| `perform_analysis` | 12.96 ms | **gone** — replaced by table lookups |
+| full parse-table scan | 2.72 ms | **gone** — it exists only to build the subgraphs `perform_analysis` walks |
+| S-expression parse + rest | ~0.5 ms | unchanged |
 
-**B. A new Rust `Query` constructor taking the schema** (the idea raised in discussion).
-*For:* no ABI change, opt-in, shippable immediately, and an excellent vehicle for validating
-the design against real queries. *Against:* only Rust consumers benefit; the C library, WASM,
-and every editor on the C API keep paying the 16–20 ms; and it creates two analysis paths to
-keep in agreement, which is exactly the class of divergence that is hard to test.
+So the ceiling is **16.26 ms → ~0.5 ms, roughly 30×** on query compilation. Note both halves go:
+the scan is not independently useful, so this subsumes the P1 caching idea rather than stacking
+with it.
 
-**C. Load `node-types.json` at runtime.** *Against:* file-path dependency, version skew between
-schema and parser, and a new failure mode at query-compile time. Not recommended except as a
-prototype.
+**Conditional on rejection also moving.** If impossible-pattern detection stays on the existing
+path, `perform_analysis` still runs and the saving is zero. That is why the "possible children
+including anonymous" set matters as much as the mandatory one.
 
-**Suggested sequence:** use **B or an offline harness to validate**, then commit to **A** for
-the actual win. B as a permanent answer would leave the broadest cost unaddressed for the
-majority of consumers, which is the thing this workstream exists to fix.
+This is a ceiling derived from existing measurements, not a measured result — a prototype
+analyzer would be needed to confirm the lookup path is as cheap as assumed. It should be: a few
+hash lookups per step against a table, versus simulating hypothetical trees.
+
+## Persistence: read-only program data, not necessarily an ABI change
+
+An earlier draft framed this as an ABI addition. That was too narrow. The schema is
+**read-only program data** — the same category as precompiled query bytecode
+([`06-compiler-architecture.md`](06-compiler-architecture.md) §"Stable serialized bytecode") —
+and the two should very likely share one mechanism, one versioning story, and one loading path
+rather than inventing separate ones.
+
+That reframing opens options that do not touch `TSLanguage`'s layout:
+
+- **An additional exported symbol** in `parser.c` (`tree_sitter_<lang>_schema()`), resolved
+  optionally. The loader already `dlsym`s `tree_sitter_<lang>`; a missing schema symbol simply
+  means falling back to today's analysis. Purely additive, no version bump, old grammars keep
+  working.
+- **An additive C API** — `ts_query_new_with_schema(...)` — so the caller supplies the data from
+  wherever it has it. Additive functions are not an ABI break, and this is what makes the Rust
+  `Query` constructor idea work end to end rather than only for Rust: the Rust binding passes
+  through to the same C entry point every other binding can use.
+- **A sidecar artifact** carrying schema *and* precompiled queries together, which is where this
+  most plausibly wants to end up.
+
+The thing worth avoiding is a Rust-only path that leaves the C library, WASM, and C-API editors
+on the slow route while creating a second analysis implementation to keep in agreement. Routing
+the Rust constructor through a new C entry point avoids that at no extra cost.
 
 ## What is not yet known
 
