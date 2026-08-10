@@ -91,6 +91,26 @@ where the answer is written down properly.
 
 ---
 
+## 2b. Enumeration: when the answer set is inherently large
+
+Directly relevant now that measurement shows unanchored patterns have combinatorially large
+but *legitimate* answer sets, and that the right target is delay rather than total time.
+
+**[core] Luc Segoufin, "Enumerating with constant delay the answers to a query" (ICDT 2013).**
+The survey. Establishes the framing: after linear-time preprocessing, emit answers with
+constant delay between consecutive outputs. Exactly the property we want and do not currently
+have (measured: delay grows ~3x across an enumeration).
+
+**[core] Guillaume Bagan, "MSO queries on tree decomposable structures are computable with
+linear delay" (CSL 2006).**
+The foundational result for trees specifically. Tree-sitter patterns are MSO-definable over
+trees, so this says constant/linear-delay enumeration is *achievable in principle* for exactly
+our setting — which turns "can we do better" into "how close can we get".
+
+**[useful] Wojciech Kazana and Luc Segoufin, work on enumeration for FO and MSO queries on
+classes of sparse structures (2011-2013).**
+Refinements and the practical constructions.
+
 ## 3. Many patterns at once, and incrementality
 
 **[core] Charles Forgy, "Rete: A Fast Algorithm for the Many Pattern/Many Object Pattern Match

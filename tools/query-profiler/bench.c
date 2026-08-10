@@ -67,6 +67,48 @@ static char *slurp(const char *path, uint32_t *len) {
   return b;
 }
 
+// Enumeration-delay mode: time each next_match call separately. When a query
+// has an inherently large answer set, total time says little; what matters is
+// whether the cost per emitted match stays flat as enumeration proceeds.
+static void delay_mode(TSQuery *q, TSTree *tree, int captures_mode) {
+  TSQueryCursor *c = ts_query_cursor_new();
+  unsigned cap = 1 << 20, n = 0;
+  double *d = malloc(sizeof(double) * cap);
+  double t_prev = now_ms(), t_start = t_prev;
+  ts_query_cursor_exec(c, q, ts_tree_root_node(tree));
+  TSQueryMatch m; uint32_t ci;
+  while (captures_mode ? ts_query_cursor_next_capture(c, &m, &ci)
+                       : ts_query_cursor_next_match(c, &m)) {
+    double now = now_ms();
+    if (n < cap) d[n++] = now - t_prev;
+    t_prev = now;
+  }
+  double total = now_ms() - t_start;
+  if (n == 0) { printf("  no matches\n"); free(d); ts_query_cursor_delete(c); return; }
+
+  // Decile means, to expose any trend in delay as enumeration proceeds.
+  printf("  matches=%u  total=%.1f ms  first_match_latency=%.4f ms  mean_delay=%.4f ms\n",
+         n, total, d[0], (total - d[0]) / (n > 1 ? n - 1 : 1));
+  printf("  delay by decile (ms):");
+  for (int k = 0; k < 10; k++) {
+    unsigned lo = (unsigned)((double)k / 10 * n), hi = (unsigned)((double)(k + 1) / 10 * n);
+    if (hi <= lo) hi = lo + 1;
+    double sum = 0; unsigned cnt = 0;
+    for (unsigned i = lo; i < hi && i < n; i++) { sum += d[i]; cnt++; }
+    printf(" %.4f", cnt ? sum / cnt : 0.0);
+  }
+  printf("\n  => last decile / first decile = ");
+  {
+    double a = 0, b = 0; unsigned ca = 0, cb = 0;
+    for (unsigned i = 0; i < n / 10 + 1 && i < n; i++) { a += d[i]; ca++; }
+    for (unsigned i = n - n / 10 - 1; i < n; i++) { b += d[i]; cb++; }
+    double fa = ca ? a / ca : 0, fb = cb ? b / cb : 0;
+    printf("%.1fx %s\n", fa > 0 ? fb / fa : 0.0,
+           (fa > 0 && fb / fa > 3) ? "  <-- delay GROWS: not constant-delay" : "  <-- roughly flat");
+  }
+  free(d); ts_query_cursor_delete(c);
+}
+
 static int cmp_double(const void *a, const void *b) {
   double x = *(const double *)a, y = *(const double *)b;
   return (x > y) - (x < y);
@@ -98,6 +140,7 @@ int main(int argc, char **argv) {
 
   int mode = strcmp(argv[4], "capture") == 0;
   int reps = argc > 5 ? atoi(argv[5]) : 5;
+  int delay = argc > 6 && strcmp(argv[6], "delay") == 0;
   ts_set_allocator(c_malloc, c_calloc, c_realloc, c_free);
 
   uint32_t qlen, slen;
@@ -111,6 +154,9 @@ int main(int argc, char **argv) {
   TSParser *p = ts_parser_new();
   ts_parser_set_language(p, lang);
   TSTree *tree = ts_parser_parse_string(p, NULL, ssrc, slen);
+
+  if (delay) { delay_mode(q, tree, mode); ts_tree_delete(tree); ts_parser_delete(p);
+               ts_query_delete(q); free(qsrc); free(ssrc); return 0; }
 
   double *times = malloc(sizeof(double) * reps);
   unsigned long returned = 0;

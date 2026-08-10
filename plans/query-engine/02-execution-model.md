@@ -132,6 +132,40 @@ free. It also strengthens the case for the compiler/IR work on completely differ
 than raw throughput: the justification is tooling and diagnostics
 ([`06-compiler-architecture.md`](06-compiler-architecture.md)), not speed.
 
+### The right metric for a large answer set: enumeration delay
+
+Unanchored patterns are frequently *correct* — non-adjacent sibling matching is often exactly
+what the author wants. So "add anchors" is a workaround, not a fix, and the engine has to be
+good at the unanchored case on its own terms.
+
+When the answer set is inherently large, total runtime measures the answer, not the algorithm.
+The meaningful metric is **delay**: the time between consecutive emitted matches, and the
+latency to the first one. A consumer that takes the first 100 of 22,100 matches should pay for
+100. Measured at M=50 (`bench ... delay`):
+
+| | unanchored (22,100 matches) | anchored (50 matches) |
+|---|---|---|
+| first-match latency | **0.018 ms** | 0.016 ms |
+| mean delay | **0.190 ms** | **0.0058 ms** |
+| delay by decile | 0.046 → 0.090 → 0.157 → 0.150 → 0.209 → 0.287 → 0.231 → 0.278 → 0.320 → 0.137 | flat at ~0.0056 |
+| last decile / first | 3.0× | 0.7× |
+
+Three findings, all actionable:
+
+1. **First-match latency is already excellent** (18 µs), so streaming consumers are not
+   penalised by the answer-set size. That is a genuine strength worth preserving.
+2. **Per-match cost is ~34× higher** on the unanchored pattern — 0.190 ms vs 0.0058 ms. That
+   gap is the engine, not the semantics, and it is the real prize.
+3. **Delay grows ~3× across the enumeration** (0.046 → 0.32 ms), so this is not
+   constant-delay. The growth tracks the accumulating live-state set that the O(n²) dedup
+   pass scans.
+
+**This gives the rewrite a crisp, falsifiable target: constant-delay enumeration at
+~5 µs/match for unanchored patterns — i.e. match what the engine already achieves for anchored
+ones.** That is a 34× improvement with a flat profile, on inputs where the user's query is
+correct as written. It is a much better goal statement than "make it faster", and it has a
+mature theory behind it (see [`07-references.md`](07-references.md) §Enumeration).
+
 ### Why the unanchored form is expensive
 
 Three properties compose:
