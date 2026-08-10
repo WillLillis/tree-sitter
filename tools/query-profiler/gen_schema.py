@@ -126,8 +126,9 @@ def main():
         alls = {a for a in alls if not a.startswith("_")}
         mand = {a for a in mand if not a.startswith("_")}
         prs = {(x, y) for x, y in prs if not x.startswith("_") and not y.startswith("_")}
-        if not alls:
-            continue
+        # Emit leaves as well, with empty sets: an absent entry means "unknown",
+        # an empty one means "this node can have no children", and only the
+        # latter licenses rejecting a child step.
         idx = {s: i for i, s in enumerate(sorted(alls))}
         # Fields, from node-types.json, with supertypes expanded to concrete names.
         flds = []

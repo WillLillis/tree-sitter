@@ -18,7 +18,7 @@
 #include "lib/src/node.c"
 #include "lib/src/parser.c"
 #include "lib/src/point.c"
-#include "lib/src/query.c"
+#include "query_norej.c"   // query.c with rejection recorded, not enforced
 #include "lib/src/stack.c"
 #include "lib/src/subtree.c"
 #include "lib/src/tree_cursor.c"
@@ -59,7 +59,10 @@ static char *slurp(const char *p, uint32_t *len) {
 // artifact, ids resolved against the language actually in hand.
 typedef struct { TSFieldId field; TSSymbol *types; uint16_t count; } ResolvedField;
 typedef struct {
+  bool present;
   TSSymbol *mandatory; uint16_t count;
+  TSSymbol *all; uint16_t all_count;
+  const uint16_t *prec; uint16_t prec_count;
   ResolvedField *fields; uint16_t field_count;
 } ResolvedNode;
 static ResolvedNode *g_by_symbol;
@@ -79,8 +82,15 @@ static double build_resolved(const TSLanguage *l) {
   for (unsigned i = 0; i < g_schema_count; i++) {
     const SchemaNode *n = &g_schema[i];
     TSSymbol parent = resolve(l, n->name);
-    if (!parent || parent >= g_symbol_count || n->mandatory_count == 0) continue;
+    if (!parent || parent >= g_symbol_count) continue;
     ResolvedNode *r = &g_by_symbol[parent];
+    r->present = true;
+    r->all = malloc(sizeof(TSSymbol) * n->all_count); r->all_count = 0;
+    for (unsigned j = 0; j < n->all_count; j++) {
+      TSSymbol c = resolve(l, n->all[j]);
+      r->all[r->all_count++] = c;                 // keep index alignment with `prec`
+    }
+    r->prec = n->prec; r->prec_count = n->prec_count;   // already a pair count
     r->mandatory = malloc(sizeof(TSSymbol) * n->mandatory_count);
     r->count = 0;
     for (unsigned j = 0; j < n->mandatory_count; j++) {
@@ -167,8 +177,75 @@ static double schema_analyze(const TSQuery *q, unsigned *agree, unsigned *lost, 
   return dt;
 }
 
+// Schema-driven rejection: child-set, field cardinality, and ordering.
+static const char *schema_reject(const TSQuery *q) {
+  static char why[160];
+  TSSymbol parent_at_depth[64] = {0};
+  uint16_t prev_at_depth[64] = {0};
+  TSFieldId seen_field[64][16] = {{0}};
+  uint8_t nseen[64] = {0};
+  for (uint32_t i = 0; i < q->steps.size; i++) {
+    const QueryStep *st = array_get(&q->steps, i);
+    if (st->depth == PATTERN_DONE_MARKER) {
+      memset(parent_at_depth,0,sizeof parent_at_depth); memset(prev_at_depth,0,sizeof prev_at_depth);
+      memset(nseen,0,sizeof nseen); continue;
+    }
+    if (st->depth >= 64) continue;
+    if (st->is_pass_through || st->is_dead_end) continue;
+    parent_at_depth[st->depth] = st->symbol;
+    for (unsigned d = st->depth + 1; d < 64; d++) { prev_at_depth[d] = 0; nseen[d] = 0; }
+    if (st->depth == 0) continue;
+    TSSymbol parent = parent_at_depth[st->depth - 1];
+    if (!parent || parent >= g_symbol_count) continue;
+    const ResolvedNode *r = &g_by_symbol[parent];
+    if (!r->present) continue;                        // no schema entry: stay silent
+    if (r->all_count == 0) {                          // known leaf: no child can match
+      snprintf(why,sizeof why,"child-set: %s can have no children",
+        ts_language_symbol_name(q->language, parent)); return why;
+    }
+
+    // 1. child-set: can this symbol be a child of this parent at all?
+    if (st->symbol != WILDCARD_SYMBOL && !st->supertype_symbol && !st->is_missing) {
+      bool ok = false;
+      for (unsigned k = 0; k < r->all_count; k++) if (r->all[k] == st->symbol) { ok = true; break; }
+      if (!ok) { snprintf(why,sizeof why,"child-set: %s cannot be a child of %s",
+          ts_language_symbol_name(q->language, st->symbol),
+          ts_language_symbol_name(q->language, parent)); return why; }
+    }
+    // 2. field cardinality: a required single-valued field used twice
+    if (st->field) {
+      for (unsigned k = 0; k < nseen[st->depth]; k++)
+        if (seen_field[st->depth][k] == st->field) {
+          snprintf(why,sizeof why,"field cardinality: %s used twice on %s",
+            ts_language_field_name_for_id(q->language, st->field),
+            ts_language_symbol_name(q->language, parent)); return why; }
+      if (nseen[st->depth] < 16) seen_field[st->depth][nseen[st->depth]++] = st->field;
+    }
+    // 3. ordering: can the previous sibling step precede this one?
+    if (prev_at_depth[st->depth] && st->symbol != WILDCARD_SYMBOL && !st->supertype_symbol) {
+      TSSymbol a = prev_at_depth[st->depth], b = st->symbol;
+      int ia = -1, ib = -1;
+      for (unsigned k = 0; k < r->all_count; k++) {
+        if (r->all[k] == a) ia = (int)k;
+        if (r->all[k] == b) ib = (int)k;
+      }
+      if (ia >= 0 && ib >= 0 && r->prec_count) {
+        bool ok = false;
+        for (unsigned k = 0; k < r->prec_count; k++)
+          if (r->prec[2*k] == ia && r->prec[2*k+1] == ib) { ok = true; break; }
+        if (!ok) { snprintf(why,sizeof why,"ordering: %s cannot precede %s in %s",
+            ts_language_symbol_name(q->language, a), ts_language_symbol_name(q->language, b),
+            ts_language_symbol_name(q->language, parent)); return why; }
+      }
+    }
+    if (st->symbol) prev_at_depth[st->depth] = st->symbol;
+  }
+  return NULL;
+}
+
 int main(int argc, char **argv) {
-  if (argc < 3) { fprintf(stderr, "usage: schema_spike <lang> <query.scm> [reps]\n"); return 1; }
+  if (argc < 3) { fprintf(stderr, "usage: schema_spike <lang> <query.scm> [reps]\n"
+                                  "       SPIKE_REJECT=1 schema_spike <lang> <queries.txt>\n"); return 1; }
   int reps = argc > 3 ? atoi(argv[3]) : 200;
   const TSLanguage *lang = NULL;
   if (!strcmp(argv[1],"rust"))            { lang = tree_sitter_rust();       g_schema = rust_schema;       g_schema_count = rust_schema_count; }
@@ -178,6 +255,33 @@ int main(int argc, char **argv) {
   else if (!strcmp(argv[1],"c"))          { lang = tree_sitter_c();          g_schema = c_schema;          g_schema_count = c_schema_count; }
   else { fprintf(stderr, "unknown language %s\n", argv[1]); return 1; }
 
+  double t_resolve0 = build_resolved(lang);
+
+  if (getenv("SPIKE_REJECT")) {
+    // One query per line; compare the stock analyzer's verdict with the schema's.
+    FILE *f = fopen(argv[2], "r"); if (!f) { perror(argv[2]); return 1; }
+    char line[1024]; unsigned agree = 0, miss = 0, over = 0;
+    printf("%-8s %-8s  %s\n", "STOCK", "SCHEMA", "QUERY");
+    while (fgets(line, sizeof line, f)) {
+      size_t n = strlen(line); while (n && (line[n-1]=='\n'||line[n-1]=='\r')) line[--n] = 0;
+      if (!n || line[0] == '#') continue;
+      g_stock_would_reject = 0;
+      uint32_t o; TSQueryError e;
+      TSQuery *tq = ts_query_new(lang, line, (uint32_t)n, &o, &e);
+      if (!tq) { printf("%-8s %-8s  %s   (parse error %d)\n", "-", "-", line, e); continue; }
+      bool stock = g_stock_would_reject;
+      const char *w = schema_reject(tq);
+      bool sch = w != NULL;
+      if (stock == sch) agree++; else if (stock && !sch) miss++; else over++;
+      printf("%-8s %-8s  %s%s%s\n", stock?"REJECT":"accept", sch?"REJECT":"accept", line,
+             (stock!=sch) ? "   <-- DISAGREE: " : "", (stock!=sch) ? (w?w:"schema accepts") : "");
+      ts_query_delete(tq);
+    }
+    fclose(f);
+    printf("\nagree=%u  schema-missed=%u  schema-over-rejected=%u\n", agree, miss, over);
+    return over ? 2 : 0;
+  }
+
   uint32_t qlen; char *qsrc = slurp(argv[2], &qlen);
   uint32_t off; TSQueryError err;
 
@@ -186,7 +290,9 @@ int main(int argc, char **argv) {
   double t_stock = now_ms() - t0;
   if (!q) { fprintf(stderr, "query failed err=%d off=%u\n", err, off); return 1; }
 
-  double t_resolve = build_resolved(lang);
+  double t_resolve = t_resolve0;
+
+
 
   unsigned agree = 0, lost = 0, unsound = 0;
   double best = 1e18;

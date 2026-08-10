@@ -1,7 +1,8 @@
 # Replacing query analysis with a generated node-type schema
 
-**Status: prototyped and measured. The analysis pass costs 1 µs against `perform_analysis`'s
-12.96 ms. Two rule bugs found and fixed by the parity check. Persistence undecided.**
+**Status: both halves prototyped and measured. Guarantees sound across 5 grammars / 15 query
+files; rejection at full parity on a 13-case suite. Analysis pass costs ~1 µs against
+`perform_analysis`'s 12.96 ms. Persistence undecided; not yet wired into `ts_query_new`.**
 
 ## Why this is the broadest lever available
 
@@ -188,6 +189,42 @@ type and cardinality rejection.
 Together these give **full parity on both guarantees and rejection**, with no permissiveness
 regression and no diagnostic lost. Anchor-position impossibility remains uncaught, but it is
 uncaught today too, so nothing regresses.
+
+### Rejection, implemented and compared
+
+Implemented in the spike over the possible-children, precedence and field sets, and compared
+against the shipped analyzer by building a copy of `query.c` whose analyzer **records** its
+verdict rather than failing the compile — so both verdicts are observable for the same query.
+
+| stock | schema | query |
+|---|---|---|
+| REJECT | REJECT | `(function_item (string_literal))` — child-set |
+| REJECT | REJECT | `(lifetime (block))` — child-set |
+| REJECT | REJECT | `(identifier (identifier))` — leaf has no children |
+| REJECT | REJECT | `(function_item name: (identifier) name: (identifier))` — field cardinality |
+| REJECT | REJECT | `(type_arguments (">") ("<"))` — ordering |
+| REJECT | REJECT | `(type_parameters (">") ("<"))` — ordering |
+| accept | accept | six valid controls, incl. `(block (let_declaration) (expression_statement))` |
+
+**`agree=13, missed=0, over-rejected=0`.** Both directions matter: a miss loses a diagnostic, an
+over-rejection breaks a valid query.
+
+Three implementation bugs surfaced, all in the consumer rather than the generator:
+
+1. **`prec_count` double-halved.** The generator reports a *pair* count while the array holds two
+   `uint16` per pair; dividing again made half the relation invisible and over-rejected
+   `(scoped_type_identifier path: (identifier) name: (type_identifier))` and
+   `(block (let_declaration) (expression_statement))` — both perfectly valid.
+2. **Leaves were indistinguishable from unknowns.** The generator skipped rules with no children,
+   so the consumer could not tell "this node can have no children" from "no entry for this node"
+   and had to stay silent, missing `(identifier (identifier))`. Leaves are now emitted with empty
+   sets: **absent means unknown, empty means genuinely childless**, and only the latter licenses
+   rejecting a child.
+3. Alias resolution and the field guard, described above.
+
+Every one produced *plausible* behaviour that was wrong in one direction only, and none would
+have been caught by a test asserting query results. The differential harness is what found them,
+which is the argument for keeping it as a permanent fixture rather than scaffolding.
 
 ### A hazard to design around
 
