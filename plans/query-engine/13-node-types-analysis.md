@@ -132,16 +132,61 @@ set-based schema.
 had to be constructed artificially; real impossible patterns are type and set violations —
 typos, wrong node type, a field that cannot hold that child.
 
-### Recommendation
+### Recommendation: keep rejection complete — it costs 1–2 KiB
 
-Add the two sets to the schema — *possible* children including anonymous, alongside the
-*mandatory* set — and move rejection onto them. Accept that ordering-only impossibility becomes
-permissive, and land a test documenting that as a known, deliberate gap. If it ever proves to
-matter, per-node child-sequence automata can be added later without changing the mechanism,
-since it is the same read-only artifact either way.
+An earlier draft of this section recommended **accepting** the ordering gap, on the grounds
+that no in-tree test covers it and that the failing example had to be constructed artificially.
+**That reasoning was wrong, twice over.**
 
-That removes the last blocker: with rejection moved, `perform_analysis` and the parse-table scan
-both go, and the ~30× ceiling becomes reachable rather than conditional.
+*The evidence was unfalsifiable.* Impossible patterns are transient by construction: an author
+writes one, gets `TSQueryErrorStructure`, fixes it, and commits the fixed version. They can
+never appear in a committed corpus. So their absence from `~/grammar_dump` and from the test
+suite is evidence the diagnostic **is working**, not that it is unnecessary — and the value of
+the check is precisely at the authoring moment, which is the one place with no observable data.
+
+*And the failure mode is the worst one.* `(type_arguments (">") ("<"))` would go from an
+immediate compile error to compiling and silently matching nothing. "Compiles but never matches"
+is the hardest query bug to diagnose, and eliminating it is the whole point of the tooling
+direction.
+
+*The alternative was dismissed without checking, and it is cheap.* A per-node-type **precedence
+relation** — the ordered pairs `(x, y)` such that `x` can appear before `y` among that node's
+children — is derivable from `grammar.json` by the same evaluator (cross-product across `SEQ`
+members in order, union across `CHOICE`, all-pairs for `REPEAT` since repetition admits any
+order). Verified on the failing case:
+
+```
+type_arguments:   '<' before '>' = True     '>' before '<' = False   -> correctly rejected
+type_parameters:  '<' before '>' = True     '>' before '<' = False   -> correctly rejected
+```
+
+Size, as a dense bitmatrix over each rule's own child set:
+
+| grammar | rules | precedence pairs | bitmatrix | widest child set |
+|---|---|---|---|---|
+| rust | 179 | 3,690 | **2 KiB** | 96 |
+| javascript | 132 | 1,013 | 1 KiB | 27 |
+| python | 148 | 1,004 | 1 KiB | 26 |
+| go | 115 | 915 | 1 KiB | 24 |
+| c | 179 | 1,356 | 1 KiB | 26 |
+
+**1–2 KiB per grammar**, against `parser.c` files measured in megabytes. There is no trade to
+make here.
+
+### So the schema needs three sets, from one pass
+
+All derivable from `grammar.json`, which `generate` already holds:
+
+1. **mandatory children** (incl. anonymous) — intersection across `CHOICE` → per-step guarantees
+2. **possible children** (incl. anonymous) — union → rejection by child-set
+3. **precedence pairs** — ordered-pair relation → rejection by ordering
+
+plus the field information already emitted (`types`, `required`, `multiple`), which covers field
+type and cardinality rejection.
+
+Together these give **full parity on both guarantees and rejection**, with no permissiveness
+regression and no diagnostic lost. Anchor-position impossibility remains uncaught, but it is
+uncaught today too, so nothing regresses.
 
 ### A hazard to design around
 
