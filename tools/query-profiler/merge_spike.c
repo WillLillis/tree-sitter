@@ -111,8 +111,16 @@ static void stream_sort_key(Stream2 *s, uint64_t *keys) {
     StreamMatch *m = array_get(&s->matches, i);
     uint64_t h = 0xcbf29ce484222325ull;
     h = (h ^ m->pattern) * 0x100000001b3ull;
-    for (uint32_t j = 0; j < m->len; j++) {
-      StreamCap *c = array_get(&s->caps, m->off + j);
+    // Sort within the match: the two engines need not agree on capture order
+    // for the capture SET to be identical, which is what is being compared.
+    StreamCap tmp[64]; uint32_t tn = m->len < 64 ? m->len : 64;
+    for (uint32_t j = 0; j < tn; j++) tmp[j] = *array_get(&s->caps, m->off + j);
+    for (uint32_t x = 1; x < tn; x++) { StreamCap k = tmp[x]; int32_t y = (int32_t)x - 1;
+      while (y >= 0 && (tmp[y].start > k.start ||
+             (tmp[y].start == k.start && tmp[y].capture_id > k.capture_id))) { tmp[y+1]=tmp[y]; y--; }
+      tmp[y+1] = k; }
+    for (uint32_t j = 0; j < tn; j++) {
+      StreamCap *c = &tmp[j];
       h = (h ^ c->capture_id) * 0x100000001b3ull;
       h = (h ^ c->start) * 0x100000001b3ull;
       h = (h ^ c->end) * 0x100000001b3ull;
@@ -169,6 +177,48 @@ static double run_stock(const TSQuery *q, TSTree *tree, Stream2 *out) {
  * Engine B: merged control state + capture
  * histories as persistent cons-lists
  *****************************************/
+
+// CAPTURE SETS AS BITSETS.
+//
+// Continuations reaching the same control state have matched the same steps;
+// they differ only in which nodes they bound to quantified steps, and those
+// nodes always come from the sibling sequence being scanned. So a capture set
+// is a bitset over (sibling position x capture id), and A superset-of B is a
+// word-wise test instead of a set comparison.
+//
+// Node identity is NOT stored: a set bit says "capture c was bound at sibling
+// i", and the node is recovered from the sibling array at emit time -- kids[i]
+// for a depth-0 step, or its field child for a depth-1 step.
+typedef Array(uint64_t) BitArena;
+static uint32_t g_words;      // words per continuation, sized per sibling sequence
+static uint32_t g_ncap;       // distinct capture ids in the query
+
+static uint32_t bs_new(BitArena *a) {
+  uint32_t off = a->size;
+  for (uint32_t i = 0; i < g_words; i++) array_push(a, (uint64_t)0);
+  return off;
+}
+static uint32_t bs_clone_set(BitArena *a, uint32_t src, uint32_t bit) {
+  uint32_t off = a->size;
+  for (uint32_t i = 0; i < g_words; i++)
+    array_push(a, src == UINT32_MAX ? (uint64_t)0 : a->contents[src + i]);
+  a->contents[off + (bit >> 6)] |= (uint64_t)1 << (bit & 63);
+  return off;
+}
+// Is every bit of `sub` also set in `sup`?
+static bool bs_superset(const BitArena *a, uint32_t sup, uint32_t sub) {
+  if (sub == UINT32_MAX) return true;
+  if (sup == UINT32_MAX) return false;
+  for (uint32_t i = 0; i < g_words; i++)
+    if (a->contents[sub + i] & ~a->contents[sup + i]) return false;
+  return true;
+}
+static bool bs_equal(const BitArena *a, uint32_t x, uint32_t y) {
+  if (x == y) return true;
+  if (x == UINT32_MAX || y == UINT32_MAX) return false;
+  for (uint32_t i = 0; i < g_words; i++) if (a->contents[x + i] != a->contents[y + i]) return false;
+  return true;
+}
 
 // A capture history is a singly-linked list through an arena, newest first.
 // Sharing is automatic: two continuations that agree on a prefix point at the
@@ -250,7 +300,7 @@ static MergedState *merged_find(MergedSet *set, uint16_t step, uint16_t depth, u
 static bool g_prune = false;
 static unsigned long g_pruned = 0;
 
-static void merged_add_a(MergedSet *set, const CapArena *arena, uint16_t step, uint16_t depth,
+static void merged_add_a(MergedSet *set, const BitArena *arena, uint16_t step, uint16_t depth,
                          uint16_t pat, uint8_t flags, uint32_t head, unsigned long *merge_count) {
   MergedState *s = merged_find(set, step, depth, pat, flags);
   if (s) {
@@ -258,17 +308,20 @@ static void merged_add_a(MergedSet *set, const CapArena *arena, uint16_t step, u
       if (*array_get(&s->heads, i) == head) return;   // identical continuation
     }
     if (g_prune) {
-      // Drop the newcomer if an existing continuation already subsumes it.
+      // Longest-match, enforced here in word-wise work: drop the newcomer if an
+      // existing continuation subsumes it, else evict those it subsumes.
       for (uint32_t i = 0; i < s->heads.size; i++) {
-        if (cap_is_suffix(arena, *array_get(&s->heads, i), head)) { g_pruned++; return; }
+        if (bs_superset(arena, *array_get(&s->heads, i), head)) { g_pruned++; return; }
       }
-      // Otherwise evict any existing continuation the newcomer subsumes.
       for (uint32_t i = 0; i < s->heads.size; i++) {
-        if (cap_is_suffix(arena, head, *array_get(&s->heads, i))) {
+        if (bs_superset(arena, head, *array_get(&s->heads, i))) {
           *array_get(&s->heads, i) = *array_back(&s->heads);
           s->heads.size--; i--; g_pruned++;
         }
       }
+    } else {
+      for (uint32_t i = 0; i < s->heads.size; i++)
+        if (bs_equal(arena, *array_get(&s->heads, i), head)) return;
     }
     array_push(&s->heads, head);
     (*merge_count)++;
@@ -281,7 +334,7 @@ static void merged_add_a(MergedSet *set, const CapArena *arena, uint16_t step, u
 }
 
 #define merged_add(set, step, depth, pat, flags, head, mc) \
-  merged_add_a((set), &ctx->arena, (step), (depth), (pat), (flags), (head), (mc))
+  merged_add_a((set), &ctx->bits, (step), (depth), (pat), (flags), (head), (mc))
 
 static void merged_clear(MergedSet *set) {
   for (uint32_t i = 0; i < set->size; i++) array_delete(&array_get(set, i)->heads);
@@ -295,6 +348,12 @@ static void merged_clear(MergedSet *set) {
 
 typedef struct {
   const TSQuery *q;
+  BitArena bits;
+  // Per capture id: the depth of the step that binds it, and its field (for a
+  // depth-1 step, the field selects which child of the sibling was captured).
+  uint8_t cap_depth[64];
+  TSFieldId cap_field[64];
+  TSNode *kids; unsigned nkids; unsigned cur_sib;
   CapArena arena;
   Stream2 *out;
   unsigned long merges;        // continuations absorbed instead of forked
@@ -339,6 +398,7 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
 // CAP_NIL_FAIL if the tail does not match.
 #define CAP_FAIL (CAP_NIL - 1)
 static uint32_t match_child_tail(MergeCtx *ctx, TSNode parent, uint16_t first_step, uint32_t head) {
+  (void)parent;
   const TSQuery *q = ctx->q;
   uint16_t si = first_step;
   for (;;) {
@@ -350,7 +410,7 @@ static uint32_t match_child_tail(MergeCtx *ctx, TSNode parent, uint16_t first_st
     if (ts_node_is_null(child)) return CAP_FAIL;
     if (st->symbol != WILDCARD_SYMBOL && ts_node_symbol(child) != st->symbol) return CAP_FAIL;
     for (unsigned c = 0; c < MAX_STEP_CAPTURE_COUNT && st->capture_ids[c] != NONE; c++) {
-      head = cap_push(&ctx->arena, head, child, st->capture_ids[c]);
+      head = bs_clone_set(&ctx->bits, head, ctx->cur_sib * g_ncap + st->capture_ids[c]);
     }
     si++;
   }
@@ -359,6 +419,10 @@ static uint32_t match_child_tail(MergeCtx *ctx, TSNode parent, uint16_t first_st
 
 static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t depth) {
   const TSQuery *q = ctx->q;
+  g_words = ((nkids * g_ncap) + 63) / 64;
+  if (g_words == 0) g_words = 1;
+  ctx->kids = kids; ctx->nkids = nkids;
+  array_clear(&ctx->bits);
   MergedSet active = array_new();
   MergedSet next = array_new();
 
@@ -380,7 +444,7 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
       const QueryStep *st = array_get(&q->steps, pe->step_index);
       if (st->depth != 0) continue;
       if (st->symbol != WILDCARD_SYMBOL && st->symbol != sym) continue;
-      merged_add(&active, pe->step_index, depth, pe->pattern_index, F_SEEK_IMM, CAP_NIL, &ctx->merges);
+      merged_add(&active, pe->step_index, depth, pe->pattern_index, F_SEEK_IMM, bs_new(&ctx->bits), &ctx->merges);
     }
 
     merged_clear(&next);
@@ -389,6 +453,7 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
       const QueryStep *st = array_get(&q->steps, s->step_index);
       if (st->depth == PATTERN_DONE_MARKER) continue;
       ctx->node_tests++;   // ONE test for all continuations in this control state
+      ctx->cur_sib = i;
 
       bool does_match;
       if (st->symbol == WILDCARD_SYMBOL) does_match = is_named || !st->is_named;
@@ -416,7 +481,7 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
         for (uint32_t h = 0; h < s->heads.size; h++) {
           uint32_t head = *array_get(&s->heads, h);
           for (unsigned c = 0; c < MAX_STEP_CAPTURE_COUNT && st->capture_ids[c] != NONE; c++)
-            head = cap_push(&ctx->arena, head, node, st->capture_ids[c]);
+            head = bs_clone_set(&ctx->bits, head, i * g_ncap + st->capture_ids[c]);
           for (unsigned x = 0; x < nr; x++) {
             uint32_t h2 = head;
             const QueryStep *tail = array_get(&q->steps, r[x].step);
@@ -446,7 +511,17 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
       if (array_get(&q->steps, s->step_index)->depth != PATTERN_DONE_MARKER) continue;
       TSQueryCapture buf[256];
       for (uint32_t h = 0; h < s->heads.size; h++) {
-        uint32_t n = cap_flatten(&ctx->arena, *array_get(&s->heads, h), buf, 256);
+        uint32_t bsoff = *array_get(&s->heads, h), n = 0;
+        for (unsigned si2 = 0; si2 < nkids && n < 256; si2++) {
+          for (unsigned c = 0; c < g_ncap && n < 256; c++) {
+            uint32_t bit = si2 * g_ncap + c;
+            if (!(ctx->bits.contents[bsoff + (bit >> 6)] >> (bit & 63) & 1)) continue;
+            TSNode nd = ctx->cap_depth[c] ? ts_node_child_by_field_id(kids[si2], ctx->cap_field[c])
+                                          : kids[si2];
+            if (ts_node_is_null(nd)) continue;
+            buf[n++] = (TSQueryCapture){ .node = nd, .index = c };
+          }
+        }
         stream_add(ctx->out, s->pattern_index, buf, n);
         ctx->emitted++;
       }
@@ -472,8 +547,19 @@ static void walk_parents(MergeCtx *ctx, TSTreeCursor *c, uint16_t depth) {
 }
 
 static double run_merge(const TSQuery *q, TSTree *tree, Stream2 *out, MergeCtx *ctx) {
-  ctx->q = q; ctx->arena = (CapArena)array_new(); ctx->out = out;
-  ctx->merges = ctx->node_tests = ctx->emitted = 0;
+  ctx->q = q; ctx->arena = (CapArena)array_new(); ctx->bits = (BitArena)array_new();
+  ctx->out = out; ctx->merges = ctx->node_tests = ctx->emitted = 0;
+  g_ncap = q->captures.slices.size; if (g_ncap == 0) g_ncap = 1;
+  memset(ctx->cap_depth, 0, sizeof ctx->cap_depth);
+  memset(ctx->cap_field, 0, sizeof ctx->cap_field);
+  for (uint32_t i = 0; i < q->steps.size; i++) {
+    const QueryStep *st = array_get(&q->steps, i);
+    if (st->depth == PATTERN_DONE_MARKER) continue;
+    for (unsigned c = 0; c < MAX_STEP_CAPTURE_COUNT && st->capture_ids[c] != NONE; c++) {
+      uint16_t cid = st->capture_ids[c];
+      if (cid < 64) { ctx->cap_depth[cid] = (uint8_t)st->depth; ctx->cap_field[cid] = st->field; }
+    }
+  }
   TSTreeCursor c = ts_tree_cursor_new(ts_tree_root_node(tree));
   double t0 = now_ms();
   walk_parents(ctx, &c, 0);
@@ -521,8 +607,8 @@ int main(int argc, char **argv) {
   MergeCtx ctx;
   g_prune = getenv("SPIKE_PRUNE") != NULL;
   double tb = run_merge(q, tree, &b, &ctx);
-  printf("merge matcher: %8.2f ms   %u matches   (node_tests=%lu, merged=%lu, arena=%u cells, pruned=%lu, prune=%s)\n",
-         tb, b.matches.size, ctx.node_tests, ctx.merges, ctx.arena.size, g_pruned,
+  printf("merge matcher: %8.2f ms   %u matches   (node_tests=%lu, merged=%lu, bitset_words=%u, pruned=%lu, prune=%s)\n",
+         tb, b.matches.size, ctx.node_tests, ctx.merges, ctx.bits.size, g_pruned,
          g_prune ? "ON" : "off");
 
   // Diagnostic: capture-count histogram per engine. If the merge matcher is
@@ -541,7 +627,7 @@ int main(int argc, char **argv) {
   bool same = stream_equal(&a, &b, why, sizeof why);
   printf("\nDIFF: %s\n", same ? "IDENTICAL match sets" : why);
   if (same && tb > 0) printf("SPEEDUP: %.1fx\n", ta / tb);
-  array_delete(&b.caps); array_delete(&b.matches); array_delete(&ctx.arena);
+  array_delete(&b.caps); array_delete(&b.matches); array_delete(&ctx.arena); array_delete(&ctx.bits);
 
   ts_tree_delete(tree); ts_parser_delete(p); ts_query_delete(q);
   array_delete(&a.caps); array_delete(&a.matches);

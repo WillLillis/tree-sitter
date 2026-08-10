@@ -72,6 +72,22 @@ tree automata — see [`05-database-angle.md`](05-database-angle.md) and
    without diagnostic, reports `capture_count == 4`, and returns matches with 3 captures
    forever. Verified, see [`03-correctness.md`](03-correctness.md).
 
+## Validated: 7.9-17.2x on the target case, with identical results
+
+The one design question the whole investigation converged on has an experimental answer.
+Representing capture sets as **bitsets over (sibling position × capture id)**, with node
+identity kept out of the continuation, makes subset testing structural — which makes
+longest-match enforceable at merge time rather than by the O(n²) pairwise pass:
+
+| workload | stock | merge + bitset | matches | |
+|---|---|---|---|---|
+| unanchored, M=50 | 4,034 ms | **514 ms** | 22,100 = 22,100 | **7.9×** |
+| unanchored, real 195 KB file | ~740 ms | **41.9 ms** | 8,003 = 8,003 | **17.2×** |
+| anchored (control) | 0.37 ms | 0.98 ms | 120 = 120 | 0.4×, nothing to merge |
+
+**Identical match sets, no semantics change, no disambiguation-policy decision.** See
+[`02-execution-model.md`](02-execution-model.md); the spike is `tools/query-profiler/merge_spike.c`.
+
 ## Reading order
 
 | Doc | What it is |

@@ -342,6 +342,37 @@ question the spike was built for.
 on the unanchored case. And `has_in_progress_alternatives`, which defers completion in the
 stock engine and is part of the same longest-match machinery, is not modelled at all.)
 
+### Bitsets: identical results, 7.9-17.2x faster
+
+Implementing the bitset representation in the spike settled it. A capture set became a bitset
+over `(sibling position x capture id)`; node identity was removed from the continuation
+entirely and recovered from the sibling array at emit time; longest-match was enforced at merge
+time by word-wise subset tests.
+
+| workload | stock | merge + bitset | matches | verdict |
+|---|---|---|---|---|
+| anchored, med.rs | 0.37 ms | 0.98 ms | 120 = 120 | IDENTICAL (0.4x — nothing to merge, as predicted) |
+| **unanchored, M=50** | **4,034 ms** | **514 ms** | **22,100 = 22,100** | **IDENTICAL, 7.9x** |
+| **unanchored, real 195 KB file** | ~740 ms | **41.9 ms** | **8,003 = 8,003** | **IDENTICAL, 17.2x** |
+
+Capture-count histograms agree bucket for bucket on both unanchored runs, so this is not a
+coincidence of totals.
+
+**This validates the design end to end.** The three claims that had been separate are now one
+result: control-state merging realises the 56× collapse; the bitset makes subset testing
+structural; and structural subset testing makes longest-match enforceable at merge time, which
+collapses the output to exactly the stock engine's — no semantics change, no policy decision,
+no downstream risk.
+
+Note what this did *not* require: changing the disambiguation policy. The bitset preserves the
+current longest-match rule exactly and makes it cheap. That was the risk
+[`06-compiler-architecture.md`](06-compiler-architecture.md) argued for avoiding, and it turns
+out to be avoidable.
+
+The spike remains a spike — it handles step depth ≤ 1, does not model
+`has_in_progress_alternatives`, and its per-node bitset sizing is naive. But the representation
+question it was built to answer is answered.
+
 ### The requirement this places on the IR
 
 The crux is **the capture representation**, not the control-state merging. Merging is settled:
