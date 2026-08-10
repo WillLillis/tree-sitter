@@ -108,6 +108,21 @@ static void static_profile(const TSQuery *q, const char *label) {
          sizeof(QueryStep), (size_t)q->steps.size * sizeof(QueryStep) / 1024);
 }
 
+// Machine-readable per-step dump, for comparing the C analyzer's guarantees
+// against a schema-derived approximation.
+static void dump_steps_tsv(const TSQuery *q, const char *label) {
+  for (unsigned i = 0; i < q->steps.size; i++) {
+    const QueryStep *st = array_get(&q->steps, i);
+    if (st->depth == PATTERN_DONE_MARKER) { printf("STEP\t%s\t%u\tDONE\t-\t-\t-\t-\t-\n", label, i); continue; }
+    const char *sym = st->symbol == WILDCARD_SYMBOL ? "_" : ts_language_symbol_name(q->language, st->symbol);
+    const char *fld = st->field ? ts_language_field_name_for_id(q->language, st->field) : "-";
+    printf("STEP\t%s\t%u\t%u\t%s\t%s\t%d\t%d\t%s%s%s\n", label, i, st->depth, sym, fld,
+           st->root_pattern_guaranteed, st->parent_pattern_guaranteed,
+           st->is_pass_through ? "P" : "-", st->is_dead_end ? "D" : "-",
+           st->supertype_symbol ? "S" : "-");
+  }
+}
+
 static void run_one(const char *lang_name, const TSLanguage *lang,
                     const char *query_path, const char *src_path, int mode) {
   uint32_t qlen, slen;
@@ -154,6 +169,7 @@ static void run_one(const char *lang_name, const TSLanguage *lang,
          lang->state_count, lang->symbol_count, qp_predecessor_map_bytes / 1024,
          qp_subgraph_count, qp_subgraph_nodes);
   static_profile(q, query_path);
+  if (getenv("QP_DUMP_STEPS")) dump_steps_tsv(q, query_path);
 
   // --- parse the source ---
   TSParser *parser = ts_parser_new();
