@@ -82,14 +82,19 @@ longest-match enforceable at merge time rather than by the O(n²) pairwise pass:
 | workload | stock | merge + bitset | matches | |
 |---|---|---|---|---|
 | unanchored, M=50 | 4,034 ms | **514 ms** | 22,100 = 22,100 | **7.9×** |
-| unanchored, real 195 KB file | ~740 ms | **41.9 ms** | 8,003 = 8,003 | **17.2×** |
+| unanchored, real 195 KB file | 727 ms | **25.9 ms** | 8,003 = 8,003 | **28.1×** |
 | unanchored, M=100 | 125,377 ms | **24,393 ms** | 171,700 = 171,700 | **5.1×** |
 | anchored (control) | 0.37 ms | 0.98 ms | 120 = 120 | 0.4×, nothing to merge |
 
-**Identical match sets, no semantics change, no disambiguation-policy decision.** The speedup
-shrinks with input size (17.2× → 7.9× → 5.1×), so this is a large constant-factor win rather
-than a change of complexity class — and part of that decay is the prototype's own linear
-control-state lookup, not the design. See
+**Identical match sets, no semantics change, no disambiguation-policy decision.** Capture sets
+are best stored as *sorted position vectors* rather than dense bitsets — a dense bitset's width
+scales with the sibling count, a sparse one with the capture count.
+
+The speedup still shrinks with input size, so this is a large constant-factor win rather than a
+change of complexity class. The remaining bottleneck is located: the prune step scans every
+head in a control state, so a state holding *h* continuations costs O(h²) — the stock engine's
+dedup problem scoped down from "all live states" to "one control state", which is where the 28×
+comes from and why the shape persists. Removing it needs a subset-query index. See
 [`02-execution-model.md`](02-execution-model.md); the spike is `tools/query-profiler/merge_spike.c`.
 
 ## Reading order

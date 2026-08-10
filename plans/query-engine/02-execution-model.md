@@ -369,6 +369,35 @@ in *both* engines (stock 183 → 730 µs/match from M=50 to M=100; merge 23 → 
 the bitset matcher is a large constant-factor win, **not** a change of complexity class, and on
 this evidence it does not by itself deliver flat-delay enumeration.
 
+**Sparse position vectors beat the dense bitset, and locate the remaining bottleneck.** The
+dense bitset's width is proportional to the sibling count (600 children at M=100 → 38 words),
+so every clone and every subset test costs O(sequence length). A capture set is small and
+bounded by captures-per-match — single digits — so storing it as a **sorted vector of set
+positions** makes clone O(len) and subset a merge-walk O(|A|+|B|), independent of sequence
+length:
+
+| workload | stock | dense bitset | **sparse vector** |
+|---|---|---|---|
+| unanchored, real 195 KB file | 727 ms | 46.3 ms (15.7×) | **25.9 ms (28.1×)** |
+
+Identical match sets in both. But per-match cost still grows with input:
+
+| M | dense µs/match | sparse µs/match |
+|---|---|---|
+| 25 | 5.7 | 6.4 |
+| 50 | 26.6 | 20.0 |
+| 100 | 165.2 | 71.6 |
+
+So sparse is ~2.3× better at M=100 and still ~3.4× per doubling. **The representation was not
+the whole story.** What remains is the prune step: every insertion scans all existing heads in
+the control state, so a state accumulating *h* continuations costs O(h²). That is the stock
+engine's O(n²) dedup problem again — scoped down from "all live states" to "heads within one
+control state", which is why the constant improved 28×, but the same shape.
+
+Removing it needs an index supporting **subset queries** over capture sets, which is a real
+problem in its own right (size-ordering to skip candidates smaller than the query, signatures
+for quick rejection). That is beyond the spike, and it is the next thing to design.
+
 Two things are tangled there and want separating before drawing conclusions. The output itself
 grows superlinearly (22,100 → 171,700 matches for a doubling of M), which no algorithm can
 avoid. But the spike's own data structures are naive — `merged_find` is a linear scan over

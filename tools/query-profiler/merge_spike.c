@@ -193,20 +193,73 @@ typedef Array(uint64_t) BitArena;
 static uint32_t g_words;      // words per continuation, sized per sibling sequence
 static uint32_t g_ncap;       // distinct capture ids in the query
 
-static uint32_t bs_new(BitArena *a) {
+// SPARSE VARIANT. The dense bitset's width is proportional to the sibling
+// count, so every clone and every subset test costs O(sequence length) -- which
+// is what kept per-match cost growing. A capture set is small and bounded by
+// captures-per-match (single digits), so store it as a sorted vector of set
+// positions instead: clone is O(len), subset is a merge-walk O(|A|+|B|), and
+// both are independent of how long the sibling sequence is.
+// Layout in the arena: [len][pos0][pos1]... ; a continuation is the offset of len.
+static bool g_sparse = false;
+
+static uint32_t sp_new(BitArena *a) {
+  uint32_t off = a->size; array_push(a, (uint64_t)0); return off;
+}
+static uint32_t sp_clone_set(BitArena *a, uint32_t src, uint32_t bit) {
+  uint32_t n = src == UINT32_MAX ? 0 : (uint32_t)a->contents[src];
+  uint32_t off = a->size;
+  array_push(a, (uint64_t)(n + 1));
+  uint32_t i = 0; bool placed = false;
+  for (; i < n; i++) {
+    uint64_t v = a->contents[src + 1 + i];
+    if (!placed && v > bit) { array_push(a, (uint64_t)bit); placed = true; }
+    if (v == bit) { a->size = off; return src; }   // already present
+    array_push(a, v);
+  }
+  if (!placed) array_push(a, (uint64_t)bit);
+  return off;
+}
+static bool sp_superset(const BitArena *a, uint32_t sup, uint32_t sub) {
+  if (sub == UINT32_MAX) return true;
+  if (sup == UINT32_MAX) return (uint32_t)a->contents[sub] == 0;
+  uint32_t ns = (uint32_t)a->contents[sup], nb = (uint32_t)a->contents[sub];
+  if (nb > ns) return false;
+  uint32_t i = 0, j = 0;
+  while (j < nb) {
+    while (i < ns && a->contents[sup + 1 + i] < a->contents[sub + 1 + j]) i++;
+    if (i >= ns || a->contents[sup + 1 + i] != a->contents[sub + 1 + j]) return false;
+    i++; j++;
+  }
+  return true;
+}
+static bool sp_equal(const BitArena *a, uint32_t x, uint32_t y) {
+  if (x == y) return true;
+  if (x == UINT32_MAX || y == UINT32_MAX) return false;
+  uint32_t n = (uint32_t)a->contents[x];
+  if (n != (uint32_t)a->contents[y]) return false;
+  for (uint32_t i = 1; i <= n; i++) if (a->contents[x + i] != a->contents[y + i]) return false;
+  return true;
+}
+
+static uint32_t bs_new_dense(BitArena *a) {
   uint32_t off = a->size;
   for (uint32_t i = 0; i < g_words; i++) array_push(a, (uint64_t)0);
   return off;
 }
-static uint32_t bs_clone_set(BitArena *a, uint32_t src, uint32_t bit) {
+static uint32_t bs_new(BitArena *a) { return g_sparse ? sp_new(a) : bs_new_dense(a); }
+static uint32_t bs_clone_dense(BitArena *a, uint32_t src, uint32_t bit) {
   uint32_t off = a->size;
   for (uint32_t i = 0; i < g_words; i++)
     array_push(a, src == UINT32_MAX ? (uint64_t)0 : a->contents[src + i]);
   a->contents[off + (bit >> 6)] |= (uint64_t)1 << (bit & 63);
   return off;
 }
+static uint32_t bs_clone_set(BitArena *a, uint32_t src, uint32_t bit) {
+  return g_sparse ? sp_clone_set(a, src, bit) : bs_clone_dense(a, src, bit);
+}
 // Is every bit of `sub` also set in `sup`?
 static bool bs_superset(const BitArena *a, uint32_t sup, uint32_t sub) {
+  if (g_sparse) return sp_superset(a, sup, sub);
   if (sub == UINT32_MAX) return true;
   if (sup == UINT32_MAX) return false;
   for (uint32_t i = 0; i < g_words; i++)
@@ -214,6 +267,7 @@ static bool bs_superset(const BitArena *a, uint32_t sup, uint32_t sub) {
   return true;
 }
 static bool bs_equal(const BitArena *a, uint32_t x, uint32_t y) {
+  if (g_sparse) return sp_equal(a, x, y);
   if (x == y) return true;
   if (x == UINT32_MAX || y == UINT32_MAX) return false;
   for (uint32_t i = 0; i < g_words; i++) if (a->contents[x + i] != a->contents[y + i]) return false;
@@ -281,12 +335,33 @@ typedef struct {
 
 typedef Array(MergedState) MergedSet;
 
-static MergedState *merged_find(MergedSet *set, uint16_t step, uint16_t depth, uint16_t pat, uint8_t flags) {
-  for (uint32_t i = 0; i < set->size; i++) {
-    MergedState *s = array_get(set, i);
-    if (s->step_index == step && s->start_depth == depth &&
-        s->pattern_index == pat && s->flags == flags) return s;
+// Control-state lookup. The first cut scanned the set linearly, which made the
+// matcher pay its own quadratic cost at 1.28M merges and muddied the scaling
+// measurement. Open addressing with epoch stamps, so clearing is O(1).
+#define MIDX_BITS 14
+#define MIDX_SIZE (1u << MIDX_BITS)
+typedef struct {
+  uint64_t key[MIDX_SIZE];
+  uint32_t slot[MIDX_SIZE];   // index into the set, +1; 0 means empty
+  uint32_t stamp[MIDX_SIZE];
+  uint32_t epoch;
+} MIndex;
+static MIndex g_idx_a, g_idx_b;   // one per set; swapped alongside them
+
+static inline uint64_t mkey(uint16_t step, uint16_t depth, uint16_t pat, uint8_t flags) {
+  return ((uint64_t)step << 40) | ((uint64_t)depth << 24) | ((uint64_t)pat << 8) | flags;
+}
+static inline uint32_t mhash(uint64_t k) {
+  return (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 50) & (MIDX_SIZE - 1);
+}
+
+static MergedState *merged_find_ix(MergedSet *set, MIndex *ix, uint64_t k, uint32_t *slot_out) {
+  uint32_t h = mhash(k);
+  while (ix->stamp[h] == ix->epoch) {
+    if (ix->key[h] == k) { *slot_out = h; return array_get(set, ix->slot[h] - 1); }
+    h = (h + 1) & (MIDX_SIZE - 1);
   }
+  *slot_out = h;
   return NULL;
 }
 
@@ -300,9 +375,12 @@ static MergedState *merged_find(MergedSet *set, uint16_t step, uint16_t depth, u
 static bool g_prune = false;
 static unsigned long g_pruned = 0;
 
-static void merged_add_a(MergedSet *set, const BitArena *arena, uint16_t step, uint16_t depth,
-                         uint16_t pat, uint8_t flags, uint32_t head, unsigned long *merge_count) {
-  MergedState *s = merged_find(set, step, depth, pat, flags);
+static void merged_add_a(MergedSet *set, MIndex *ix, const BitArena *arena, uint16_t step,
+                         uint16_t depth, uint16_t pat, uint8_t flags, uint32_t head,
+                         unsigned long *merge_count) {
+  uint64_t k = mkey(step, depth, pat, flags);
+  uint32_t hslot;
+  MergedState *s = merged_find_ix(set, ix, k, &hslot);
   if (s) {
     for (uint32_t i = 0; i < s->heads.size; i++) {
       if (*array_get(&s->heads, i) == head) return;   // identical continuation
@@ -331,10 +409,13 @@ static void merged_add_a(MergedSet *set, const BitArena *arena, uint16_t step, u
                      .pattern_index = pat, .flags = flags, .heads = array_new() };
   array_push(&ns.heads, head);
   array_push(set, ns);
+  ix->stamp[hslot] = ix->epoch; ix->key[hslot] = k; ix->slot[hslot] = set->size;
 }
 
-#define merged_add(set, step, depth, pat, flags, head, mc) \
-  merged_add_a((set), &ctx->bits, (step), (depth), (pat), (flags), (head), (mc))
+static void mindex_clear(MIndex *ix) { ix->epoch++; }
+
+#define merged_add(set, ixp, step, depth, pat, flags, head, mc) \
+  merged_add_a((set), (ixp), &ctx->bits, (step), (depth), (pat), (flags), (head), (mc))
 
 static void merged_clear(MergedSet *set) {
   for (uint32_t i = 0; i < set->size; i++) array_delete(&array_get(set, i)->heads);
@@ -425,6 +506,10 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
   array_clear(&ctx->bits);
   MergedSet active = array_new();
   MergedSet next = array_new();
+  // Swap by pointer: MIndex is 256 KB, so swapping by value would memcpy it
+  // three times per sibling position.
+  MIndex *ixa = &g_idx_a, *ixb = &g_idx_b;
+  mindex_clear(ixa); mindex_clear(ixb);
 
   for (unsigned i = 0; i < nkids; i++) {
     TSNode node = kids[i];
@@ -444,10 +529,10 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
       const QueryStep *st = array_get(&q->steps, pe->step_index);
       if (st->depth != 0) continue;
       if (st->symbol != WILDCARD_SYMBOL && st->symbol != sym) continue;
-      merged_add(&active, pe->step_index, depth, pe->pattern_index, F_SEEK_IMM, bs_new(&ctx->bits), &ctx->merges);
+      merged_add(&active, ixa, pe->step_index, depth, pe->pattern_index, F_SEEK_IMM, bs_new(&ctx->bits), &ctx->merges);
     }
 
-    merged_clear(&next);
+    merged_clear(&next); mindex_clear(ixb);
     for (uint32_t si = 0; si < active.size; si++) {
       MergedState *s = array_get(&active, si);
       const QueryStep *st = array_get(&q->steps, s->step_index);
@@ -490,28 +575,41 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
               if (h2 == CAP_FAIL) continue;
               uint16_t t = r[x].step;
               while (array_get(&q->steps, t)->depth == 1) t++;
-              merged_add(&next, t, depth, s->pattern_index, r[x].flags, h2, &ctx->merges);
+              merged_add(&next, ixb, t, depth, s->pattern_index, r[x].flags, h2, &ctx->merges);
             } else {
-              merged_add(&next, r[x].step, depth, s->pattern_index, r[x].flags, h2, &ctx->merges);
+              merged_add(&next, ixb, r[x].step, depth, s->pattern_index, r[x].flags, h2, &ctx->merges);
             }
           }
         }
       }
       if (later_ok) {
         for (uint32_t h = 0; h < s->heads.size; h++)
-          merged_add(&next, s->step_index, depth, s->pattern_index, s->flags,
+          merged_add(&next, ixb, s->step_index, depth, s->pattern_index, s->flags,
                      *array_get(&s->heads, h), &ctx->merges);
       }
     }
 
     // Swap, then emit anything that completed.
     MergedSet t = active; active = next; next = t;
+    { MIndex *tix = ixa; ixa = ixb; ixb = tix; }
     for (uint32_t si = 0; si < active.size; si++) {
       MergedState *s = array_get(&active, si);
       if (array_get(&q->steps, s->step_index)->depth != PATTERN_DONE_MARKER) continue;
       TSQueryCapture buf[256];
       for (uint32_t h = 0; h < s->heads.size; h++) {
         uint32_t bsoff = *array_get(&s->heads, h), n = 0;
+        if (g_sparse) {
+          uint32_t cnt = (uint32_t)ctx->bits.contents[bsoff];
+          for (uint32_t z = 0; z < cnt && n < 256; z++) {
+            uint32_t bit = (uint32_t)ctx->bits.contents[bsoff + 1 + z];
+            unsigned si2 = bit / g_ncap, c = bit % g_ncap;
+            TSNode nd = ctx->cap_depth[c] ? ts_node_child_by_field_id(kids[si2], ctx->cap_field[c]) : kids[si2];
+            if (!ts_node_is_null(nd)) buf[n++] = (TSQueryCapture){ .node = nd, .index = c };
+          }
+          stream_add(ctx->out, s->pattern_index, buf, n);
+          ctx->emitted++;
+          continue;
+        }
         for (unsigned si2 = 0; si2 < nkids && n < 256; si2++) {
           for (unsigned c = 0; c < g_ncap && n < 256; c++) {
             uint32_t bit = si2 * g_ncap + c;
@@ -600,12 +698,19 @@ int main(int argc, char **argv) {
   }
 
   Stream2 a = { .caps = array_new(), .matches = array_new() };
-  double ta = run_stock(q, tree, &a);
-  printf("stock engine : %8.2f ms   %u matches\n", ta, a.matches.size);
+  bool skip_stock = getenv("SPIKE_NOSTOCK") != NULL;
+  double ta = 0;
+  if (skip_stock) {
+    printf("stock engine : skipped\n");
+  } else {
+    ta = run_stock(q, tree, &a);
+    printf("stock engine : %8.2f ms   %u matches\n", ta, a.matches.size);
+  }
 
   Stream2 b = { .caps = array_new(), .matches = array_new() };
   MergeCtx ctx;
   g_prune = getenv("SPIKE_PRUNE") != NULL;
+  g_sparse = getenv("SPIKE_SPARSE") != NULL;
   double tb = run_merge(q, tree, &b, &ctx);
   printf("merge matcher: %8.2f ms   %u matches   (node_tests=%lu, merged=%lu, bitset_words=%u, pruned=%lu, prune=%s)\n",
          tb, b.matches.size, ctx.node_tests, ctx.merges, ctx.bits.size, g_pruned,
@@ -624,9 +729,11 @@ int main(int argc, char **argv) {
   }
 
   char why[256] = {0};
-  bool same = stream_equal(&a, &b, why, sizeof why);
-  printf("\nDIFF: %s\n", same ? "IDENTICAL match sets" : why);
-  if (same && tb > 0) printf("SPEEDUP: %.1fx\n", ta / tb);
+  if (!skip_stock) {
+    bool same = stream_equal(&a, &b, why, sizeof why);
+    printf("\nDIFF: %s\n", same ? "IDENTICAL match sets" : why);
+    if (same && tb > 0) printf("SPEEDUP: %.1fx\n", ta / tb);
+  }
   array_delete(&b.caps); array_delete(&b.matches); array_delete(&ctx.arena); array_delete(&ctx.bits);
 
   ts_tree_delete(tree); ts_parser_delete(p); ts_query_delete(q);
