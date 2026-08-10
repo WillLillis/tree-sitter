@@ -637,7 +637,7 @@ static void walk_parents(MergeCtx *ctx, TSTreeCursor *c, uint16_t depth) {
     while (ts_tree_cursor_goto_next_sibling(c));
     ts_tree_cursor_goto_parent(c);
   }
-  if (n) match_siblings(ctx, kids, n, depth);
+  if (n && !getenv("SPIKE_WALKONLY")) match_siblings(ctx, kids, n, depth);
   if (ts_tree_cursor_goto_first_child(c)) {
     do { walk_parents(ctx, c, depth + 1); } while (ts_tree_cursor_goto_next_sibling(c));
     ts_tree_cursor_goto_parent(c);
