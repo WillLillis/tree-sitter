@@ -141,6 +141,7 @@ int main(int argc, char **argv) {
   int mode = strcmp(argv[4], "capture") == 0;
   int reps = argc > 5 ? atoi(argv[5]) : 5;
   int delay = argc > 6 && strcmp(argv[6], "delay") == 0;
+  int compile_only = argc > 6 && strcmp(argv[6], "compile") == 0;
   ts_set_allocator(c_malloc, c_calloc, c_realloc, c_free);
 
   uint32_t qlen, slen;
@@ -150,6 +151,21 @@ int main(int argc, char **argv) {
   uint32_t off; TSQueryError err;
   TSQuery *q = ts_query_new(lang, qsrc, qlen, &off, &err);
   if (!q) { fprintf(stderr, "query failed: err=%d off=%u\n", err, off); return 1; }
+
+  // Uninstrumented compile timing: ts_query_new only, nothing else.
+  if (compile_only) {
+    double *ct = malloc(sizeof(double) * reps);
+    for (int r = 0; r < reps; r++) {
+      TSQuery *tmp; double t0 = now_ms();
+      tmp = ts_query_new(lang, qsrc, qlen, &off, &err);
+      ct[r] = now_ms() - t0;
+      ts_query_delete(tmp);
+    }
+    qsort(ct, reps, sizeof(double), cmp_double);
+    printf("%-26s compile  reps=%-4d min=%8.3f ms  median=%8.3f ms\n",
+           strrchr(argv[2], '/') ? strrchr(argv[2], '/') + 1 : argv[2], reps, ct[0], ct[reps/2]);
+    free(ct); ts_query_delete(q); free(qsrc); free(ssrc); return 0;
+  }
 
   TSParser *p = ts_parser_new();
   ts_parser_set_language(p, lang);

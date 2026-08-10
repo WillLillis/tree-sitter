@@ -136,33 +136,44 @@ Roughly 3–4× per added child through the middle, then saturating near W=7 as 
 state space is exhausted. Not unbounded — but 127 ms for **one pattern** is already a cliff,
 and a query file with a handful of such patterns is seconds.
 
-### What the shipped build actually does, and why it is worse than it looks
+### Re-verified against wall clock: the cliff is capped, and the spread is 4.7x
 
-At the shipped `MAX_ANALYSIS_ITERATION_COUNT = 256`:
+The table above was measured with the iteration cap **raised**, and an earlier draft omitted
+that caveat. Re-measured uninstrumented, at the shipped `MAX_ANALYSIS_ITERATION_COUNT = 256`,
+compiling the same six-child patterns (min of 10 reps):
 
-| W | `ts_query_new` | perform_analysis | **aborts** |
-|---|---|---|---|
-| 2 | 3.87 ms | 1.01 ms | 0 |
-| 4 | 9.22 ms | 6.20 ms | 0 |
-| 6 | 9.01 ms | 6.10 ms | **1** |
-| 8 | 8.83 ms | 5.81 ms | **1** |
+| pattern | compile |
+|---|---|
+| `(field_declaration_list … x 6)` | 1.58 ms |
+| `(declaration_list (function_item) x 6)` | 1.72 ms |
+| `(source_file (function_item) x 6)` | 2.22 ms |
+| `(block (let_declaration) x 6)` | 3.72 ms |
+| `(arguments (identifier) x 6)` | 7.17 ms |
+| `(parameters (parameter) x 6)` | 7.48 ms |
+| **`rust/highlights.scm` (94 patterns)** | **16.07 ms** |
 
-The cap converts an unbounded cost into ~9 ms — so, like `MAX_STEP_CAPTURE_COUNT`
-([`03-correctness.md`](03-correctness.md) §A1), it is **load-bearing blast-radius containment,
-not a tuning knob**. But the price is that from W≥6 the analysis *gives up*, and
-`did_abort` marks every step in the pattern fallible (1964-1977). That means:
+**The spread at shipped settings is 4.7x, not 195x** — the cap truncates the expensive cases.
+And a real query file costs more than any single pathological pattern. So the user-visible
+compile story is *a large constant per pattern* (~0.17 ms), not a cliff. The cliff is real but
+only reachable by removing the containment.
 
-- `root_pattern_guaranteed` is false everywhere in the pattern, so `next_capture` can never
-  stream a capture early for it;
-- `ts_query__step_is_fallible` returns true more often, so `advance` splits more states.
+### The abort-degrades-execution claim: weak, and previously overstated
 
-**So the compile-side failure mode leaks into execution**: a pattern over a broad parent
-symbol is penalized at compile time *and* runs slower forever after. This is the one place the
-two budgets are genuinely coupled, and it is an argument for fixing the analysis rather than
-just bounding it.
+An earlier draft asserted that a pattern hitting the abort is "penalised twice" and "runs
+slower forever after", because `did_abort` marks every step fallible. **Measured, that is
+barely true.** Same query, same input, 400 matches on both sides
+(`(block (let_declaration) x 6)` over 400 functions with 8 lets each):
 
-Note also `(arguments (identifier) × 4)` costs **9.22 ms of compile for a single pattern** with
-no abort at all — this is not an exotic query.
+| mode | cap = 256 (aborts) | cap = 20000 (completes) |
+|---|---|---|
+| `next_match` | min 4.43, mean 4.66 ms | min 3.52, mean 3.93 ms |
+| `next_capture` | min 4.52, mean 4.75 ms | min 4.30, mean **5.16** ms |
+
+Roughly 15% in `next_match`; in `next_capture` the means move in the *opposite* direction and
+the result is within noise. Also note **no real query file in the fixture corpus aborts at
+all** — all five `highlights.scm` measured zero aborts. So this coupling between the compile
+and execution budgets, which an earlier draft leaned on, is weak-to-inconclusive and should
+not be used to justify work.
 
 ### Why: the cost is inherent to what the analysis computes
 
