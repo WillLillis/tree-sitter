@@ -37,6 +37,14 @@ typedef struct {
   unsigned long max_finished;       // peak finished states
   unsigned long capture_drops;      // captures silently dropped: step already had 3
   unsigned long matches;            // finished states pushed
+  unsigned long analysis_inserts;   // analysis_state_set__insert_sorted calls
+  unsigned long analysis_dedup_hits;// ... of those, already present (no insert)
+  unsigned long analysis_hit_at_back;// ... of those, matching the LAST element
+  unsigned long analysis_ins_at_back;// inserts landing at the very end (pure append)
+  unsigned long analysis_shift;     // elements memmoved by array_insert
+  unsigned long analysis_compares;  // analysis_state__compare calls
+  unsigned long analysis_cmp_steps; // stack-entry iterations inside the comparator
+  unsigned long max_analysis_set;   // peak size of a sorted analysis-state set
 } QProbe;
 QProbe qprobe = {0};
 #define QP(f) (qprobe.f++)
@@ -340,6 +348,49 @@ sub1(
     "perform_analysis timer end",
 )
 
+
+# ---- analysis-state set instrumentation ----
+
+sub1(
+    """static inline int analysis_state__compare(
+  AnalysisState *const *self,
+  AnalysisState *const *other
+) {
+  if ((*self)->depth < (*other)->depth) return 1;
+  for (unsigned i = 0; i < (*self)->depth; i++) {""",
+    """static inline int analysis_state__compare(
+  AnalysisState *const *self,
+  AnalysisState *const *other
+) {
+  QP(analysis_compares);
+  if ((*self)->depth < (*other)->depth) return 1;
+  for (unsigned i = 0; i < (*self)->depth; i++) {
+    QP(analysis_cmp_steps);""",
+    "analysis comparator",
+)
+
+sub1(
+    """  unsigned index, exists;
+  array_search_sorted_with(self, analysis_state__compare, &borrowed_item, &index, &exists);
+  if (!exists) {
+    AnalysisState *new_item = analysis_state_pool__clone_or_reuse(pool, borrowed_item);
+    array_insert(self, index, new_item);
+  }""",
+    """  unsigned index, exists;
+  array_search_sorted_with(self, analysis_state__compare, &borrowed_item, &index, &exists);
+  QP(analysis_inserts);
+  QPMAX(max_analysis_set, self->size);
+  if (!exists) {
+    QPADD(analysis_shift, self->size - index);
+    AnalysisState *new_item = analysis_state_pool__clone_or_reuse(pool, borrowed_item);
+    array_insert(self, index, new_item);
+    if (index == self->size - 1) QP(analysis_ins_at_back);
+  } else {
+    QP(analysis_dedup_hits);
+    if (index == self->size - 1) QP(analysis_hit_at_back);
+  }""",
+    "analysis insert_sorted",
+)
 
 open(p, "w").write(src)
 print(f"wrote {p} ({len(src.splitlines())} lines)")

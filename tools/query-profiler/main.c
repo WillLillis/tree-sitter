@@ -136,6 +136,20 @@ static void run_one(const char *lang_name, const TSLanguage *lang,
          t_compile, qp_t_analyze_ms, 100.0 * qp_t_analyze_ms / t_compile);
   printf("    analyze breakdown: full parse-table scan=%.2f ms, perform_analysis=%.2f ms (%lu calls, %lu iters, %lu aborts)\n",
          qp_t_subgraph_scan_ms, qp_t_perform_ms, qp_perform_calls, qp_perform_iterations, qp_analysis_aborts);
+  printf("    analysis set: inserts=%lu (dedup_hits=%lu, %.0f%%) shift=%lu (avg %.1f) peak_set=%lu\n",
+         qprobe.analysis_inserts, qprobe.analysis_dedup_hits,
+         qprobe.analysis_inserts ? 100.0 * qprobe.analysis_dedup_hits / qprobe.analysis_inserts : 0.0,
+         qprobe.analysis_shift,
+         qprobe.analysis_inserts ? (double)qprobe.analysis_shift / qprobe.analysis_inserts : 0.0,
+         qprobe.max_analysis_set);
+  printf("      of dedup hits, %.0f%% matched the LAST element; of inserts, %.0f%% were pure appends\n",
+         qprobe.analysis_dedup_hits ? 100.0 * qprobe.analysis_hit_at_back / qprobe.analysis_dedup_hits : 0.0,
+         (qprobe.analysis_inserts - qprobe.analysis_dedup_hits)
+           ? 100.0 * qprobe.analysis_ins_at_back / (qprobe.analysis_inserts - qprobe.analysis_dedup_hits) : 0.0);
+  printf("    comparator: calls=%lu steps=%lu (avg %.1f stack entries/call, %.1f calls/insert)\n",
+         qprobe.analysis_compares, qprobe.analysis_cmp_steps,
+         qprobe.analysis_compares ? (double)qprobe.analysis_cmp_steps / qprobe.analysis_compares : 0.0,
+         qprobe.analysis_inserts ? (double)qprobe.analysis_compares / qprobe.analysis_inserts : 0.0);
   printf("    language: states=%u symbols=%u  predecessor_map alloc=%lu KiB  subgraphs=%lu (%lu nodes)\n",
          lang->state_count, lang->symbol_count, qp_predecessor_map_bytes / 1024,
          qp_subgraph_count, qp_subgraph_nodes);
