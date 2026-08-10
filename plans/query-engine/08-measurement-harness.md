@@ -85,18 +85,34 @@ Static structure dump (no instrumentation needed, just struct access): pattern/s
 1. **A committed corpus.** Fixture grammars + real query files + representative source files,
    with sizes recorded. The `crates/cli/benches/benchmark.rs` harness already walks
    `test/fixtures/grammars/*/queries/`; extend rather than duplicate it.
-2. **The pathological query set as regression tests with time budgets.** At minimum:
-   - `((line_comment)* @doc (function_item) @fn)` — single quantifier, O(K²)
-   - `((attribute_item)* @attr (line_comment)* @doc (function_item …) @fn)` — the 4.2 s case
-   - `(block (_)* @stmt)` — wildcard quantifier, 23× fan-out
-   - `(_) @any` — wildcard root
-   These should fail CI if they regress, and they are the acceptance test for the
-   disambiguation rewrite.
-3. **An output-sensitivity assertion.** The most useful single metric is
+2. **The pathological query set — as measured, not as assumed.** Rechecked against wall
+   clock and match counts; only one of the original four survives:
+
+   | query | matches | mean delay | verdict |
+   |---|---|---|---|
+   | `((attribute_item)* @attr (line_comment)* @doc (function_item …) @fn)` unanchored | 22,100 | 0.190 ms, grows 3× | **genuinely pathological** — 34× the anchored per-match cost |
+   | `((line_comment)* @doc (function_item) @fn)` | 128 | 0.067 ms, flat | fine |
+   | `(block (_)* @stmt)` | 289 | 0.037 ms, flat | fine — only 1.3× the trivial `(block) @b` |
+   | `(_) @any` | 21,316 | 0.0005 ms, flat | excellent |
+
+   Keep all four as regression tests, but only the first is an acceptance test for the
+   matcher rewrite. The others are guards against regressing something that currently works.
+
+3. **A methodological warning, learned the hard way.** Three of those four were called
+   pathological on the strength of *internal counter magnitudes* — 23× state fan-out, 98.4%
+   of state visits failing the depth test, 322 M dedup inner steps — without checking wall
+   clock or counting the matches. Counters localise where time *could* go; they do not
+   establish that it does. `(block (_)* @stmt)` has 23× fan-out and costs 1.3×.
+
+   **Every counter-based claim in this doc set should be paired with a wall-clock or
+   match-count check before it is acted on.** The `dedup_capture_steps / matches` ratio
+   proposed below is subject to the same caveat: validate it against wall clock before
+   treating it as an acceptance metric.
+4. **An output-sensitivity assertion.** The most useful single metric is
    `dedup_capture_steps / matches`. Today it is ~40,000:1 on the pathological case. A healthy
    engine keeps it bounded by a small constant. Track it explicitly; it is the number that
    says whether the rewrite achieved its goal.
-4. **Differential mode.** Run old and new engines and diff the match streams (pattern index,
+5. **Differential mode.** Run old and new engines and diff the match streams (pattern index,
    capture ids, node ranges). This is the single most important piece of infrastructure for
    the whole project — see [`09-roadmap.md`](09-roadmap.md).
 

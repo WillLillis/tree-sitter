@@ -321,7 +321,25 @@ The disambiguation rewrite. This is where the cliff dies.
 This is the phase most likely to slip. Budget accordingly, and keep the old VM behind a flag
 until downstream users have shipped a release on the new one.
 
-## Phase 5 — the optimizer, tooling, and language growth (ongoing)
+## Phase 5 — the optimizer and language growth (ongoing)
+
+**Tooling comes last, deliberately.** An earlier draft justified the IR and compiler work
+partly on what it unlocks for `ts_query_ls`, linters, and `--explain`. That is the wrong
+order of priorities: the work has to pay for itself in improvements every consumer gets,
+whether or not they ever touch a language server. Restated on core grounds, the IR earns its
+place because it enables:
+
+- the matcher rewrite — a measured **34× per-match target** on unanchored patterns
+  ([`02-execution-model.md`](02-execution-model.md));
+- reformulating the analysis — the **100× parent-subgraph compile cliff**
+  ([`04-performance.md`](04-performance.md) §1b);
+- precompiled queries — removing 3–17 ms from every `ts_query_new` for every consumer;
+- structural fixes to the silent-truncation defects
+  ([`03-correctness.md`](03-correctness.md) §A1, §A3).
+
+Tooling — LSP support, linting, `--explain`, the anchor diagnostic — is a **byproduct** of
+having an IR, not a reason to build one. It lands after the core work, and nothing in the
+sequencing should be reordered to reach it sooner.
 
 Now that a plan stage exists, these become incremental work rather than rewrites:
 
