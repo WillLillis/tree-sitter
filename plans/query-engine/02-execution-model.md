@@ -98,7 +98,41 @@ Input: M top-level Rust functions, each preceded by 2 attributes and 3 line comm
 `peak live states ≈ M²` — 624 ≈ 25², 2,499 ≈ 50². Wall time grows ~30× per doubling of M.
 The query yields roughly M matches.
 
-### Why
+### Correction: most of this is the answer set, not the algorithm
+
+An earlier draft presented this as the flagship example of the engine being non-output-
+sensitive — "~50 matches after 2.35 billion units of work". **That was wrong**, and the error
+was mine: I never counted the matches. The unanchored pattern returns **22,100** matches at
+M=50, not ~50.
+
+Anchoring it (`.` between the quantified runs) changes everything:
+
+| M | unanchored | matches | anchored | matches |
+|---|---|---|---|---|
+| 25 | 137.8 ms | 2,925 | 0.145 ms | 25 |
+| 50 | 3,904 ms | 22,100 | 0.270 ms | 50 |
+| 100 | > 60 s | — | 0.566 ms | 100 |
+
+The anchored form is **linear** and returns exactly M matches. On the real 195 KB corpus file
+the same two characters take 738 ms → **7.07 ms**, a 104× speedup, and 8,003 → 128 matches.
+
+A hand-written structural-join prototype over the same tree
+(`tools/query-profiler/join_proto.c`) computes the anchored answer in **9.05 ms** — *slower*
+than the engine's 7.07 ms. So for anchored patterns there is **no order-of-magnitude prize
+available in execution**; the engine is already close to a hand-rolled single-pass walk.
+
+What remains genuinely wrong: on the large answer set the engine costs **177 µs per match**
+versus **5.4 µs** anchored, ~33×. That gap is the O(n²) dedup pass and is worth removing. But
+it is a 33× constant on a pathological input, not the 1000× the earlier framing implied.
+
+**The practical consequence is a reordering of what matters.** The highest-value fix for this
+entire class is not an engine rewrite — it is a *diagnostic*: "quantified sibling steps with
+no anchor between them; did you mean `.`?" That would prevent the pain at authoring time, for
+free. It also strengthens the case for the compiler/IR work on completely different grounds
+than raw throughput: the justification is tooling and diagnostics
+([`06-compiler-architecture.md`](06-compiler-architecture.md)), not speed.
+
+### Why the unanchored form is expensive
 
 Three properties compose:
 

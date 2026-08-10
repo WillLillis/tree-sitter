@@ -44,19 +44,24 @@ tree automata — see [`05-database-angle.md`](05-database-angle.md) and
    query over it takes 13 ms. An editor loading 20 languages × 3 query files pays this
    60 times at startup.
 
-3. **An idiomatic query goes quadratic in live states and cubic in wall time.**
-   `((attribute_item)* @attr (line_comment)* @doc (function_item name: (identifier) @name) @fn)`
-   — a doc-comment highlighting rule anyone would write — over a synthetic file of M
-   attributed functions:
+3. **A quantified sibling pattern without anchors has a combinatorial answer set — and that,
+   not the engine, is most of the cost.** `((attribute_item)* @attr (line_comment)* @doc
+   (function_item name: (identifier) @name) @fn)` over M attributed functions:
 
-   | M functions | peak live states | dedup inner steps | wall |
-   |---|---|---|---|
-   | 25 | 624 (≈ M²) | 78.2 M | 140 ms |
-   | 50 | 2,499 (≈ M²) | 2.35 G | **4,162 ms** |
-   | 100 | — | — | **> 120 s (timed out)** |
+   | M | unanchored | matches | **anchored** (`.` between runs) | matches |
+   |---|---|---|---|---|
+   | 25 | 137.8 ms | 2,925 | **0.145 ms** | 25 |
+   | 50 | 3,904 ms | 22,100 | **0.270 ms** | 50 |
+   | 100 | > 60 s | — | **0.566 ms** | 100 |
 
-   Fifty functions is a ~300-line file. It produces ~50 matches after 2.35 billion units of
-   work. The algorithm is not output-sensitive.
+   Adding two `.` characters is a **104× speedup on a real 195 KB file** (738 ms → 7.07 ms)
+   and yields the answer the author almost certainly wanted. Without anchors, sibling steps do
+   not require adjacency, so every in-order subset of preceding attributes and comments is a
+   legitimate match. The engine is *slower per match* on the large answer set — 177 µs vs
+   5.4 µs anchored, roughly 33× — which is the real O(n²) dedup cost and is worth fixing. But
+   the dominant factor is that the query asks for a combinatorially large answer.
+   **This is a semantics and ergonomics trap first, an engine defect second.**
+   See [`02-execution-model.md`](02-execution-model.md).
 
 4. **The engine has no index over the tree and no index over its own state.** At every node
    it linearly scans every live state; on the pathological case **99.1% of those visits are

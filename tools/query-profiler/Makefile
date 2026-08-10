@@ -19,7 +19,7 @@ SRCS     := $(foreach g,$(AVAIL),$(ROOT)/test/fixtures/grammars/$(g)/src/parser.
 CFLAGS  := -O2 -D_DEFAULT_SOURCE=1 -I$(ROOT)/lib/include -I$(ROOT)/lib/src -I$(ROOT) -Wno-unused-function
 LANGDEF := $(foreach g,$(AVAIL),-DHAVE_$(shell echo $(g) | tr a-z A-Z))
 
-.PHONY: all clean check bench
+.PHONY: all clean check bench joinproto
 all: $(OUT)/qprobe $(OUT)/bugs $(OUT)/bench
 
 $(INSTR): $(ROOT)/lib/src/query.c patch.py
@@ -41,6 +41,11 @@ check: all
 # Build only the uninstrumented timer -- useful for A/B'ing a query.c change,
 # since it does not depend on patch.py's anchors still matching.
 bench: $(OUT)/bench
+
+# Structural-join prototype (throwaway; sizes the prize for the pathological pattern).
+joinproto: $(OUT)/join_proto
+$(OUT)/join_proto: join_proto.c $(ROOT)/lib/src/query.c | $(OUT)
+	cd $(ROOT) && $(CC) $(CFLAGS) $(LANGDEF) -o $@ $(HERE)/join_proto.c $(SRCS)
 
 clean:
 	rm -rf $(OUT) $(INSTR)
