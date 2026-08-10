@@ -1,6 +1,7 @@
 # Replacing query analysis with a generated node-type schema
 
-**Status: feasibility established, one schema gap identified, persistence undecided.**
+**Status: feasibility established end to end. Two schema additions identified, both derivable
+from `grammar.json`. Persistence mechanism undecided. Not yet prototyped or measured.**
 
 ## Why this is the broadest lever available
 
@@ -97,6 +98,50 @@ memory.
 
 For **impossible-pattern rejection** a second set is needed: the *possible* children including
 anonymous ones (union rather than intersection). Same evaluator, same pass.
+
+## Impossible-pattern rejection: nothing actually blocks it
+
+The rejection path was the open risk, since a schema that is *more permissive* than the parse
+table would let genuinely-impossible queries compile and silently match nothing — a diagnostic
+regression. Tested against the shipped analyzer to see which kinds of impossibility it catches:
+
+| kind | example | caught today | schema-derivable |
+|---|---|---|---|
+| child-set | `(function_item (string_literal))`, `(lifetime (block))` | ✅ `STRUCTURE` | **yes** — possible-children incl. anonymous |
+| field type | `(function_declaration name: (statement_block))` | ✅ `STRUCTURE` | **yes** — `fields[f].types` |
+| field cardinality | `(binary_expression left: … left: …)` | ✅ `STRUCTURE` | **yes** — `fields[f].multiple == false` |
+| ordering | `(type_arguments (">") ("<"))` | ✅ `STRUCTURE` | **no** — needs sequence info |
+| anchor position | `(type_arguments . (">"))`, `(type_arguments ("<") .)` | ❌ **compiles** | n/a — no parity to preserve |
+
+Two useful facts fall out. The analyzer is **already incomplete** — it does not reject a pattern
+anchoring a token to a position it can never occupy. And only the *ordering* case resists a
+set-based schema.
+
+**Auditing every `QueryErrorKind::Structure` assertion in `query_test.rs` (12 of them):**
+
+| asserted-impossible pattern | kind |
+|---|---|
+| `(binary_expression left: (expression (identifier)) left: (expression (identifier)))` | field cardinality |
+| `(function_declaration name: (statement_block))` | field type |
+| `(call receiver: (binary))` | field type |
+| `(identifier (identifier))`, `(true (true))` | leaf has no children |
+| `(if_statement condition: (expression))` | field type via supertype |
+| `(identifier/identifier)`, `(statement/identifier)`, `(statement/pattern)` | supertype/subtype — **already a separate parse-time path** (`query.c:2671-2692`), not `perform_analysis` |
+
+**Every one is schema-derivable. None requires ordering.** The ordering case is something that
+had to be constructed artificially; real impossible patterns are type and set violations —
+typos, wrong node type, a field that cannot hold that child.
+
+### Recommendation
+
+Add the two sets to the schema — *possible* children including anonymous, alongside the
+*mandatory* set — and move rejection onto them. Accept that ordering-only impossibility becomes
+permissive, and land a test documenting that as a known, deliberate gap. If it ever proves to
+matter, per-node child-sequence automata can be added later without changing the mechanism,
+since it is the same read-only artifact either way.
+
+That removes the last blocker: with rejection moved, `perform_analysis` and the parse-table scan
+both go, and the ~30× ceiling becomes reachable rather than conditional.
 
 ### A hazard to design around
 
