@@ -43,6 +43,14 @@ const TSLanguage *tree_sitter_go(void);
 const TSLanguage *tree_sitter_c(void);
 #endif
 
+// Allocation counters, installed via ts_set_allocator. These answer a question
+// wall clock cannot on small inputs: does a change add allocator traffic?
+static unsigned long n_malloc, n_calloc, n_realloc, n_free;
+static void *c_malloc(size_t n) { n_malloc++; return malloc(n); }
+static void *c_calloc(size_t a, size_t b) { n_calloc++; return calloc(a, b); }
+static void *c_realloc(void *p, size_t n) { n_realloc++; return realloc(p, n); }
+static void c_free(void *p) { if (p) n_free++; free(p); }
+
 static double now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -90,6 +98,7 @@ int main(int argc, char **argv) {
 
   int mode = strcmp(argv[4], "capture") == 0;
   int reps = argc > 5 ? atoi(argv[5]) : 5;
+  ts_set_allocator(c_malloc, c_calloc, c_realloc, c_free);
 
   uint32_t qlen, slen;
   char *qsrc = slurp(argv[2], &qlen);
@@ -105,6 +114,9 @@ int main(int argc, char **argv) {
 
   double *times = malloc(sizeof(double) * reps);
   unsigned long returned = 0;
+  // Reset after setup so the counts cover only cursor creation + execution,
+  // which is what a per-edit query in an editor actually repeats.
+  n_malloc = n_calloc = n_realloc = n_free = 0;
   for (int r = 0; r < reps; r++) {
     TSQueryCursor *c = ts_query_cursor_new();
     double t0 = now_ms();
@@ -116,9 +128,14 @@ int main(int argc, char **argv) {
     ts_query_cursor_delete(c);
   }
   qsort(times, reps, sizeof(double), cmp_double);
-  printf("%-34s %-10s reps=%d  min=%.2f ms  median=%.2f ms  returned=%lu\n",
-         strrchr(argv[2], '/') ? strrchr(argv[2], '/') + 1 : argv[2],
-         argv[4], reps, times[0], times[reps / 2], returned);
+  double total = 0;
+  for (int r = 0; r < reps; r++) total += times[r];
+  printf("%-22s %-9s reps=%-6d min=%8.4f ms  median=%8.4f ms  mean=%8.4f ms  "
+         "allocs/rep: m=%.1f c=%.1f re=%.1f f=%.1f  returned=%lu\n",
+         strrchr(argv[3], '/') ? strrchr(argv[3], '/') + 1 : argv[3],
+         argv[4], reps, times[0], times[reps / 2], total / reps,
+         (double)n_malloc / reps, (double)n_calloc / reps,
+         (double)n_realloc / reps, (double)n_free / reps, returned);
 
   free(times); ts_tree_delete(tree); ts_parser_delete(p); ts_query_delete(q);
   free(qsrc); free(ssrc);
