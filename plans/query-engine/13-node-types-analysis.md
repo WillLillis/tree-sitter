@@ -1,7 +1,7 @@
 # Replacing query analysis with a generated node-type schema
 
-**Status: feasibility established end to end. Two schema additions identified, both derivable
-from `grammar.json`. Persistence mechanism undecided. Not yet prototyped or measured.**
+**Status: prototyped and measured. The analysis pass costs 1 µs against `perform_analysis`'s
+12.96 ms. Two rule bugs found and fixed by the parity check. Persistence undecided.**
 
 ## Why this is the broadest lever available
 
@@ -162,16 +162,17 @@ type_parameters:  '<' before '>' = True     '>' before '<' = False   -> correctl
 
 Size, as a dense bitmatrix over each rule's own child set:
 
-| grammar | rules | precedence pairs | bitmatrix | widest child set |
-|---|---|---|---|---|
-| rust | 179 | 3,690 | **2 KiB** | 96 |
-| javascript | 132 | 1,013 | 1 KiB | 27 |
-| python | 148 | 1,004 | 1 KiB | 26 |
-| go | 115 | 915 | 1 KiB | 24 |
-| c | 179 | 1,356 | 1 KiB | 26 |
+| grammar | node types | widest child set | dense bitmatrix |
+|---|---|---|---|
+| rust | 154 | 111 | **40.6 KiB** |
+| javascript | 111 | 29 | 0.9 KiB |
+| python | 122 | 27 | 1.7 KiB |
 
-**1–2 KiB per grammar**, against `parser.c` files measured in megabytes. There is no trade to
-make here.
+**Correction.** An earlier draft of this table reported 1–2 KiB for every grammar. That was
+measured *without inlining hidden rules*, so `_expression` counted as a single symbol rather
+than the ~38 concrete types it expands to. With correct inlining Rust is **40.6 KiB** — a 20×
+correction, and the widest child set is 111, not 96. Still 0.6% of Rust's 6.3 MB `parser.c`, so
+the conclusion holds, but the number was wrong.
 
 ### So the schema needs three sets, from one pass
 
@@ -214,9 +215,40 @@ with it.
 path, `perform_analysis` still runs and the saving is zero. That is why the "possible children
 including anonymous" set matters as much as the mandatory one.
 
-This is a ceiling derived from existing measurements, not a measured result — a prototype
-analyzer would be needed to confirm the lookup path is as cheap as assumed. It should be: a few
-hash lookups per step against a table, versus simulating hypothetical trees.
+**Measured** (`tools/query-profiler/schema_spike.c`, rust/highlights.scm, 222 steps):
+
+| | time |
+|---|---|
+| stock `ts_query_new` (parse + full analysis) | 16.648 ms |
+| schema resolve, names → symbols, **once** | 0.327 ms |
+| **schema analysis pass over all 222 steps** | **0.0010 ms** |
+
+The analysis pass is **1 µs**, against `perform_analysis`'s 12.96 ms. So the lookup path is not
+merely cheaper, it is free relative to everything else, and the remaining compile cost becomes
+S-expression parsing plus the one-time name resolution — which is itself per-language and
+cacheable, or avoidable entirely if ids are resolved at generation time.
+
+### Two rule bugs, both caught by the parity check
+
+The first run reported `unsound=1` — the schema claiming a guarantee the analyzer withholds,
+the one direction that would be a correctness bug. The case:
+`(scoped_type_identifier path: (identifier))`, where the `path` field is **optional**.
+
+Two compounding errors:
+
+1. **Aliases were resolved to the underlying symbol.** `_type_identifier` is
+   `alias($.identifier, $.type_identifier)`, so recursing into an `ALIAS` node recorded
+   `identifier` — a symbol that never appears in the tree — as a mandatory child. The generator
+   must yield the *alias* name.
+2. **The mandatory rule was applied to field-constrained steps.** The mandatory set records only
+   *that* a child must be present, not *which field it fills*. `identifier` being mandatory
+   somewhere in `scoped_type_identifier` says nothing about the optional `path` field. The
+   mandatory rule is only sound for steps with **no** field constraint; field-constrained steps
+   need the field rule.
+
+After both fixes: **`agree=7, lost=1, unsound=0`** on this query. Worth stating plainly that
+the parity harness is what made these visible — neither would have been caught by tests, since
+both produce *faster* behaviour that is merely occasionally wrong.
 
 ## Persistence: read-only program data, not necessarily an ABI change
 
