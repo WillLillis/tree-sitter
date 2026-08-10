@@ -326,15 +326,18 @@ static void match_siblings(MergeCtx *ctx, TSNode *kids, unsigned nkids, uint16_t
     bool later_named = false;
     for (unsigned k = i + 1; k < nkids; k++) if (ts_node_is_named(kids[k])) { later_named = true; break; }
 
-    // Seed every pattern whose first step could match here.
+    // Seed every pattern entry. pattern_map already enumerates a pattern's
+    // alternative entry points (this query has 1 pattern and 3 entries), so
+    // expanding alternatives here as well would seed the same control state
+    // twice under different flags and emit every match twice. The stock engine
+    // seeds at pattern->step_index only, and expands after a match advances.
+    // New states seek an immediate match, matching ts_query_cursor__add_state.
     for (uint32_t pi = 0; pi < q->pattern_map.size; pi++) {
       const PatternEntry *pe = array_get(&q->pattern_map, pi);
       const QueryStep *st = array_get(&q->steps, pe->step_index);
       if (st->depth != 0) continue;
-      Reach r[32];
-      unsigned nr = expand(q, pe->step_index, 0, later_named, r, 32);
-      for (unsigned x = 0; x < nr; x++)
-        merged_add(&active, r[x].step, depth, pe->pattern_index, r[x].flags, CAP_NIL, &ctx->merges);
+      if (st->symbol != WILDCARD_SYMBOL && st->symbol != sym) continue;
+      merged_add(&active, pe->step_index, depth, pe->pattern_index, F_SEEK_IMM, CAP_NIL, &ctx->merges);
     }
 
     merged_clear(&next);

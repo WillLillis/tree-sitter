@@ -258,6 +258,78 @@ differ only in capture history is precisely the tagged-automaton problem
 ([`05-database-angle.md`](05-database-angle.md) §2). That is the spike's real work, and it is
 where the disambiguation policy stops being abstract.
 
+## Spike result: merging works, but the dedup pass is load-bearing semantics
+
+`tools/query-profiler/merge_spike.c` runs the stock engine and a merge-based matcher over the
+same tree in one process and diffs the match streams. The matcher keeps one entry per control
+state `(step_index, start_depth, pattern, flags)` holding a **set** of capture continuations,
+with histories as persistent cons-lists in an arena.
+
+**Anchored query — identical.** 120 matches from both engines, same capture shapes. The
+matcher is a faithful implementation for the case with nothing to disambiguate. (It is 0.4×
+the speed, as expected: collapse there is 1.03×, so there is nothing to win and the spike pays
+its overhead.)
+
+**Unanchored query, M=50 — the target case:**
+
+| | stock | merge matcher |
+|---|---|---|
+| matches | 22,100 | **428,700** |
+| captures per match | all 7 | spread: 50 @2, 6,425 @3, 14,030 @4, 16,240 @5, 94,825 @6, 24,700 @7 |
+| time | 3,995 ms | 4,696 ms |
+| continuations absorbed | — | **2,896,905** |
+| control-state match tests | — | **1,645** |
+
+Two conclusions, and the second is the important one.
+
+**1. Merging the control state works, and works hard.** 2.9 million continuations were
+absorbed into shared control states instead of forked into threads, and the whole run
+performed only 1,645 control-state match tests. The mechanism does what the 56× collapse
+measurement predicted.
+
+**2. It does not reduce the output, because the O(n²) dedup pass is not deduplication — it is
+the longest-match rule.** The stock engine emits only 7-capture matches; the merge matcher
+emits a spread from 2 to 7 captures. The extra 406,600 are matches whose capture set is a
+strict subset of another, which `ts_query_cursor__compare_captures` discards. Delete the pass
+and they come back.
+
+This is the concrete form of the claim made throughout this document: **the dedup pass *is* the
+disambiguation semantics.** It was an argument before; it is now a measurement.
+
+### What that means for the rewrite
+
+The 34× target needs **both** halves:
+
+- merge the control state — demonstrated, and it is where the 56× collapse lives;
+- **replace longest-match with a rule applied at merge time**, in bounded work, rather than by
+  pairwise capture-set comparison afterwards.
+
+The second is the real problem, and it is exactly the tagged-automaton question
+([`05-database-angle.md`](05-database-angle.md) §2). Note what it is *not*: "keep the longest
+continuation per control state" does not work, because the 22,100 stock matches are genuinely
+distinct maximal matches, not one per control state. The rule has to prune strict subsets while
+retaining incomparable alternatives — cheaply, on a shared-prefix representation.
+
+### Lessons for the IR
+
+Recorded because they are the reason to build one, learned from writing a matcher against the
+current encoding:
+
+- **`pattern_map` already enumerates a pattern's alternative entry points.** This query has 1
+  pattern and 3 map entries. Seeding from the map *and* expanding `alternative_index` seeds the
+  same control state twice under different flags, and emits every match twice. Nothing in the
+  representation says which of the two enumerations is authoritative; it has to be recovered
+  by reading `ts_query__pattern_map_insert`.
+- **New states must seek an immediate match** (`ts_query_cursor__add_state` sets
+  `seeking_immediate_match = true`), which is what stops a pattern seeded at every position
+  from matching everywhere. That is load-bearing semantics expressed as a struct-field default.
+- **The alternative-following logic cannot be understood in isolation** — dead-end,
+  pass-through, and skip interact with `is_immediate`, `is_last_child`, and the depth of the
+  *previous* step. A faithful reimplementation is archaeology, not translation.
+
+Each of these is a case where the semantics live in the interaction between fields rather than
+in a stated rule, which is the argument for the IR restated in concrete terms.
+
 ## The disambiguation question
 
 This is the part that matters most, and it is not primarily about performance.
