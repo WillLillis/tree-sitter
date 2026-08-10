@@ -31,7 +31,17 @@ void ts_wasm_language_retain(const TSLanguage *s) { (void)s; }
 void ts_wasm_language_release(const TSLanguage *s) { (void)s; }
 
 const TSLanguage *tree_sitter_rust(void);
+const TSLanguage *tree_sitter_javascript(void);
+const TSLanguage *tree_sitter_python(void);
+const TSLanguage *tree_sitter_go(void);
+const TSLanguage *tree_sitter_c(void);
 #include "schema_rust.h"
+#include "schema_javascript.h"
+#include "schema_python.h"
+#include "schema_go.h"
+#include "schema_c.h"
+
+
 
 static double now_ms(void) {
   struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -47,7 +57,11 @@ static char *slurp(const char *p, uint32_t *len) {
 // Resolved form: schema keyed by TSSymbol, with child names resolved to symbols.
 // This is the load-time pass a real implementation would do -- names in the
 // artifact, ids resolved against the language actually in hand.
-typedef struct { TSSymbol *mandatory; uint16_t count; } ResolvedNode;
+typedef struct { TSFieldId field; TSSymbol *types; uint16_t count; } ResolvedField;
+typedef struct {
+  TSSymbol *mandatory; uint16_t count;
+  ResolvedField *fields; uint16_t field_count;
+} ResolvedNode;
 static ResolvedNode *g_by_symbol;
 static uint32_t g_symbol_count;
 
@@ -57,12 +71,13 @@ static TSSymbol resolve(const TSLanguage *l, const char *name) {
   return s;
 }
 
+static const SchemaNode *g_schema; static unsigned g_schema_count;
 static double build_resolved(const TSLanguage *l) {
   double t0 = now_ms();
   g_symbol_count = ts_language_symbol_count(l);
   g_by_symbol = calloc(g_symbol_count, sizeof(ResolvedNode));
-  for (unsigned i = 0; i < rust_schema_count; i++) {
-    const SchemaNode *n = &rust_schema[i];
+  for (unsigned i = 0; i < g_schema_count; i++) {
+    const SchemaNode *n = &g_schema[i];
     TSSymbol parent = resolve(l, n->name);
     if (!parent || parent >= g_symbol_count || n->mandatory_count == 0) continue;
     ResolvedNode *r = &g_by_symbol[parent];
@@ -71,6 +86,23 @@ static double build_resolved(const TSLanguage *l) {
     for (unsigned j = 0; j < n->mandatory_count; j++) {
       TSSymbol c = resolve(l, n->mandatory[j]);
       if (c) r->mandatory[r->count++] = c;
+    }
+    if (n->field_count) {
+      r->fields = calloc(n->field_count, sizeof(ResolvedField));
+      r->field_count = 0;
+      for (unsigned j = 0; j < n->field_count; j++) {
+        const SchemaField *f = &n->fields[j];
+        TSFieldId fid = ts_language_field_id_for_name(l, f->name, (uint32_t)strlen(f->name));
+        if (!fid) continue;
+        ResolvedField *rf = &r->fields[r->field_count++];
+        rf->field = fid;
+        rf->types = malloc(sizeof(TSSymbol) * f->type_count);
+        rf->count = 0;
+        for (unsigned k = 0; k < f->type_count; k++) {
+          TSSymbol t = resolve(l, f->types[k]);
+          if (t) rf->types[rf->count++] = t;
+        }
+      }
     }
   }
   return now_ms() - t0;
@@ -94,10 +126,26 @@ static double schema_analyze(const TSQuery *q, unsigned *agree, unsigned *lost, 
     // field rule; applying the mandatory rule to it is unsound -- e.g.
     // `(scoped_type_identifier path: (identifier))`, where `path` is optional
     // but an `identifier` is mandatory elsewhere in the node.
-    if (parent && parent < g_symbol_count && st->field == 0) {
+    if (parent && parent < g_symbol_count) {
       const ResolvedNode *r = &g_by_symbol[parent];
-      for (unsigned k = 0; k < r->count; k++)
-        if (r->mandatory[k] == st->symbol) { guar = true; break; }
+      if (st->field == 0) {
+        // Mandatory-children rule: sound only without a field constraint, since
+        // the mandatory set records presence, not which field a child fills.
+        for (unsigned k = 0; k < r->count; k++)
+          if (r->mandatory[k] == st->symbol) { guar = true; break; }
+      } else if (st->symbol != WILDCARD_SYMBOL && !st->supertype_symbol) {
+        // Field rule: guaranteed iff the field is required and single-valued
+        // (both already filtered at generation) and every type it admits is
+        // the one this step matches.
+        for (unsigned k = 0; k < r->field_count; k++) {
+          if (r->fields[k].field != st->field) continue;
+          bool all = r->fields[k].count > 0;
+          for (unsigned m = 0; m < r->fields[k].count; m++)
+            if (r->fields[k].types[m] != st->symbol) { all = false; break; }
+          guar = all;
+          break;
+        }
+      }
     }
     bool c = st->parent_pattern_guaranteed;
     if (c && guar) a++;
@@ -120,11 +168,17 @@ static double schema_analyze(const TSQuery *q, unsigned *agree, unsigned *lost, 
 }
 
 int main(int argc, char **argv) {
-  if (argc < 2) { fprintf(stderr, "usage: schema_spike <query.scm> [reps]\n"); return 1; }
-  int reps = argc > 2 ? atoi(argv[2]) : 200;
-  const TSLanguage *lang = tree_sitter_rust();
+  if (argc < 3) { fprintf(stderr, "usage: schema_spike <lang> <query.scm> [reps]\n"); return 1; }
+  int reps = argc > 3 ? atoi(argv[3]) : 200;
+  const TSLanguage *lang = NULL;
+  if (!strcmp(argv[1],"rust"))            { lang = tree_sitter_rust();       g_schema = rust_schema;       g_schema_count = rust_schema_count; }
+  else if (!strcmp(argv[1],"javascript")) { lang = tree_sitter_javascript(); g_schema = javascript_schema; g_schema_count = javascript_schema_count; }
+  else if (!strcmp(argv[1],"python"))     { lang = tree_sitter_python();     g_schema = python_schema;     g_schema_count = python_schema_count; }
+  else if (!strcmp(argv[1],"go"))         { lang = tree_sitter_go();         g_schema = go_schema;         g_schema_count = go_schema_count; }
+  else if (!strcmp(argv[1],"c"))          { lang = tree_sitter_c();          g_schema = c_schema;          g_schema_count = c_schema_count; }
+  else { fprintf(stderr, "unknown language %s\n", argv[1]); return 1; }
 
-  uint32_t qlen; char *qsrc = slurp(argv[1], &qlen);
+  uint32_t qlen; char *qsrc = slurp(argv[2], &qlen);
   uint32_t off; TSQueryError err;
 
   double t0 = now_ms();
@@ -141,7 +195,7 @@ int main(int argc, char **argv) {
     if (d < best) best = d;
   }
 
-  printf("query: %s   (%u steps, %u patterns)\n", argv[1], q->steps.size, q->patterns.size);
+  printf("query: %s   (%u steps, %u patterns)\n", argv[2], q->steps.size, q->patterns.size);
   printf("  stock ts_query_new (parse + full analysis) : %8.3f ms\n", t_stock);
   printf("  schema resolve, names -> symbols, once     : %8.3f ms\n", t_resolve);
   printf("  schema analysis pass over all steps        : %8.4f ms   (min of %d)\n", best, reps);

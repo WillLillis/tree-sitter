@@ -19,7 +19,7 @@ SRCS     := $(foreach g,$(AVAIL),$(ROOT)/test/fixtures/grammars/$(g)/src/parser.
 CFLAGS  := -O2 -D_DEFAULT_SOURCE=1 -I$(ROOT)/lib/include -I$(ROOT)/lib/src -I$(ROOT) -Wno-unused-function
 LANGDEF := $(foreach g,$(AVAIL),-DHAVE_$(shell echo $(g) | tr a-z A-Z))
 
-.PHONY: all clean check bench joinproto spike
+.PHONY: all clean check bench joinproto spike schema
 all: $(OUT)/qprobe $(OUT)/bugs $(OUT)/bench
 
 $(INSTR): $(ROOT)/lib/src/query.c patch.py
@@ -50,6 +50,18 @@ $(OUT)/merge_spike: merge_spike.c $(ROOT)/lib/src/query.c | $(OUT)
 joinproto: $(OUT)/join_proto
 $(OUT)/join_proto: join_proto.c $(ROOT)/lib/src/query.c | $(OUT)
 	cd $(ROOT) && $(CC) $(CFLAGS) $(LANGDEF) -o $@ $(HERE)/join_proto.c $(SRCS)
+
+# Schema-driven analysis spike: generate the child-relation tables from each
+# grammar, then build the parity/timing harness against them.
+SCHEMA_DIR := $(OUT)/schema
+SCHEMA_LANGS := $(AVAIL)
+schema: | $(OUT)
+	mkdir -p $(SCHEMA_DIR)
+	cd $(ROOT) && for L in $(SCHEMA_LANGS); do \
+	  python3 $(HERE)/gen_schema.py test/fixtures/grammars/$$L/src $$L \
+	    > $(SCHEMA_DIR)/schema_$$L.h; done
+	cd $(ROOT) && $(CC) $(CFLAGS) $(LANGDEF) -I$(SCHEMA_DIR) \
+	  -o $(OUT)/schema_spike $(HERE)/schema_spike.c $(SRCS)
 
 clean:
 	rm -rf $(OUT) $(INSTR)

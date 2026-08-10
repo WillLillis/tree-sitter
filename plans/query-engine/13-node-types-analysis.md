@@ -246,7 +246,25 @@ Two compounding errors:
    mandatory rule is only sound for steps with **no** field constraint; field-constrained steps
    need the field rule.
 
-After both fixes: **`agree=7, lost=1, unsound=0`** on this query. Worth stating plainly that
+After both fixes, and with the field rule implemented alongside the mandatory one, parity
+across **5 grammars and all 15 of their query files**:
+
+| grammar | query | agree | lost | unsound |
+|---|---|---|---|---|
+| rust | highlights / injections / tags | 8 / 2 / 7 | 0 / 0 / 0 | 0 |
+| javascript | highlights-jsx / -params / highlights / injections / locals / tags | 6 / 0 / 3 / 0 / 0 / 4 | 0 / 3 / 0 / 1 / 0 / 4 | 0 |
+| python | highlights / tags | 5 / 3 | 0 / 1 | 0 |
+| go | highlights / tags | 3 / 9 | 0 / 5 | 0 |
+| c | highlights / tags | 2 / 0 | 0 / 0 | 0 |
+| **total** | | **52** | **14** | **0** |
+
+**Sound on every file — 0 unsound across all 15 — and 52 of 66 guarantees recovered (79%).**
+The analysis pass measured between 0.0000 and 0.0010 ms throughout.
+
+The 14 losses cluster in `tags.scm` files and in `highlights-params.scm`; they are positional
+non-field steps the shipped analyzer can still prove via reasoning the three sets do not
+capture. Losing them costs `next_capture` streaming on those steps and nothing else, so they
+are safe to leave. Chasing them is optional work, not a blocker. Worth stating plainly that
 the parity harness is what made these visible — neither would have been caught by tests, since
 both produce *faster* behaviour that is merely occasionally wrong.
 
