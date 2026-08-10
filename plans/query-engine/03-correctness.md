@@ -98,6 +98,59 @@ This is arguably by design ("degrade rather than fail"), but it should be a docu
 deterministic degradation — e.g. drop *whole patterns* in a defined priority order, or
 surface a recoverable error — not "whichever state happened to hold the earliest capture".
 
+### A5. `analysis_state__compare` is not antisymmetric, and the sorted analysis set relies on it
+
+`query.c:1071-1092`. The depth test fires *before* the stack entries are compared, and only in
+one direction:
+
+```c
+if ((*self)->depth < (*other)->depth) return 1;   // shallower sorts later
+for (unsigned i = 0; i < (*self)->depth; i++) {
+  if (i >= (*other)->depth) return -1;
+  ... compare stack[i] ...
+}
+```
+
+If `A` is shallower **and** `A.stack[0]` sorts before `B.stack[0]`, then `compare(A,B)` returns
+1 via the depth test, and `compare(B,A)` returns 1 via the stack comparison. Both report the
+other is smaller.
+
+Verified by running every real comparison both ways:
+
+| query | comparisons | inconsistent | |
+|---|---|---|---|
+| `rust/highlights.scm` | 756,626 | 3,509 | 0.46% |
+| `javascript/highlights.scm` | 272,246 | 7,777 | 2.86% |
+| `(arguments (identifier) × 6)` | 202,531 | 12,979 | 6.41% |
+| `(block (let_declaration) × 6)` | 46,545 | 12,372 | **26.58%** |
+
+All are the `both > 0` case. `analysis_state_set__insert_sorted` calls
+`array_search_sorted_with`, which requires a total order, so the set is not reliably sorted:
+binary search can miss an entry that is present (inserting a duplicate) and can compute a
+wrong insertion position. The same comparator also drives the iteration-ordering shortcut in
+`perform_analysis` (1380-1402) that decides which states to defer.
+
+**The awkward part: fixing it makes compilation slower.** Two correct repairs, both
+antisymmetric, both passing all 127 query tests and the goldens unchanged:
+
+| pattern | current (buggy) | compare stacks first | depth primary both ways |
+|---|---|---|---|
+| `rust/highlights.scm` | 14.39 ms | 13.96 ms | 13.85 ms |
+| `(block (let_declaration) × 6)` | 3.11 ms | 4.48 ms | 7.60 ms |
+| `(parameters (parameter) × 6)` | 6.09 ms | 12.08 ms | 10.52 ms |
+| `(arguments (identifier) × 6)` | **6.31 ms** | **16.61 ms** | **47.67 ms** |
+
+The broken ordering is acting as accidental pruning: an unsorted region causes the binary
+search and the deferral shortcut to truncate exploration. So **the analysis as designed costs
+2.6–7.6× more than the analysis as implemented**, on broad-parent patterns.
+
+Recommendation: **do not land either repair standalone.** No observable behaviour changes on
+the corpus, so there is no user-facing bug to fix today, and paying 2.6–7.6× compile for
+internal correctness is a bad trade in isolation. Instead treat it as a constraint on the
+analysis rewrite: a correct total order must be part of the new design, and the design has to
+absorb the cost the current implementation is avoiding by accident. It also means every
+measurement of analysis cost in these docs understates the true cost of the algorithm.
+
 ---
 
 ## Tier B — code-reading, not yet verified
