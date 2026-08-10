@@ -355,8 +355,26 @@ time by word-wise subset tests.
 | **unanchored, M=50** | **4,034 ms** | **514 ms** | **22,100 = 22,100** | **IDENTICAL, 7.9x** |
 | **unanchored, real 195 KB file** | ~740 ms | **41.9 ms** | **8,003 = 8,003** | **IDENTICAL, 17.2x** |
 
-Capture-count histograms agree bucket for bucket on both unanchored runs, so this is not a
+And at M=100, which the stock engine could not finish inside 60 s earlier:
+
+| workload | stock | merge + bitset | matches | |
+|---|---|---|---|---|
+| unanchored, M=100 | **125,377 ms** | **24,393 ms** | 171,700 = 171,700 | **5.1×** |
+
+Capture-count histograms agree bucket for bucket on every unanchored run, so this is not a
 coincidence of totals.
+
+**Caveat — the speedup shrinks as the input grows: 17.2× → 7.9× → 5.1×.** Per-match cost rises
+in *both* engines (stock 183 → 730 µs/match from M=50 to M=100; merge 23 → 142 µs/match). So
+the bitset matcher is a large constant-factor win, **not** a change of complexity class, and on
+this evidence it does not by itself deliver flat-delay enumeration.
+
+Two things are tangled there and want separating before drawing conclusions. The output itself
+grows superlinearly (22,100 → 171,700 matches for a doubling of M), which no algorithm can
+avoid. But the spike's own data structures are naive — `merged_find` is a linear scan over
+control states, and the prune step scans every head in a state — so with 1,285,254 merges at
+M=100 the matcher is paying its own quadratic cost on top. An indexed lookup would remove that,
+and until it does the asymptotics measured here belong to the prototype, not to the design.
 
 **This validates the design end to end.** The three claims that had been separate are now one
 result: control-state merging realises the 56× collapse; the bitset makes subset testing
