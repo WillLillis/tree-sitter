@@ -146,6 +146,73 @@ This is a Thompson NFA program, deliberately. It makes the regex literature
 ([`05-database-angle.md`](05-database-angle.md) §2) directly applicable, and it is the form
 that a later TDFA construction consumes.
 
+## The capture representation: a derived requirement
+
+Everything else in this document is design-by-argument. This section is the one part derived
+from experiment ([`02-execution-model.md`](02-execution-model.md), spike results), and it is a
+hard constraint on the matcher the IR has to serve.
+
+**The requirement:** capture histories must support *subset testing structurally*, not by set
+comparison. The spike showed that control-state merging is settled — 56× collapse, already
+faster than the stock engine — and that what blocks the remaining win is enforcing longest-match
+at merge time. A cons-list makes suffix-extension cheap but general subset O(n·m), which is the
+stock engine's pairwise cost relocated rather than removed.
+
+### Why not "just change the disambiguation policy"
+
+The tagged-automata literature resolves this by specifying a policy (POSIX, greedy) applied at
+merge time, and that is the principled answer. It is also the **highest-risk change available**,
+for a reason this investigation surfaced by accident:
+
+> The golden corpus measures **1.00× state collapse on every real query file**. Real queries
+> barely exercise the disambiguation machinery at all.
+
+So a policy change would pass the entire test corpus and surface downstream, in whatever
+unusual query shapes do exercise it, long after landing. The safety net is thinnest exactly
+where the change is riskiest. Defer it; it is not needed for the measured 34×.
+
+### Bitsets over sibling positions, with node identity kept out of the continuation
+
+Continuations that reach the same control state have matched the *same steps*; they differ only
+in **which nodes they bound to quantified steps**. And those nodes are always drawn from the
+sibling sequence currently being scanned. That gives a dense, bounded index for free:
+
+```
+continuation = one bitset per quantified step in the pattern,
+               indexed by sibling position within the current parent's child list
+```
+
+`A ⊇ B` becomes a per-step bitset AND — O(quantified_steps × words), and for realistic patterns
+(1–3 quantifiers, sequences of tens of siblings) that is one or two machine words per test.
+
+**This answers where node ids live: nowhere in the continuation.** The bitset records *which
+sibling positions* were bound; the nodes themselves are recovered from the sibling array when a
+match is actually emitted. Node identity stays in the traversal, and continuations carry only
+positional information. Consequences:
+
+- continuations become small and fixed-size, so merging is cheap and the arena shrinks;
+- the `TSQueryCapture` array is materialized once per *emitted* match, which is also what the
+  public API's interior pointer requires ([`11-data-oriented-design.md`](11-data-oriented-design.md));
+- the O(n·m) subset test disappears without touching semantics.
+
+Open questions before committing:
+
+- **Sizing.** A sequence with thousands of siblings makes the bitset large. Realistic child
+  counts are tens; the pathological ones are hundreds. Needs a measured distribution over the
+  corpus, and probably a fallback for the tail.
+- **Non-quantified captures.** Captures on non-quantified steps are identical across all
+  continuations at a control state, so they need not be in the bitset at all — they can be
+  recovered from the path. Worth confirming.
+- **Depth > 1 patterns.** The sibling-position index is per-sequence; a pattern spanning
+  several depths needs one index space per level, or a different scheme.
+
+### What is still not ready to draft
+
+The rest of the IR — HIR node kinds, opcode set, bytecode encoding — should wait. The capture
+representation is derivable now because an experiment produced a constraint; the others would be
+speculative until the matcher is faithful enough to say what it needs. The productive order is:
+finish the matcher against this representation, collect the constraints it produces, then draft.
+
 ## Stable serialized bytecode
 
 Real benefits, in order of value:
