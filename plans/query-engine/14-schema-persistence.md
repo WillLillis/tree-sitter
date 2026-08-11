@@ -61,20 +61,48 @@ better. But the rows are highly repetitive — symbols that behave identically w
 ordering share a row — which is the same observation the parse-table action pooling exploited
 (`plans/ACTION_POOL_DESIGN.md`: 98–99.4% duplication).
 
-Measured, pooling distinct rows globally and storing one row id per symbol:
+**Built and measured**, not estimated — `gen_schema.py` now emits a shared row pool plus one
+row id per symbol, and the sizes below are of the emitted artifact:
 
-| grammar | widest | rows | distinct | dedup | dense | **pooled** |
-|---|---|---|---|---|---|---|
-| hoon | 280 | 45,990 | 870 | **52.9×** | 1,234.7 KiB | **107.6 KiB** |
-| abl | 221 | 7,815 | 1,311 | 6.0× | 69.4 KiB | 21.3 KiB |
-| julia | 627 | 3,084 | 186 | 16.6× | 64.2 KiB | **6.9 KiB** |
-| swift | 121 | 6,119 | 497 | 12.3× | 62.3 KiB | 14.5 KiB |
-| rust | 94 | 3,684 | 486 | 7.6× | 21.3 KiB | 8.9 KiB |
+| grammar | dense | **pooled** | min-per-node |
+|---|---|---|---|
+| hoon | 1,251.1 KiB | **93.5 KiB** | 93.4 KiB |
+| abl | 72.3 KiB | 23.2 KiB | 22.8 KiB |
+| julia | 65.6 KiB | **7.0 KiB** | 6.9 KiB |
+| rust | 22.9 KiB | 9.6 KiB | 9.3 KiB |
+| c | 2.2 KiB | 3.1 KiB | **2.6 KiB** |
+| javascript | 0.9 KiB | 1.6 KiB | **1.2 KiB** |
+| **corpus (295)** | **2.24 MiB** | **0.69 MiB** | **0.64 MiB** |
 
-**hoon drops from 1.23 MiB to 108 KiB**, which puts the worst grammar in the corpus roughly
-where `abl` and `julia` sat *before* pooling. Extrapolating the observed ~10× average, corpus
-precedence falls from 2.13 MiB to somewhere near 0.2 MiB, and the whole schema for 295 grammars
-lands under a megabyte.
+**hoon drops 13.4×, from 1.25 MiB to 93.5 KiB** — slightly better than the 107.6 KiB estimated
+before building it. Corpus-wide, pooling is **3.2×**.
+
+**Correction to an earlier draft.** Pooling was sanity-checked only on the five *largest*
+grammars, where it always wins. On small ones it **loses**: javascript goes 0.9 → 1.6 KiB, c
+2.2 → 3.1 KiB. The row-id array costs 2 bytes per symbol occurrence regardless of width, so
+below roughly 16 children per node type a dense inline row is cheaper. Choosing per node type
+(`min-per-node` above) recovers that, but corpus-wide it is worth only **7%** over uniform
+pooling — 0.64 vs 0.69 MiB — in exchange for two representations in the consumer. Given the
+all-or-nothing simplicity goal, **uniform pooling is the right call**, and the penalty on small
+grammars is sub-kilobyte in absolute terms.
+
+### Runtime, verified
+
+Pooled lookup is: read the row id for *x*, index the shared pool by offset, test bit *y*.
+Three loads and a bit test. With the spike reading the pooled form:
+
+| | |
+|---|---|
+| rejection parity | `agree=13, missed=0, over-rejected=0` — unchanged |
+| guarantee parity | `agree=52, lost=14, unsound=0` — unchanged |
+| analysis pass | **0.0009 ms** — unchanged |
+
+So the 3.2× size reduction costs nothing at runtime, which was the constraint. One thing the
+run did surface: the one-time name→symbol resolve now varies between **0.3 and 2.9 ms** and is
+the dominant remaining cost. It is per *language*, not per query, so it amortises to nothing in
+a process compiling several queries — but it argues for caching the resolved schema on the
+`TSLanguage`, and it is the one place where resolving ids at generation time would pay, at the
+cost of the stability that name-keying buys.
 
 **The property that matters is that this is a representation, not a compression.** Looking up
 whether *x* can precede *y* is: read the row id for *x*, index the pool, test bit *y*. O(1), no

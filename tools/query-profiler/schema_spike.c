@@ -62,7 +62,7 @@ typedef struct {
   bool present;
   TSSymbol *mandatory; uint16_t count;
   TSSymbol *all; uint16_t all_count;
-  const uint16_t *prec; uint16_t prec_count;
+  const uint16_t *rows; uint16_t row_count;
   ResolvedField *fields; uint16_t field_count;
 } ResolvedNode;
 static ResolvedNode *g_by_symbol;
@@ -75,6 +75,7 @@ static TSSymbol resolve(const TSLanguage *l, const char *name) {
 }
 
 static const SchemaNode *g_schema; static unsigned g_schema_count;
+static const uint8_t *g_pool; static const uint32_t *g_pool_off;
 static double build_resolved(const TSLanguage *l) {
   double t0 = now_ms();
   g_symbol_count = ts_language_symbol_count(l);
@@ -90,7 +91,7 @@ static double build_resolved(const TSLanguage *l) {
       TSSymbol c = resolve(l, n->all[j]);
       r->all[r->all_count++] = c;                 // keep index alignment with `prec`
     }
-    r->prec = n->prec; r->prec_count = n->prec_count;   // already a pair count
+    r->rows = n->rows; r->row_count = n->row_count;
     r->mandatory = malloc(sizeof(TSSymbol) * n->mandatory_count);
     r->count = 0;
     for (unsigned j = 0; j < n->mandatory_count; j++) {
@@ -229,10 +230,11 @@ static const char *schema_reject(const TSQuery *q) {
         if (r->all[k] == a) ia = (int)k;
         if (r->all[k] == b) ib = (int)k;
       }
-      if (ia >= 0 && ib >= 0 && r->prec_count) {
-        bool ok = false;
-        for (unsigned k = 0; k < r->prec_count; k++)
-          if (r->prec[2*k] == ia && r->prec[2*k+1] == ib) { ok = true; break; }
+      if (ia >= 0 && ib >= 0 && r->row_count) {
+        // Pooled lookup: row id for `a`, index the shared pool, test bit `b`.
+        // Three loads and a bit test -- no unpacking.
+        const uint8_t *row = g_pool + g_pool_off[r->rows[ia]];
+        bool ok = (row[ib >> 3] >> (ib & 7)) & 1;
         if (!ok) { snprintf(why,sizeof why,"ordering: %s cannot precede %s in %s",
             ts_language_symbol_name(q->language, a), ts_language_symbol_name(q->language, b),
             ts_language_symbol_name(q->language, parent)); return why; }
@@ -248,8 +250,8 @@ int main(int argc, char **argv) {
                                   "       SPIKE_REJECT=1 schema_spike <lang> <queries.txt>\n"); return 1; }
   int reps = argc > 3 ? atoi(argv[3]) : 200;
   const TSLanguage *lang = NULL;
-  if (!strcmp(argv[1],"rust"))            { lang = tree_sitter_rust();       g_schema = rust_schema;       g_schema_count = rust_schema_count; }
-  else if (!strcmp(argv[1],"javascript")) { lang = tree_sitter_javascript(); g_schema = javascript_schema; g_schema_count = javascript_schema_count; }
+  if (!strcmp(argv[1],"rust"))            { lang = tree_sitter_rust();       g_schema = rust_schema;       g_schema_count = rust_schema_count; g_pool = rust_prec_pool; g_pool_off = rust_prec_off; }
+  else if (!strcmp(argv[1],"javascript")) { lang = tree_sitter_javascript(); g_schema = javascript_schema; g_schema_count = javascript_schema_count; g_pool = javascript_prec_pool; g_pool_off = javascript_prec_off; }
   else if (!strcmp(argv[1],"python"))     { lang = tree_sitter_python();     g_schema = python_schema;     g_schema_count = python_schema_count; }
   else if (!strcmp(argv[1],"go"))         { lang = tree_sitter_go();         g_schema = go_schema;         g_schema_count = go_schema_count; }
   else if (!strcmp(argv[1],"c"))          { lang = tree_sitter_c();          g_schema = c_schema;          g_schema_count = c_schema_count; }
