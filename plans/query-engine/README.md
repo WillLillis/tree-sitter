@@ -113,7 +113,8 @@ comes from and why the shape persists. Removing it needs a subset-query index. S
 | [`10-differential-rig.md`](10-differential-rig.md) | What the testing oracle actually is at each phase, and what to build when |
 | [`11-data-oriented-design.md`](11-data-oriented-design.md) | Where DoD pays here, where the algorithmic fix dominates it, and what that means for P2 |
 | [`12-handoff-merge-matcher.md`](12-handoff-merge-matcher.md) | Standalone pickup doc for the merge-matcher spike, incl. measurement hazards |
-| [`13-node-types-analysis.md`](13-node-types-analysis.md) | Replacing query analysis with a generated schema — feasibility, the one gap, the persistence decision |
+| [`13-node-types-analysis.md`](13-node-types-analysis.md) | Replacing query analysis with a generated schema — feasibility, parity, measured cost |
+| [`14-schema-persistence.md`](14-schema-persistence.md) | How the schema gets persisted and consumed — sized across 295 grammars |
 
 ## If you only do three things
 
