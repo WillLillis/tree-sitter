@@ -298,17 +298,37 @@ needs text access in the cursor.
 Much of what makes `query.c` hard is the absence of a standard library — every map, pool and
 dynamic array is hand-rolled or built on `array.h`.
 
-The bytecode turns that into an architectural choice rather than a constraint. The half needing
-rich data structures — parsing, resolution, analysis, optimisation — is **ahead-of-time** work
-that can live in Rust, exactly as `generate` does and exactly as the node-type schema will
-([`13-node-types-analysis.md`](13-node-types-analysis.md)). The half that must stay C is the VM,
-and the VM needs almost nothing: a thread list, a program array, a capture set. The dispatch
-loop above is a `switch` over two arrays.
+An earlier draft proposed splitting on that line — rich data structures in Rust ahead of time,
+a thin VM in C. That is not available; see below.
 
-**The constraint that keeps this honest:** `lib/` cannot depend on Rust — it must build
-standalone for embedding. So `ts_query_new(source)` still needs a C front end unless precompiled
-queries become the primary path and source compilation stays a slower convenience. That is a
-real fork and should be decided deliberately.
+### Decided: source compilation stays in C
+
+`ts_query_new(source)` remains a complete C path. Consumer simplicity and portability outrank
+the ergonomics of writing the compiler in Rust — a query engine that cannot be embedded without
+a Rust toolchain is a worse engine, and portability is why the core is C to begin with.
+
+Four consequences, two of them non-obvious:
+
+1. **The data-structure library is a prerequisite, not a convenience.** If parse → HIR →
+   analysis → bytecode all live in C, the four structures below are needed before the compiler
+   can be written, which moves them earlier in the sequence.
+2. **One compiler, in C. Rust orchestrates, never reimplements.** Ahead-of-time precompilation
+   should drive the C compiler through FFI — as `crates/cli` already drives the C library —
+   rather than growing a second front end. Two compilers for one language is the same
+   divergence risk that argued against a Rust-only `Query` constructor, and avoiding it is free.
+3. **Rust prototyping stays useful, with a trap.** If porting to C is the goal, the prototype
+   must be *C-shaped Rust*: no trait objects, no closure-heavy iterator chains, no design whose
+   structure depends on the borrow checker. Otherwise it teaches a design that does not survive
+   translation, which is worse than not prototyping. Rust's value here is fast iteration on
+   **shapes** — what does a capture set actually need to do? — not on architecture.
+4. **The bytecode boundary keeps its value for different reasons.** Not as a language boundary,
+   but as a stage boundary for maintainability, the vehicle for precompiled artifacts, and the
+   tooling deliverable. Those were the stronger arguments anyway.
+
+Unaffected: the node-type schema still generates in `generate` and is only *consumed* by C
+([`13-node-types-analysis.md`](13-node-types-analysis.md)). That asymmetry — Rust produces
+read-only program data, C consumes it — is the shape that survives this decision, and it is the
+one already chosen for `node-types.json`.
 
 ### The data structures actually needed, by measurement
 
