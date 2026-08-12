@@ -115,6 +115,7 @@ comes from and why the shape persists. Removing it needs a subset-query index. S
 | [`12-handoff-merge-matcher.md`](12-handoff-merge-matcher.md) | Standalone pickup doc for the merge-matcher spike, incl. measurement hazards |
 | [`13-node-types-analysis.md`](13-node-types-analysis.md) | Replacing query analysis with a generated schema — feasibility, parity, measured cost |
 | [`14-schema-persistence.md`](14-schema-persistence.md) | How the schema gets persisted and consumed — sized across 295 grammars |
+| [`15-ir-design.md`](15-ir-design.md) | The query VM: instruction set, thread state, dispatch loop, and the bug classes it removes |
 
 ## If you only do three things
 
