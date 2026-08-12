@@ -224,6 +224,14 @@ structure. Two well-studied answers:
 - **Automaton union.** Merge all patterns into one automaton with per-pattern accept states.
   This is what lexer generators do and what a TDFA construction would give for free.
 
+**Predicate pushdown — largely retracted, see [`15-ir-design.md`](15-ir-design.md).** Measured
+across 1,672 real query files, the predicate namespace is a consumer-owned extension point:
+`#set!` (a directive, not a filter) is the most common use, and `#lua-match?`, `#offset!`,
+`#make-range!` are nvim-treesitter's own rather than tree-sitter core. An engine that evaluated
+predicates would cover only the core set and leave the rest in bindings, i.e. two mechanisms.
+What survives is a possible *optimisation with a fallback* for `#eq?`/`#any-of?`/`#match?`. The
+original argument, for the record:
+
 **Predicate pushdown.** Covered in [`03-correctness.md`](03-correctness.md) §C2. `#eq?` and
 `#match?` are evaluated in the binding *after* a full match is produced. For
 `tags.scm`/`locals.scm`, which are dense with `#match?`, this means matching everything and

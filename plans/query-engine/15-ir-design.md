@@ -265,16 +265,69 @@ shared tail collapses it. The open question in an earlier draft — "how much do
 program?" — is largely answered by construction: on the order of one extra instruction per
 distinct arrival requirement, not a duplicated subtree.
 
+## Resolved in review
+
+**Two levels, not three — no plan layer.** There is one matching strategy today and no concrete
+second one in view. *Document* the strategy; do not *abstract* it. An abstraction with a single
+implementation is a cost with no payer, and it is precisely the speculative generality that
+makes code hard to read later. If selectivity-driven start points ever arrive, they can grow
+instructions in the bytecode or a level can be introduced then, with a real second case to
+design against.
+
+**Predicates stay out of the VM.** The current engine does not evaluate them at all: it parses
+them into `predicate_steps` and hands them to the binding via
+`ts_query_predicates_for_pattern`, and every binding implements `#eq?`, `#match?` and friends
+independently. Parity is therefore trivial — keep the side table, keep the accessor.
+
+Measured across 1,672 real query files: 42% contain a predicate, ~3,420 uses over ~16,437
+patterns. But the most common by far is `#set!` (1,310), which is a **directive** attaching
+metadata rather than a filter, and `#lua-match?` (371), `#offset!`, `#make-range!` and
+`#select-adjacent!` are **nvim-treesitter's own**, not tree-sitter core. Actual filtering
+predicates are ~1,814 uses, about 0.11 per pattern.
+
+That settles it: **the predicate namespace is a consumer-owned extension point the ecosystem has
+already extended.** A VM that evaluated predicates would either cover only the core set — leaving
+the rest in bindings, so two mechanisms — or need an extension mechanism of its own. The
+predicate-pushdown enthusiasm in [`05-database-angle.md`](05-database-angle.md) §3 is retracted
+on that basis. If it returns it is an *optimisation with a fallback* for the three core
+predicates (`#eq?`, `#any-of?`, `#match?`, 1,364 uses), not a semantic change, and it still
+needs text access in the cursor.
+
+## Implementation language: the bytecode is a boundary
+
+Much of what makes `query.c` hard is the absence of a standard library — every map, pool and
+dynamic array is hand-rolled or built on `array.h`.
+
+The bytecode turns that into an architectural choice rather than a constraint. The half needing
+rich data structures — parsing, resolution, analysis, optimisation — is **ahead-of-time** work
+that can live in Rust, exactly as `generate` does and exactly as the node-type schema will
+([`13-node-types-analysis.md`](13-node-types-analysis.md)). The half that must stay C is the VM,
+and the VM needs almost nothing: a thread list, a program array, a capture set. The dispatch
+loop above is a `switch` over two arrays.
+
+**The constraint that keeps this honest:** `lib/` cannot depend on Rust — it must build
+standalone for embedding. So `ts_query_new(source)` still needs a C front end unless precompiled
+queries become the primary path and source compilation stays a slower convenience. That is a
+real fork and should be decided deliberately.
+
+### The data structures actually needed, by measurement
+
+| structure | evidence |
+|---|---|
+| open-addressed map with epoch clearing | the merge spike's `MIndex`, for control-state lookup; epoch clearing avoided a 256 KB memset per sibling |
+| intrusive free-list pool | P2 — capture-list acquisition scans 191 entries on average today |
+| small sorted vector with subset ops | capture sets — what made merge-time disambiguation cheap |
+| interned string → id table | `symbol_table_id_for_name` is a linear `strncmp` scan |
+
+Four structures, each with a measured need, which is a tractable in-tree library rather than a
+stdlib reimplementation. Prototyping them in Rust first would establish the shapes before
+committing to C implementations.
+
 ## Open questions
 
 - **Encoding.** Fixed-width vs variable-length; operand widths; whether spans and provenance
   live in side tables keyed by pc (they should, so bytecode stays stable when only diagnostics
   change).
-- **Where the plan layer goes.** Selectivity-driven start points and program-driven traversal
-  are *plan* choices. Do they get their own level between HIR and bytecode, or does the
-  bytecode simply grow instructions to express them?
-- **Predicates.** Represented in the IR? Evaluated by the VM (needs text access, an API change,
-  cross-binding coordination)? Or left where they are? The largest optional scope fork.
 - **Incrementality.** If per-node VM state is ever cached against shared subtrees, it must be
   explicit and addressable. Cheap to design for now, expensive to retrofit.
 - **Stability policy.** Since the IR is a deliverable: what is versioned, what may change, and
