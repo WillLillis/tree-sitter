@@ -164,6 +164,18 @@ at merge time rather than by an O(n²) pass. It also satisfies the public API's 
 requirement, since a contiguous `TSQueryCapture[]` gets materialised once per emitted match
 anyway.
 
+**Position-keying is also what makes quantified captures work.** Each iteration of a loop
+executes the *same* `CAPTURE` instruction at a *different* position, setting a different entry —
+three `line_comment`s produce three `@doc` entries, in position order. That matches the existing
+contract, where `TSQueryMatch.captures` may repeat a capture index and `capture_quantifiers`
+already records `@doc` as `ZeroOrMore`.
+
+The failure mode worth naming: if the capture set were keyed by *capture id* rather than by
+*position*, the second iteration would overwrite the first and every quantified capture would
+silently collapse to one binding. So position-keying is load-bearing for quantifier semantics,
+not only for cheap subset testing — which makes it exactly the kind of thing an implementer
+might "simplify" away.
+
 **Do not let node references into thread state.** It is the single decision most likely to be
 made by accident and most expensive to undo.
 
@@ -203,31 +215,55 @@ The maintainability argument, made concrete against bugs actually found:
 `((line_comment)* @doc . (function_item name: (identifier) @name) @fn)`
 
 ```
-  0: CHILD    ANY            ; enter the sibling sequence
-  1: SPLIT    2, 6           ; zero or more line_comments
+  0: CHILD    ANY             ; first candidate in the sibling sequence
+  1: SPLIT    2, 20           ; enter the run, or skip it entirely
+  ; --- run body ---
   2: MATCH_SYM line_comment
   3: CAPTURE  @doc
-  4: SIBLING  IMMEDIATE      ; the run is contiguous
-  5: JMP      1
-  6: MATCH_SYM function_item ; '.' anchor: adjacency required here
-  7: CAPTURE  @fn
-  8: CHILD    ANY
-  9: CHECK_FIELD name
- 10: MATCH_SYM identifier
- 11: CAPTURE  @name
- 12: UP
- 13: ACCEPT   0
+  4: SPLIT    5, 8            ; another comment, or leave the run
+  5: SIBLING  ANY             ; comments need NOT be adjacent to each other
+  6: JMP      2
+  ; --- leaving the run: the '.' applies to this edge ---
+  8: SIBLING  IMMEDIATE
+  9: JMP      30
+  ; --- zero comments: the anchor is vacuous, position unchanged ---
+ 20: JMP      30
+  ; --- shared tail ---
+ 30: MATCH_SYM function_item
+ 31: CAPTURE  @fn
+ 32: CHILD    ANY
+ 33: CHECK_FIELD name
+ 34: MATCH_SYM identifier
+ 35: CAPTURE  @name
+ 36: UP
+ 37: ACCEPT   0
 ```
 
-Compare with reading the same pattern out of today's step array, where the quantifier is a
-`pass_through` step with a backward `alternative_index`, the anchor is an `is_immediate` bit
-whose meaning depends on whether a zero-match skip was taken, and the `name:` child is a depth
-change inferred from a `uint16`.
+Two things this gets right that an earlier draft of this document got wrong, both worth
+dwelling on because they are the whole point of P2.
 
-Note what the anchor became: `SIBLING IMMEDIATE` at 4 (the run is contiguous) versus the entry
-at 6 being reached from either the loop or the zero-match skip. If those two paths need
-different adjacency, the compiler emits two instructions rather than setting a flag — P2 in
-practice.
+**The anchor belongs to the edge leaving the loop, not to the loop body.** `(line_comment)*`
+with no internal anchor does **not** require the comments to be adjacent to one another — that
+is the unanchored semantics measured in [`02-execution-model.md`](02-execution-model.md), and it
+is why the unanchored form yields 22,100 matches where the anchored one yields 128. The `.`
+constrains only the transition out of the run. Hence `SIBLING ANY` at 5 inside the loop and
+`SIBLING IMMEDIATE` at 8 on the way out.
+
+**`function_item` is reachable two ways, with different requirements.** Via the loop it must be
+immediately after the last comment; via the zero-skip the anchor is vacuous and it may appear
+anywhere. That is exactly what `skipped_quantifier` encodes at runtime today, and what the four
+anchor commits are about. Here it is two code paths, and the flag does not exist.
+
+### P2's duplication cost is bounded, and small
+
+The two paths differ by **exactly one instruction** — `SIBLING IMMEDIATE` at 8 versus falling
+through at 20 — and then rejoin at 30 via `JMP`.
+
+That generalises: **P2 duplicates position-advance instructions, not the matching that follows
+them.** The divergence is in *how a thread arrived*, not in *what it does next*, so a jump to a
+shared tail collapses it. The open question in an earlier draft — "how much does P2 inflate the
+program?" — is largely answered by construction: on the order of one extra instruction per
+distinct arrival requirement, not a duplicated subtree.
 
 ## Open questions
 
@@ -244,5 +280,7 @@ practice.
 - **Stability policy.** Since the IR is a deliverable: what is versioned, what may change, and
   what happens when a grammar regenerates and symbol ids move. The schema work chose
   names-plus-load-time-resolve for exactly this reason; the same answer probably applies.
-- **How much program duplication P2 causes in practice.** Bounded by alternation × quantifier
-  nesting, but unmeasured. Worth checking against real query files before committing.
+- **Whether P2's duplication stays bounded on real queries.** The worked example shows it costs
+  one instruction per distinct arrival requirement, with tails shared via `JMP`. Deeply nested
+  alternation-inside-quantifier may behave worse; worth checking against real query files, but
+  it is no longer an open-ended risk.
