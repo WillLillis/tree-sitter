@@ -7,6 +7,8 @@
 
 use rustc_hash::FxHashMap;
 
+use crate::strpool::{StrId, StrPool};
+
 use super::{
     Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
     ast::{
@@ -20,7 +22,7 @@ use super::{
 /// imports, so importers override imported modules.
 #[derive(Default)]
 pub struct CfgState {
-    pub active: FxHashMap<String, bool>,
+    pub active: FxHashMap<StrId, bool>,
 }
 
 impl CfgState {
@@ -30,6 +32,7 @@ impl CfgState {
         &mut self,
         shared: &SharedAst,
         ctx: &mut ModuleContext,
+        strs: &mut StrPool,
     ) -> Result<(), ResolveError> {
         let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) else {
             return Ok(());
@@ -41,17 +44,17 @@ impl CfgState {
             ));
         };
         for &ObjectField {
-            name: key_span,
+            name: key,
             value: value_id,
         } in shared.pools.get_object(range)
         {
-            let enable = match ctx.text(key_span) {
+            let enable = match ctx.text(key.span) {
                 "enabled" => true,
                 "disabled" => false,
                 other => {
                     return Err(err(
                         ResolveErrorKind::CfgFlagsUnknownKey(other.into()),
-                        key_span,
+                        key.span,
                     ));
                 }
             };
@@ -70,16 +73,15 @@ impl CfgState {
                     }
                     _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
                 }
-                let name_text = ctx.text(span);
-                if let Some(&first_span) = ctx.cfg_declared.get(name_text) {
+                let name = strs.intern(ctx.text(span));
+                if let Some(&first_span) = ctx.cfg_declared.get(&name) {
                     return Err(ResolveError::with_note(
-                        ResolveErrorKind::CfgFlagDeclaredTwice(name_text.to_owned()),
+                        ResolveErrorKind::CfgFlagDeclaredTwice(strs.resolve(name).to_string()),
                         span,
                         ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
                 }
-                let name = name_text.to_owned();
-                ctx.cfg_declared.insert(name.clone(), span);
+                ctx.cfg_declared.insert(name, span);
                 self.active.entry(name).or_insert(enable);
             }
         }
@@ -91,6 +93,7 @@ impl CfgState {
 pub fn apply_cfg(
     shared: &mut SharedAst,
     ctx: &mut ModuleContext,
+    strs: &StrPool,
     state: &CfgState,
     kind: ModuleKind,
 ) -> Result<(), ResolveError> {
@@ -100,6 +103,7 @@ pub fn apply_cfg(
         state,
         kind,
         source: &ctx.source,
+        strs,
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
         module_refs: &mut ctx.module_refs,
@@ -138,10 +142,12 @@ struct Walker<'a> {
     state: &'a CfgState,
     kind: ModuleKind,
     source: &'a str,
+    /// Interner for the cfg-name lookups in [`Self::walk_cfg`].
+    strs: &'a StrPool,
     /// Local declared set for the grammar visibility check
-    cfg_declared: &'a FxHashMap<String, Span>,
+    cfg_declared: &'a FxHashMap<StrId, Span>,
     /// cfg-dropped top-level decls for `enrich_resolve_error` to use later.
-    cfg_dropped: &'a mut FxHashMap<String, NodeId>,
+    cfg_dropped: &'a mut FxHashMap<StrId, NodeId>,
     /// The module's import/inherit refs, rebuilt from the surviving AST as the
     /// walk visits each one - a nested cfg-dropped ref is never collected.
     module_refs: &'a mut Vec<NodeId>,
@@ -169,19 +175,23 @@ impl Walker<'_> {
         child: NodeId,
     ) -> Result<Option<NodeId>, ResolveError> {
         let name_text: &str = name.resolve(self.source);
+        let name_id = self.strs.get(name_text);
         // Grammar modules require local declaration. Helper modules transparently
         // see the importing grammar's declared set.
-        let visible = match self.kind {
-            ModuleKind::Grammar => self.cfg_declared.contains_key(name_text),
-            ModuleKind::Helper => self.state.active.contains_key(name_text),
-        };
+        let visible = name_id.is_some_and(|id| match self.kind {
+            ModuleKind::Grammar => self.cfg_declared.contains_key(&id),
+            ModuleKind::Helper => self.state.active.contains_key(&id),
+        });
         if !visible {
             Err(err(
                 ResolveErrorKind::CfgFlagUnknown(name_text.into()),
                 name,
             ))?;
         }
-        let active = self.state.active.get(name_text).copied().unwrap_or(false);
+        let active = name_id
+            .and_then(|id| self.state.active.get(&id))
+            .copied()
+            .unwrap_or(false);
         if !active {
             // Peel any nested cfg layers to find the underlying item.
             let mut item = child;
@@ -193,12 +203,11 @@ impl Walker<'_> {
                 Node::Rule { name, .. } | Node::Let { name, .. } | Node::Forward { name } => {
                     Some(*name)
                 }
-                Node::Macro(macro_id) => Some(self.shared.pools.get_macro(*macro_id).name),
+                Node::Macro(macro_id) => Some(self.shared.pools.get_macro(*macro_id).name.value),
                 _ => None,
             };
             if let Some(decl_name) = dropped_name {
-                let key = decl_name.resolve(self.source).to_owned();
-                self.cfg_dropped.entry(key).or_insert(id);
+                self.cfg_dropped.entry(decl_name).or_insert(id);
             }
             Ok(None)
         } else {

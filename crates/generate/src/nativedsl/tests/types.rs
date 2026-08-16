@@ -8,7 +8,7 @@ fn extras_mixed_rule_and_str() {
         rule program { "x" }
         rule ws { regexp(r"\s") }
     "#);
-    assert_eq!(g.extra_symbols.len(), 2);
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 compile_tests! {

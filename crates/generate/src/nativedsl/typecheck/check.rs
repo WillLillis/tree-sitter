@@ -1,63 +1,69 @@
-use crate::nativedsl::{
-    ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
-    ast::{
-        ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, ObjectField, Param,
-        PrecKind, SharedAst, Span,
+use crate::{
+    nativedsl::{
+        ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
+        ast::{
+            ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, ObjectField, Param,
+            PrecKind, SharedAst, Span, Spanned,
+        },
+        diagnostic::suggest_name,
+        resolve::resolve_module_ref,
+        typecheck::{
+            Constraint, TypeEnv, TypeResult,
+            types::{ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError},
+        },
     },
-    diagnostic::suggest_name,
-    resolve::resolve_module_ref,
-    typecheck::{
-        Constraint, TypeEnv, TypeResult,
-        types::{ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError},
-    },
+    strpool::{StrId, StrPool},
 };
 
-type CheckFn = fn(&SharedAst, &ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<()>;
+/// The immutable context threaded through every typecheck walk: the AST being
+/// read, the module the current item came from (for spans and diagnostics), and
+/// the string/rule arena.
+#[derive(Clone, Copy)]
+pub(super) struct Cx<'a> {
+    pub shared: &'a SharedAst,
+    pub ctx: &'a ModuleContext,
+    pub strs: &'a StrPool,
+}
 
-pub(super) fn check_item(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
+type CheckFn = fn(Cx<'_>, NodeId, &mut TypeEnv) -> TypeResult<()>;
+
+pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    let Cx { shared, ctx, .. } = cx;
     match shared.arena.get(id) {
         Node::Grammar => {
             // INVARIANT: validate_grammar enforces `grammar_config.is_some()`
             let config = ctx.grammar_config.as_ref().unwrap();
             for id in [config.extras, config.externals].into_iter().flatten() {
-                expect_list(shared, ctx, id, env, expect_rule, Ty::LIST_RULE)?;
+                expect_list(cx, id, env, expect_rule, Ty::LIST_RULE)?;
             }
             for id in [config.inline, config.supertypes].into_iter().flatten() {
-                expect_name_list(shared, ctx, id, env)?;
+                expect_name_list(cx, id, env)?;
             }
             if let Some(id) = config.conflicts {
-                expect_list(shared, ctx, id, env, expect_name_list, Ty::LIST_LIST_RULE)?;
+                expect_list(cx, id, env, expect_name_list, Ty::LIST_LIST_RULE)?;
             }
             if let Some(id) = config.precedences {
                 expect_list(
-                    shared,
-                    ctx,
+                    cx,
                     id,
                     env,
-                    |shared, ctx, id, env| {
-                        expect_list(shared, ctx, id, env, expect_name_or_str, Ty::LIST_RULE)
-                    },
+                    |cx, id, env| expect_list(cx, id, env, expect_name_or_str, Ty::LIST_RULE),
                     Ty::LIST_LIST_RULE,
                 )?;
             }
             if let Some(id) = config.word {
-                expect_name_ref(shared, ctx, id, env)?;
+                expect_name_ref(cx, id, env)?;
             }
             if let Some(id) = config.start {
-                expect_name_ref(shared, ctx, id, env)?;
+                expect_name_ref(cx, id, env)?;
             }
             if let Some(id) = config.reserved {
-                expect_reserved(shared, ctx, id, env)?;
+                expect_reserved(cx, id, env)?;
             }
             if let Some(id) = config.flags {
                 expect_pat!(Node::Object(range), shared.arena.get(id));
                 check_duplicate_names(
-                    ctx,
+                    cx,
                     shared.pools.get_object(*range),
                     |f| f.name,
                     TypeErrorKind::DuplicateObjectKey,
@@ -66,7 +72,7 @@ pub(super) fn check_item(
             Ok(())
         }
         Node::Let { .. } => {
-            _ = type_of_let(shared, ctx, id, env)?;
+            _ = type_of_let(cx, id, env)?;
             Ok(())
         }
         Node::Macro(macro_id) => {
@@ -76,30 +82,30 @@ pub(super) fn check_item(
             let name = config.name;
             let body = config.body;
             check_duplicate_names(
-                ctx,
+                cx,
                 shared.pools.param_slice(params),
                 |p| p.name,
                 TypeErrorKind::DuplicateParameter,
             )?;
             for p in shared.pools.param_slice(params) {
-                reject_module_type(p.ty, p.name)?;
+                reject_module_type(p.ty, p.name.span)?;
             }
             match kind {
                 MacroKind::Expression(return_ty) => {
-                    reject_module_type(return_ty, name)?;
-                    type_of(shared, ctx, body, env, Constraint::Exact(return_ty))?;
+                    reject_module_type(return_ty, name.span)?;
+                    type_of(cx, body, env, Constraint::Exact(return_ty))?;
                 }
-                MacroKind::RuleSet => check_rule_set_body(shared, ctx, body, env)?,
+                MacroKind::RuleSet => check_rule_set_body(cx, body, env)?,
             }
             Ok(())
         }
-        Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env),
+        Node::Rule { body, .. } => expect_rule(cx, *body, env),
         &Node::ExpandedRule(expand_id) => {
             let exp = *shared.pools.get_expansion(expand_id);
             let params = shared.pools.get_macro(exp.macro_id).params;
             for (i, &arg) in shared.pools.child_slice(exp.args).iter().enumerate() {
                 let ty = shared.pools.param_slice(params)[i].ty;
-                type_of(shared, ctx, arg, env, Constraint::Exact(ty))?;
+                type_of(cx, arg, env, Constraint::Exact(ty))?;
             }
             Ok(())
         }
@@ -110,12 +116,12 @@ pub(super) fn check_item(
 }
 
 /// Type a `let` and any transitively referenced `let`s, memoizing each.
-fn type_of_let(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    let_id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<Ty> {
+fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> {
+    let Cx {
+        shared,
+        ctx,
+        strs: pool,
+    } = cx;
     if let Some(&ty) = env.vars.get(&let_id) {
         return Ok(ty);
     }
@@ -135,7 +141,7 @@ fn type_of_let(
                     unreachable!()
                 };
                 return Err(TypeError::with_note(
-                    TypeErrorKind::CircularLet(ctx.text(name).to_string()),
+                    TypeErrorKind::CircularLet(pool.resolve(name).to_string()),
                     shared.arena.span(dep),
                     ctx.note(NoteMessage::SelfReferenceHere, shared.arena.span(reference)),
                 ));
@@ -148,13 +154,13 @@ fn type_of_let(
             .get(&cur)
             .copied()
             .map_or(Constraint::None, Constraint::Exact);
-        let inferred = type_of(shared, ctx, value, env, constraint)?;
+        let inferred = type_of(cx, value, env, constraint)?;
         if let Node::Object(range) = *shared.arena.get(value) {
-            let fields: Vec<String> = shared
+            let fields: Vec<StrId> = shared
                 .pools
                 .get_object(range)
                 .iter()
-                .map(|f| ctx.text(f.name).to_string())
+                .map(|f| f.name.value)
                 .collect();
             env.object_fields.insert(cur, fields);
         }
@@ -166,23 +172,19 @@ fn type_of_let(
 }
 
 /// Typecheck rule decls inside a rule-set macro body at definition time.
-fn check_rule_set_body(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    body_id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
+fn check_rule_set_body(cx: Cx<'_>, body_id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    let Cx { shared, .. } = cx;
     let Node::RuleSet(range) = shared.arena.get(body_id) else {
         unreachable!()
     };
     for &decl_id in shared.pools.child_slice(*range) {
         match shared.arena.get(decl_id) {
-            Node::Rule { body, .. } => expect_rule(shared, ctx, *body, env)?,
+            Node::Rule { body, .. } => expect_rule(cx, *body, env)?,
             Node::ComputedRule {
                 name_expr, body, ..
             } => {
-                type_of(shared, ctx, *name_expr, env, Constraint::Exact(Ty::STR))?;
-                expect_rule(shared, ctx, *body, env)?;
+                type_of(cx, *name_expr, env, Constraint::Exact(Ty::STR))?;
+                expect_rule(cx, *body, env)?;
             }
             _ => unreachable!(),
         }
@@ -192,41 +194,31 @@ fn check_rule_set_body(
 
 /// Check a list config field.
 fn expect_list(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
+    cx: Cx<'_>,
     id: NodeId,
     env: &mut TypeEnv,
     check_elem: CheckFn,
     expected: Ty,
 ) -> TypeResult<()> {
+    let Cx { shared, .. } = cx;
     if let Node::List(range) = shared.arena.get(id) {
-        let leaf = |shared: &SharedAst, ctx: &ModuleContext, id: NodeId, env: &mut TypeEnv| {
-            check_elem(shared, ctx, id, env).map(|()| Ty::RULE)
-        };
+        let leaf =
+            |cx: Cx<'_>, id: NodeId, env: &mut TypeEnv| check_elem(cx, id, env).map(|()| Ty::RULE);
         for &child in shared.pools.child_slice(*range) {
-            check_spread_item(shared, ctx, child, env, leaf)?;
+            check_spread_item(cx, child, env, leaf)?;
         }
         return Ok(());
     }
-    type_of(shared, ctx, id, env, Constraint::Exact(expected))?;
+    type_of(cx, id, env, Constraint::Exact(expected))?;
     Ok(())
 }
 
-fn expect_name_list(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
-    expect_list(shared, ctx, id, env, expect_name_ref, Ty::LIST_RULE)
+fn expect_name_list(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    expect_list(cx, id, env, expect_name_ref, Ty::LIST_RULE)
 }
 
-fn expect_name_ref(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
+fn expect_name_ref(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    let Cx { shared, ctx, .. } = cx;
     match shared.arena.get(id) {
         Node::Ident(IdentKind::Rule) => Ok(()),
         Node::Ident(IdentKind::Var(_))
@@ -234,7 +226,7 @@ fn expect_name_ref(
         | Node::GrammarConfig { .. }
         | Node::MacroParam { .. }
         | Node::ForBinding { .. } => {
-            type_of(shared, ctx, id, env, Constraint::Strict(Ty::RULE))?;
+            type_of(cx, id, env, Constraint::Strict(Ty::RULE))?;
             Ok(())
         }
         // A qualified ref names a rule but is not a name here; suggest the
@@ -254,28 +246,20 @@ fn expect_name_ref(
     }
 }
 
-fn expect_name_or_str(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
+fn expect_name_or_str(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    let Cx { shared, .. } = cx;
     if matches!(
         shared.arena.get(id),
         Node::StringLit | Node::RawStringLit { .. }
     ) {
         return Ok(());
     }
-    expect_name_ref(shared, ctx, id, env)
+    expect_name_ref(cx, id, env)
 }
 
 /// Check the `reserved` config field.
-fn expect_reserved(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
+fn expect_reserved(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    let Cx { shared, .. } = cx;
     let Node::Object(range) = shared.arena.get(id) else {
         return Err(TypeError::new(
             TypeErrorKind::ReservedMustBeLiteral,
@@ -283,65 +267,66 @@ fn expect_reserved(
         ));
     };
     let fields = shared.pools.get_object(*range);
-    check_duplicate_names(ctx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
+    check_duplicate_names(cx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
     for &ObjectField { value: val_id, .. } in fields {
-        expect_list(shared, ctx, val_id, env, expect_rule, Ty::LIST_RULE)?;
+        expect_list(cx, val_id, env, expect_rule, Ty::LIST_RULE)?;
     }
     Ok(())
 }
 
-fn expect_rule(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-) -> TypeResult<()> {
-    type_of(shared, ctx, id, env, Constraint::Exact(Ty::RULE))?;
+fn expect_rule(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
+    type_of(cx, id, env, Constraint::Exact(Ty::RULE))?;
     Ok(())
+}
+
+/// What a position asks of the expression being typed: the constraint to
+/// enforce, and whether the resulting type is pushed onto `results` for a
+/// parent [`Work::Combine`] to fold. Every `Work` variant carries one, and a
+/// spread propagates its own demand down to the leaves it expands into.
+#[derive(Clone, Copy)]
+pub(super) struct Demand {
+    expected: Constraint,
+    emit: bool,
+}
+
+impl Demand {
+    /// Check against `expected` and discard the resulting type.
+    const fn checking(expected: Constraint) -> Self {
+        Self {
+            expected,
+            emit: false,
+        }
+    }
+
+    /// Check against `expected` and emit the type for a parent to fold.
+    const fn emitting(expected: Constraint) -> Self {
+        Self {
+            expected,
+            emit: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum Work {
-    /// Type `id` under `expected`.
-    Eval {
-        id: NodeId,
-        expected: Constraint,
-        emit: bool,
-    },
-    /// Type a spread-position item.
-    Spread {
-        id: NodeId,
-        leaf: Constraint,
-        emit: bool,
-    },
-    /// Match a `for`'s iterable type, then type its body under `leaf`.
-    ForBindings {
-        node: NodeId,
-        leaf: Constraint,
-        emit: bool,
-    },
+    /// Type `id` under `demand`.
+    Eval { id: NodeId, demand: Demand },
+    /// Type a spread-position item, propagating `demand` to its leaves.
+    Spread { id: NodeId, demand: Demand },
+    /// Match a `for`'s iterable type, then type its body under `demand`.
+    ForBindings { node: NodeId, demand: Demand },
     /// Fold a combining node's emitted child types.
-    Combine {
-        id: NodeId,
-        expected: Constraint,
-        emit: bool,
-    },
+    Combine { id: NodeId, demand: Demand },
 }
 
 const _: () = assert!(std::mem::size_of::<Work>() == 16);
 
 /// Type a node.
-fn type_of(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    id: NodeId,
-    env: &mut TypeEnv,
-    expected: Constraint,
-) -> TypeResult<Ty> {
+fn type_of(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv, expected: Constraint) -> TypeResult<Ty> {
     let work_base = env.work.len();
     let results_base = env.results.len();
-    push_eval(&mut env.work, id, expected, true);
-    match drive(shared, ctx, env, work_base) {
+    push_eval(&mut env.work, id, Demand::emitting(expected));
+    match drive(cx, env, work_base) {
         Ok(()) => Ok(pop_result(&mut env.results)),
         Err(e) => {
             env.work.truncate(work_base);
@@ -352,65 +337,51 @@ fn type_of(
 }
 
 /// Run the iterative traversal until the work stack returns to `work_base`.
-fn drive(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    env: &mut TypeEnv,
-    work_base: usize,
-) -> TypeResult<()> {
+fn drive(cx: Cx<'_>, env: &mut TypeEnv, work_base: usize) -> TypeResult<()> {
+    let Cx { shared, .. } = cx;
     while env.work.len() > work_base {
         match env.work.pop().unwrap() {
-            Work::Eval {
-                mut id,
-                mut expected,
-                mut emit,
-            } => {
-                while let Some((next_id, next_expected, next_emit)) =
-                    eval(shared, ctx, env, id, expected, emit)?
-                {
+            Work::Eval { mut id, mut demand } => {
+                while let Some((next_id, next_demand)) = eval(cx, env, id, demand)? {
                     id = next_id;
-                    expected = next_expected;
-                    emit = next_emit;
+                    demand = next_demand;
                 }
             }
-            Work::Spread { id, leaf, emit } => {
-                enqueue_for(shared, ctx, id, leaf, emit, &mut env.work)?;
+            Work::Spread { id, demand } => {
+                enqueue_for(cx, id, demand, &mut env.work)?;
             }
-            Work::ForBindings { node, leaf, emit } => {
+            Work::ForBindings { node, demand } => {
                 let iter_ty = pop_result(&mut env.results);
                 expect_pat!(Node::For { for_id, body }, *shared.arena.get(node));
                 match_for_elem(shared, for_id, iter_ty)?;
-                push_spread_item(shared, body, leaf, emit, &mut env.work);
+                push_spread_item(shared, body, demand, &mut env.work);
             }
-            Work::Combine { id, expected, emit } => combine(shared, ctx, env, id, expected, emit)?,
+            Work::Combine { id, demand } => {
+                combine(cx, env, id, demand)?;
+            }
         }
     }
     Ok(())
 }
 
-type Descent = Option<(NodeId, Constraint, bool)>;
+type Descent = Option<(NodeId, Demand)>;
 
 /// Handle a [`Work::Eval`].
-fn eval(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    env: &mut TypeEnv,
-    id: NodeId,
-    expected: Constraint,
-    emit: bool,
-) -> TypeResult<Descent> {
+fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult<Descent> {
+    let Cx { shared, ctx, .. } = cx;
+    let Demand { expected, emit } = demand;
     let span = shared.arena.span(id);
     Ok(match *shared.arena.get(id) {
         Node::IntLit(_) => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::INT, span)?;
+            enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
             None
         }
         Node::StringLit | Node::RawStringLit { .. } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::STR, span)?;
+            enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
             None
         }
         Node::Ident(IdentKind::Rule) | Node::Blank | Node::ModuleRule { .. } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
             None
         }
         Node::ModuleRef { import, module, .. } => {
@@ -420,11 +391,11 @@ fn eval(
             } else {
                 ModuleTy::Grammar(idx)
             });
-            enforce_leaf(&mut env.results, expected, emit, ty, span)?;
+            enforce_leaf(&mut env.results, demand, ty, span)?;
             None
         }
         Node::MacroParam { ty, .. } | Node::ForBinding { ty, .. } => {
-            enforce_leaf(&mut env.results, expected, emit, ty, span)?;
+            enforce_leaf(&mut env.results, demand, ty, span)?;
             None
         }
         Node::Ident(IdentKind::Macro(_)) => {
@@ -437,29 +408,33 @@ fn eval(
         // through other lets). type_of_let resolves chains iteratively and
         // reports any self-reference cycle.
         Node::Ident(IdentKind::Var(let_id)) => {
-            let ty = type_of_let(shared, ctx, let_id, env)?;
-            enforce_leaf(&mut env.results, expected, emit, ty, span)?;
+            let ty = type_of_let(cx, let_id, env)?;
+            enforce_leaf(&mut env.results, demand, ty, span)?;
             None
         }
         Node::SymRef { expr } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
-            Some((expr, Constraint::Exact(Ty::STR), false))
+            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            Some((expr, Demand::checking(Constraint::Exact(Ty::STR))))
         }
         Node::Neg(inner) => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::INT, span)?;
-            Some((inner, Constraint::Exact(Ty::INT), false))
+            enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
+            Some((inner, Demand::checking(Constraint::Exact(Ty::INT))))
         }
         Node::Repeat { inner, .. }
         | Node::Token { inner, .. }
         | Node::Field { content: inner, .. }
         | Node::Reserved { content: inner, .. } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
-            Some((inner, Constraint::Exact(Ty::RULE), false))
+            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            Some((inner, Demand::checking(Constraint::Exact(Ty::RULE))))
         }
         Node::BinOp { lhs, rhs, .. } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::INT, span)?;
-            push_eval(&mut env.work, rhs, Constraint::Exact(Ty::INT), false);
-            Some((lhs, Constraint::Exact(Ty::INT), false))
+            enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
+            push_eval(
+                &mut env.work,
+                rhs,
+                Demand::checking(Constraint::Exact(Ty::INT)),
+            );
+            Some((lhs, Demand::checking(Constraint::Exact(Ty::INT))))
         }
         Node::Prec {
             kind,
@@ -471,19 +446,27 @@ fn eval(
             } else {
                 Constraint::IntOrStr
             };
-            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
-            push_eval(&mut env.work, content, Constraint::Exact(Ty::RULE), false);
-            Some((value, value_expected, false))
+            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            push_eval(
+                &mut env.work,
+                content,
+                Demand::checking(Constraint::Exact(Ty::RULE)),
+            );
+            Some((value, Demand::checking(value_expected)))
         }
         Node::DynRegex { pattern, flags } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
             if let Some(fid) = flags {
-                push_eval(&mut env.work, fid, Constraint::Exact(Ty::STR), false);
+                push_eval(
+                    &mut env.work,
+                    fid,
+                    Demand::checking(Constraint::Exact(Ty::STR)),
+                );
             }
-            Some((pattern, Constraint::Exact(Ty::STR), false))
+            Some((pattern, Demand::checking(Constraint::Exact(Ty::STR))))
         }
         Node::Concat(range) => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::STR, span)?;
+            enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
             descend_eval(
                 shared.pools.child_slice(range),
                 Constraint::Exact(Ty::STR),
@@ -491,47 +474,55 @@ fn eval(
             )
         }
         Node::SeqOrChoice { range, .. } => {
-            enforce_leaf(&mut env.results, expected, emit, Ty::RULE, span)?;
+            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
             for &member in shared.pools.child_slice(range).iter().rev() {
-                push_spread_item(shared, member, Constraint::RuleLike, false, &mut env.work);
+                push_spread_item(
+                    shared,
+                    member,
+                    Demand::checking(Constraint::RuleLike),
+                    &mut env.work,
+                );
             }
             None
         }
         Node::Append { left, right } => {
             let (left_evaled, right_evaled) = append_operands(shared, left, right, expected);
-            push_combine(&mut env.work, id, expected, emit);
+            push_combine(&mut env.work, id, demand);
             if right_evaled {
-                push_eval(&mut env.work, right, expected, true);
+                push_eval(&mut env.work, right, Demand::emitting(expected));
             }
             if left_evaled {
-                push_eval(&mut env.work, left, expected, true);
+                push_eval(&mut env.work, left, Demand::emitting(expected));
             }
             None
         }
         Node::FieldAccess { obj, .. } => {
-            push_combine(&mut env.work, id, expected, emit);
-            push_eval(&mut env.work, obj, Constraint::AnyObject, true);
+            push_combine(&mut env.work, id, demand);
+            push_eval(&mut env.work, obj, Demand::emitting(Constraint::AnyObject));
             None
         }
         Node::QualifiedAccess { obj, .. } => {
-            push_combine(&mut env.work, id, expected, emit);
-            push_eval(&mut env.work, obj, Constraint::None, true);
+            push_combine(&mut env.work, id, demand);
+            push_eval(&mut env.work, obj, Demand::emitting(Constraint::None));
             None
         }
         Node::GrammarConfig { module, .. } => {
-            push_combine(&mut env.work, id, expected, emit);
+            push_combine(&mut env.work, id, demand);
             push_eval(
                 &mut env.work,
                 module,
-                Constraint::Exact(Ty::ANY_MODULE),
-                true,
+                Demand::emitting(Constraint::Exact(Ty::ANY_MODULE)),
             );
             None
         }
         Node::Alias { content, target } => {
-            push_combine(&mut env.work, id, expected, emit);
-            push_eval(&mut env.work, target, Constraint::None, true);
-            push_eval(&mut env.work, content, Constraint::Exact(Ty::RULE), false);
+            push_combine(&mut env.work, id, demand);
+            push_eval(&mut env.work, target, Demand::emitting(Constraint::None));
+            push_eval(
+                &mut env.work,
+                content,
+                Demand::checking(Constraint::Exact(Ty::RULE)),
+            );
             None
         }
         Node::Object(range) => {
@@ -543,11 +534,11 @@ fn eval(
                 }
                 return Ok(None);
             }
-            check_duplicate_names(ctx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
+            check_duplicate_names(cx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
             let value_expected = expected.object_value();
-            push_combine(&mut env.work, id, expected, emit);
+            push_combine(&mut env.work, id, demand);
             for f in fields.iter().rev() {
-                push_eval(&mut env.work, f.value, value_expected, true);
+                push_eval(&mut env.work, f.value, Demand::emitting(value_expected));
             }
             None
         }
@@ -561,9 +552,9 @@ fn eval(
                 return Ok(None);
             }
             let elem_expected = expected.elem();
-            push_combine(&mut env.work, id, expected, emit);
+            push_combine(&mut env.work, id, demand);
             for &item in items.iter().rev() {
-                push_spread_item(shared, item, elem_expected, true, &mut env.work);
+                push_spread_item(shared, item, Demand::emitting(elem_expected), &mut env.work);
             }
             None
         }
@@ -573,32 +564,22 @@ fn eval(
             if !(TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY).contains(&n) {
                 return Err(TypeError::new(TypeErrorKind::TupleArityInvalid(n), span));
             }
-            push_combine(&mut env.work, id, expected, emit);
+            push_combine(&mut env.work, id, demand);
             for &item in items.iter().rev() {
-                push_eval(&mut env.work, item, Constraint::None, true);
+                push_eval(&mut env.work, item, Demand::emitting(Constraint::None));
             }
             None
         }
         Node::Call { name, args } => {
-            let macro_id = resolve_macro_name(shared, ctx, name, span)?;
+            let macro_id = resolve_macro_name(cx, name, span)?;
             let args = shared.pools.child_slice(args);
-            enqueue_macro_call(
-                shared,
-                ctx,
-                macro_id,
-                id,
-                name,
-                args,
-                expected,
-                emit,
-                &mut env.work,
-            )?;
+            enqueue_macro_call(cx, macro_id, id, name, args, demand, &mut env.work)?;
             None
         }
         Node::QualifiedCall(range) => {
             let (obj, name, args) = shared.pools.get_qualified_call(range);
             // Preserve recursive error order: receiver before macro name/args.
-            type_of(shared, ctx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
+            type_of(cx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
             let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) else {
                 let macro_name = ctx.text(shared.arena.span(name));
                 return Err(TypeError::new(
@@ -606,27 +587,15 @@ fn eval(
                     shared.arena.span(name),
                 ));
             };
-            enqueue_macro_call(
-                shared,
-                ctx,
-                macro_id,
-                id,
-                name,
-                args,
-                expected,
-                emit,
-                &mut env.work,
-            )?;
+            enqueue_macro_call(cx, macro_id, id, name, args, demand, &mut env.work)?;
             None
         }
         Node::For { .. } => {
-            push_combine(&mut env.work, id, expected, emit);
+            push_combine(&mut env.work, id, demand);
             enqueue_for(
-                shared,
-                ctx,
+                cx,
                 id,
-                Constraint::Exact(Ty::RULE),
-                false,
+                Demand::checking(Constraint::Exact(Ty::RULE)),
                 &mut env.work,
             )?;
             None
@@ -639,9 +608,9 @@ fn eval(
 fn descend_eval(children: &[NodeId], c: Constraint, work: &mut Vec<Work>) -> Descent {
     let (&first, rest) = children.split_first()?;
     for &child in rest.iter().rev() {
-        push_eval(work, child, c, false);
+        push_eval(work, child, Demand::checking(c));
     }
-    Some((first, c, false))
+    Some((first, Demand::checking(c)))
 }
 
 fn append_operands(
@@ -659,14 +628,13 @@ fn append_operands(
 }
 
 /// Handle a [`Work::Combine`].
-fn combine(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    env: &mut TypeEnv,
-    id: NodeId,
-    expected: Constraint,
-    emit: bool,
-) -> TypeResult<()> {
+fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult<()> {
+    let Cx {
+        shared,
+        ctx,
+        strs: pool,
+    } = cx;
+    let Demand { expected, emit } = demand;
     let span = shared.arena.span(id);
     let ty = match *shared.arena.get(id) {
         Node::List(range) => {
@@ -766,10 +734,10 @@ fn combine(
                 }
             }
         }
-        Node::Call { name, .. } => macro_call_result(shared, ctx, name, span)?,
+        Node::Call { name, .. } => macro_call_result(cx, name, span)?,
         Node::QualifiedCall(range) => {
             let (_, name, _) = shared.pools.get_qualified_call(range);
-            macro_call_result(shared, ctx, name, span)?
+            macro_call_result(cx, name, span)?
         }
         Node::GrammarConfig { module, field } => {
             let module_ty = pop_result(&mut env.results);
@@ -803,38 +771,43 @@ fn combine(
         }
         Node::FieldAccess { obj, field } => {
             let obj_ty = pop_result(&mut env.results);
-            let field_name = ctx.text(field);
             let inner = obj_ty.object_inner().unwrap();
             let field_known = match shared.arena.get(obj) {
                 Node::Ident(IdentKind::Var(let_id)) => env
                     .object_fields
                     .get(let_id)
-                    .is_none_or(|fields| fields.iter().any(|f| f == field_name)),
+                    .is_none_or(|fields| fields.contains(&field)),
                 Node::Object(range) => {
                     let fields = shared.pools.get_object(*range);
-                    fields.iter().any(|f| ctx.text(f.name) == field_name)
+                    fields.iter().any(|f| f.name.value == field)
                 }
                 _ => true,
             };
             if !field_known {
                 let available = match shared.arena.get(obj) {
-                    Node::Ident(IdentKind::Var(let_id)) => {
-                        env.object_fields.get(let_id).cloned().unwrap_or_default()
-                    }
+                    Node::Ident(IdentKind::Var(let_id)) => env
+                        .object_fields
+                        .get(let_id)
+                        .map(|obj| {
+                            obj.iter()
+                                .map(|&sid| pool.resolve(sid).to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     Node::Object(range) => shared
                         .pools
                         .get_object(*range)
                         .iter()
-                        .map(|f| ctx.text(f.name).to_string())
+                        .map(|f| pool.resolve(f.name.value).to_string())
                         .collect(),
                     _ => Vec::new(),
                 };
                 return Err(TypeError::new(
                     TypeErrorKind::FieldNotFound {
-                        field: field_name.to_string(),
+                        field: pool.resolve(field).to_string(),
                         available,
                     },
-                    field,
+                    span,
                 ));
             }
             Ty::from(inner)
@@ -886,12 +859,8 @@ fn combine(
     Ok(())
 }
 
-fn macro_call_result(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    name: NodeId,
-    span: Span,
-) -> TypeResult<Ty> {
+fn macro_call_result(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<Ty> {
+    let Cx { shared, ctx, .. } = cx;
     let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) else {
         // Call names are resolved before the combine step is queued.
         unreachable!()
@@ -907,51 +876,39 @@ fn macro_call_result(
     }
 }
 
-fn push_spread_item(
-    shared: &SharedAst,
-    id: NodeId,
-    leaf: Constraint,
-    emit: bool,
-    work: &mut Vec<Work>,
-) {
+fn push_spread_item(shared: &SharedAst, id: NodeId, demand: Demand, work: &mut Vec<Work>) {
     if matches!(shared.arena.get(id), Node::For { .. }) {
-        work.push(Work::Spread { id, leaf, emit });
+        work.push(Work::Spread { id, demand });
     } else {
-        push_eval(work, id, leaf, emit);
+        push_eval(work, id, demand);
     }
 }
 
 /// Schedule a for-loop's iterable and body.
-fn enqueue_for(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    node: NodeId,
-    leaf: Constraint,
-    emit: bool,
-    work: &mut Vec<Work>,
-) -> TypeResult<()> {
+fn enqueue_for(cx: Cx<'_>, node: NodeId, demand: Demand, work: &mut Vec<Work>) -> TypeResult<()> {
+    let Cx { shared, .. } = cx;
     expect_pat!(Node::For { for_id, body }, *shared.arena.get(node));
     let config = shared.pools.get_for(for_id);
     let bindings = shared.pools.param_slice(config.bindings);
     let iterable = config.iterable;
-    validate_for_bindings(ctx, bindings, shared.arena.span(body))?;
+    validate_for_bindings(cx, bindings, shared.arena.span(body))?;
     if let Node::List(range) = shared.arena.get(iterable)
         && shared.pools.child_slice(*range).is_empty()
     {
-        push_spread_item(shared, body, leaf, emit, work);
+        push_spread_item(shared, body, demand, work);
         return Ok(());
     }
-    work.push(Work::ForBindings { node, leaf, emit });
-    push_eval(work, iterable, Constraint::None, true);
+    work.push(Work::ForBindings { node, demand });
+    push_eval(work, iterable, Demand::emitting(Constraint::None));
     Ok(())
 }
 
-fn resolve_macro_name(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    name: NodeId,
-    span: Span,
-) -> TypeResult<MacroId> {
+fn resolve_macro_name(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<MacroId> {
+    let Cx {
+        shared,
+        ctx,
+        strs: pool,
+    } = cx;
     if let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) {
         return Ok(macro_id);
     }
@@ -959,7 +916,7 @@ fn resolve_macro_name(
     let kind = TypeErrorKind::UndefinedMacro(macro_name.to_string());
     let macros = ctx.root_items.iter().filter_map(|&id| {
         if let Node::Macro(mid) = shared.arena.get(id) {
-            Some(ctx.text(shared.pools.get_macro(*mid).name))
+            Some(pool.resolve(shared.pools.get_macro(*mid).name.value))
         } else {
             None
         }
@@ -971,18 +928,16 @@ fn resolve_macro_name(
     Err(err)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn enqueue_macro_call(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
+    cx: Cx<'_>,
     macro_id: MacroId,
     node: NodeId,
     name: NodeId,
     args: &[NodeId],
-    expected: Constraint,
-    emit: bool,
+    demand: Demand,
     work: &mut Vec<Work>,
 ) -> TypeResult<()> {
+    let Cx { shared, ctx, .. } = cx;
     let params = shared.pools.get_macro(macro_id).params;
     if args.len() != params.len as usize {
         return Err(TypeError::new(
@@ -994,12 +949,12 @@ fn enqueue_macro_call(
             shared.arena.span(node),
         ));
     }
-    push_combine(work, node, expected, emit);
+    push_combine(work, node, demand);
     // Push args reversed so they execute left-to-right (matching the recursive
     // order: the first ill-typed argument is reported first).
     for (i, &arg) in args.iter().enumerate().rev() {
         let ty = shared.pools.param_slice(params)[i].ty;
-        push_eval(work, arg, Constraint::Exact(ty), false);
+        push_eval(work, arg, Demand::checking(Constraint::Exact(ty)));
     }
     Ok(())
 }
@@ -1021,15 +976,9 @@ fn enforce(expected: Constraint, ty: Ty, span: Span) -> TypeResult<()> {
     Ok(())
 }
 
-fn enforce_leaf(
-    results: &mut Vec<Ty>,
-    expected: Constraint,
-    emit: bool,
-    ty: Ty,
-    span: Span,
-) -> TypeResult<()> {
-    enforce(expected, ty, span)?;
-    if emit {
+fn enforce_leaf(results: &mut Vec<Ty>, demand: Demand, ty: Ty, span: Span) -> TypeResult<()> {
+    enforce(demand.expected, ty, span)?;
+    if demand.emit {
         results.push(ty);
     }
     Ok(())
@@ -1042,48 +991,44 @@ fn pop_result(results: &mut Vec<Ty>) -> Ty {
     results.pop().unwrap()
 }
 
-fn push_eval(work: &mut Vec<Work>, id: NodeId, expected: Constraint, emit: bool) {
-    work.push(Work::Eval { id, expected, emit });
+fn push_eval(work: &mut Vec<Work>, id: NodeId, demand: Demand) {
+    work.push(Work::Eval { id, demand });
 }
 
-fn push_combine(work: &mut Vec<Work>, id: NodeId, expected: Constraint, emit: bool) {
-    work.push(Work::Combine { id, expected, emit });
+fn push_combine(work: &mut Vec<Work>, id: NodeId, demand: Demand) {
+    work.push(Work::Combine { id, demand });
 }
 
 fn check_spread_item<Leaf>(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
+    cx: Cx<'_>,
     item: NodeId,
     env: &mut TypeEnv,
     leaf: Leaf,
 ) -> TypeResult<Ty>
 where
-    Leaf: Fn(&SharedAst, &ModuleContext, NodeId, &mut TypeEnv) -> TypeResult<Ty> + Copy,
+    Leaf: Fn(Cx<'_>, NodeId, &mut TypeEnv) -> TypeResult<Ty> + Copy,
 {
+    let Cx { shared, .. } = cx;
     if let &Node::For { for_id, body } = shared.arena.get(item) {
-        check_for_expr(shared, ctx, for_id, body, env, |body, env| {
-            check_spread_item(shared, ctx, body, env, leaf)
+        check_for_expr(cx, for_id, body, env, |body, env| {
+            check_spread_item(cx, body, env, leaf)
         })
     } else {
-        leaf(shared, ctx, item, env)
+        leaf(cx, item, env)
     }
 }
 
-fn validate_for_bindings(
-    ctx: &ModuleContext,
-    bindings: &[Param],
-    body_span: Span,
-) -> TypeResult<()> {
+fn validate_for_bindings(cx: Cx<'_>, bindings: &[Param], body_span: Span) -> TypeResult<()> {
     if bindings.is_empty() {
         return Err(TypeError::new(TypeErrorKind::EmptyForBindings, body_span));
     }
-    check_duplicate_names(ctx, bindings, |p| p.name, TypeErrorKind::DuplicateBinding)?;
+    check_duplicate_names(cx, bindings, |p| p.name, TypeErrorKind::DuplicateBinding)?;
     if bindings.len() >= 2 {
         for param in bindings {
             if !matches!(param.ty, Ty::Data(DataTy::Scalar(_))) {
                 return Err(TypeError::new(
                     TypeErrorKind::TupleElementNotScalar(param.ty),
-                    param.name,
+                    param.name.span,
                 ));
             }
         }
@@ -1104,7 +1049,7 @@ fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<
     if bindings.len() == 1 {
         let Param { name, ty: declared } = bindings[0];
         if !elem_ty.is_compatible(declared) {
-            return Err(mismatch(declared, elem_ty, name));
+            return Err(mismatch(declared, elem_ty, name.span));
         }
     } else {
         let Ty::Data(DataTy::Tuple(sig)) = elem_ty else {
@@ -1125,7 +1070,7 @@ fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<
         for (i, param) in bindings.iter().enumerate() {
             let elem_scalar = Ty::Data(DataTy::Scalar(sig.elem(i)));
             if !elem_scalar.is_compatible(param.ty) {
-                return Err(mismatch(param.ty, elem_scalar, param.name));
+                return Err(mismatch(param.ty, elem_scalar, param.name.span));
             }
         }
     }
@@ -1133,8 +1078,7 @@ fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<
 }
 
 fn check_for_expr<CheckBody>(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
+    cx: Cx<'_>,
     for_idx: ForId,
     body: NodeId,
     env: &mut TypeEnv,
@@ -1143,10 +1087,11 @@ fn check_for_expr<CheckBody>(
 where
     CheckBody: FnOnce(NodeId, &mut TypeEnv) -> TypeResult<Ty>,
 {
+    let Cx { shared, .. } = cx;
     let config = shared.pools.get_for(for_idx);
     let bindings = shared.pools.param_slice(config.bindings);
     let iterable = config.iterable;
-    validate_for_bindings(ctx, bindings, shared.arena.span(body))?;
+    validate_for_bindings(cx, bindings, shared.arena.span(body))?;
 
     if let Node::List(range) = shared.arena.get(iterable)
         && shared.pools.child_slice(*range).is_empty()
@@ -1154,7 +1099,7 @@ where
         return check_body(body, env);
     }
 
-    let iter_ty = type_of(shared, ctx, iterable, env, Constraint::None)?;
+    let iter_ty = type_of(cx, iterable, env, Constraint::None)?;
     match_for_elem(shared, for_idx, iter_ty)?;
     check_body(body, env)
 }
@@ -1183,7 +1128,12 @@ const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
 
 /// Bare member name of a module-qualified reference's source text.
 fn bare_name(ctx: &ModuleContext, span: Span) -> String {
-    ctx.text(span).rsplit("::").next().unwrap().trim().to_string()
+    ctx.text(span)
+        .rsplit("::")
+        .next()
+        .unwrap()
+        .trim()
+        .to_string()
 }
 
 const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {
@@ -1194,20 +1144,23 @@ const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {
 }
 
 fn check_duplicate_names<T>(
-    ctx: &ModuleContext,
+    cx: Cx<'_>,
     items: &[T],
-    name_of: impl Fn(&T) -> Span,
+    name_of: impl Fn(&T) -> Spanned<StrId>,
     make_kind: impl Fn(String) -> TypeErrorKind,
 ) -> TypeResult<()> {
+    let Cx {
+        ctx, strs: pool, ..
+    } = cx;
     for i in 1..items.len() {
-        let span = name_of(&items[i]);
-        let name = ctx.text(span);
+        let curr = name_of(&items[i]);
         for prev in &items[..i] {
-            if ctx.text(name_of(prev)) == name {
+            let prev_name = name_of(prev);
+            if prev_name.value == curr.value {
                 return Err(TypeError::with_note(
-                    make_kind(name.to_string()),
-                    span,
-                    ctx.note(NoteMessage::FirstDefinedHere, name_of(prev)),
+                    make_kind(pool.resolve(curr.value).to_string()),
+                    curr.span,
+                    ctx.note(NoteMessage::FirstDefinedHere, prev_name.span),
                 ));
             }
         }

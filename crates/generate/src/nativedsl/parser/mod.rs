@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
 
+use crate::{nativedsl::ast::Spanned, strpool::StrPool};
+
 use super::{
     InnerTy, NoteMessage, ParseError,
     ast::{
@@ -28,10 +30,11 @@ enum LocalBinding {
     ForBinding(ForId, Ty, u8),
 }
 
-pub struct Parser<'tok, 'shared> {
+pub struct Parser<'tok, 'shared, 'strs> {
     tokens: &'tok [Token],
     pos: usize,
     shared: &'shared mut SharedAst,
+    strs: &'strs mut StrPool,
     ctx: ModuleContext,
     scratch: Vec<NodeId>,
     /// Stack of local bindings (macro params and for-loop bindings).
@@ -58,7 +61,7 @@ macro_rules! depth_scope {
     }};
 }
 
-impl<'tok, 'shared> Parser<'tok, 'shared> {
+impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     /// SAFETY:
     ///
     /// Caller must pass a token stream produced by terminated by `TokenKind::Eof`.
@@ -68,12 +71,14 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         source: String,
         grammar_path: PathBuf,
         shared: &'shared mut SharedAst,
+        strs: &'strs mut StrPool,
     ) -> Self {
         let root_cap = tokens.len() / 10;
         Self {
             tokens,
             pos: 0,
             shared,
+            strs,
             ctx: ModuleContext {
                 source,
                 path: grammar_path,
@@ -312,12 +317,13 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_expect_decl(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwExpect)?;
-        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name = self.strs.intern(self.ctx.text(name_span));
         self.ctx.has_forward_decls = true;
         Ok(self
             .shared
             .arena
-            .push(Node::Forward { name }, start.merge(name)))
+            .push(Node::Forward { name }, start.merge(name_span)))
     }
 
     fn parse_grammar_block(&mut self) -> ParseResult<NodeId> {
@@ -359,7 +365,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             match field {
                 ConfigField::Language => {
                     let s = self.expect_string()?;
-                    config.language = Some(self.ctx.text(s.strip_quotes()).to_string());
+                    config.language = Some(self.strs.intern(self.ctx.text(s.strip_quotes())));
                 }
                 ConfigField::Inherits => config.inherits = Some(self.parse_expr()?),
                 ConfigField::Extras => config.extras = Some(self.parse_expr()?),
@@ -404,10 +410,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 start.merge(end),
             ));
         }
-        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.expect(TokenKind::LBrace)?;
         let body = self.parse_expr()?;
         let end = self.expect(TokenKind::RBrace)?;
+        let name = self.strs.intern(self.ctx.text(name_span));
         Ok(self.shared.arena.push(
             Node::Rule {
                 is_override,
@@ -420,7 +427,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
 
     fn parse_let_def(&mut self) -> ParseResult<NodeId> {
         let start = self.expect(TokenKind::KwLet)?;
-        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         let ty = if self.eat(TokenKind::Colon).is_some() {
             Some(self.parse_type()?.0)
         } else {
@@ -428,6 +435,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         };
         self.expect(TokenKind::Eq)?;
         let value = self.parse_expr()?;
+        let name = self.strs.intern(self.ctx.text(name_span));
         let id = self.shared.arena.push(
             Node::Let { name, value },
             start.merge(self.shared.arena.span(value)),
@@ -450,13 +458,13 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_macro_like(&mut self, start: Span, rule_set: bool) -> ParseResult<NodeId> {
-        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.expect(TokenKind::LParen)?;
         let params = self.comma_sep(TokenKind::RParen, |this| {
             let pname = this.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
             this.expect(TokenKind::Colon)?;
             Ok(Param {
-                name: pname,
+                name: Spanned::new(this.strs.intern(this.ctx.text(pname)), pname),
                 ty: this.parse_type()?.0,
             })
         })?;
@@ -473,7 +481,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         let body = stack_scope!(self.locals, |saved| {
             for (i, p) in params.iter().enumerate() {
                 self.locals
-                    .push((p.name, LocalBinding::MacroParam(p.ty, i as u8)));
+                    .push((p.name.span, LocalBinding::MacroParam(p.ty, i as u8)));
             }
             match kind {
                 MacroKind::Expression(_) => self.parse_expr(),
@@ -491,8 +499,9 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
             .pools
             .push_children(&sym_ref_ids)
             .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren(sym_ref_ids.len())))?;
+        let name = self.strs.intern(self.ctx.text(name_span));
         let macro_idx = self.shared.pools.push_macro(MacroConfig {
-            name,
+            name: Spanned::new(name, name_span),
             params,
             body,
             kind,
@@ -691,11 +700,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 let start = self.shared.arena.span(result);
                 self.advance_pos();
                 self.deepen()?;
-                let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
-                result = self
-                    .shared
-                    .arena
-                    .push(Node::FieldAccess { obj: result, field }, start.merge(field));
+                let field_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
+                let field = self.strs.intern(self.ctx.text(field_span));
+                result = self.shared.arena.push(
+                    Node::FieldAccess { obj: result, field },
+                    start.merge(field_span),
+                );
             }
             Ok(result)
         })
@@ -924,9 +934,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     }
 
     fn parse_field(&mut self, start: Span) -> ParseResult<NodeId> {
-        let (name, content, end) = self.parse_binary(start, TokenKind::KwField, |this| {
+        let (name_span, content, end) = self.parse_binary(start, TokenKind::KwField, |this| {
             this.expect_ident_or_kw(ParseErrorKind::ExpectedName)
         })?;
+        let name = self.strs.intern(self.ctx.text(name_span));
         Ok(self
             .shared
             .arena
@@ -1048,10 +1059,10 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         let bindings = self.comma_sep(TokenKind::RParen, |this| {
-            let name = this.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+            let name_span = this.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
             this.expect(TokenKind::Colon)?;
             Ok(Param {
-                name,
+                name: Spanned::new(this.strs.intern(this.ctx.text(name_span)), name_span),
                 ty: this.parse_type()?.0,
             })
         })?;
@@ -1070,7 +1081,7 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 self.shared.pools.param_slice(bindings).iter().enumerate()
             {
                 self.locals
-                    .push((name, LocalBinding::ForBinding(for_id, ty, i as u8)));
+                    .push((name.span, LocalBinding::ForBinding(for_id, ty, i as u8)));
             }
             let body = self.parse_expr()?;
             let end = self.expect(TokenKind::RBrace)?;
@@ -1109,11 +1120,12 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
                 if self.at(TokenKind::Dot) {
                     self.advance_pos();
                     self.deepen()?;
-                    let field = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
-                    id = self
-                        .shared
-                        .arena
-                        .push(Node::FieldAccess { obj: id, field }, start.merge(field));
+                    let field_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
+                    let field = self.strs.intern(self.ctx.text(field_span));
+                    id = self.shared.arena.push(
+                        Node::FieldAccess { obj: id, field },
+                        start.merge(field_span),
+                    );
                 } else if self.at(TokenKind::ColonColon) {
                     self.advance_pos();
                     self.deepen()?;
@@ -1186,10 +1198,11 @@ impl<'tok, 'shared> Parser<'tok, 'shared> {
     fn parse_object(&mut self, start: Span) -> ParseResult<NodeId> {
         self.advance_pos();
         let fields = self.comma_sep(TokenKind::RBrace, |this| {
-            let key = this.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
+            let key_span = this.expect_ident_or_kw(ParseErrorKind::ExpectedName)?;
+            let key = this.strs.intern(this.ctx.text(key_span));
             this.expect(TokenKind::Colon)?;
             Ok(ObjectField {
-                name: key,
+                name: Spanned::new(key, key_span),
                 value: this.parse_expr()?,
             })
         })?;

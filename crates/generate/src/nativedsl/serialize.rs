@@ -2,34 +2,51 @@
 
 use crate::grammars::{InputGrammar, PrecedenceEntry};
 use crate::parse_grammar::{PrecedenceValueJSON, RuleJSON};
-use crate::rules::{Alias, Associativity, Precedence, Rule};
+use crate::rules::{Alias, Associativity, Precedence, Rule, RuleId, RulePool};
+use crate::strpool::StrId;
 
 use serde_json::{Map, Value};
 
 /// Convert an [`InputGrammar`] to `grammar.json` format.
+#[must_use]
 pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
+    let pool = &grammar.pool;
     let mut obj = Map::new();
-    obj.insert("name".into(), Value::String(grammar.name.clone()));
+    obj.insert(
+        "name".into(),
+        Value::String(pool.resolve(grammar.name).into()),
+    );
 
     let mut rules = Map::new();
     for var in &grammar.variables {
-        rules.insert(var.name.clone(), rule_to_json(&var.rule));
+        rules.insert(pool.resolve(var.name).into(), rule_to_json(pool, var.root));
     }
     obj.insert("rules".into(), Value::Object(rules));
 
-    let str_array = |items: &[String]| -> Value {
-        Value::Array(items.iter().map(|s| Value::String(s.clone())).collect())
+    let str_array = |items: &[StrId]| -> Value {
+        Value::Array(
+            items
+                .iter()
+                .map(|&s| Value::String(pool.resolve(s).into()))
+                .collect(),
+        )
     };
 
     obj.insert(
         "extras".into(),
-        Value::Array(grammar.extra_symbols.iter().map(rule_to_json).collect()),
+        Value::Array(
+            grammar
+                .extra_roots
+                .iter()
+                .map(|&r| rule_to_json(pool, r))
+                .collect(),
+        ),
     );
     obj.insert(
         "conflicts".into(),
         Value::Array(
             grammar
-                .expected_conflicts
+                .conflict_names
                 .iter()
                 .map(|g| str_array(g))
                 .collect(),
@@ -45,13 +62,13 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
                     Value::Array(
                         g.iter()
                             .map(|e| {
-                                let node = match e {
-                                    PrecedenceEntry::Name(s) => {
-                                        RuleJSON::STRING { value: s.clone() }
-                                    }
-                                    PrecedenceEntry::Symbol(s) => {
-                                        RuleJSON::SYMBOL { name: s.clone() }
-                                    }
+                                let node = match *e {
+                                    PrecedenceEntry::Name(s) => RuleJSON::STRING {
+                                        value: pool.resolve(s).into(),
+                                    },
+                                    PrecedenceEntry::Symbol(s) => RuleJSON::SYMBOL {
+                                        name: pool.resolve(s).into(),
+                                    },
                                 };
                                 node_to_value(node)
                             })
@@ -63,19 +80,25 @@ pub fn grammar_to_json(grammar: &InputGrammar) -> serde_json::Value {
     );
     obj.insert(
         "externals".into(),
-        Value::Array(grammar.external_tokens.iter().map(rule_to_json).collect()),
+        Value::Array(
+            grammar
+                .external_roots
+                .iter()
+                .map(|&r| rule_to_json(pool, r))
+                .collect(),
+        ),
     );
-    obj.insert("inline".into(), str_array(&grammar.variables_to_inline));
-    obj.insert("supertypes".into(), str_array(&grammar.supertype_symbols));
-    if let Some(word) = &grammar.word_token {
-        obj.insert("word".into(), Value::String(word.clone()));
+    obj.insert("inline".into(), str_array(&grammar.inline_names));
+    obj.insert("supertypes".into(), str_array(&grammar.supertype_names));
+    if let Some(word) = grammar.word_name {
+        obj.insert("word".into(), Value::String(pool.resolve(word).into()));
     }
-    if !grammar.reserved_words.is_empty() {
+    if !grammar.reserved_sets.is_empty() {
         let mut reserved = Map::new();
-        for ctx in &grammar.reserved_words {
+        for ctx in &grammar.reserved_sets {
             reserved.insert(
-                ctx.name.clone(),
-                Value::Array(ctx.reserved_words.iter().map(rule_to_json).collect()),
+                pool.resolve(ctx.name).into(),
+                Value::Array(ctx.roots.iter().map(|&r| rule_to_json(pool, r)).collect()),
             );
         }
         obj.insert("reserved".into(), Value::Object(reserved));
@@ -88,45 +111,61 @@ fn node_to_value(node: RuleJSON) -> Value {
     serde_json::to_value(node).expect("RuleJSON serialization cannot fail")
 }
 
-fn rule_to_json(rule: &Rule) -> Value {
-    node_to_value(build_rule(rule))
+pub(crate) fn rule_to_json(pool: &RulePool, rule: RuleId) -> Value {
+    node_to_value(build_rule(pool, rule))
 }
 
 /// Lower the internal [`Rule`] representation into the typed `grammar.json`
 /// schema ([`RuleJSON`]).
-fn build_rule(rule: &Rule) -> RuleJSON {
-    match rule {
+fn build_rule(pool: &RulePool, id: RuleId) -> RuleJSON {
+    match pool.node(id) {
         Rule::Blank => RuleJSON::BLANK,
-        Rule::String(s) => RuleJSON::STRING { value: s.clone() },
-        Rule::Pattern(p, f) => RuleJSON::PATTERN {
-            value: p.clone(),
-            flags: (!f.is_empty()).then(|| f.clone()),
+        Rule::String(s) => RuleJSON::STRING {
+            value: pool.resolve(s).into(),
         },
-        Rule::NamedSymbol(n) => RuleJSON::SYMBOL { name: n.clone() },
-        Rule::Symbol(s) => RuleJSON::SYMBOL {
-            name: format!("__symbol_{}", s.index),
+        Rule::Pattern(p, f) => {
+            let flags = pool.resolve(f);
+            RuleJSON::PATTERN {
+                value: pool.resolve(p).into(),
+                flags: (!flags.is_empty()).then(|| flags.to_string()),
+            }
+        }
+        Rule::NamedSymbol(n) => RuleJSON::SYMBOL {
+            name: pool.resolve(n).into(),
         },
-        Rule::Choice(ms) => RuleJSON::CHOICE {
-            members: ms.iter().map(build_rule).collect(),
+        Rule::Sym { index, .. } => RuleJSON::SYMBOL {
+            name: format!("__symbol_{index}"),
         },
-        Rule::Seq(ms) => RuleJSON::SEQ {
-            members: ms.iter().map(build_rule).collect(),
+        Rule::Choice(range) => RuleJSON::CHOICE {
+            members: pool
+                .child_slice(range)
+                .iter()
+                .map(|&c| build_rule(pool, c))
+                .collect(),
+        },
+        Rule::Seq(range) => RuleJSON::SEQ {
+            members: pool
+                .child_slice(range)
+                .iter()
+                .map(|&c| build_rule(pool, c))
+                .collect(),
         },
         Rule::Repeat(inner) => RuleJSON::REPEAT1 {
-            content: Box::new(build_rule(inner)),
+            content: Box::new(build_rule(pool, inner)),
         },
         Rule::Metadata { params, rule } => {
-            let mut c = build_rule(rule);
+            let params = pool.params(params);
+            let mut c = build_rule(pool, rule);
             if params.dynamic_precedence != 0 {
                 c = RuleJSON::PREC_DYNAMIC {
                     value: params.dynamic_precedence,
                     content: Box::new(c),
                 };
             }
-            let pv = match &params.precedence {
+            let pv = match params.precedence {
                 Precedence::None => None,
-                Precedence::Integer(n) => Some(PrecedenceValueJSON::Integer(*n)),
-                Precedence::Name(s) => Some(PrecedenceValueJSON::Name(s.clone())),
+                Precedence::Integer(n) => Some(PrecedenceValueJSON::Integer(n)),
+                Precedence::Name(s) => Some(PrecedenceValueJSON::Name(pool.resolve(s).into())),
             };
             if let Some(pv) = pv {
                 c = match params.associativity {
@@ -144,16 +183,16 @@ fn build_rule(rule: &Rule) -> RuleJSON {
                     },
                 };
             }
-            if let Some(Alias { value, is_named }) = &params.alias {
+            if let Some(Alias { value, is_named }) = params.alias {
                 c = RuleJSON::ALIAS {
                     content: Box::new(c),
-                    named: *is_named,
-                    value: value.clone(),
+                    named: is_named,
+                    value: pool.resolve(value).into(),
                 };
             }
-            if let Some(field_name) = &params.field_name {
+            if let Some(field_name) = params.field {
                 c = RuleJSON::FIELD {
-                    name: field_name.clone(),
+                    name: pool.resolve(field_name).into(),
                     content: Box::new(c),
                 };
             }
@@ -168,9 +207,9 @@ fn build_rule(rule: &Rule) -> RuleJSON {
             }
             c
         }
-        Rule::Reserved { rule, context_name } => RuleJSON::RESERVED {
-            context_name: context_name.clone(),
-            content: Box::new(build_rule(rule)),
+        Rule::Reserved { rule, ctx } => RuleJSON::RESERVED {
+            context_name: pool.resolve(ctx).into(),
+            content: Box::new(build_rule(pool, rule)),
         },
     }
 }

@@ -2,16 +2,18 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::IoError;
-use crate::nativedsl::{
-    DisallowedItemKind, DslError, DslResult, LexError, LexErrorKind, LowerError, LowerErrorKind,
-    LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
-    apply_cfg::{CfgState, apply_cfg},
-    ast::{ModuleContext, Node, SharedAst, Span},
-    expand_macro_calls, lexer, lower, parser, resolve,
-    resolve::ResolveErrorKind,
-    string_pool::StringPool,
-    typecheck::{self, TypeEnv},
+use crate::{
+    IoError,
+    nativedsl::{
+        DisallowedItemKind, DslError, DslResult, LexError, LexErrorKind, LowerError,
+        LowerErrorKind, LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
+        apply_cfg::{CfgState, apply_cfg},
+        ast::{ModuleContext, Node, SharedAst, Span},
+        expand_macro_calls, lexer, lower, parser,
+        resolve::{self, ResolveErrorKind},
+        typecheck::{self, TypeEnv},
+    },
+    rules::RulePool,
 };
 
 const MAX_MODULE_DEPTH: usize = 256;
@@ -22,7 +24,7 @@ pub struct Loader<'a> {
     pub modules: &'a mut Vec<Module>,
     pub env: &'a mut TypeEnv,
     pub state: &'a mut LoweringState,
-    pub strings: &'a mut StringPool,
+    pub pool: &'a mut RulePool,
     pub cfg: &'a mut CfgState,
     pub ancestor_paths: Vec<PathBuf>,
     /// Module dedup cache. Each (canonical path, kind) loads at most once
@@ -57,18 +59,24 @@ impl Loader<'_> {
         let module_dir = path.parent().unwrap();
 
         let tokens = lexer::Lexer::new(source).tokenize()?;
-        let mut ctx =
-            parser::Parser::new(&tokens, source.to_string(), path.to_path_buf(), self.shared)
-                .parse()?;
+        let mut ctx = parser::Parser::new(
+            &tokens,
+            source.to_string(),
+            path.to_path_buf(),
+            self.shared,
+            self.pool.strs_mut(),
+        )
+        .parse()?;
 
         // Register this module's flag declarations into the global state. This module's
         // flag values win over flags in any modules it imports.
-        self.cfg.merge_module_flags(self.shared, &mut ctx)?;
+        self.cfg
+            .merge_module_flags(self.shared, &mut ctx, self.pool.strs_mut())?;
 
         // Apply cfg gating *before* loading children so cfg-disabled imports don't trigger file
         // loads and other side effects. Skip the whole walk when no cfgs are used.
         if ctx.has_cfg {
-            apply_cfg(self.shared, &mut ctx, self.cfg, kind)?;
+            apply_cfg(self.shared, &mut ctx, self.pool.strs(), self.cfg, kind)?;
         }
 
         match kind {
@@ -79,7 +87,7 @@ impl Loader<'_> {
         // Inline top-level rule-set macro invocations into `ExpandedRule`
         // decls. Runs before child loads so all nodes this module owns
         // sit in one contiguous arena range.
-        expand_macro_calls::expand_macro_calls(self.shared, self.strings, &mut ctx)?;
+        expand_macro_calls::expand_macro_calls(self.shared, self.pool.strs_mut(), &mut ctx)?;
         ctx.node_range.end = self.shared.arena.next_id().into();
 
         // Load inherited grammar (Grammar kind only, must happen before typecheck).
@@ -116,7 +124,7 @@ impl Loader<'_> {
         resolve::resolve(
             self.shared,
             &ctx,
-            self.strings,
+            self.pool,
             self.modules,
             base,
             &imported_rules,
@@ -124,7 +132,7 @@ impl Loader<'_> {
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         // Child modules already populated `env` during their own `load_module` calls.
-        typecheck::check(self.shared, &ctx, self.env)?;
+        typecheck::check(self.shared, &ctx, self.env, self.pool.strs())?;
         // After typecheck so a cycling inherits chain reports CircularLet.
         self.validate_inherits_binding(&ctx)?;
         // This module's id. Checked before lowering: the evaluator derives its
@@ -136,7 +144,7 @@ impl Loader<'_> {
             ModuleKind::Grammar => {
                 let lowered = Box::new(lower::lower_with_base(
                     self.state,
-                    self.strings,
+                    self.pool,
                     self.shared,
                     self.modules,
                     &ctx,
@@ -146,6 +154,7 @@ impl Loader<'_> {
                     &self.shared.arena,
                     &self.shared.pools,
                     &ctx,
+                    self.pool,
                     super::LoweredRef::Grammar(&lowered),
                 );
                 Module::Grammar {
@@ -156,11 +165,12 @@ impl Loader<'_> {
             }
             ModuleKind::Helper => {
                 let lowered_rules =
-                    lower::lower_helper(self.state, self.strings, self.shared, self.modules, &ctx)?;
+                    lower::lower_helper(self.state, self.pool, self.shared, self.modules, &ctx)?;
                 let exports = super::build_exports(
                     &self.shared.arena,
                     &self.shared.pools,
                     &ctx,
+                    self.pool,
                     super::LoweredRef::Helper(&lowered_rules),
                 );
                 Module::Helper {
@@ -171,7 +181,7 @@ impl Loader<'_> {
             }
         };
         // The id is this module's final index; lowering must not grow the list.
-        debug_assert!(usize::from(global_id) == self.modules.len());
+        debug_assert_eq!(usize::from(global_id), self.modules.len());
         self.modules.push(module);
 
         Ok(global_id)
@@ -187,15 +197,18 @@ impl Loader<'_> {
         // the cfg flag span resolves. Prefer the failing module's own drops (the
         // collision case where two modules gate the same name), then any loaded
         // module so inherited / imported drops are still attributed correctly.
+        let Some(name_id) = self.pool.strs().get(name) else {
+            return e;
+        };
         let Some((cfg_id, owner)) = current
             .cfg_dropped
-            .get(name)
+            .get(&name_id)
             .map(|&id| (id, current))
             .or_else(|| {
                 self.modules
                     .iter()
                     .map(Module::ctx)
-                    .find_map(|m| m.cfg_dropped.get(name).map(|&id| (id, m)))
+                    .find_map(|m| m.cfg_dropped.get(&name_id).map(|&id| (id, m)))
             })
         else {
             return e;
@@ -241,7 +254,8 @@ impl Loader<'_> {
                 content,
                 module_path,
                 span,
-            ))?;
+            )
+            .into());
         }
 
         self.ancestor_paths.push(module_path.to_path_buf());

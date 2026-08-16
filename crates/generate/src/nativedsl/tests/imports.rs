@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[test]
 fn import_function_uses_own_let_binding() {
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[(
             "self_ref.tsg",
             r#"
@@ -21,7 +21,9 @@ macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
     "#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "program"), sep_by1_rule(",", "identifier"));
+    let actual = find_rule(&g, "program");
+    let expected = sep_by1_rule(&mut g.pool, ",", "identifier");
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -86,11 +88,10 @@ fn error_import_disallowed_items() {
         ),
         ("let b = inherit(\"base.tsg\")", DisallowedItemKind::Inherit),
     ] {
-        let err = parse_with_modules(
+        let err = expect_err(parse_with_modules(
             &[("bad.tsg", content)],
             "let h = import(\"bad.tsg\")\ngrammar { language: \"test\" }\nrule program { \"x\" }",
-        )
-        .unwrap_err();
+        ));
         let outer = assert_err!(err, Module);
         let DslError::Lower(e) = outer.inner.as_ref() else {
             panic!("expected Lower error, got {:?}", outer.inner)
@@ -105,7 +106,7 @@ fn error_import_disallowed_items() {
 
 #[test]
 fn error_import_cycle() {
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[
             ("a.tsg", "let b = import(\"b.tsg\")"),
             ("b.tsg", "let a = import(\"a.tsg\")"),
@@ -115,8 +116,7 @@ fn error_import_cycle() {
         grammar { language: "test" }
         rule program { "x" }
     "#,
-    )
-    .unwrap_err();
+    ));
     // Should detect cycle somewhere in the chain
     let is_cycle = matches!(
         &err,
@@ -136,7 +136,7 @@ fn error_import_cycle() {
 
 #[test]
 fn error_import_cycle_three_levels() {
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[
             ("a.tsg", "let b = import(\"b.tsg\")"),
             ("b.tsg", "let c = import(\"c.tsg\")"),
@@ -145,8 +145,7 @@ fn error_import_cycle_three_levels() {
         r#"let h = import("a.tsg")
         grammar { language: "test" }
         rule program { "x" }"#,
-    )
-    .unwrap_err();
+    ));
     fn has_cycle(e: &DslError) -> bool {
         match e {
             DslError::Lower(l) => matches!(l.kind, LowerErrorKind::ModuleCycle),
@@ -170,7 +169,7 @@ fn too_many_modules_err(tail: &str) -> DslError {
     root.push_str(tail);
     let root_path = dir.path().join("root.tsg");
     std::fs::write(&root_path, &root).unwrap();
-    parse_native_dsl(&root, &root_path).unwrap_err()
+    expect_err(parse_native_dsl(&root, &root_path))
 }
 
 #[test]
@@ -214,15 +213,14 @@ fn error_import_bad_path() {
 
 #[test]
 fn error_import_nested_error() {
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[("bad_syntax.tsg", "let x = ~~~")],
         r#"
         let h = import("bad_syntax.tsg")
         grammar { language: "test" }
         rule program { "x" }
     "#,
-    )
-    .unwrap_err();
+    ));
     let outer = assert_err!(err, Module);
     assert!(matches!(outer.inner.as_ref(), DslError::Lex(_)));
 }
@@ -231,7 +229,7 @@ fn error_import_nested_error() {
 fn error_import_transitive_nested_error() {
     // root -> middle.tsg -> bad.tsg (lex error)
     // Error should be double-wrapped: Module(Module(Lex(...)))
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[
             ("bad.tsg", "let x = ~~~"),
             ("middle.tsg", "let h = import(\"bad.tsg\")"),
@@ -241,8 +239,7 @@ fn error_import_transitive_nested_error() {
         grammar { language: "test" }
         rule program { "x" }
     "#,
-    )
-    .unwrap_err();
+    ));
     let outer = assert_err!(err, Module);
     let inner = assert_err!(*outer.inner, Module);
     assert!(matches!(inner.inner.as_ref(), DslError::Lex(_)));
@@ -250,30 +247,36 @@ fn error_import_transitive_nested_error() {
 
 #[test]
 fn import_function_receives_complex_expr() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
         rule program { h::comma_sep1(seq(identifier, ":", identifier)) }
         rule identifier { regexp(r"[a-z]+") }
     "#);
-    let id = || Rule::NamedSymbol("identifier".into());
-    let pair = Rule::seq(vec![id(), Rule::String(":".into()), id()]);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            pair.clone(),
-            Rule::choice(vec![
-                Rule::repeat(Rule::seq(vec![Rule::String(",".into()), pair])),
-                Rule::Blank,
-            ]),
-        ])
-    );
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        // `pair` appears twice; the pool is a DAG so the same id is reused.
+        let pair = {
+            let a = r_sym!(p, "identifier");
+            let colon = r_str!(p, ":");
+            let b = r_sym!(p, "identifier");
+            r_seq!(p, [a, colon, b])
+        };
+        let comma = r_str!(p, ",");
+        let tail_item = r_seq!(p, [comma, pair]);
+        let rep = r_repeat!(p, tail_item);
+        let blank = r_blank!(p);
+        let tail = r_choice!(p, [rep, blank]);
+        r_seq!(p, [pair, tail])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn import_diamond() {
     // A imports B and C, which both import helpers.tsg; each gets its own copy.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[
             ("helpers.tsg", "let VAL = 10"),
             (
@@ -293,13 +296,18 @@ fn import_diamond() {
     "#,
     )
     .unwrap();
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::choice(vec![
-            Rule::prec(Precedence::Integer(10), Rule::String("a".into())),
-            Rule::prec(Precedence::Integer(10), Rule::String("b".into())),
-        ])
-    );
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(
+            p,
+            [
+                r_prec!(p, Precedence::Integer(10), r_str!(p, "a")),
+                r_prec!(p, Precedence::Integer(10), r_str!(p, "b"))
+            ]
+        )
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -331,7 +339,7 @@ fn import_diamond_dedups_shared_leaf() {
 #[test]
 fn helper_rule_collision_errors() {
     // Two helpers each defining `expression` -> resolver collision error.
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[
             ("a.tsg", "rule expression { \"a\" }"),
             ("b.tsg", "rule expression { \"b\" }"),
@@ -342,8 +350,7 @@ fn helper_rule_collision_errors() {
         grammar { language: "test" }
         rule program { expression }
     "#,
-    )
-    .unwrap_err();
+    ));
     let outer = assert_err!(err, Resolve);
     assert_eq!(
         outer.kind,
@@ -355,7 +362,7 @@ fn helper_rule_collision_errors() {
 fn override_helper_rule() {
     // An `override` of a helper rule wins in the final grammar; the original is
     // still reachable via h::digit (which inlines).
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
         r#"
         let h = import("h.tsg")
@@ -366,20 +373,19 @@ fn override_helper_rule() {
     )
     .unwrap();
     // Final `digit` is the override body, with h::digit inlined to the original.
-    assert_eq!(
-        *find_rule(&g, "digit"),
-        Rule::choice(vec![
-            Rule::Pattern(r"[0-9]".into(), String::new()),
-            Rule::String("x".into()),
-        ])
-    );
+    let actual = find_rule(&g, "digit");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_pattern!(p, r"[0-9]"), r_str!(p, "x")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn helper_rule_transitive_promotion() {
     // root -> A -> B: root references B's `inner` by bare name, which transitive
     // promotion must make resolvable.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[
             ("b.tsg", r#"rule inner { "leaf" }"#),
             ("a.tsg", "let b = import(\"b.tsg\")\nrule middle { inner }"),
@@ -393,14 +399,19 @@ fn helper_rule_transitive_promotion() {
     .unwrap();
     assert!(rule_names(&g).contains(&"inner"));
     assert!(rule_names(&g).contains(&"middle"));
-    assert_eq!(*find_rule(&g, "inner"), Rule::String("leaf".into()));
+    let actual = find_rule(&g, "inner");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "leaf")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn helper_rule_qualified_inlines() {
     // `h::rule_name` inlines the rule body, mirroring `base::rule_name` for
     // inherited grammars.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[("h.tsg", r#"rule greeting { "hello" }"#)],
         r#"
         let h = import("h.tsg")
@@ -411,17 +422,19 @@ fn helper_rule_qualified_inlines() {
     .unwrap();
     // h::greeting inlined - program body has the literal "hello", not a
     // NamedSymbol reference.
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
-    );
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_seq!(p, [r_str!(p, "hello"), r_str!(p, "!")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn helper_rule_materialized_into_grammar() {
     // A helper rule referenced by bare name materializes as a top-level Variable,
     // reachable as a NamedSymbol.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
         r#"
         let h = import("h.tsg")
@@ -431,14 +444,18 @@ fn helper_rule_materialized_into_grammar() {
     )
     .unwrap();
     assert_eq!(rule_names(&g), vec!["program", "digit"]);
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::repeat(Rule::NamedSymbol("digit".into()))
-    );
-    assert_eq!(
-        *find_rule(&g, "digit"),
-        Rule::Pattern(r"[0-9]".into(), String::new())
-    );
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_repeat!(p, r_sym!(p, "digit"))
+    };
+    assert_rule_eq(&g.pool, actual, expected);
+    let actual = find_rule(&g, "digit");
+    let expected = {
+        let p = &mut g.pool;
+        r_pattern!(p, r"[0-9]")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -454,7 +471,7 @@ fn error_helper_rule_collides_with_root_rule() {
         rule expression { "from_root" }
     "#,
     );
-    let e = assert_err!(err.unwrap_err(), Resolve);
+    let e = assert_err!(expect_err(err), Resolve);
     assert_eq!(
         e.kind,
         ResolveErrorKind::DuplicateDeclaration("expression".into())
@@ -489,7 +506,7 @@ fn helper_can_define_rules() {
 fn helper_rule_uses_grammar_registered_external() {
     // A helper forward-declares an external and uses it; the grammar registers it
     // by bare name, and they connect by name with no qualified reference.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
         r#"
         let e = import("ext.tsg")
@@ -498,14 +515,13 @@ fn helper_rule_uses_grammar_registered_external() {
     "#,
     )
     .unwrap();
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(
-        *find_rule(&g, "wrapped"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("_tok".into()),
-            Rule::NamedSymbol("_tok".into()),
-        ])
-    );
+    assert_eq!(g.external_roots.len(), 1);
+    let actual = find_rule(&g, "wrapped");
+    let expected = {
+        let p = &mut g.pool;
+        r_seq!(p, [r_sym!(p, "_tok"), r_sym!(p, "_tok")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -513,15 +529,14 @@ fn helper_hole_unregistered_external_is_rejected() {
     // With the grammar's `externals: [_tok]` dropped, the materialized helper rule
     // carries a dangling `_tok` that the completeness check rejects, anchored at
     // the helper's `expect`.
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
         r#"
         let e = import("ext.tsg")
         grammar { language: "test" }
         rule program { wrapped }
     "#,
-    )
-    .unwrap_err();
+    ));
     let e = assert_err!(err, Lower);
     assert!(
         matches!(&e.kind, LowerErrorKind::UndefinedSymbols(names) if *names == ["_tok"]),
@@ -532,7 +547,7 @@ fn helper_hole_unregistered_external_is_rejected() {
 
 #[test]
 fn import_empty_module() {
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[("empty.tsg", "// nothing here\n")],
         r#"
         let e = import("empty.tsg")
@@ -541,12 +556,17 @@ fn import_empty_module() {
     "#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "program"), Rule::String("x".into()));
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn import_value_in_config_extras() {
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[("ws.tsg", r#"let WS = [regexp(r"\s"), regexp(r"//[^\n]*")]"#)],
         r#"
         let ws = import("ws.tsg")
@@ -555,15 +575,12 @@ fn import_value_in_config_extras() {
     "#,
     )
     .unwrap();
-    assert_eq!(g.extra_symbols.len(), 2);
-    assert_eq!(
-        g.extra_symbols[0],
-        Rule::Pattern(r"\s".into(), String::new())
-    );
-    assert_eq!(
-        g.extra_symbols[1],
-        Rule::Pattern(r"//[^\n]*".into(), String::new())
-    );
+    let actual = g.extra_roots.clone();
+    let expected = {
+        let p = &mut g.pool;
+        vec![r_pattern!(p, r"\s"), r_pattern!(p, r"//[^\n]*")]
+    };
+    assert_rules_eq(&g.pool, &actual, &expected);
 }
 
 #[test]
@@ -573,23 +590,33 @@ fn import_keyword_as_rule_name() {
         rule program { import }
         rule import { "import_stmt" }
     "#);
-    assert_eq!(g.variables[1].name, "import");
+    assert_eq!(g.pool.resolve(g.variables[1].name), "import");
 }
 
 #[test]
 fn import_helper_rule_set_macro_expands_locally() {
     // A helper's `@pair(...)` rule-set call expands into ExpandedRule items that
     // flow into the importing grammar's variables.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let h = import("import_helpers/rule_set_self.tsg")
         grammar { language: "test", start: program }
         rule program { seq(a_helper, b_helper) }
     "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    let names: Vec<&str> = g.variables.iter().map(|v| g.pool.resolve(v.name)).collect();
     assert!(names.contains(&"a_helper"), "missing a_helper in {names:?}");
     assert!(names.contains(&"b_helper"), "missing b_helper in {names:?}");
-    assert_eq!(*find_rule(&g, "a_helper"), Rule::String("x".into()));
-    assert_eq!(*find_rule(&g, "b_helper"), Rule::String("y".into()));
+    let actual = find_rule(&g, "a_helper");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
+    let actual = find_rule(&g, "b_helper");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "y")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -629,8 +656,16 @@ fn import_rule_preserves_metadata_and_reserved() {
         rule res_direct { reserved("ctx", "rw") }
         rule res_via_import { h::reserved_rule }
     "#);
-    assert_eq!(find_rule(&g, "via_import"), find_rule(&g, "direct"));
-    assert_eq!(find_rule(&g, "res_via_import"), find_rule(&g, "res_direct"));
+    assert_rule_eq(
+        &g.pool,
+        find_rule(&g, "via_import"),
+        find_rule(&g, "direct"),
+    );
+    assert_rule_eq(
+        &g.pool,
+        find_rule(&g, "res_via_import"),
+        find_rule(&g, "res_direct"),
+    );
 }
 
 #[test]
@@ -648,7 +683,7 @@ fn helper_rules_materialize_in_import_source_order() {
     "#,
     )
     .unwrap();
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    let names: Vec<&str> = g.variables.iter().map(|v| g.pool.resolve(v.name)).collect();
     // ha imports before hb, so its rules materialize first.
     assert_eq!(names, vec!["program", "a_rule", "b_rule"]);
 }
@@ -658,7 +693,7 @@ fn override_reaching_helper_top_level_via_macro_is_rejected() {
     // A helper can't inherit, so an `override` reaching its top level via a
     // rules-macro call has nothing to override and is rejected (the macro
     // definition stays legal; only the call is rejected).
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[(
             "helper.tsg",
             r#"
@@ -671,8 +706,7 @@ fn override_reaching_helper_top_level_via_macro_is_rejected() {
         grammar { language: "t" }
         rule program { h::expr }
         "#,
-    )
-    .unwrap_err();
+    ));
     let outer = assert_err!(err, Module);
     let DslError::Lower(e) = outer.inner.as_ref() else {
         panic!("expected Lower error, got {:?}", outer.inner)
@@ -696,7 +730,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        comma_sep1_rule("identifier")
+        |p| comma_sep1_rule(p, "identifier")
     }
     import_function_expands_comma_sep {
         r#"
@@ -706,7 +740,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        comma_sep_rule("identifier")
+        |p| comma_sep_rule(p, "identifier")
     }
     import_function_with_string_param {
         r#"
@@ -716,7 +750,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        sep_by1_rule(";", "identifier")
+        |p| sep_by1_rule(p, ";", "identifier")
     }
     import_function_intra_module_call {
         // double_wrap(x) = wrap(seq(x, ",", x))
@@ -728,15 +762,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::seq(vec![
-                Rule::NamedSymbol("identifier".into()),
-                Rule::String(",".into()),
-                Rule::NamedSymbol("identifier".into()),
-            ]),
-            Rule::String(")".into()),
-        ])
+        |p| r_seq!(p, [r_str!(p, "("), r_seq!(p, [r_sym!(p, "identifier"), r_str!(p, ","), r_sym!(p, "identifier")]), r_str!(p, ")")])
     }
     import_string_value {
         r#"
@@ -745,7 +771,7 @@ find_rule_tests! {
         rule program { h::GREETING }
     "#,
         "program",
-        Rule::String("hello".into())
+        |p| r_str!(p, "hello")
     }
     import_let_name_does_not_collide_with_local {
         r#"
@@ -755,10 +781,7 @@ find_rule_tests! {
         rule program { seq(h::GREETING, GREETING) }
     "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("hello".into()),
-            Rule::String("goodbye".into()),
-        ])
+        |p| r_seq!(p, [r_str!(p, "hello"), r_str!(p, "goodbye")])
     }
     import_int_value_in_prec {
         r#"
@@ -769,14 +792,7 @@ find_rule_tests! {
         }
     "#,
         "program",
-        Rule::prec_left(
-            Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::NamedSymbol("program".into()),
-                Rule::String("+".into()),
-                Rule::NamedSymbol("program".into()),
-            ])
-        )
+        |p| r_prec_left!(p, Precedence::Integer(1), r_seq!(p, [r_sym!(p, "program"), r_str!(p, "+"), r_sym!(p, "program")]))
     }
     import_value_reassigned_to_local {
         r#"
@@ -788,14 +804,7 @@ find_rule_tests! {
         }
     "#,
         "program",
-        Rule::prec_left(
-            Precedence::Integer(2),
-            Rule::seq(vec![
-                Rule::NamedSymbol("program".into()),
-                Rule::String("*".into()),
-                Rule::NamedSymbol("program".into()),
-            ])
-        )
+        |p| r_prec_left!(p, Precedence::Integer(2), r_seq!(p, [r_sym!(p, "program"), r_str!(p, "*"), r_sym!(p, "program")]))
     }
     import_transitive_function_body {
         r#"
@@ -805,7 +814,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        sep_by1_rule(",", "identifier")
+        |p| sep_by1_rule(p, ",", "identifier")
     }
     import_transitive_value {
         r#"
@@ -814,7 +823,7 @@ find_rule_tests! {
         rule program { prec(n::NESTED_VAL, "x") }
     "#,
         "program",
-        Rule::prec(Precedence::Integer(42), Rule::String("x".into()))
+        |p| r_prec!(p, Precedence::Integer(42), r_str!(p, "x"))
     }
     import_multiple_modules_body {
         r#"
@@ -830,10 +839,11 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        Rule::choice(vec![
-            sep_by1_rule(",", "identifier"),
-            sep_by1_rule(";", "identifier")
-        ])
+        |p| {
+            let a = sep_by1_rule(p, ",", "identifier");
+            let b = sep_by1_rule(p, ";", "identifier");
+            r_choice!(p, [a, b])
+        }
     }
     import_function_result_in_seq {
         r#"
@@ -843,11 +853,12 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("{".into()),
-            comma_sep1_rule("identifier"),
-            Rule::String("}".into()),
-        ])
+        |p| {
+            let open = r_str!(p, "{");
+            let inner = comma_sep1_rule(p, "identifier");
+            let close = r_str!(p, "}");
+            r_seq!(p, [open, inner, close])
+        }
     }
     import_module_values_only {
         r#"
@@ -856,7 +867,7 @@ find_rule_tests! {
         rule program { prec(m::X, "x") }
     "#,
         "program",
-        Rule::prec(Precedence::Integer(1), Rule::String("x".into()))
+        |p| r_prec!(p, Precedence::Integer(1), r_str!(p, "x"))
     }
     import_function_receives_caller_let_binding {
         r#"
@@ -867,7 +878,7 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        sep_by1_rule(";", "identifier")
+        |p| sep_by1_rule(p, ";", "identifier")
     }
     import_function_receives_object_field {
         r#"
@@ -878,8 +889,11 @@ find_rule_tests! {
         rule identifier { regexp(r"[a-z]+") }
     "#,
         "program",
-        sep_by1_rule(";", "identifier")
+        |p| sep_by1_rule(p, ";", "identifier")
     }
+    // Both arms resolve to the same "hello", and `choice` dedups, so the result
+    // has a single member. The expectation is written with one member because
+    // `r_choice!` bypasses dedup - it describes the literal shape.
     import_same_module_twice {
         r#"
         let h1 = import("import_helpers/helpers.tsg")
@@ -888,10 +902,7 @@ find_rule_tests! {
         rule program { choice(h1::GREETING, h2::GREETING) }
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::String("hello".into()),
-            Rule::String("hello".into()),
-        ])
+        |p| r_choice!(p, [r_str!(p, "hello")])
     }
     chained_let_alias_to_import_module {
         r#"
@@ -901,7 +912,7 @@ find_rule_tests! {
         rule program { h2::GREETING }
     "#,
         "program",
-        Rule::String("hello".into())
+        |p| r_str!(p, "hello")
     }
 }
 

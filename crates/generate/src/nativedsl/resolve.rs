@@ -11,17 +11,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    grammars::InputGrammar,
     nativedsl::{
-        Export, ImportedRule, Module, ModuleId, NoteMessage, ResolveError,
+        Export, ImportedRule, LoweredGrammar, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
             AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, Param, SharedAst, Span,
             Spanned,
         },
         diagnostic::suggest_name,
-        string_pool::StringPool,
     },
-    rules::Rule,
+    rules::{Rule, RulePool},
+    strpool::{StrId, StrPool},
 };
 
 /// Intermediate resolve environment used during phase 1. Maps declaration
@@ -29,13 +28,13 @@ use crate::{
 /// (for duplicate checking / "first defined here" notes). The kind never
 /// stores [`IdentKind::Unresolved`] - by the time a name reaches the table
 /// we know what it resolves to.
-type Decls<'src> = FxHashMap<&'src str, Spanned<IdentKind>>;
+type Decls = FxHashMap<StrId, Spanned<IdentKind>>;
 
 /// Context for [`collect_external_names`].
-struct ExternalNameCtx<'src, 'a> {
-    decls: &'a mut Decls<'src>,
+struct ExternalNameCtx<'a> {
+    decls: &'a mut Decls,
     /// `let` names currently being expanded; reentry indicates a cycle.
-    expanding_lets: FxHashSet<&'src str>,
+    expanding_lets: FxHashSet<StrId>,
 }
 
 /// Read-only context threaded through the pass-2 resolve walk
@@ -43,7 +42,8 @@ struct ExternalNameCtx<'src, 'a> {
 struct ResolveCtx<'a> {
     pools: &'a AstPools,
     ctx: &'a ModuleContext,
-    decls: &'a Decls<'a>,
+    strs: &'a StrPool,
+    decls: &'a Decls,
     modules: &'a [Module],
 }
 
@@ -56,34 +56,41 @@ struct ResolveCtx<'a> {
 pub fn resolve(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
-    strings: &StringPool,
+    pool: &mut RulePool,
     modules: &[Module],
-    base: Option<(&InputGrammar, Span)>,
+    base: Option<(&LoweredGrammar, Span)>,
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<()> {
     let decls = collect_decls(
         shared,
         ctx,
-        strings,
+        pool,
         &ctx.root_items,
         base,
         modules,
         imported_rules,
     )?;
 
+    let rcx = ResolveCtx {
+        pools: &shared.pools,
+        ctx,
+        strs: pool.strs(),
+        decls: &decls,
+        modules,
+    };
+
     // Validate computed-name references (`@<expr>`), evaluated under each call's
     // args at expand, against the complete name table.
     for &Spanned { value: name, span } in &ctx.computed_refs {
-        let text = strings.resolve_local(name, &ctx.source);
         // Must resolve to a rule: lower emits a NamedSymbol for whatever name
         // this is, so a let/macro match would lower a dangling symbol.
-        match decls.get(text).map(|d| d.value) {
+        match rcx.decls.get(&name).map(|d| d.value) {
             Some(IdentKind::Rule) => {}
             Some(_) => Err(ResolveError::new(
-                ResolveErrorKind::ComputedNameNotARule(text.to_string()),
+                ResolveErrorKind::ComputedNameNotARule(rcx.strs.resolve(name).to_string()),
                 span,
             ))?,
-            None => Err(unknown_ident_error(ctx, &decls, text, span))?,
+            None => Err(unknown_ident_error(&rcx, rcx.strs.resolve(name), span))?,
         }
     }
 
@@ -92,31 +99,26 @@ pub fn resolve(
     // that covers the realistic worst case and avoids the growth reallocs.
     let mut stack = Vec::with_capacity(ctx.root_items.len());
     for &item_id in &ctx.root_items {
-        let rcx = ResolveCtx {
-            pools: &shared.pools,
-            ctx,
-            decls: &decls,
-            modules,
-        };
         resolve_item(&mut shared.arena, &rcx, item_id, &mut stack)?;
     }
 
     Ok(())
 }
 
-fn insert_decl<'src>(
-    decls: &mut Decls<'src>,
-    name: &'src str,
+fn insert_decl(
+    decls: &mut Decls,
+    strs: &StrPool,
+    name: StrId,
     kind: IdentKind,
     span: Span,
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
     if let Some(&Spanned {
         span: first_span, ..
-    }) = decls.get(name)
+    }) = decls.get(&name)
     {
         return Err(ResolveError::with_note(
-            ResolveErrorKind::DuplicateDeclaration(name.to_string()),
+            ResolveErrorKind::DuplicateDeclaration(strs.resolve(name).to_string()),
             span,
             ctx.note(NoteMessage::FirstDefinedHere, first_span),
         ));
@@ -128,14 +130,13 @@ fn insert_decl<'src>(
 /// Reject a macro-param / for-binding name that shadows a top-level declaration.
 fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
     for binding in bindings {
-        let name = rcx.ctx.text(binding.name);
         if let Some(&Spanned {
             span: first_span, ..
-        }) = rcx.decls.get(name)
+        }) = rcx.decls.get(&binding.name.value)
         {
             return Err(ResolveError::with_note(
-                ResolveErrorKind::ShadowedBinding(name.to_string()),
-                binding.name,
+                ResolveErrorKind::ShadowedBinding(rcx.strs.resolve(binding.name.value).to_string()),
+                binding.name.span,
                 rcx.ctx.note(NoteMessage::FirstDefinedHere, first_span),
             ));
         }
@@ -152,15 +153,15 @@ fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
 /// before the externals walk so that an `externals` field referencing an
 /// inherited rule is correctly identified as a known name rather than being
 /// re-registered as a fresh external token.
-fn collect_decls<'a>(
+fn collect_decls(
     shared: &SharedAst,
-    ctx: &'a ModuleContext,
-    strings: &'a StringPool,
+    ctx: &ModuleContext,
+    pool: &mut RulePool,
     root_items: &[NodeId],
-    base: Option<(&'a InputGrammar, Span)>,
-    modules: &'a [Module],
+    base: Option<(&LoweredGrammar, Span)>,
+    modules: &[Module],
     imported_rules: &[ImportedRule],
-) -> ResolveResult<Decls<'a>> {
+) -> ResolveResult<Decls> {
     let mut decls = FxHashMap::with_capacity_and_hasher(root_items.len(), FxBuildHasher);
     let mut override_names = FxHashSet::default();
 
@@ -171,27 +172,31 @@ fn collect_decls<'a>(
             Node::Rule {
                 name, is_override, ..
             } => {
-                let name_text = ctx.text(*name);
-                insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
+                insert_decl(&mut decls, pool.strs(), *name, IdentKind::Rule, span, ctx)?;
                 if *is_override {
-                    override_names.insert(name_text);
+                    override_names.insert(*name);
                 }
             }
             Node::ExpandedRule(expand_id) => {
                 let exp = shared.pools.get_expansion(*expand_id);
-                let (name, is_override) = (exp.name, exp.is_override);
-                // Source entries from expand always reference ctx.source.
-                let name_text = strings.resolve_local(name, &ctx.source);
-                insert_decl(&mut decls, name_text, IdentKind::Rule, span, ctx)?;
-                if is_override {
-                    override_names.insert(name_text);
+                insert_decl(
+                    &mut decls,
+                    pool.strs(),
+                    exp.name,
+                    IdentKind::Rule,
+                    span,
+                    ctx,
+                )?;
+                if exp.is_override {
+                    override_names.insert(exp.name);
                 }
             }
             Node::Macro(macro_id) => {
                 let config = shared.pools.get_macro(*macro_id);
                 insert_decl(
                     &mut decls,
-                    ctx.text(config.name),
+                    pool.strs(),
+                    config.name.value,
                     IdentKind::Macro(*macro_id),
                     span,
                     ctx,
@@ -200,7 +205,8 @@ fn collect_decls<'a>(
             Node::Let { name, .. } => {
                 insert_decl(
                     &mut decls,
-                    ctx.text(*name),
+                    pool.strs(),
+                    *name,
                     IdentKind::Var(item_id),
                     span,
                     ctx,
@@ -217,10 +223,17 @@ fn collect_decls<'a>(
             // The first source of an overridden name coexists with the override
             // (claim it by removing). A later source is no longer skipped and so
             // collides as a duplicate, exactly as it would without the override.
-            if override_names.remove(var.name.as_str()) {
+            if override_names.remove(&var.name) {
                 continue;
             }
-            insert_decl(&mut decls, &var.name, IdentKind::Rule, inherit_span, ctx)?;
+            insert_decl(
+                &mut decls,
+                pool.strs(),
+                var.name,
+                IdentKind::Rule,
+                inherit_span,
+                ctx,
+            )?;
         }
         // Inherited external tokens are referenceable by bare name too, just
         // like inherited rules). Anonymous externals (string/pattern) have no
@@ -228,12 +241,19 @@ fn collect_decls<'a>(
         // `externals` (an external-scanner token with a grammar-rule fallback),
         // putting the name in both lists; it's one symbol, already registered by
         // the rule loop, so skip it rather than colliding with ourselves.
-        for ext in &base_grammar.external_tokens {
-            if let Rule::NamedSymbol(name) = ext
-                && !override_names.contains(name.as_str())
-                && !base_grammar.variables.iter().any(|v| v.name == *name)
+        for ext in &base_grammar.external_roots {
+            if let Rule::NamedSymbol(name) = pool.node(*ext)
+                && !override_names.contains(&name)
+                && !base_grammar.variables.iter().any(|v| v.name == name)
             {
-                insert_decl(&mut decls, name, IdentKind::Rule, inherit_span, ctx)?;
+                insert_decl(
+                    &mut decls,
+                    pool.strs(),
+                    name,
+                    IdentKind::Rule,
+                    inherit_span,
+                    ctx,
+                )?;
             }
         }
     }
@@ -245,11 +265,18 @@ fn collect_decls<'a>(
             Module::Helper { lowered_rules, .. },
             &modules[usize::from(ir.module)]
         );
-        let name = &lowered_rules[ir.index as usize].0;
+        let name = lowered_rules[ir.index as usize].0;
         // First source of an overridden name claims the override. A later
         // source is no longer skipped and collides (see the base loop above).
-        if !override_names.remove(name.as_str()) {
-            insert_decl(&mut decls, name, IdentKind::Rule, ir.ref_span, ctx)?;
+        if !override_names.remove(&name) {
+            insert_decl(
+                &mut decls,
+                pool.strs(),
+                name,
+                IdentKind::Rule,
+                ir.ref_span,
+                ctx,
+            )?;
         }
     }
 
@@ -262,7 +289,7 @@ fn collect_decls<'a>(
             decls: &mut decls,
             expanding_lets: FxHashSet::default(),
         };
-        collect_external_names(shared, ctx, ext_id, &mut ec)?;
+        collect_external_names(shared, ctx, pool.strs_mut(), ext_id, &mut ec)?;
     }
 
     // Forward-decls (`expect X`) name a symbol provided elsewhere: a rule (here or
@@ -274,10 +301,9 @@ fn collect_decls<'a>(
         let Node::Forward { name } = shared.arena.get(item_id) else {
             continue;
         };
-        let name_text = ctx.text(*name);
         let span = shared.arena.span(item_id);
         decls
-            .entry(name_text)
+            .entry(*name)
             .or_insert_with(|| Spanned::new(IdentKind::Rule, span));
     }
 
@@ -385,8 +411,10 @@ fn resolve_node(
         Node::Ident(IdentKind::Unresolved) => {
             let span = arena.span(id);
             let name = rcx.ctx.text(span);
-            let Some(&Spanned { value: kind, .. }) = rcx.decls.get(name) else {
-                return Err(unknown_ident_error(rcx.ctx, rcx.decls, name, span));
+            let Some(&Spanned { value: kind, .. }) =
+                rcx.strs.get(name).and_then(|sid| rcx.decls.get(&sid))
+            else {
+                return Err(unknown_ident_error(rcx, name, span));
             };
             arena.resolve_as(id, kind);
             None
@@ -397,9 +425,11 @@ fn resolve_node(
         // mirroring grammar.js `alias($.x, $.undeclared)`.
         Node::Alias { content, target } => {
             if matches!(arena.get(target), Node::Ident(IdentKind::Unresolved)) {
+                let text = rcx.ctx.text(arena.span(target));
                 let kind = rcx
-                    .decls
-                    .get(rcx.ctx.text(arena.span(target)))
+                    .strs
+                    .get(text)
+                    .and_then(|sid| rcx.decls.get(&sid))
                     .map_or(IdentKind::Rule, |s| s.value);
                 arena.resolve_as(target, kind);
             } else {
@@ -474,15 +504,7 @@ fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Resolv
         Node::QualifiedAccess { obj, member } => {
             if let Some(idx) = resolve_module_id(arena, obj) {
                 let member_name = rcx.ctx.text(member);
-                resolve_qualified_member(
-                    rcx.ctx,
-                    arena,
-                    &rcx.modules[usize::from(idx)],
-                    idx,
-                    id,
-                    member_name,
-                    member,
-                )?;
+                resolve_qualified_member(rcx, arena, idx, id, member_name, member)?;
             }
             Ok(())
         }
@@ -490,13 +512,7 @@ fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Resolv
             let (obj, name, _args) = rcx.pools.get_qualified_call(range);
             if let Some(idx) = resolve_module_id(arena, obj) {
                 let macro_name = rcx.ctx.text(arena.span(name));
-                resolve_qualified_call_name(
-                    rcx.ctx,
-                    arena,
-                    &rcx.modules[usize::from(idx)],
-                    name,
-                    macro_name,
-                )?;
+                resolve_qualified_call_name(rcx, arena, idx, name, macro_name)?;
             }
             Ok(())
         }
@@ -506,16 +522,17 @@ fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Resolv
 
 /// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
 fn resolve_qualified_call_name(
-    ctx: &ModuleContext,
+    rcx: &ResolveCtx,
     arena: &mut NodeArena,
-    target: &Module,
+    module: ModuleId,
     name_id: NodeId,
     macro_name: &str,
 ) -> ResolveResult<()> {
-    match target.export(macro_name) {
+    let target = &rcx.modules[usize::from(module)];
+    match rcx.strs.get(macro_name).and_then(|id| target.export(id)) {
         Some(Export::Local(kind @ IdentKind::Macro(_))) => arena.set(name_id, Node::Ident(kind)),
         None => Err(import_member_not_found(
-            ctx,
+            rcx,
             target,
             macro_name,
             arena.span(name_id),
@@ -532,19 +549,19 @@ fn resolve_qualified_call_name(
 ///   - lowered rule / external -> `ImportRef` (the lowerer indexes directly)
 ///   - not found -> error
 fn resolve_qualified_member(
-    ctx: &ModuleContext,
+    rcx: &ResolveCtx,
     arena: &mut NodeArena,
-    target: &Module,
     module: ModuleId,
     node_id: NodeId,
     member_name: &str,
     member_span: Span,
 ) -> ResolveResult<()> {
-    match target.export(member_name) {
+    let target = &rcx.modules[usize::from(module)];
+    match rcx.strs.get(member_name).and_then(|id| target.export(id)) {
         Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
         Some(Export::Rule(target)) => arena.set(node_id, Node::ModuleRule { module, target }),
         None => Err(import_member_not_found(
-            ctx,
+            rcx,
             target,
             member_name,
             member_span,
@@ -555,17 +572,19 @@ fn resolve_qualified_member(
 
 /// Build an `ImportMemberNotFound` error, attaching a "did you mean" note when appropriate
 fn import_member_not_found(
-    ctx: &ModuleContext,
+    rcx: &ResolveCtx,
     target: &Module,
     name: &str,
     span: Span,
 ) -> ResolveError {
     let kind = ResolveErrorKind::ImportMemberNotFound(name.to_string());
-    if let Some(suggestion) = suggest_name(name, target.export_keys()) {
+    let candidates = target.export_keys().map(|id| rcx.strs.resolve(id));
+    if let Some(suggestion) = suggest_name(name, candidates) {
         return ResolveError::with_note(
             kind,
             span,
-            ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span),
+            rcx.ctx
+                .note(NoteMessage::DidYouMean(suggestion.to_string()), span),
         );
     }
     ResolveError::new(kind, span)
@@ -604,19 +623,20 @@ pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<N
 }
 
 /// Recursively collect external token names from an expression.
-fn collect_external_names<'src>(
+fn collect_external_names(
     shared: &SharedAst,
-    ctx: &'src ModuleContext,
+    ctx: &ModuleContext,
+    strs: &mut StrPool,
     id: NodeId,
-    ec: &mut ExternalNameCtx<'src, '_>,
+    ec: &mut ExternalNameCtx<'_>,
 ) -> ResolveResult<()> {
     let arena = &shared.arena;
     match arena.get(id) {
         // Bare identifier: follow a let, ignore an already-declared name, or
         // register an unknown name as a new external token.
         Node::Ident(IdentKind::Unresolved) => {
-            let name = ctx.text(arena.span(id));
-            match ec.decls.get(name).map(|d| d.value) {
+            let name = strs.intern(ctx.text(arena.span(id)));
+            match ec.decls.get(&name).map(|d| d.value) {
                 Some(IdentKind::Var(let_id)) => {
                     if !ec.expanding_lets.insert(name) {
                         return Err(ResolveError::new(
@@ -625,21 +645,21 @@ fn collect_external_names<'src>(
                         ));
                     }
                     expect_pat!(Node::Let { value, .. }, *arena.get(let_id));
-                    collect_external_names(shared, ctx, value, ec)?;
-                    ec.expanding_lets.remove(name);
+                    collect_external_names(shared, ctx, strs, value, ec)?;
+                    ec.expanding_lets.remove(&name);
                 }
-                None => insert_decl(ec.decls, name, IdentKind::Rule, arena.span(id), ctx)?,
+                None => insert_decl(ec.decls, strs, name, IdentKind::Rule, arena.span(id), ctx)?,
                 Some(_) => {}
             }
         }
         Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
             for &child in shared.pools.child_slice(*range) {
-                collect_external_names(shared, ctx, child, ec)?;
+                collect_external_names(shared, ctx, strs, child, ec)?;
             }
         }
         Node::Append { left, right } => {
-            collect_external_names(shared, ctx, *left, ec)?;
-            collect_external_names(shared, ctx, *right, ec)?;
+            collect_external_names(shared, ctx, strs, *left, ec)?;
+            collect_external_names(shared, ctx, strs, *right, ec)?;
         }
         // Literals don't introduce names, inherited values already registered.
         #[rustfmt::skip]
@@ -693,9 +713,9 @@ pub enum ResolveErrorKind {
 }
 
 /// Build an `UnknownIdentifier` error, attaching a "did you mean" note if appropriate
-fn unknown_ident_error(ctx: &ModuleContext, decls: &Decls, name: &str, span: Span) -> ResolveError {
+fn unknown_ident_error(rcx: &ResolveCtx, name: &str, span: Span) -> ResolveError {
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
-    let candidates = decls.keys().copied().chain(
+    let candidates = rcx.decls.keys().map(|&id| rcx.strs.resolve(id)).chain(
         super::lexer::TokenKind::COMBINATOR_KEYWORD_NAMES
             .iter()
             .copied(),
@@ -704,7 +724,8 @@ fn unknown_ident_error(ctx: &ModuleContext, decls: &Decls, name: &str, span: Spa
         return ResolveError::with_note(
             kind,
             span,
-            ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span),
+            rcx.ctx
+                .note(NoteMessage::DidYouMean(suggestion.to_string()), span),
         );
     }
     ResolveError::new(kind, span)

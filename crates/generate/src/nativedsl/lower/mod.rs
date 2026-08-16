@@ -1,11 +1,13 @@
-//! Lowering pass: evaluates the typed AST into an [`InputGrammar`].
+//! Lowering pass: evaluates the typed AST into a
+//! [`LoweredGrammar`](crate::nativedsl::LoweredGrammar).
 //!
 //! Pipeline:
-//! 1. [`evaluate`] walks the root grammar's items, populating an
-//!    [`evaluator::Evaluator`] with intermediate IR (values + `ARule` pools).
-//! 2. [`build_grammar`] consumes the [`EvalResult`] and the optional
-//!    inherited base grammar, materializing a final [`InputGrammar`] with
-//!    overrides applied and unset fields inherited.
+//! 1. `evaluate` walks the root grammar's items, emitting rules into the shared
+//!    `RulePool` and values into the `repr::IrPools` value pool.
+//! 2. `build_grammar` consumes the `EvalResult` and the optional inherited base
+//!    grammar, materializing a final
+//!    [`LoweredGrammar`](crate::nativedsl::LoweredGrammar) with overrides
+//!    applied and unset fields inherited.
 
 mod error;
 mod evaluator;
@@ -14,47 +16,29 @@ mod repr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
-    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
-    nativedsl::{ImportedRule, Module, ast::ModuleContext},
-    rules::Rule,
+    grammars::{PrecedenceEntry, ReservedWordContext, Variable},
+    nativedsl::{ImportedRule, LoweredGrammar, Module, ast::ModuleContext},
+    rules::{Rule, RuleId, RulePool},
+    strpool::{StrId, StrPool},
 };
 
 use super::{
     LowerError, ModuleId, Note, NoteMessage,
     ast::{ForId, Node, NodeId, SharedAst, Span, Spanned},
-    string_pool::{Str, StringPool},
 };
 
 pub use error::{DisallowedItemKind, LowerErrorKind, LowerResult};
 
-/// Rule-decl name source. Resolution is deferred to the final build step
-/// so the body-lowering loop doesn't hold a `StringPool` borrow across
-/// `lower_to_rule` calls (which may intern further entries).
-#[derive(Clone, Copy)]
-enum NameSource {
-    Span(Span), // Node::Rule
-    Str(Str),   // Node::ExpandedRule
-}
-
-use evaluator::{BuildStep, Evaluator, Task};
-use repr::{IrPools, RuleId, ValueId};
+use evaluator::{Evaluator, Task};
+use repr::{IrPools, ValueId};
 
 const MAX_CALL_DEPTH: u16 = 128;
-/// Maximum nesting depth of a materialized [`Rule`] tree. The evaluator builds
-/// rules iteratively (no native-stack bound), but the resulting tree is consumed
-/// by the *recursive* shared grammar backend (`crate::prepare_grammar`, also used
-/// by the grammar.js front-end). This bounds the tree depth so a pathologically
-/// deep rule - reachable via macro expansion, whose product of `MAX_CALL_DEPTH`
-/// and per-body nesting far exceeds this - is rejected with a clean error here
-/// rather than overflowing the backend. Lift it once that backend is iterative.
-const MAX_RULE_DEPTH: u16 = 256;
 
 /// One stack frame for the macro-call trace.
 #[derive(Clone, Copy)]
 pub(super) struct CallFrame {
-    /// Span of the macro's name in its defining module.
-    pub name_span: Span,
-    pub name_mod: ModuleId,
+    /// The macro's name.
+    pub name: StrId,
     /// Span of the call site in the caller's module.
     pub call_span: Span,
     pub caller_mod: ModuleId,
@@ -98,10 +82,10 @@ struct Scratch {
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
     /// this is a plain stack.
     combine_bases: Vec<u32>,
-    /// Reused work + output stacks for [`Evaluator::build_rule`]'s iterative
-    /// materialization, so it doesn't allocate fresh buffers per top-level rule.
-    build_work: Vec<BuildStep>,
-    build_out: Vec<Rule>,
+    /// Traversal stack for choice flattening in [`evaluator`]
+    rule_walk: Vec<RuleId>,
+    /// Retained stack for `RulePool::subtree_eq_with_scratch` during choice dedup
+    rule_eq: Vec<(RuleId, RuleId)>,
 }
 
 impl Scratch {
@@ -116,8 +100,8 @@ impl Scratch {
         self.val_scratch.clear();
         self.rule_scratch.clear();
         self.combine_bases.clear();
-        self.build_work.clear();
-        self.build_out.clear();
+        self.rule_walk.clear();
+        self.rule_eq.clear();
     }
 }
 
@@ -128,18 +112,18 @@ impl LoweringState {
 }
 
 struct EvalResult {
-    language: String,
-    rules: Vec<(String, Rule)>,
-    overrides: Vec<(String, Rule, Span)>,
-    extras: Option<Vec<Rule>>,
-    externals: Option<Vec<Rule>>,
-    inline: Option<Vec<String>>,
-    supertypes: Option<Vec<String>>,
-    word: Option<String>,
-    start: Option<(String, Span)>,
-    conflicts: Option<Vec<Vec<String>>>,
+    language: StrId,
+    rules: Vec<(StrId, RuleId)>,
+    overrides: Vec<(StrId, RuleId, Span)>,
+    extras: Option<Vec<RuleId>>,
+    externals: Option<Vec<RuleId>>,
+    inline: Option<Vec<StrId>>,
+    supertypes: Option<Vec<StrId>>,
+    word: Option<StrId>,
+    start: Option<(StrId, Span)>,
+    conflicts: Option<Vec<Vec<StrId>>>,
     precedences: Option<Vec<Vec<PrecedenceEntry>>>,
-    reserved: Option<Vec<ReservedWordContext<Rule>>>,
+    reserved: Option<Vec<ReservedWordContext>>,
 }
 
 /// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
@@ -148,38 +132,26 @@ struct EvalResult {
 /// - `state` persists across the whole `parse_native_dsl` pipeline.
 pub fn lower_with_base(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    pool: &mut RulePool,
     shared: &SharedAst,
     previous: &[Module],
     current: &ModuleContext,
     imported_rules: &[ImportedRule],
-) -> LowerResult<InputGrammar> {
+) -> LowerResult<LoweredGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
-    let result = evaluate(state, strings, shared, previous, current)?;
-    let grammar = build_grammar(current, result, base_grammar, previous, imported_rules)?;
-    check_symbol_completeness(shared, current, previous, &grammar)?;
+    let result = evaluate(state, pool, shared, previous, current)?;
+    let grammar = build_grammar(
+        current,
+        pool,
+        result,
+        base_grammar,
+        previous,
+        imported_rules,
+    )?;
+    check_symbol_completeness(shared, current, previous, pool, &grammar)?;
     Ok(grammar)
-}
-
-/// Benchmark hook: run only the eval walk (AST -> `ARule`/value IR pool) over the
-/// root items, skipping the `build_rule` (`ARule` -> [`Rule`]) materialization.
-/// Isolates the permanent lowering pass from the transitional `Rule`-building
-/// bridge, so the iterative eval engine can be timed against the recursive one
-/// without the `Rule`-box allocation noise. Not part of the real pipeline.
-#[doc(hidden)]
-pub fn eval_only_for_bench(
-    state: &mut LoweringState,
-    strings: &mut StringPool,
-    shared: &SharedAst,
-    previous: &[Module],
-    current: &ModuleContext,
-) -> LowerResult<()> {
-    let mut eval = Evaluator::new(state, strings, shared, previous, current);
-    let items = lower_items(&mut eval, shared, current)?;
-    std::hint::black_box(&items);
-    Ok(())
 }
 
 /// Every `NamedSymbol` a grammar references must resolve to a definition.
@@ -189,38 +161,50 @@ fn check_symbol_completeness(
     shared: &SharedAst,
     current: &ModuleContext,
     previous: &[Module],
-    grammar: &InputGrammar,
+    pool: &RulePool,
+    grammar: &LoweredGrammar,
 ) -> LowerResult<()> {
     if !current.has_forward_decls && !previous.iter().any(|m| m.ctx().has_forward_decls) {
         return Ok(());
     }
-    let mut defined: FxHashSet<&str> = grammar.variables.iter().map(|v| v.name.as_str()).collect();
-    for ext in &grammar.external_tokens {
-        if let Rule::NamedSymbol(name) = ext {
-            defined.insert(name.as_str());
+    let mut defined: FxHashSet<StrId> = grammar.variables.iter().map(|v| v.name).collect();
+    for &ext in &grammar.external_roots {
+        if let Rule::NamedSymbol(name) = pool.node(ext) {
+            defined.insert(name);
         }
     }
-    let mut undefined: Vec<&str> = Vec::new();
+    let mut undefined: Vec<StrId> = Vec::new();
     for v in &grammar.variables {
-        collect_undefined(&v.rule, &defined, &mut undefined);
+        collect_undefined(pool, v.root, &defined, &mut undefined);
     }
     if undefined.is_empty() {
         return Ok(());
     }
     Err(undefined_symbols_error(
-        shared, current, previous, undefined,
+        shared,
+        current,
+        previous,
+        pool.strs(),
+        undefined,
     ))
 }
 
 /// Push every `NamedSymbol` in `root` whose name is absent from `defined` into
 /// `out`. Walks with an explicit stack (order is irrelevant - `out` is sorted and
 /// deduped by the caller) so a deeply nested rule cannot overflow the native stack.
-fn collect_undefined<'a>(root: &'a Rule, defined: &FxHashSet<&str>, out: &mut Vec<&'a str>) {
+fn collect_undefined(
+    pool: &RulePool,
+    root: RuleId,
+    defined: &FxHashSet<StrId>,
+    out: &mut Vec<StrId>,
+) {
     let mut stack = vec![root];
-    while let Some(rule) = stack.pop() {
-        match rule {
-            Rule::NamedSymbol(name) if !defined.contains(name.as_str()) => out.push(name.as_str()),
-            Rule::Seq(rules) | Rule::Choice(rules) => stack.extend(rules.iter()),
+    while let Some(id) = stack.pop() {
+        match pool.node(id) {
+            Rule::NamedSymbol(name) if !defined.contains(&name) => out.push(name),
+            Rule::Seq(range) | Rule::Choice(range) => {
+                stack.extend_from_slice(pool.child_slice(range));
+            }
             Rule::Metadata { rule, .. } | Rule::Repeat(rule) | Rule::Reserved { rule, .. } => {
                 stack.push(rule);
             }
@@ -228,7 +212,7 @@ fn collect_undefined<'a>(root: &'a Rule, defined: &FxHashSet<&str>, out: &mut Ve
             | Rule::Blank
             | Rule::String(_)
             | Rule::Pattern(..)
-            | Rule::Symbol(_) => {}
+            | Rule::Sym { .. } => {}
         }
     }
 }
@@ -238,14 +222,17 @@ fn undefined_symbols_error(
     shared: &SharedAst,
     current: &ModuleContext,
     previous: &[Module],
-    mut names: Vec<&str>,
+    strs: &StrPool,
+    mut names: Vec<StrId>,
 ) -> LowerError {
-    names.sort_unstable();
+    names.sort_unstable_by_key(|&n| strs.resolve(n));
     names.dedup();
-    let kind = LowerErrorKind::UndefinedSymbols(names.iter().map(|n| (*n).to_string()).collect());
+    let kind = LowerErrorKind::UndefinedSymbols(
+        names.iter().map(|&n| strs.resolve(n).to_string()).collect(),
+    );
     let mut notes = names
         .iter()
-        .filter_map(|name| forward_decl_note(shared, current, previous, name));
+        .filter_map(|&name| forward_decl_note(shared, current, previous, name));
     let Some(primary) = notes.next() else {
         // No `expect` behind any dangling symbol: anchor at the grammar block,
         // which `validate_grammar` guarantees is present in a grammar module.
@@ -272,7 +259,7 @@ fn forward_decl_note(
     shared: &SharedAst,
     current: &ModuleContext,
     previous: &[Module],
-    name: &str,
+    name: StrId,
 ) -> Option<Note> {
     if let Some(span) = forward_decl_span(shared, current, name) {
         return Some(current.note(NoteMessage::ForwardDeclaredHere, span));
@@ -285,11 +272,11 @@ fn forward_decl_note(
 }
 
 /// Span of an `expect <name>` forward-decl in `ctx`, if one is present.
-fn forward_decl_span(shared: &SharedAst, ctx: &ModuleContext, name: &str) -> Option<Span> {
+fn forward_decl_span(shared: &SharedAst, ctx: &ModuleContext, name: StrId) -> Option<Span> {
     ctx.root_items
         .iter()
         .find_map(|&id| match *shared.arena.get(id) {
-            Node::Forward { name: decl } if ctx.text(decl) == name => Some(decl),
+            Node::Forward { name: decl } if decl == name => Some(shared.arena.span(id)),
             _ => None,
         })
 }
@@ -298,7 +285,7 @@ fn forward_decl_span(shared: &SharedAst, ctx: &ModuleContext, name: &str) -> Opt
 /// so grammar lowering can split overrides out while helper lowering treats them
 /// all as plain rules. Built in source order.
 struct LoweredItem {
-    src: NameSource,
+    name: StrId,
     rule_id: RuleId,
     is_override: bool,
     /// Attribution span for an override (the rule name, or the macro call site).
@@ -329,10 +316,10 @@ fn lower_items(
             } => {
                 let rule_id = eval.lower_to_rule(body)?;
                 items.push(LoweredItem {
-                    src: NameSource::Span(name),
+                    name,
                     rule_id,
                     is_override,
-                    span: name,
+                    span: shared.arena.span(item_id),
                 });
             }
             &Node::ExpandedRule(expand_id) => {
@@ -342,7 +329,7 @@ fn lower_items(
                 let span = shared.arena.span(item_id);
                 let rule_id = eval.lower_expansion(expand_id, span)?;
                 items.push(LoweredItem {
-                    src: NameSource::Str(exp.name),
+                    name: exp.name,
                     rule_id,
                     is_override: exp.is_override,
                     span,
@@ -361,12 +348,12 @@ fn lower_items(
 ///     reaching the top level via a called macro is rejected below.
 pub fn lower_helper(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    pool: &mut RulePool,
     shared: &SharedAst,
     previous: &[super::Module],
     current: &super::ModuleContext,
-) -> LowerResult<Vec<(String, Rule)>> {
-    let mut eval = Evaluator::new(state, strings, shared, previous, current);
+) -> LowerResult<Vec<(StrId, RuleId)>> {
+    let mut eval = Evaluator::new(state, pool, shared, previous, current);
     let mut rules = Vec::new();
     for it in lower_items(&mut eval, shared, current)? {
         if it.is_override {
@@ -379,54 +366,35 @@ pub fn lower_helper(
                 it.span,
             ));
         }
-        rules.push((
-            resolve_name(it.src, &eval, current),
-            eval.build_rule(it.rule_id)?,
-        ));
+        rules.push((it.name, it.rule_id));
     }
     Ok(rules)
 }
 
-fn resolve_name(src: NameSource, eval: &Evaluator, ctx: &super::ModuleContext) -> String {
-    match src {
-        NameSource::Span(s) => ctx.text(s).to_string(),
-        NameSource::Str(s) => eval.strings.resolve_local(s, &ctx.source).to_string(),
-    }
-}
-
 fn evaluate(
     state: &mut LoweringState,
-    strings: &mut StringPool,
+    pool: &mut RulePool,
     shared: &SharedAst,
     previous: &[super::Module],
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
-    let mut eval = Evaluator::new(state, strings, shared, previous, ctx);
-    let mut rule_entries: Vec<(NameSource, RuleId)> = Vec::new();
-    let mut override_entries: Vec<(NameSource, RuleId, Span)> = Vec::new();
+    let mut eval = Evaluator::new(state, pool, shared, previous, ctx);
+    let mut rules: Vec<(StrId, RuleId)> = Vec::new();
+    let mut overrides: Vec<(StrId, RuleId, Span)> = Vec::new();
     for it in lower_items(&mut eval, shared, ctx)? {
         if it.is_override {
-            override_entries.push((it.src, it.rule_id, it.span));
+            overrides.push((it.name, it.rule_id, it.span));
         } else {
-            rule_entries.push((it.src, it.rule_id));
+            rules.push((it.name, it.rule_id));
         }
     }
     // grammar_config is guaranteed present by `validate_grammar`, language
     // is guaranteed present by the parser (`MissingLanguageField` error).
     let config = ctx.grammar_config.as_ref().unwrap();
-    let language = config.language.as_ref().unwrap();
-
-    let rules: Vec<(String, Rule)> = rule_entries
-        .into_iter()
-        .map(|(src, rid)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?)))
-        .collect::<LowerResult<_>>()?;
-    let overrides: Vec<(String, Rule, Span)> = override_entries
-        .into_iter()
-        .map(|(src, rid, span)| Ok((resolve_name(src, &eval, ctx), eval.build_rule(rid)?, span)))
-        .collect::<LowerResult<_>>()?;
+    let language = config.language.unwrap();
 
     Ok(EvalResult {
-        language: language.clone(),
+        language,
         rules,
         overrides,
         extras: config
@@ -470,8 +438,8 @@ fn evaluate(
 /// which is more concise than threading a slice through all five call sites.
 fn inherit<T: Clone>(
     overridden: Option<Vec<T>>,
-    base: Option<&InputGrammar>,
-    field: fn(&InputGrammar) -> &[T],
+    base: Option<&LoweredGrammar>,
+    field: fn(&LoweredGrammar) -> &[T],
 ) -> Vec<T> {
     overridden.unwrap_or_else(|| base.map_or_else(Vec::new, |b| field(b).to_vec()))
 }
@@ -482,73 +450,72 @@ fn inherit<T: Clone>(
 /// child's new sets. Matches dsl.js, which assigns `reserved[name] = ...` over a
 /// copy of the base's reserved object.
 fn merge_reserved(
-    overridden: Option<Vec<ReservedWordContext<Rule>>>,
-    base: Option<&[ReservedWordContext<Rule>]>,
-) -> Vec<ReservedWordContext<Rule>> {
-    let mut merged = base.unwrap_or(&[]).to_vec();
-    for child in overridden.into_iter().flatten() {
-        if let Some(existing) = merged.iter_mut().find(|c| c.name == child.name) {
-            *existing = child;
+    overridden: Option<Vec<ReservedWordContext>>,
+    base: Option<&[ReservedWordContext]>,
+) -> Vec<ReservedWordContext> {
+    let base = base.unwrap_or(&[]);
+    let Some(mut children) = overridden else {
+        return base.to_vec();
+    };
+    let mut merged = Vec::with_capacity(base.len() + children.len());
+    for b in base {
+        if let Some(pos) = children.iter().position(|c| c.name == b.name) {
+            merged.push(children.remove(pos));
         } else {
-            merged.push(child);
+            merged.push(b.clone());
         }
     }
+    merged.append(&mut children);
     merged
 }
 
 fn build_grammar(
     ctx: &ModuleContext,
+    pool: &mut RulePool,
     result: EvalResult,
-    base: Option<&InputGrammar>,
+    base: Option<&LoweredGrammar>,
     previous: &[Module],
     imported_rules: &[ImportedRule],
-) -> LowerResult<InputGrammar> {
-    let mut overrides: FxHashMap<String, Spanned<Rule>> = FxHashMap::default();
+) -> LowerResult<LoweredGrammar> {
+    let mut overrides: FxHashMap<StrId, Spanned<RuleId>> = FxHashMap::default();
     for (name, rule, span) in result.overrides {
         overrides.insert(name, Spanned::new(rule, span));
     }
 
-    let mut variables = Vec::new();
+    let mut variables = Vec::with_capacity(
+        base.map_or(0, |b| b.variables.len()) + result.rules.len() + imported_rules.len(),
+    );
 
     // Base rules first - preserves the inherited grammar's start rule.
     if let Some(base) = base {
-        variables.reserve(base.variables.len());
         for v in &base.variables {
-            if let Some(Spanned { value: rule, .. }) = overrides.remove(v.name.as_str()) {
+            if let Some(Spanned { value: rule, .. }) = overrides.remove(&v.name) {
                 variables.push(Variable {
-                    name: v.name.clone(),
-                    kind: v.kind,
-                    rule,
+                    name: v.name,
+                    root: rule,
                 });
             } else {
-                variables.push(v.clone());
+                variables.push(*v);
             }
         }
     }
 
     for (name, rule) in result.rules {
-        variables.push(Variable {
-            name,
-            kind: VariableType::Named,
-            rule,
-        });
+        variables.push(Variable { name, root: rule });
     }
 
-    // Helper rules (materialized from the shared imported-rule list) can also be
-    // override targets. The clone happens here, once, at final assembly.
+    // Helper rules reached through the shared imported-rule list can also be
+    // override targets.
     for ir in imported_rules {
         expect_pat!(
             Module::Helper { lowered_rules, .. },
             &previous[usize::from(ir.module)]
         );
-        let (name, rule) = &lowered_rules[ir.index as usize];
-        let final_rule = overrides
-            .remove(name)
-            .map_or_else(|| rule.clone(), |s| s.value);
+        let &(name, rule) = &lowered_rules[ir.index as usize];
+        let final_rule = overrides.remove(&name).map_or(rule, |s| s.value);
         variables.push(Variable {
-            name: name.clone(),
-            kind: VariableType::Named,
-            rule: final_rule,
+            name,
+            root: final_rule,
         });
     }
 
@@ -557,12 +524,15 @@ fn build_grammar(
         // located snippet - the first (in source order) as the primary span,
         // the rest as `override declared here` notes. This gets all locations
         // through the generic note machinery, no renderer special-casing.
-        let mut entries: Vec<(String, Span)> = overrides
+        let mut entries: Vec<(StrId, Span)> = overrides
             .into_iter()
             .map(|(name, s)| (name, s.span))
             .collect();
         entries.sort_unstable_by_key(|(_, span)| span.start);
-        let mut names: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+        let mut names: Vec<String> = entries
+            .iter()
+            .map(|(name, _)| pool.resolve(*name).to_string())
+            .collect();
         names.sort_unstable();
         let (_, primary) = entries[0];
         let mut err = LowerError::new(LowerErrorKind::OverrideRuleNotFound(names), primary);
@@ -581,32 +551,40 @@ fn build_grammar(
         let pos = variables
             .iter()
             .position(|v| v.name == name)
-            .ok_or_else(|| LowerError::new(LowerErrorKind::ExternalCannotBeStart(name), span))?;
+            .ok_or_else(|| {
+                LowerError::new(
+                    LowerErrorKind::ExternalCannotBeStart(pool.resolve(name).to_string()),
+                    span,
+                )
+            })?;
         if pos != 0 {
             let v = variables.remove(pos);
             variables.insert(0, v);
         }
     }
 
-    Ok(InputGrammar {
+    // Default extras matches grammar.js (dsl.js:254): `[/\s/]` applied
+    // when neither the grammar nor its base specifies extras.
+    let extra_roots = match (result.extras, base) {
+        (Some(e), _) => e,
+        (None, Some(b)) => b.extra_roots.clone(),
+        (None, None) => {
+            let value = pool.intern("\\s");
+            let flags = StrPool::EMPTY_STR_ID;
+            vec![pool.push_node(Rule::Pattern(value, flags))]
+        }
+    };
+
+    Ok(LoweredGrammar {
         name: result.language,
         variables,
-        // Default extras matches grammar.js (dsl.js:254): `[/\s/]` applied
-        // when neither the grammar nor its base specifies extras.
-        extra_symbols: result.extras.unwrap_or_else(|| {
-            base.map_or_else(
-                || vec![Rule::Pattern("\\s".into(), String::new())],
-                |b| b.extra_symbols.clone(),
-            )
-        }),
-        expected_conflicts: inherit(result.conflicts, base, |b| &b.expected_conflicts),
+        extra_roots,
+        reserved_sets: merge_reserved(result.reserved, base.map(|b| b.reserved_sets.as_slice())),
+        external_roots: inherit(result.externals, base, |b| &b.external_roots),
+        supertype_names: inherit(result.supertypes, base, |b| &b.supertype_names),
+        conflict_names: inherit(result.conflicts, base, |b| &b.conflict_names),
+        inline_names: inherit(result.inline, base, |b| &b.inline_names),
+        word_name: result.word.or_else(|| base.and_then(|b| b.word_name)),
         precedence_orderings: inherit(result.precedences, base, |b| &b.precedence_orderings),
-        external_tokens: inherit(result.externals, base, |b| &b.external_tokens),
-        variables_to_inline: inherit(result.inline, base, |b| &b.variables_to_inline),
-        supertype_symbols: inherit(result.supertypes, base, |b| &b.supertype_symbols),
-        word_token: result
-            .word
-            .or_else(|| base.and_then(|b| b.word_token.clone())),
-        reserved_words: merge_reserved(result.reserved, base.map(|b| b.reserved_words.as_slice())),
     })
 }

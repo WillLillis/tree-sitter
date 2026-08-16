@@ -411,13 +411,12 @@ fn error_module_rule_in_name_position_suggests_bare_name() {
 
 #[test]
 fn error_grammar_config_on_import_module() {
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[("helper.tsg", "let X: int_t = 1")],
         "let h = import(\"helper.tsg\")\n\
          grammar { language: \"t\", extras: grammar_config(h, extras) }\n\
          rule program { \"x\" }",
-    )
-    .unwrap_err();
+    ));
     let e = assert_err!(err, Type);
     assert_eq!(e.kind, TypeErrorKind::GrammarConfigRequiresInherit);
 }
