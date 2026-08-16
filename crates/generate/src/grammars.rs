@@ -19,7 +19,7 @@ pub enum VariableType {
     Named,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Variable {
     pub name: StrId,
     pub root: RuleId,
@@ -47,7 +47,7 @@ pub struct InputGrammar {
     pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReservedWordContext {
     pub name: StrId,
     pub roots: Vec<RuleId>,

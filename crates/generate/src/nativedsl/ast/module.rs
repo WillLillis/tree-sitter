@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use rustc_hash::FxHashMap;
 
 use super::{Node, NodeArena, NodeId, Span, Spanned};
-use crate::nativedsl::string_pool::Str;
 use crate::nativedsl::typecheck::Ty;
 use crate::nativedsl::{ModuleId, Note, NoteMessage};
+use crate::strpool::StrId;
 
 /// All grammar config fields. Used for parsing the grammar block, `grammar_config()`
 /// access (Language/Inherits excluded by the parser), and iterating config node fields.
@@ -76,14 +76,14 @@ pub struct ModuleContext {
     pub has_forward_decls: bool,
     /// Flag names declared in this module's `flags`, mapped to the span of
     /// their first occurrence (used for `FirstDefinedHere` notes).
-    pub cfg_declared: FxHashMap<String, Span>,
+    pub cfg_declared: FxHashMap<StrId, Span>,
     /// Top-level declarations dropped by cfg in this module: name -> Cfg
     /// node id. Drives `GatedByDisabledCfg` enrichment.
-    pub cfg_dropped: FxHashMap<String, NodeId>,
+    pub cfg_dropped: FxHashMap<StrId, NodeId>,
     /// Computed-name references (`@<expr>`) from rule-set macro instances,
     /// evaluated under each call's args at expand time, paired with their span.
     /// Resolve validates each against the rule-name table.
-    pub computed_refs: Vec<Spanned<Str>>,
+    pub computed_refs: Vec<Spanned<StrId>>,
     /// Optional `let name: ty` annotations, keyed by the `Node::Let` id. Stored
     /// out-of-line (most lets have none) so the annotation doesn't widen `Node`.
     /// Written by the parser, read by typecheck.
@@ -148,7 +148,7 @@ impl ModuleContext {
 
 #[derive(Clone, Default, Debug)]
 pub struct GrammarConfig {
-    pub language: Option<String>,
+    pub language: Option<StrId>,
     pub inherits: Option<NodeId>,
     pub extras: Option<NodeId>,
     pub externals: Option<NodeId>,
@@ -192,7 +192,7 @@ mod tests {
         // this test.
         let id = NodeId::from_index(1);
         let config = GrammarConfig {
-            language: Some(String::new()),
+            language: Some(StrId::default()),
             inherits: Some(id),
             extras: Some(id),
             externals: Some(id),

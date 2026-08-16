@@ -2,9 +2,10 @@
 //! (`MacroId`/`ForId`/`ExpandId`, `ChildRange`), the [`SharedAst`]/[`AstPools`]
 //! containers, and the element types they store.
 
-use super::{IdentKind, Node, NodeArena, NodeId, Span};
-use crate::nativedsl::string_pool::Str;
+use super::{IdentKind, Node, NodeArena, NodeId};
+use crate::nativedsl::ast::Spanned;
 use crate::nativedsl::typecheck::Ty;
+use crate::strpool::StrId;
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -41,17 +42,16 @@ impl ChildRange {
     }
 }
 
-/// One `name: value` entry of an object literal, stored in
-/// [`AstPools::object_fields`]. `name` is the span of the field key.
+/// One `name: value` entry of an object literal, stored in [`AstPools::object_fields`].
 #[derive(Clone, Copy, Debug)]
 pub struct ObjectField {
-    pub name: Span,
+    pub name: Spanned<StrId>,
     pub value: NodeId,
 }
 
 #[derive(Clone)]
 pub struct MacroConfig {
-    pub name: Span,
+    pub name: Spanned<StrId>,
     pub params: ChildRange,
     pub body: NodeId,
     pub kind: MacroKind,
@@ -71,7 +71,7 @@ pub enum MacroKind {
 
 #[derive(Copy, Clone)]
 pub struct Param {
-    pub name: Span,
+    pub name: Spanned<StrId>,
     pub ty: Ty,
 }
 
@@ -85,7 +85,7 @@ pub struct ForConfig {
 #[derive(Clone, Copy)]
 pub struct Expansion {
     pub is_override: bool,
-    pub name: Str,
+    pub name: StrId,
     pub macro_id: MacroId,
     pub body: NodeId,
     pub args: ChildRange,

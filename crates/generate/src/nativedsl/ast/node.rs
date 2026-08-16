@@ -3,6 +3,7 @@
 use super::{ChildRange, ConfigField, ExpandId, ForId, MacroId, NodeId, Span};
 use crate::nativedsl::ModuleId;
 use crate::nativedsl::typecheck::Ty;
+use crate::strpool::StrId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrecKind {
@@ -43,7 +44,7 @@ pub enum IdentKind {
 pub enum RuleTarget {
     /// Index into the target grammar's `lowered.variables`.
     GrammarRule(u32),
-    /// Index into the target grammar's `lowered.external_tokens`.
+    /// Index into the target grammar's `lowered.external_roots`.
     GrammarExternal(u32),
     /// Index into the target helper's `lowered_rules`.
     HelperRule(u32),
@@ -54,7 +55,7 @@ pub enum Node {
     Grammar,
     Rule {
         is_override: bool,
-        name: Span,
+        name: StrId,
         body: NodeId,
     },
     /// `rule @<str_expr> { ... }` inside a rule-set macro body.
@@ -75,7 +76,7 @@ pub enum Node {
     /// annotation lives out-of-line in [`ModuleContext::let_types`](super::ModuleContext) (keyed by
     /// this node's id) so it doesn't widen `Node` past its 16-byte budget.
     Let {
-        name: Span,
+        name: StrId,
         value: NodeId,
     },
     Macro(MacroId),
@@ -83,7 +84,7 @@ pub enum Node {
     /// elsewhere (a rule, an `externals:` token, or an inherited rule) so this
     /// file can reference it before/without defining it here.
     Forward {
-        name: Span,
+        name: StrId,
     },
     StringLit,
     RawStringLit {
@@ -93,7 +94,7 @@ pub enum Node {
     Ident(IdentKind),
     FieldAccess {
         obj: NodeId,
-        field: Span,
+        field: StrId,
     },
     QualifiedAccess {
         obj: NodeId,
@@ -117,7 +118,7 @@ pub enum Node {
     },
     Blank,
     Field {
-        name: Span,
+        name: StrId,
         content: NodeId,
     },
     Alias {

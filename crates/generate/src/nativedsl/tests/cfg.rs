@@ -53,7 +53,7 @@ fn cfg_in_grammar_config_field() {
         rule baz { "c" }
     "#);
     // A active -> [foo, baz] kept; B disabled -> [bar, baz] dropped.
-    assert_eq!(g.expected_conflicts.len(), 2);
+    assert_eq!(g.conflict_names.len(), 2);
 }
 
 #[test]
@@ -149,14 +149,19 @@ fn cfg_dropped_ruleset_macro_enriches_error() {
 fn cfg_dropped_macro_keeps_same_named_survivor() {
     // macro_index is rebuilt from post-cfg root_items, so when two cfg branches
     // define the same rule-set macro `@dup()` binds to the enabled survivor.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         #[cfg(Y)] rules dup() { rule program { "stable" } }
         #[cfg(X)] rules dup() { rule program { "gated" } }
         grammar { language: "test", flags: { enabled: ["Y"], disabled: ["X"] } }
         @dup()
     "#);
-    assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("stable".into()));
+    assert_eq!(g.pool.resolve(g.variables[0].name), "program");
+    let actual = g.variables[0].root;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "stable")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -199,7 +204,7 @@ fn cfg_dropped_let_enriches_error() {
 fn helper_module_inherits_cfg_from_importer() {
     // Helper modules can't declare their own flags (no grammar block). They
     // see the importing grammar's full declared set transparently.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[(
             "h.tsg",
             r#"
@@ -214,14 +219,12 @@ fn helper_module_inherits_cfg_from_importer() {
     )
     .unwrap();
     // GFM is enabled in the importer; the helper's cfg branch survives.
-    assert_eq!(
-        find_rule(&g, "program"),
-        &Rule::choice(vec![
-            Rule::String("a".into()),
-            Rule::String("b".into()),
-            Rule::String("c".into()),
-        ])
-    );
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_str!(p, "a"), r_str!(p, "b"), r_str!(p, "c")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -353,7 +356,7 @@ fn cfg_dropped_attribution_uses_owning_module() {
     // When parent and child both cfg-drop a `strikethrough` under different flags,
     // parent's UnknownIdentifier note must name parent's flag (P), not child's (C)
     // winning a global or_insert.
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[(
             "parent.tsg",
             r#"
@@ -372,8 +375,7 @@ fn cfg_dropped_attribution_uses_owning_module() {
         rule program { "x" }
         #[cfg(C)] rule strikethrough { "c" }
         "#,
-    )
-    .unwrap_err();
+    ));
     // Error originates from the inherited (parent) grammar load, so it's
     // wrapped in `Module(...)` once.
     let inner = *assert_err!(err, Module).inner;
@@ -509,7 +511,11 @@ fn cfg_disabled_nested_import_does_not_load() {
         }
         rule program { "x" }
     "#);
-    assert!(g.variables.iter().any(|v| v.name == "program"));
+    assert!(
+        g.variables
+            .iter()
+            .any(|v| g.pool.resolve(v.name) == "program")
+    );
 }
 
 #[test]
@@ -529,7 +535,9 @@ fn cfg_disabled_nested_import_does_not_merge_rules() {
     )
     .unwrap();
     assert!(
-        !g.variables.iter().any(|v| v.name == "helper_only"),
+        !g.variables
+            .iter()
+            .any(|v| g.pool.resolve(v.name) == "helper_only"),
         "cfg-disabled import's rule leaked into the grammar"
     );
 }
@@ -545,7 +553,11 @@ fn cfg_disabled_symref_not_validated() {
         grammar { language: "t", flags: { disabled: ["X"] } }
         @m("rule")
     "#);
-    assert!(g.variables.iter().any(|v| v.name == "program"));
+    assert!(
+        g.variables
+            .iter()
+            .any(|v| g.pool.resolve(v.name) == "program")
+    );
 }
 
 find_rule_tests! {
@@ -555,11 +567,7 @@ find_rule_tests! {
         rule program { choice("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::String("a".into()),
-            Rule::String("b".into()),
-            Rule::String("c".into()),
-        ])
+        |p| r_choice!(p, [r_str!(p, "a"), r_str!(p, "b"), r_str!(p, "c")])
     }
     cfg_choice_member_disabled {
         // GFM disabled -> "b" arm dropped from the choice.
@@ -568,7 +576,7 @@ find_rule_tests! {
         rule program { choice("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::choice(vec![Rule::String("a".into()), Rule::String("c".into())])
+        |p| r_choice!(p, [r_str!(p, "a"), r_str!(p, "c")])
     }
     cfg_concat_member_disabled {
         // walk_children's Concat arm once only recursed without filtering, leaving
@@ -578,7 +586,7 @@ find_rule_tests! {
         rule program { concat("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::String("ac".into())
+        |p| r_str!(p, "ac")
     }
     cfg_seq_member_disabled {
         r#"
@@ -586,7 +594,7 @@ find_rule_tests! {
         rule program { seq("a", #[cfg(GFM)] "b", "c") }
     "#,
         "program",
-        Rule::seq(vec![Rule::String("a".into()), Rule::String("c".into())])
+        |p| r_seq!(p, [r_str!(p, "a"), r_str!(p, "c")])
     }
     cfg_nested_both_active {
         r#"
@@ -594,11 +602,7 @@ find_rule_tests! {
         rule program { choice("x", #[cfg(A)] #[cfg(B)] "y", "z") }
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::String("x".into()),
-            Rule::String("y".into()),
-            Rule::String("z".into()),
-        ])
+        |p| r_choice!(p, [r_str!(p, "x"), r_str!(p, "y"), r_str!(p, "z")])
     }
     cfg_nested_inner_off {
         // Outer A is on but inner B is off -> drop the whole "y" branch.
@@ -607,7 +611,7 @@ find_rule_tests! {
         rule program { choice("x", #[cfg(A)] #[cfg(B)] "y", "z") }
     "#,
         "program",
-        Rule::choice(vec![Rule::String("x".into()), Rule::String("z".into())])
+        |p| r_choice!(p, [r_str!(p, "x"), r_str!(p, "z")])
     }
 }
 

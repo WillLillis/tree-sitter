@@ -377,7 +377,7 @@ pub(super) fn assemble_syntax_grammar(
         .map(|(v, &kind)| SyntaxVariable { name: v.name, kind })
         .collect::<Vec<_>>();
 
-    let interner = g.pool.into_interner();
+    let interner = g.pool.into_strs();
 
     (
         SyntaxGrammar {

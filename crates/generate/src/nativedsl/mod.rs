@@ -50,7 +50,6 @@ pub mod lower;
 pub mod parser;
 pub mod resolve;
 pub mod serialize;
-pub mod string_pool;
 #[cfg(test)]
 mod tests;
 pub mod typecheck;
@@ -76,7 +75,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::IoError;
-use crate::rules::Rule;
+use crate::grammars::{PrecedenceEntry, ReservedWordContext, Variable};
+use crate::rules::{Rule, RuleId, RulePool};
+use crate::strpool::StrId;
 
 use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
 use loader::Loader;
@@ -102,6 +103,42 @@ impl From<ModuleId> for usize {
     }
 }
 
+/// A module's lowered grammar, holding only IDs. The pool these IDs reference is
+/// owned by the [`Loader`] and moved into the root [`InputGrammar`] once every
+/// module has been lowered.
+#[derive(Debug)]
+pub struct LoweredGrammar {
+    pub name: StrId,
+    pub variables: Vec<Variable>,
+    pub external_roots: Vec<RuleId>,
+    pub extra_roots: Vec<RuleId>,
+    pub reserved_sets: Vec<ReservedWordContext>,
+    pub supertype_names: Vec<StrId>,
+    pub conflict_names: Vec<Vec<StrId>>,
+    pub inline_names: Vec<StrId>,
+    pub word_name: Option<StrId>,
+    pub precedence_orderings: Vec<Vec<PrecedenceEntry>>,
+}
+
+impl LoweredGrammar {
+    /// Take ownership of the [`Loader`]-wide pool.
+    fn into_input(self, pool: RulePool) -> InputGrammar {
+        InputGrammar {
+            pool,
+            name: self.name,
+            variables: self.variables,
+            external_roots: self.external_roots,
+            extra_roots: self.extra_roots,
+            reserved_sets: self.reserved_sets,
+            supertype_names: self.supertype_names,
+            conflict_names: self.conflict_names,
+            inline_names: self.inline_names,
+            word_name: self.word_name,
+            precedence_orderings: self.precedence_orderings,
+        }
+    }
+}
+
 /// A loaded and resolved module.
 #[derive(Debug)]
 pub enum Module {
@@ -109,15 +146,15 @@ pub enum Module {
     /// bindings. Their rules are lowered eagerly into `lowered_rules`.
     Helper {
         ctx: ModuleContext,
-        lowered_rules: Vec<(String, Rule)>,
-        exports: FxHashMap<Box<str>, Export>,
+        lowered_rules: Vec<(StrId, RuleId)>,
+        exports: FxHashMap<StrId, Export>,
     },
     /// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
     /// a fully lowered grammar for rule merging and `grammar_config` access.
     Grammar {
         ctx: ModuleContext,
-        lowered: Box<InputGrammar>,
-        exports: FxHashMap<Box<str>, Export>,
+        lowered: Box<LoweredGrammar>,
+        exports: FxHashMap<StrId, Export>,
     },
 }
 
@@ -140,7 +177,7 @@ impl Module {
     }
 
     #[must_use]
-    pub fn lowered(&self) -> Option<&InputGrammar> {
+    pub fn lowered(&self) -> Option<&LoweredGrammar> {
         match self {
             Self::Grammar { lowered, .. } => Some(lowered),
             Self::Helper { .. } => None,
@@ -149,27 +186,27 @@ impl Module {
 
     /// Look up a name in this module's export table.
     #[must_use]
-    pub fn export(&self, name: &str) -> Option<Export> {
+    pub fn export(&self, name: StrId) -> Option<Export> {
         let exports = match self {
             Self::Helper { exports, .. } | Self::Grammar { exports, .. } => exports,
         };
-        exports.get(name).copied()
+        exports.get(&name).copied()
     }
 
     /// The names this module exports, for "did you mean" suggestions.
-    pub(crate) fn export_keys(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn export_keys(&self) -> impl Iterator<Item = StrId> {
         let exports = match self {
             Self::Helper { exports, .. } | Self::Grammar { exports, .. } => exports,
         };
-        exports.keys().map(|k| &**k)
+        exports.keys().copied()
     }
 }
 
 /// The lowered output a module exposes, passed to [`build_exports`].
 #[derive(Clone, Copy)]
 pub enum LoweredRef<'a> {
-    Grammar(&'a InputGrammar),
-    Helper(&'a [(String, Rule)]),
+    Grammar(&'a LoweredGrammar),
+    Helper(&'a [(StrId, RuleId)]),
 }
 
 /// Build a module's export table: each name this module exposes to `mod::name` refs,
@@ -179,21 +216,22 @@ pub fn build_exports(
     arena: &NodeArena,
     pools: &AstPools,
     ctx: &ModuleContext,
+    rule_pool: &RulePool,
     lowered: LoweredRef,
-) -> FxHashMap<Box<str>, Export> {
-    let mut exports: FxHashMap<Box<str>, Export> = FxHashMap::default();
+) -> FxHashMap<StrId, Export> {
+    let mut exports: FxHashMap<StrId, Export> = FxHashMap::default();
     // First-wins. User names share one namespace that collect_decls already
     // deduped. The only name added twice is a symbol that is both a rule and an
     // external (rules iterated first below, so it resolves to the rule).
-    let mut add = |name: &str, export| {
-        exports.entry(name.into()).or_insert(export);
+    let mut add = |name: StrId, export| {
+        exports.entry(name).or_insert(export);
     };
     // AST-level `let` / `macro` bindings.
     for &item_id in &ctx.root_items {
         let (name, kind) = match arena.get(item_id) {
-            Node::Let { name, .. } => (ctx.text(*name), IdentKind::Var(item_id)),
+            Node::Let { name, .. } => (*name, IdentKind::Var(item_id)),
             Node::Macro(macro_id) => (
-                ctx.text(pools.get_macro(*macro_id).name),
+                pools.get_macro(*macro_id).name.value,
                 IdentKind::Macro(*macro_id),
             ),
             _ => continue,
@@ -205,17 +243,17 @@ pub fn build_exports(
     match lowered {
         LoweredRef::Grammar(g) => {
             for (i, v) in g.variables.iter().enumerate() {
-                add(&v.name, Export::Rule(RuleTarget::GrammarRule(i as u32)));
+                add(v.name, Export::Rule(RuleTarget::GrammarRule(i as u32)));
             }
-            for (i, r) in g.external_tokens.iter().enumerate() {
-                if let Rule::NamedSymbol(n) = r {
+            for (i, r) in g.external_roots.iter().enumerate() {
+                if let Rule::NamedSymbol(n) = rule_pool.node(*r) {
                     add(n, Export::Rule(RuleTarget::GrammarExternal(i as u32)));
                 }
             }
         }
         LoweredRef::Helper(rules) => {
             for (i, (name, _)) in rules.iter().enumerate() {
-                add(name, Export::Rule(RuleTarget::HelperRule(i as u32)));
+                add(*name, Export::Rule(RuleTarget::HelperRule(i as u32)));
             }
         }
     }
@@ -299,14 +337,14 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
-    let mut strings = string_pool::StringPool::default();
+    let mut pool = RulePool::default();
     let mut cfg = apply_cfg::CfgState::default();
     let mut dsl_loader = Loader {
         shared: &mut shared,
         modules: &mut modules,
         env: &mut env,
         state: &mut state,
-        strings: &mut strings,
+        pool: &mut pool,
         cfg: &mut cfg,
         ancestor_paths: vec![canonical.clone()],
         loaded: Vec::new(),
@@ -323,5 +361,5 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
             .unwrap();
         Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, g_span))?;
     }
-    Ok(*lowered)
+    Ok(lowered.into_input(pool))
 }

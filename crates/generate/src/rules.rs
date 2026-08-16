@@ -311,7 +311,7 @@ impl RulePool {
         self.push_node(Rule::Eof)
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg_attr(not(any(test, feature = "nativedsl")), expect(dead_code))]
     pub fn seq(&mut self, ids: &[RuleId]) -> RuleId {
         let range = self.push_children(ids);
         self.push_node(Rule::Seq(range))
@@ -366,6 +366,30 @@ impl RulePool {
         self.push_node(Rule::Choice(range))
     }
 
+    /// Flatten nested `Choice` nodes out of the work stack `walk`, appending the
+    /// deduplicated alternatives to `out`. `walk` holds the alternatives in left
+    /// to right order.
+    pub fn flatten_choice(
+        &self,
+        walk: &mut Vec<RuleId>,
+        out: &mut Vec<RuleId>,
+        dedup_base: usize,
+        eq: &mut Vec<(RuleId, RuleId)>,
+    ) {
+        walk.reverse();
+        while let Some(id) = walk.pop() {
+            if let Rule::Choice(range) = self.node(id) {
+                // push nested choice children in reverse to preserve source order
+                walk.extend(self.child_slice(range).iter().rev().copied());
+            } else if !out[dedup_base..]
+                .iter()
+                .any(|&e| self.subtree_eq_with_scratch(e, id, eq))
+            {
+                out.push(id);
+            }
+        }
+    }
+
     pub fn reserved(&mut self, content: RuleId, ctx: StrId) -> RuleId {
         self.push_node(Rule::Reserved { rule: content, ctx })
     }
@@ -383,7 +407,17 @@ impl RulePool {
     }
 
     #[must_use]
-    pub fn into_interner(self) -> StrPool {
+    pub const fn strs(&self) -> &StrPool {
+        &self.str_pool
+    }
+
+    #[must_use]
+    pub const fn strs_mut(&mut self) -> &mut StrPool {
+        &mut self.str_pool
+    }
+
+    #[must_use]
+    pub fn into_strs(self) -> StrPool {
         self.str_pool
     }
 
@@ -430,7 +464,18 @@ impl RulePool {
     }
 
     pub fn subtree_eq(&self, a: RuleId, b: RuleId) -> bool {
-        let mut stack = vec![(a, b)];
+        self.subtree_eq_with_scratch(a, b, &mut Vec::new())
+    }
+
+    /// [`subtree_eq`](Self::subtree_eq) reusing a caller-owned work stack.
+    pub fn subtree_eq_with_scratch(
+        &self,
+        a: RuleId,
+        b: RuleId,
+        stack: &mut Vec<(RuleId, RuleId)>,
+    ) -> bool {
+        stack.clear();
+        stack.push((a, b));
         while let Some((a, b)) = stack.pop() {
             match (self.node(a), self.node(b)) {
                 (Rule::Blank, Rule::Blank) | (Rule::Eof, Rule::Eof) => {}

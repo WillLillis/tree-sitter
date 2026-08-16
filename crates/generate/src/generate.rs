@@ -165,7 +165,7 @@ impl<'de> Deserialize<'de> for IoError {
 pub type LoadGrammarFileResult<T> = Result<T, LoadGrammarError>;
 
 #[cfg(feature = "load")]
-#[derive(Debug)]
+// #[derive(Debug)] // TODO: Remove?
 pub enum GrammarSource {
     Json(String),
     #[cfg(feature = "nativedsl")]

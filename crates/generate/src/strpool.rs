@@ -127,4 +127,8 @@ impl StrPool {
         // `str`. Both offsets are therefore in bounds and on UTF-8 boundaries.
         unsafe { buf.get_unchecked(range) }
     }
+
+    pub fn get(&self, s: &str) -> Option<StrId> {
+        self.str_ids.get(s).copied()
+    }
 }

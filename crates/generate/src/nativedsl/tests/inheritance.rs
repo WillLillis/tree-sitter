@@ -7,7 +7,7 @@ fn inherit_rules_and_config() {
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
     "#);
-    assert_eq!(g.name, "derived");
+    assert_eq!(g.pool.resolve(g.name), "derived");
     assert_eq!(
         rule_names(&g),
         vec![
@@ -18,9 +18,15 @@ fn inherit_rules_and_config() {
             "_inline_rule"
         ]
     );
-    assert_eq!(g.word_token.as_deref(), Some("identifier"));
-    assert_eq!(g.variables_to_inline, vec!["_inline_rule"]);
-    assert_eq!(g.extra_symbols.len(), 1);
+    assert_eq!(g.word_name.map(|w| g.pool.resolve(w)), Some("identifier"));
+    assert_eq!(
+        g.inline_names
+            .iter()
+            .map(|&n| g.pool.resolve(n))
+            .collect::<Vec<_>>(),
+        vec!["_inline_rule"]
+    );
+    assert_eq!(g.extra_roots.len(), 1);
 }
 
 #[test]
@@ -46,7 +52,13 @@ fn inherit_config_append_inline() {
         }
         rule _extra_inline { "extra" }
     "#);
-    assert_eq!(g.variables_to_inline, vec!["_inline_rule", "_extra_inline"]);
+    assert_eq!(
+        g.inline_names
+            .iter()
+            .map(|&n| g.pool.resolve(n))
+            .collect::<Vec<_>>(),
+        vec!["_inline_rule", "_extra_inline"]
+    );
 }
 
 #[test]
@@ -60,7 +72,7 @@ fn inherit_config_append_extras() {
         }
         rule comment { regexp(r"//.*") }
     "#);
-    assert_eq!(g.extra_symbols.len(), 2);
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 #[test]
@@ -74,7 +86,7 @@ fn config_expr_let_binding() {
         rule program { "x" }
         rule comment { regexp(r"//.*") }
     "#);
-    assert_eq!(g.extra_symbols.len(), 2);
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 #[test]
@@ -83,14 +95,14 @@ fn config_expr_word() {
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, word: grammar_config(base, word) }
     "#);
-    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+    assert_eq!(g.word_name.map(|w| g.pool.resolve(w)), Some("identifier"));
 }
 
 #[test]
 fn override_rule_emitted_by_rule_set_macro() {
     // `override rule` inside a `rules` body propagates is_override through
     // expansion, so the generated rule replaces the inherited base rule.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         rules wrap_expression(rhs: rule_t) {
             override rule expression { choice(identifier, rhs) }
@@ -98,82 +110,90 @@ fn override_rule_emitted_by_rule_set_macro() {
         grammar { language: "derived", inherits: base }
         @wrap_expression("99")
     "#);
-    assert_eq!(
-        *find_rule(&g, "expression"),
-        Rule::choice(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::String("99".into()),
-        ])
-    );
+    let actual = find_rule(&g, "expression");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_sym!(p, "identifier"), r_str!(p, "99")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
     // Sibling inherited rules untouched.
-    assert_eq!(
-        *find_rule(&g, "_inline_rule"),
-        Rule::String("inline".into())
-    );
+    let actual = find_rule(&g, "_inline_rule");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "inline")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn override_rule_replaces_body() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule expression { choice(identifier, "42") }
     "#);
-    assert_eq!(
-        *find_rule(&g, "expression"),
-        Rule::choice(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::String("42".into()),
-        ])
-    );
-    assert_eq!(
-        *find_rule(&g, "_inline_rule"),
-        Rule::String("inline".into())
-    );
+    let actual = find_rule(&g, "expression");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_sym!(p, "identifier"), r_str!(p, "42")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
+    let actual = find_rule(&g, "_inline_rule");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "inline")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn override_preserves_rule_order() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule statement { "overridden" }
     "#);
-    assert_eq!(g.variables[1].name, "statement");
-    assert_eq!(g.variables[1].rule, Rule::String("overridden".into()));
+    assert_eq!(g.pool.resolve(g.variables[1].name), "statement");
+    let actual = g.variables[1].root;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "overridden")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn new_rules_appended() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         rule new_rule { "hello" }
     "#);
-    assert_eq!(g.variables.last().unwrap().name, "new_rule");
-    assert_eq!(
-        g.variables.last().unwrap().rule,
-        Rule::String("hello".into())
-    );
+    assert_eq!(g.pool.resolve(g.variables.last().unwrap().name), "new_rule");
+    let actual = g.variables.last().unwrap().root;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "hello")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
     assert_eq!(g.variables.len(), 6);
 }
 
 #[test]
 fn override_and_new_combined() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule expression { choice(identifier, number) }
         rule number { regexp("[0-9]+") }
     "#);
     assert_eq!(g.variables.len(), 6);
-    assert_eq!(
-        *find_rule(&g, "expression"),
-        Rule::choice(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::NamedSymbol("number".into()),
-        ])
-    );
+    let actual = find_rule(&g, "expression");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_sym!(p, "identifier"), r_sym!(p, "number")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -186,7 +206,7 @@ fn config_override_replaces() {
             extras: [regexp(r"\s"), regexp(r"//.*")],
         }
     "#);
-    assert_eq!(g.extra_symbols.len(), 2);
+    assert_eq!(g.extra_roots.len(), 2);
 }
 
 #[test]
@@ -195,44 +215,45 @@ fn config_word_overridden() {
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, word: expression }
     "#);
-    assert_eq!(g.word_token.as_deref(), Some("expression"));
+    assert_eq!(g.word_name.map(|w| g.pool.resolve(w)), Some("expression"));
 }
 
 #[test]
 fn rule_inline_expands_base_rule_body() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         override rule expression { choice(base::expression, "extended") }
     "#);
-    assert_eq!(
-        *find_rule(&g, "expression"),
-        Rule::choice(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::String("extended".into()),
-        ])
-    );
+    let actual = find_rule(&g, "expression");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_sym!(p, "identifier"), r_str!(p, "extended")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn config_access_extras() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base, extras: grammar_config(base, extras) }
         override rule program { "x" }
     "#);
-    assert_eq!(g.name, "derived");
+    assert_eq!(g.pool.resolve(g.name), "derived");
     // base has extras: [regexp("\\s")], verify it was inherited
-    assert_eq!(g.extra_symbols.len(), 1);
-    assert_eq!(
-        g.extra_symbols[0],
-        Rule::Pattern("\\s".into(), String::new())
-    );
+    assert_eq!(g.extra_roots.len(), 1);
+    let actual = g.extra_roots[0];
+    let expected = {
+        let p = &mut g.pool;
+        r_pattern!(p, "\\s")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn config_all_fields_access_and_append() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar_full_config.tsg")
         grammar {
             language: "derived",
@@ -248,37 +269,46 @@ fn config_all_fields_access_and_append() {
         rule _statement { "stmt" }
         rule eof_marker { "EOF" }
     "#);
+    let extras = g.extra_roots.clone();
+    let externals = g.external_roots.clone();
+    let (expected_extras, expected_externals) = {
+        let p = &mut g.pool;
+        (
+            vec![r_pattern!(p, "\\s")],
+            vec![r_sym!(p, "heredoc"), r_sym!(p, "eof_marker")],
+        )
+    };
+    assert_rules_eq(&g.pool, &extras, &expected_extras);
+    assert_rules_eq(&g.pool, &externals, &expected_externals);
     assert_eq!(
-        g.extra_symbols,
-        vec![Rule::Pattern("\\s".into(), String::new())]
+        g.inline_names
+            .iter()
+            .map(|&n| g.pool.resolve(n))
+            .collect::<Vec<_>>(),
+        vec!["_inline_rule"]
     );
     assert_eq!(
-        g.external_tokens,
-        vec![
-            Rule::NamedSymbol("heredoc".into()),
-            Rule::NamedSymbol("eof_marker".into()),
-        ]
+        g.supertype_names
+            .iter()
+            .map(|&n| g.pool.resolve(n))
+            .collect::<Vec<_>>(),
+        vec!["_expression", "_statement"]
     );
-    assert_eq!(g.variables_to_inline, vec!["_inline_rule"]);
-    assert_eq!(g.supertype_symbols, vec!["_expression", "_statement"]);
-    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+    assert_eq!(g.word_name.map(|w| g.pool.resolve(w)), Some("identifier"));
     assert_eq!(
-        g.expected_conflicts,
-        vec![
-            vec!["identifier".to_string(), "keyword".to_string()],
-            vec!["keyword".to_string(), "_statement".to_string()],
-        ]
+        conflict_names(&g),
+        vec![vec!["identifier", "keyword"], vec!["keyword", "_statement"],]
     );
     assert_eq!(
         g.precedence_orderings,
         vec![
             vec![
-                PrecedenceEntry::Name("member".into()),
-                PrecedenceEntry::Name("call".into()),
+                PrecedenceEntry::Name(g.pool.intern("member")),
+                PrecedenceEntry::Name(g.pool.intern("call")),
             ],
             vec![
-                PrecedenceEntry::Name("unary".into()),
-                PrecedenceEntry::Name("binary".into()),
+                PrecedenceEntry::Name(g.pool.intern("unary")),
+                PrecedenceEntry::Name(g.pool.intern("binary")),
             ],
         ]
     );
@@ -296,7 +326,7 @@ fn externals_append_inherited_with_new_undeclared() {
         }
     "#);
     // base has [heredoc], we add [_eof_marker]
-    assert_eq!(g.external_tokens.len(), 2);
+    assert_eq!(g.external_roots.len(), 2);
 }
 
 #[test]
@@ -310,26 +340,24 @@ fn externals_inherited_directly() {
             externals: grammar_config(base, externals),
         }
     "#);
-    assert_eq!(g.external_tokens.len(), 1);
+    assert_eq!(g.external_roots.len(), 1);
 }
 
 #[test]
 fn append_concatenates_lists() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         grammar { language: "test" }
         let a: list_t<str_t> = ["x", "y"]
         let b: list_t<str_t> = ["z"]
         let c: list_t<str_t> = append(a, b)
         rule program { choice(for (s: str_t) in c { s }) }
     "#);
-    assert_eq!(
-        g.variables[0].rule,
-        Rule::choice(vec![
-            Rule::String("x".into()),
-            Rule::String("y".into()),
-            Rule::String("z".into()),
-        ])
-    );
+    let actual = g.variables[0].root;
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_str!(p, "x"), r_str!(p, "y"), r_str!(p, "z")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -341,7 +369,7 @@ fn inherit_from_grammar_that_imports() {
         grammar { language: "derived", inherits: base }
         rule extra { "extra" }
     "#);
-    assert_eq!(g.name, "derived");
+    assert_eq!(g.pool.resolve(g.name), "derived");
     // Inherited rule from base uses the imported helper macro
     assert!(rule_names(&g).contains(&"program"));
     assert!(rule_names(&g).contains(&"extra"));
@@ -351,7 +379,7 @@ fn inherit_from_grammar_that_imports() {
 fn override_rule_can_access_base_let() {
     // An override rule body referencing a base let exercises eager evaluation of
     // the base's let bindings before the override body reads them.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[(
             "base.tsg",
             r#"
@@ -367,22 +395,24 @@ fn override_rule_can_access_base_let() {
         "#,
     )
     .unwrap();
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![Rule::String("hello".into()), Rule::String("!".into())])
-    );
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_seq!(p, [r_str!(p, "hello"), r_str!(p, "!")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn nested_inheritance_merges_all_rules() {
     // child inherits parent inherits grandparent. All three levels' rules
     // should appear in the child's grammar.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
         rule child_only { "child" }
     "#);
-    assert_eq!(g.name, "child");
+    assert_eq!(g.pool.resolve(g.name), "child");
     let names = rule_names(&g);
     // Grandparent's rules
     assert!(names.contains(&"program"));
@@ -391,17 +421,15 @@ fn nested_inheritance_merges_all_rules() {
     // Parent's added rules
     assert!(names.contains(&"parent_only"));
     assert!(names.contains(&"_parent_inline"));
-    // Parent's override of statement should be present (not grandparent's)
-    let statement = find_rule(&g, "statement");
-    assert_eq!(
-        *statement,
-        Rule::choice(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::String("!".into())
-        ])
-    );
     // Child's own rule
     assert!(names.contains(&"child_only"));
+    // Parent's override of statement should be present (not grandparent's)
+    let actual = find_rule(&g, "statement");
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_sym!(p, "identifier"), r_str!(p, "!")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -414,7 +442,7 @@ fn nested_inheritance_qualified_access_to_grandparent_via_parent() {
         rule wrapper { parent::identifier }
     "#);
     let wrapper = find_rule(&g, "wrapper");
-    assert!(matches!(wrapper, Rule::Pattern(p, _) if p == "[a-z]+"));
+    assert!(matches!(g.pool.node(wrapper), Rule::Pattern(v, _) if g.pool.resolve(v) == "[a-z]+"));
 }
 
 #[test]
@@ -427,7 +455,7 @@ fn nested_inheritance_explicit_chain_access() {
         rule wrapper { parent::gp::identifier }
     "#);
     let wrapper = find_rule(&g, "wrapper");
-    assert!(matches!(wrapper, Rule::Pattern(p, _) if p == "[a-z]+"));
+    assert!(matches!(g.pool.node(wrapper), Rule::Pattern(v, _) if g.pool.resolve(v) == "[a-z]+"));
 }
 
 #[test]
@@ -440,20 +468,27 @@ fn nested_inheritance_child_override_of_grandparent_rule() {
         override rule identifier { regexp("[A-Z]+") }
     "#);
     let identifier = find_rule(&g, "identifier");
-    assert!(matches!(identifier, Rule::Pattern(p, _) if p == "[A-Z]+"));
+    assert!(
+        matches!(g.pool.node(identifier), Rule::Pattern(v, _) if g.pool.resolve(v) == "[A-Z]+")
+    );
 }
 
 #[test]
 fn nested_inheritance_child_override_of_parent_override() {
     // parent overrides statement (originally from grandparent).
     // child overrides statement again. Child's version wins.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
         override rule statement { "child_statement" }
     "#);
     let statement = find_rule(&g, "statement");
-    assert_eq!(*statement, Rule::String("child_statement".into()));
+    let actual = statement;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "child_statement")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -470,7 +505,10 @@ fn nested_inheritance_grammar_config_transitive() {
         rule _child_inline { "c" }
     "#);
     assert_eq!(
-        g.variables_to_inline,
+        g.inline_names
+            .iter()
+            .map(|&n| g.pool.resolve(n))
+            .collect::<Vec<_>>(),
         vec!["_gp_inline", "_parent_inline", "_child_inline"]
     );
 }
@@ -479,7 +517,7 @@ fn nested_inheritance_grammar_config_transitive() {
 fn nested_inheritance_chain_accesses_pre_override_rule() {
     // parent overrides `statement`: from the child, `parent::statement` yields
     // parent's override while `parent::gp::statement` yields grandparent's.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
         rule via_parent { parent::statement }
@@ -488,47 +526,53 @@ fn nested_inheritance_chain_accesses_pre_override_rule() {
     let via_parent = find_rule(&g, "via_parent");
     let via_chain = find_rule(&g, "via_chain");
     // parent::statement -> parent's override: choice(identifier, "!")
-    assert_eq!(
-        *via_parent,
-        Rule::choice(vec![
-            Rule::NamedSymbol("identifier".into()),
-            Rule::String("!".into())
-        ])
-    );
+    let actual = via_parent;
+    let expected = {
+        let p = &mut g.pool;
+        r_choice!(p, [r_sym!(p, "identifier"), r_str!(p, "!")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
     // parent::gp::statement -> grandparent's original: identifier
-    assert_eq!(*via_chain, Rule::NamedSymbol("identifier".into()));
+    let actual = via_chain;
+    let expected = {
+        let p = &mut g.pool;
+        r_sym!(p, "identifier")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn nested_inheritance_word_token_propagates() {
     // grandparent set word: identifier. parent didn't override. child should
-    // see the inherited word_token.
+    // see the inherited word_name.
     let g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
     "#);
-    assert_eq!(g.word_token.as_deref(), Some("identifier"));
+    assert_eq!(g.word_name.map(|w| g.pool.resolve(w)), Some("identifier"));
 }
 
 #[test]
 fn import_before_inherit_in_source_order() {
     // Import before inherit in source order. Tests that eval order doesn't
     // corrupt the module values table.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let h = import("import_helpers/helpers.tsg")
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         rule new_rule { h::comma_sep1(identifier) }
     "#);
-    assert_eq!(g.name, "derived");
-    assert_eq!(*find_rule(&g, "new_rule"), comma_sep1_rule("identifier"));
+    assert_eq!(g.pool.resolve(g.name), "derived");
+    let actual = find_rule(&g, "new_rule");
+    let expected = comma_sep1_rule(&mut g.pool, "identifier");
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn inherited_external_qualified_access() {
     // A child can reference an inherited external via `base::name`, resolving
-    // through the base's lowered external_tokens.
-    let g = parse_with_modules(
+    // through the base's lowered external_roots.
+    let mut g = parse_with_modules(
         &[(
             "base.tsg",
             r#"
@@ -543,22 +587,26 @@ fn inherited_external_qualified_access() {
     "#,
     )
     .unwrap();
-    assert_eq!(g.external_tokens.len(), 1);
-    assert_eq!(g.external_tokens[0], Rule::NamedSymbol("_token".into()));
-    assert_eq!(
-        *find_rule(&g, "program"),
-        Rule::seq(vec![
-            Rule::NamedSymbol("_token".into()),
-            Rule::String("!".into()),
-        ])
-    );
+    assert_eq!(g.external_roots.len(), 1);
+    let actual = g.external_roots[0];
+    let expected = {
+        let p = &mut g.pool;
+        r_sym!(p, "_token")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
+    let actual = find_rule(&g, "program");
+    let expected = {
+        let p = &mut g.pool;
+        r_seq!(p, [r_sym!(p, "_token"), r_str!(p, "!")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn inherited_external_bare_reference() {
     // An inherited external is referenceable by bare name, like an inherited
     // rule (and like grammar.js's `$.name`) - not only via `base::name`.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[(
             "base.tsg",
             r#"grammar { language: "base", externals: [_token] }
@@ -571,15 +619,20 @@ fn inherited_external_bare_reference() {
         rule extra { _token }"#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "extra"), Rule::NamedSymbol("_token".into()));
+    let actual = find_rule(&g, "extra");
+    let expected = {
+        let p = &mut g.pool;
+        r_sym!(p, "_token")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn inherited_rule_also_in_externals() {
     // A base may list one of its own rules in `externals` (external-scanner token
     // with a grammar-rule fallback), so the name is in both variables and
-    // external_tokens; inheriting it must not double-register in the child.
-    let g = parse_with_modules(
+    // external_roots; inheriting it must not double-register in the child.
+    let mut g = parse_with_modules(
         &[(
             "base.tsg",
             r#"grammar { language: "base", externals: [tok] }
@@ -591,7 +644,12 @@ fn inherited_rule_also_in_externals() {
         rule extra { tok }"#,
     )
     .unwrap();
-    assert_eq!(*find_rule(&g, "extra"), Rule::NamedSymbol("tok".into()));
+    let actual = find_rule(&g, "extra");
+    let expected = {
+        let p = &mut g.pool;
+        r_sym!(p, "tok")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -599,7 +657,7 @@ fn config_only_base_is_allowed() {
     // A config-only base (no rules) is a native-DSL extension: it can't compile
     // standalone but contributes config to a child; only the root's rule count
     // is enforced.
-    let g = parse_with_modules(
+    let mut g = parse_with_modules(
         &[(
             "base.tsg",
             r#"grammar { language: "base", externals: [_eof] }
@@ -613,7 +671,12 @@ fn config_only_base_is_allowed() {
     .unwrap();
     // Child supplies the only rule; base contributes its externals as config.
     assert_eq!(rule_names(&g), vec!["program"]);
-    assert_eq!(g.external_tokens, vec![Rule::NamedSymbol("_eof".into())]);
+    let actual = g.external_roots.clone();
+    let expected = {
+        let p = &mut g.pool;
+        vec![r_sym!(p, "_eof")]
+    };
+    assert_rules_eq(&g.pool, &actual, &expected);
 }
 
 #[test]
@@ -650,19 +713,24 @@ fn start_picks_derived_rule_under_inheritance() {
 #[test]
 fn grammar_config_reads_base_language() {
     // grammar_config(base, language) reads the base grammar's name as a str_t.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         rule lang_name { grammar_config(base, language) }
     "#);
-    assert_eq!(*find_rule(&g, "lang_name"), Rule::String("base".into()));
+    let actual = find_rule(&g, "lang_name");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "base")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn override_with_rule_from_two_sources_errors() {
     // `expr` comes from two imported helpers; an `override rule expr` claims one,
     // so the second collides as a duplicate declaration, not a silent dup.
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[
             ("a.tsg", "rule expr { \"from_a\" }\n"),
             ("b.tsg", "rule expr { \"from_b\" }\n"),
@@ -674,8 +742,7 @@ fn override_with_rule_from_two_sources_errors() {
         rule program { expr }
         override rule expr { "overridden" }
     "#,
-    )
-    .unwrap_err();
+    ));
     let e = assert_err!(err, Resolve);
     assert_eq!(
         e.kind,

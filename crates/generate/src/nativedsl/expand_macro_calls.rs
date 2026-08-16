@@ -18,8 +18,8 @@ use super::{
     ExpandError, NoteMessage,
     ast::{Expansion, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
     lexer::{is_ident_str, unescape_string},
-    string_pool::{Str, StringPool},
 };
+use crate::strpool::{StrId, StrPool};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ExpandErrorKind {
@@ -44,7 +44,7 @@ pub enum ExpandErrorKind {
 
 pub fn expand_macro_calls(
     shared: &mut SharedAst,
-    strings: &mut StringPool,
+    strs: &mut StrPool,
     ctx: &mut ModuleContext,
 ) -> Result<(), ExpandError> {
     // A name declared by more than one top-level macro is rejected by resolve
@@ -64,7 +64,7 @@ pub fn expand_macro_calls(
         if duplicates.contains(ctx.text(shared.arena.span(name))) {
             continue;
         }
-        expand_one_call(shared, strings, ctx, &macros, id, i)?;
+        expand_one_call(shared, strs, ctx, &macros, id, i)?;
     }
     // A zero-decl expansion contributes nothing, so drop any Call left in place
     // (a duplicate-skipped call also lands here; resolve rejects the dup anyway).
@@ -85,7 +85,7 @@ fn collect_macros(
     let mut dups: FxHashSet<String> = FxHashSet::default();
     for &id in &ctx.root_items {
         if let Node::Macro(macro_id) = *shared.arena.get(id) {
-            let name = ctx.text(shared.pools.get_macro(macro_id).name);
+            let name = ctx.text(shared.pools.get_macro(macro_id).name.span);
             if macros.insert(name.to_string(), macro_id).is_some() {
                 dups.insert(name.to_string());
             }
@@ -96,7 +96,7 @@ fn collect_macros(
 
 fn expand_one_call(
     shared: &mut SharedAst,
-    strings: &mut StringPool,
+    strs: &mut StrPool,
     ctx: &mut ModuleContext,
     macros: &FxHashMap<String, MacroId>,
     call_id: NodeId,
@@ -115,7 +115,7 @@ fn expand_one_call(
         // If the name was a cfg-dropped macro, say so - parity with the
         // GatedByDisabledCfg enrichment a cfg-dropped expression-macro
         // reference gets at resolve.
-        if let Some(&cfg_node) = ctx.cfg_dropped.get(name_text)
+        if let Some(&cfg_node) = strs.get(name_text).and_then(|id| ctx.cfg_dropped.get(&id))
             && let Node::Cfg {
                 name: flag_span, ..
             } = *shared.arena.get(cfg_node)
@@ -167,14 +167,14 @@ fn expand_one_call(
                 is_override,
                 name,
                 body,
-            } => (is_override, strings.intern_owned(ctx.text(name)), body),
+            } => (is_override, name, body),
             Node::ComputedRule {
                 is_override,
                 name_expr,
                 body,
             } => {
                 let name_span = shared.arena.span(name_expr);
-                let name = eval_name(shared, strings, ctx, args_start, name_expr, name_span)?;
+                let name = eval_name(shared, strs, ctx, args_start, name_expr, name_span)?;
                 (is_override, name, body)
             }
             // Parser only places Rule/ComputedRule in a RuleSet body.
@@ -200,7 +200,7 @@ fn expand_one_call(
     for &sym_ref in shared.pools.child_slice(sym_refs) {
         expect_pat!(Node::SymRef { expr }, *shared.arena.get(sym_ref));
         let span = shared.arena.span(sym_ref);
-        let name = eval_name(shared, strings, ctx, args_start, expr, span)?;
+        let name = eval_name(shared, strs, ctx, args_start, expr, span)?;
         ctx.computed_refs.push(Spanned::new(name, span));
     }
     Ok(())
@@ -212,12 +212,12 @@ fn expand_one_call(
 /// compile-time evaluator subset (e.g. references to lets).
 fn eval_name(
     shared: &SharedAst,
-    strings: &mut StringPool,
+    strs: &mut StrPool,
     ctx: &ModuleContext,
     args_start: usize,
     node_id: NodeId,
     name_expr_span: Span,
-) -> Result<Str, ExpandError> {
+) -> Result<StrId, ExpandError> {
     let mut buf = String::new();
     eval_name_into(shared, ctx, args_start, node_id, &mut buf)?;
     if !is_ident_str(&buf) {
@@ -226,7 +226,7 @@ fn eval_name(
             name_expr_span,
         ));
     }
-    Ok(strings.intern_owned(&buf))
+    Ok(strs.intern(&buf))
 }
 
 /// Build a computed rule name (`@<expr>`) at expand time, before resolve - so

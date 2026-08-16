@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn rule_set_macro_single_rule() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         rules make_program() {
             rule program { "x" }
         }
@@ -10,28 +10,38 @@ fn rule_set_macro_single_rule() {
         @make_program()
         "#);
     assert_eq!(g.variables.len(), 1);
-    assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+    assert_eq!(g.pool.resolve(g.variables[0].name), "program");
+    let actual = g.variables[0].root;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn rule_set_macro_str_param_substitution() {
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         rules lit(s: str_t) {
             rule program { s }
         }
         grammar { language: "test" }
         @lit("hello")
         "#);
-    assert_eq!(g.variables[0].name, "program");
-    assert_eq!(g.variables[0].rule, Rule::String("hello".into()));
+    assert_eq!(g.pool.resolve(g.variables[0].name), "program");
+    let actual = g.variables[0].root;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "hello")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn rule_set_macro_symref_in_expr_position() {
     // pair("foo") produces a_foo and b_foo; b_foo's body references
     // a_foo by computed name via @concat(...) in expression position.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         rules pair(s: str_t) {
             rule @concat("a_", s) { "x" }
             rule @concat("b_", s) { seq(@concat("a_", s), "y") }
@@ -39,31 +49,39 @@ fn rule_set_macro_symref_in_expr_position() {
         grammar { language: "test", start: a_foo }
         @pair("foo")
         "#);
-    let names: Vec<&str> = g.variables.iter().map(|v| v.name.as_str()).collect();
+    let names: Vec<&str> = g.variables.iter().map(|v| g.pool.resolve(v.name)).collect();
     assert_eq!(names, vec!["a_foo", "b_foo"]);
-    let b = g.variables.iter().find(|v| v.name == "b_foo").unwrap();
-    assert_eq!(
-        b.rule,
-        Rule::seq(vec![
-            Rule::NamedSymbol("a_foo".into()),
-            Rule::String("y".into()),
-        ])
-    );
+    let b = g
+        .variables
+        .iter()
+        .find(|v| g.pool.resolve(v.name) == "b_foo")
+        .unwrap();
+    let actual = b.root;
+    let expected = {
+        let p = &mut g.pool;
+        r_seq!(p, [r_sym!(p, "a_foo"), r_str!(p, "y")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
 fn rule_set_macro_literal_name_via_at_string() {
     // `@"foo"` evaluates the StringLit to "foo" and produces a rule named foo.
     // Pins behavior - shape is unusual but parser+expand accept it.
-    let g = dsl(r#"
+    let mut g = dsl(r#"
         rules emit() {
             rule @"foo" { "x" }
         }
         grammar { language: "test", start: foo }
         @emit()
     "#);
-    assert_eq!(g.variables[0].name, "foo");
-    assert_eq!(g.variables[0].rule, Rule::String("x".into()));
+    assert_eq!(g.pool.resolve(g.variables[0].name), "foo");
+    let actual = g.variables[0].root;
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, actual, expected);
 }
 
 #[test]
@@ -77,7 +95,7 @@ fn rule_set_macro_at_string_name_unescapes() {
         grammar { language: "test", start: aA }
         @emit()
     "#);
-    assert_eq!(g.variables[0].name, "aA");
+    assert_eq!(g.pool.resolve(g.variables[0].name), "aA");
 }
 
 #[test]
@@ -143,7 +161,10 @@ fn computed_ref_to_let_name_rejected() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::ComputedNameNotARule("width".into()));
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::ComputedNameNotARule("width".into())
+    );
 }
 
 #[test]
@@ -161,7 +182,10 @@ fn computed_ref_unknown_gets_suggestion() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("porgram".into()));
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::UnknownIdentifier("porgram".into())
+    );
     assert!(
         e.notes
             .iter()
@@ -284,11 +308,7 @@ find_rule_tests! {
         @wrap(digit)
         "#,
         "program",
-        Rule::seq(vec![
-            Rule::String("(".into()),
-            Rule::NamedSymbol("digit".into()),
-            Rule::String(")".into()),
-        ])
+        |p| r_seq!(p, [r_str!(p, "("), r_sym!(p, "digit"), r_str!(p, ")")])
     }
     rule_set_macro_with_for_loop_over_param {
         // A for-loop in a rule-set body iterating a list_t<rule_t> param must read
@@ -306,10 +326,7 @@ find_rule_tests! {
         @with_choices([a, b])
     "#,
         "program",
-        Rule::choice(vec![
-            Rule::NamedSymbol("a".into()),
-            Rule::NamedSymbol("b".into()),
-        ])
+        |p| r_choice!(p, [r_sym!(p, "a"), r_sym!(p, "b")])
     }
     rule_set_macro_param_in_combinator_positions {
         // Exercises the Repeat/Optional/Field/Alias/Prec arms of clone_with_subst
@@ -331,14 +348,11 @@ find_rule_tests! {
         @wrap(digit, pretty)
     "#,
         "program",
-        Rule::prec(
-            Precedence::Integer(1),
-            Rule::seq(vec![
-                Rule::repeat(Rule::NamedSymbol("digit".into())),
-                Rule::choice(vec![Rule::NamedSymbol("digit".into()), Rule::Blank]),
-                Rule::field("label".into(), Rule::NamedSymbol("digit".into())),
-                Rule::alias(Rule::NamedSymbol("digit".into()), "pretty".into(), true),
-            ]),
-        )
+        |p| r_prec!(p, Precedence::Integer(1), r_seq!(p, [
+            r_repeat!(p, r_sym!(p, "digit")),
+            r_choice!(p, [r_sym!(p, "digit"), r_blank!(p)]),
+            r_field!(p, "label", r_sym!(p, "digit")),
+            r_alias!(p, "pretty", true, r_sym!(p, "digit")),
+        ]))
     }
 }

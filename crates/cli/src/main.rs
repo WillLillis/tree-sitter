@@ -1000,7 +1000,7 @@ impl Generate {
                 #[cfg(feature = "nativedsl")]
                 if let GenerateError::LoadGrammarFile(LoadGrammarError::NativeDsl(_)) = err {
                     // Native DSL errors are rendered by themselves
-                    return Err(err)?;
+                    return Err(err.into());
                 }
                 // Removes extra context associated with the error
                 Err(anyhow!(err.to_string())).context("Error when generating parser")?;

@@ -44,7 +44,7 @@ error_tests! { match Lower {
         r#"grammar { language: "test" }"#,
         LowerErrorKind::GrammarHasNoRules
     }
-    // An external resolves rule-like but lives in external_tokens, not
+    // An external resolves rule-like but lives in external_roots, not
     // variables, so it can't be variables[0] (the start symbol).
     error_external_as_start_rule {
         r#"grammar { language: "test", externals: [tok], start: tok }
@@ -224,7 +224,7 @@ fn error_module_read_failure_renders_without_panic() {
         dsl_path(&subdir)
     );
     std::fs::write(&parent_path, &parent_src).unwrap();
-    let error = parse_native_dsl(&parent_src, &parent_path).unwrap_err();
+    let error = expect_err(parse_native_dsl(&parent_src, &parent_path));
     assert!(
         matches!(
             &error,
@@ -246,7 +246,7 @@ fn helper_lower_error_carries_helper_source() {
     // A lower error born inside an imported helper (an integer overflow in the
     // helper's macro body) tags the diagnostic with the helper's source + path,
     // so it renders against helper.tsg, not the root that imported it.
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[(
             "helper.tsg",
             "macro big() rule_t { prec(1000000000 + 2000000000, \"x\") }\n",
@@ -256,8 +256,7 @@ fn helper_lower_error_carries_helper_source() {
         grammar { language: "test" }
         rule program { h::big() }
     "#,
-    )
-    .unwrap_err();
+    ));
     let e = assert_err!(err, Lower);
     assert!(
         matches!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000)),
@@ -314,7 +313,7 @@ fn error_inherit_cycle() {
     )
     .unwrap();
     let source = std::fs::read_to_string(&a_path).unwrap();
-    let err = parse_native_dsl(&source, &a_path).unwrap_err();
+    let err = expect_err(parse_native_dsl(&source, &a_path));
     let mut chain = Vec::new();
     let mut current: &DslError = &err;
     loop {
@@ -337,13 +336,12 @@ fn error_inherit_cycle() {
 fn error_self_inherit_cycle() {
     // A grammar that inherits itself should be caught as a cycle,
     // not spin until MAX_MODULE_DEPTH.
-    let err = parse_with_modules(
+    let err = expect_err(parse_with_modules(
         &[],
         r#"let base = inherit("grammar.tsg")
         grammar { language: "test", inherits: base }
         rule program { "x" }"#,
-    )
-    .unwrap_err();
+    ));
     match &err {
         DslError::Module(m) => {
             assert!(
