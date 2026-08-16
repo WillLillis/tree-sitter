@@ -71,4 +71,8 @@ impl StrPool {
     pub fn resolve(&self, id: StrId) -> &str {
         &self.strs[id.index()]
     }
+
+    pub fn get(&self, s: &str) -> Option<StrId> {
+        self.str_ids.get(s).copied()
+    }
 }

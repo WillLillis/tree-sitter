@@ -86,17 +86,10 @@ fn wrap_in_binary_tree(pool: &mut RulePool, symbol: Symbol, inner: RuleId) -> Ru
     let s2 = pool.push_node(Rule::from(symbol));
     let range = pool.push_children(&[s1, s2]);
     let seq = pool.push_node(Rule::Seq(range));
-    let mut elements = vec![seq];
-    let mut stack = vec![inner];
-    while let Some(id) = stack.pop() {
-        if let Rule::Choice(range) = pool.node(id) {
-            let base = stack.len();
-            stack.extend_from_slice(pool.child_slice(range));
-            stack[base..].reverse();
-        } else if !elements.iter().any(|&e| pool.subtree_eq(e, id)) {
-            elements.push(id);
-        }
-    }
+    let mut elements = Vec::new();
+    let mut walk = vec![seq, inner];
+    let mut eq = Vec::new();
+    pool.flatten_choice(&mut walk, &mut elements, 0, &mut eq);
     if elements.len() == 1 {
         elements[0]
     } else {

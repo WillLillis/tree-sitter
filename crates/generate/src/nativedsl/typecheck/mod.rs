@@ -13,13 +13,15 @@ use serde::{Deserialize, Serialize};
 
 use check::check_item;
 
+use crate::strpool::{StrId, StrPool};
+
 use super::ast::{ModuleContext, NodeId, SharedAst};
 
 #[derive(Clone, Default)]
 pub struct TypeEnv {
     pub vars: FxHashMap<NodeId, Ty>,
     /// Field names for Object variables, keyed by the Let node's `NodeId`.
-    pub object_fields: FxHashMap<NodeId, Vec<String>>,
+    pub object_fields: FxHashMap<NodeId, Vec<StrId>>,
     /// Lets currently being typed; reentry is a self-reference cycle.
     lets_in_progress: FxHashSet<NodeId>,
     /// Shared work and results stacks for the iterative `type_of` walk. They
@@ -35,9 +37,15 @@ pub struct TypeEnv {
 /// # Errors
 ///
 /// Returns a `TypeError` on typecheck failure.
-pub fn check(shared: &mut SharedAst, ctx: &ModuleContext, env: &mut TypeEnv) -> TypeResult<()> {
+pub fn check(
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    env: &mut TypeEnv,
+    strs: &StrPool,
+) -> TypeResult<()> {
+    let cx = check::Cx { shared, ctx, strs };
     for &item_id in &ctx.root_items {
-        check_item(shared, ctx, item_id, env)?;
+        check_item(cx, item_id, env)?;
     }
     Ok(())
 }

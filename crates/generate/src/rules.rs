@@ -304,23 +304,40 @@ impl RulePool {
         self.push_node(Rule::Seq(range))
     }
 
-    /// Flatten nested choices and de-dup structurally, keeping a `Choice` node
-    /// event for a single element
+    // Flatten nested choices and de-dup structurally, keeping `Choice` node
+    // even for a single element.
     pub fn choice(&mut self, ids: &[RuleId]) -> RuleId {
-        let mut elements: Vec<RuleId> = Vec::with_capacity(ids.len());
-        let mut stack: Vec<RuleId> = Vec::with_capacity(ids.len());
-        stack.extend(ids.iter().rev());
-        while let Some(id) = stack.pop() {
+        let mut out: Vec<RuleId> = Vec::with_capacity(ids.len());
+        let mut walk: Vec<RuleId> = Vec::with_capacity(ids.len());
+        let mut eq = Vec::new();
+        walk.extend(ids.iter());
+        self.flatten_choice(&mut walk, &mut out, 0, &mut eq);
+        let range = self.push_children(&out);
+        self.push_node(Rule::Choice(range))
+    }
+
+    /// Flatten nested `Choice` nodes out of the work stack `walk`, appending the
+    /// deduplicated altnernatives to `out`.`walk` holds the alternatives in left
+    /// to right order.
+    pub fn flatten_choice(
+        &self,
+        walk: &mut Vec<RuleId>,
+        out: &mut Vec<RuleId>,
+        dedup_base: usize,
+        eq: &mut Vec<(RuleId, RuleId)>,
+    ) {
+        walk.reverse();
+        while let Some(id) = walk.pop() {
             if let Rule::Choice(range) = self.node(id) {
-                let base = stack.len();
-                stack.extend_from_slice(self.child_slice(range));
-                stack[base..].reverse();
-            } else if !elements.iter().any(|&e| self.subtree_eq(e, id)) {
-                elements.push(id);
+                // push nested choice children in reverse to preserve source order
+                walk.extend(self.child_slice(range).iter().rev().copied());
+            } else if !out[dedup_base..]
+                .iter()
+                .any(|&e| self.subtree_eq_with_scratch(e, id, eq))
+            {
+                out.push(id);
             }
         }
-        let range = self.push_children(&elements);
-        self.push_node(Rule::Choice(range))
     }
 
     pub fn reserved(&mut self, content: RuleId, ctx: StrId) -> RuleId {
@@ -340,7 +357,17 @@ impl RulePool {
     }
 
     #[must_use]
-    pub fn into_interner(self) -> StrPool {
+    pub const fn strs(&self) -> &StrPool {
+        &self.str_pool
+    }
+
+    #[must_use]
+    pub const fn strs_mut(&mut self) -> &mut StrPool {
+        &mut self.str_pool
+    }
+
+    #[must_use]
+    pub fn into_strs(self) -> StrPool {
         self.str_pool
     }
 
@@ -387,7 +414,18 @@ impl RulePool {
     }
 
     pub fn subtree_eq(&self, a: RuleId, b: RuleId) -> bool {
-        let mut stack = vec![(a, b)];
+        self.subtree_eq_with_scratch(a, b, &mut Vec::new())
+    }
+
+    /// [`subtree_eq`](Self::subtree_eq) reusing a caller-owned work stack.
+    pub fn subtree_eq_with_scratch(
+        &self,
+        a: RuleId,
+        b: RuleId,
+        stack: &mut Vec<(RuleId, RuleId)>,
+    ) -> bool {
+        stack.clear();
+        stack.push((a, b));
         while let Some((a, b)) = stack.pop() {
             match (self.node(a), self.node(b)) {
                 (Rule::Blank, Rule::Blank) => {}
