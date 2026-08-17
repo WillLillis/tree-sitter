@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
 
-use crate::{nativedsl::ast::Spanned, strpool::StrPool};
+use crate::{
+    nativedsl::ast::Spanned,
+    strpool::{StrId, StrPool},
+};
 
 use super::{
     InnerTy, NoteMessage, ParseError,
@@ -38,7 +41,7 @@ pub struct Parser<'tok, 'shared, 'strs> {
     ctx: ModuleContext,
     scratch: Vec<NodeId>,
     /// Stack of local bindings (macro params and for-loop bindings).
-    locals: Vec<(Span, LocalBinding)>,
+    locals: Vec<(StrId, LocalBinding)>,
     depth: u16,
     /// `Some` while parsing a `rules` macro def, holding the `SymRef` node ids created.
     pending_sym_refs: Option<Vec<NodeId>>,
@@ -481,7 +484,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         let body = stack_scope!(self.locals, |saved| {
             for (i, p) in params.iter().enumerate() {
                 self.locals
-                    .push((p.name.span, LocalBinding::MacroParam(p.ty, i as u8)));
+                    .push((p.name.value, LocalBinding::MacroParam(p.ty, i as u8)));
             }
             match kind {
                 MacroKind::Expression(_) => self.parse_expr(),
@@ -520,10 +523,11 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         if self.at(TokenKind::ColonColon) {
             return Err(self.error(ParseErrorKind::QualifiedRuleSetCall));
         }
+        let name = self.strs.intern(self.ctx.text(name_span));
         let name_id = self
             .shared
             .arena
-            .push(Node::Ident(IdentKind::Unresolved), name_span);
+            .push(Node::Ident(IdentKind::Unresolved(name)), name_span);
         self.expect(TokenKind::LParen)?;
         let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
@@ -992,7 +996,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     /// Parse `reserved("context", content)` expression (not the config block).
     fn parse_reserved_expr(&mut self, start: Span) -> ParseResult<NodeId> {
         let (context, content, end) = self.parse_binary(start, TokenKind::KwReserved, |this| {
-            Ok(this.expect_string()?.strip_quotes())
+            let span = this.expect_string()?.strip_quotes();
+            Ok(this.strs.intern(this.ctx.text(span)))
         })?;
         Ok(self
             .shared
@@ -1081,7 +1086,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                 self.shared.pools.param_slice(bindings).iter().enumerate()
             {
                 self.locals
-                    .push((name.span, LocalBinding::ForBinding(for_id, ty, i as u8)));
+                    .push((name.value, LocalBinding::ForBinding(for_id, ty, i as u8)));
             }
             let body = self.parse_expr()?;
             let end = self.expect(TokenKind::RBrace)?;
@@ -1095,25 +1100,21 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
 
     fn parse_ident_expr(&mut self, start: Span) -> ParseResult<NodeId> {
         let span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
-        let name = self.ctx.text(span);
-        let name_id = if let Some(&(_, binding)) = self
-            .locals
-            .iter()
-            .rev()
-            .find(|(s, _)| self.ctx.text(*s) == name)
-        {
-            let node = match binding {
-                LocalBinding::MacroParam(ty, index) => Node::MacroParam { ty, index },
-                LocalBinding::ForBinding(for_id, ty, index) => {
-                    Node::ForBinding { for_id, ty, index }
-                }
+        let name = self.strs.intern(self.ctx.text(span));
+        let name_id =
+            if let Some(&(_, binding)) = self.locals.iter().rev().find(|(s, _)| *s == name) {
+                let node = match binding {
+                    LocalBinding::MacroParam(ty, index) => Node::MacroParam { ty, index },
+                    LocalBinding::ForBinding(for_id, ty, index) => {
+                        Node::ForBinding { for_id, ty, index }
+                    }
+                };
+                self.shared.arena.push(node, span)
+            } else {
+                self.shared
+                    .arena
+                    .push(Node::Ident(IdentKind::Unresolved(name)), span)
             };
-            self.shared.arena.push(node, span)
-        } else {
-            self.shared
-                .arena
-                .push(Node::Ident(IdentKind::Unresolved), span)
-        };
         depth_scope!(self, {
             let mut id = name_id;
             loop {
@@ -1130,12 +1131,13 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                     self.advance_pos();
                     self.deepen()?;
                     let member_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+                    let member = self.strs.intern(self.ctx.text(member_span));
                     if self.at(TokenKind::LParen) {
                         // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
                         let member_id = self
                             .shared
                             .arena
-                            .push(Node::Ident(IdentKind::Unresolved), member_span);
+                            .push(Node::Ident(IdentKind::Unresolved(member)), member_span);
                         self.advance_pos();
                         let range = self.comma_sep_children(
                             &[id, member_id],
@@ -1159,7 +1161,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                 } else if self.at(TokenKind::LParen) {
                     if !matches!(
                         self.shared.arena.get(id),
-                        Node::Ident(IdentKind::Unresolved)
+                        Node::Ident(IdentKind::Unresolved(_))
                     ) {
                         return Err(self.error(ParseErrorKind::ExpectedMacroName));
                     }

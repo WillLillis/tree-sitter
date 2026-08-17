@@ -95,7 +95,10 @@ impl NodeArena {
 
     #[inline]
     pub fn resolve_as(&mut self, id: NodeId, kind: IdentKind) {
-        debug_assert!(matches!(self.get(id), Node::Ident(IdentKind::Unresolved)));
+        debug_assert!(matches!(
+            self.get(id),
+            Node::Ident(IdentKind::Unresolved(_))
+        ));
         self.set(id, Node::Ident(kind));
     }
 

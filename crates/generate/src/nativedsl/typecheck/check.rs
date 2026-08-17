@@ -220,7 +220,7 @@ fn expect_name_list(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()>
 fn expect_name_ref(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
     let Cx { shared, ctx, .. } = cx;
     match shared.arena.get(id) {
-        Node::Ident(IdentKind::Rule) => Ok(()),
+        Node::Ident(IdentKind::Rule(_)) => Ok(()),
         Node::Ident(IdentKind::Var(_))
         | Node::FieldAccess { .. }
         | Node::GrammarConfig { .. }
@@ -380,7 +380,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
             None
         }
-        Node::Ident(IdentKind::Rule) | Node::Blank | Node::ModuleRule { .. } => {
+        Node::Ident(IdentKind::Rule(_)) | Node::Blank | Node::ModuleRule { .. } => {
             enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
             None
         }
@@ -827,7 +827,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             }
             let is_valid = matches!(
                 shared.arena.get(target),
-                Node::Ident(IdentKind::Rule | IdentKind::Var(_))
+                Node::Ident(IdentKind::Rule(_) | IdentKind::Var(_))
                     | Node::MacroParam { .. }
                     | Node::ForBinding { .. }
                     | Node::QualifiedAccess { .. }

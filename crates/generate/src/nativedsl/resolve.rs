@@ -85,7 +85,7 @@ pub fn resolve(
         // Must resolve to a rule: lower emits a NamedSymbol for whatever name
         // this is, so a let/macro match would lower a dangling symbol.
         match rcx.decls.get(&name).map(|d| d.value) {
-            Some(IdentKind::Rule) => {}
+            Some(IdentKind::Rule(_)) => {}
             Some(_) => Err(ResolveError::new(
                 ResolveErrorKind::ComputedNameNotARule(rcx.strs.resolve(name).to_string()),
                 span,
@@ -172,7 +172,14 @@ fn collect_decls(
             Node::Rule {
                 name, is_override, ..
             } => {
-                insert_decl(&mut decls, pool.strs(), *name, IdentKind::Rule, span, ctx)?;
+                insert_decl(
+                    &mut decls,
+                    pool.strs(),
+                    *name,
+                    IdentKind::Rule(*name),
+                    span,
+                    ctx,
+                )?;
                 if *is_override {
                     override_names.insert(*name);
                 }
@@ -183,7 +190,7 @@ fn collect_decls(
                     &mut decls,
                     pool.strs(),
                     exp.name,
-                    IdentKind::Rule,
+                    IdentKind::Rule(exp.name),
                     span,
                     ctx,
                 )?;
@@ -230,7 +237,7 @@ fn collect_decls(
                 &mut decls,
                 pool.strs(),
                 var.name,
-                IdentKind::Rule,
+                IdentKind::Rule(var.name),
                 inherit_span,
                 ctx,
             )?;
@@ -250,7 +257,7 @@ fn collect_decls(
                     &mut decls,
                     pool.strs(),
                     name,
-                    IdentKind::Rule,
+                    IdentKind::Rule(name),
                     inherit_span,
                     ctx,
                 )?;
@@ -273,7 +280,7 @@ fn collect_decls(
                 &mut decls,
                 pool.strs(),
                 name,
-                IdentKind::Rule,
+                IdentKind::Rule(name),
                 ir.ref_span,
                 ctx,
             )?;
@@ -304,7 +311,7 @@ fn collect_decls(
         let span = shared.arena.span(item_id);
         decls
             .entry(*name)
-            .or_insert_with(|| Spanned::new(IdentKind::Rule, span));
+            .or_insert_with(|| Spanned::new(IdentKind::Rule(*name), span));
     }
 
     Ok(decls)
@@ -408,13 +415,10 @@ fn resolve_node(
     Ok(match unsafe { *arena.get_unchecked(id) } {
         // Local bindings are emitted as MacroParam/ForBinding by the parser, so
         // any remaining `Ident(Unresolved)` is a top-level reference.
-        Node::Ident(IdentKind::Unresolved) => {
-            let span = arena.span(id);
-            let name = rcx.ctx.text(span);
-            let Some(&Spanned { value: kind, .. }) =
-                rcx.strs.get(name).and_then(|sid| rcx.decls.get(&sid))
-            else {
-                return Err(unknown_ident_error(rcx, name, span));
+        Node::Ident(IdentKind::Unresolved(name)) => {
+            let Some(&Spanned { value: kind, .. }) = rcx.decls.get(&name) else {
+                let span = arena.span(id);
+                return Err(unknown_ident_error(rcx, rcx.strs.resolve(name), span));
             };
             arena.resolve_as(id, kind);
             None
@@ -424,13 +428,11 @@ fn resolve_node(
         // UNDECLARED bare identifier becomes a named-alias rule reference,
         // mirroring grammar.js `alias($.x, $.undeclared)`.
         Node::Alias { content, target } => {
-            if matches!(arena.get(target), Node::Ident(IdentKind::Unresolved)) {
-                let text = rcx.ctx.text(arena.span(target));
+            if let Node::Ident(IdentKind::Unresolved(name)) = *arena.get(target) {
                 let kind = rcx
-                    .strs
-                    .get(text)
-                    .and_then(|sid| rcx.decls.get(&sid))
-                    .map_or(IdentKind::Rule, |s| s.value);
+                    .decls
+                    .get(&name)
+                    .map_or(IdentKind::Rule(name), |s| s.value);
                 arena.resolve_as(target, kind);
             } else {
                 stack.push(Resolve::Node(target));
@@ -634,24 +636,28 @@ fn collect_external_names(
     match arena.get(id) {
         // Bare identifier: follow a let, ignore an already-declared name, or
         // register an unknown name as a new external token.
-        Node::Ident(IdentKind::Unresolved) => {
-            let name = strs.intern(ctx.text(arena.span(id)));
-            match ec.decls.get(&name).map(|d| d.value) {
-                Some(IdentKind::Var(let_id)) => {
-                    if !ec.expanding_lets.insert(name) {
-                        return Err(ResolveError::new(
-                            ResolveErrorKind::InvalidExternalsExpression,
-                            arena.span(id),
-                        ));
-                    }
-                    expect_pat!(Node::Let { value, .. }, *arena.get(let_id));
-                    collect_external_names(shared, ctx, strs, value, ec)?;
-                    ec.expanding_lets.remove(&name);
+        Node::Ident(IdentKind::Unresolved(name)) => match ec.decls.get(name).map(|d| d.value) {
+            Some(IdentKind::Var(let_id)) => {
+                if !ec.expanding_lets.insert(*name) {
+                    return Err(ResolveError::new(
+                        ResolveErrorKind::InvalidExternalsExpression,
+                        arena.span(id),
+                    ));
                 }
-                None => insert_decl(ec.decls, strs, name, IdentKind::Rule, arena.span(id), ctx)?,
-                Some(_) => {}
+                expect_pat!(Node::Let { value, .. }, *arena.get(let_id));
+                collect_external_names(shared, ctx, strs, value, ec)?;
+                ec.expanding_lets.remove(name);
             }
-        }
+            None => insert_decl(
+                ec.decls,
+                strs,
+                *name,
+                IdentKind::Rule(*name),
+                arena.span(id),
+                ctx,
+            )?,
+            Some(_) => {}
+        },
         Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
             for &child in shared.pools.child_slice(*range) {
                 collect_external_names(shared, ctx, strs, child, ec)?;
