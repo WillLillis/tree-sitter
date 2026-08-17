@@ -14,8 +14,8 @@ use crate::{
     nativedsl::{
         Export, ImportedRule, LoweredGrammar, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, ModuleContext, Node, NodeArena, NodeId, Param, SharedAst, Span,
-            Spanned,
+            AstPools, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, Param, SharedAst,
+            Span, Spanned,
         },
         diagnostic::suggest_name,
     },
@@ -28,7 +28,26 @@ use crate::{
 /// (for duplicate checking / "first defined here" notes). The kind never
 /// stores [`IdentKind::Unresolved`] - by the time a name reaches the table
 /// we know what it resolves to.
-type Decls = FxHashMap<StrId, Spanned<IdentKind>>;
+type Decls = FxHashMap<StrId, Spanned<DeclKind>>;
+
+/// What a declared name denotes
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DeclKind {
+    Rule,
+    Var(NodeId),
+    Macro(MacroId),
+}
+
+impl DeclKind {
+    /// The [`IdentKind`] a reference to `name` takes on once it resolves.
+    const fn to_ident(self, name: StrId) -> IdentKind {
+        match self {
+            Self::Rule => IdentKind::Rule(name),
+            Self::Var(id) => IdentKind::Var(id),
+            Self::Macro(id) => IdentKind::Macro(id),
+        }
+    }
+}
 
 /// Context for [`collect_external_names`].
 struct ExternalNameCtx<'a> {
@@ -85,7 +104,7 @@ pub fn resolve(
         // Must resolve to a rule: lower emits a NamedSymbol for whatever name
         // this is, so a let/macro match would lower a dangling symbol.
         match rcx.decls.get(&name).map(|d| d.value) {
-            Some(IdentKind::Rule(_)) => {}
+            Some(DeclKind::Rule) => {}
             Some(_) => Err(ResolveError::new(
                 ResolveErrorKind::ComputedNameNotARule(rcx.strs.resolve(name).to_string()),
                 span,
@@ -109,7 +128,7 @@ fn insert_decl(
     decls: &mut Decls,
     strs: &StrPool,
     name: StrId,
-    kind: IdentKind,
+    kind: DeclKind,
     span: Span,
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
@@ -172,28 +191,14 @@ fn collect_decls(
             Node::Rule {
                 name, is_override, ..
             } => {
-                insert_decl(
-                    &mut decls,
-                    pool.strs(),
-                    *name,
-                    IdentKind::Rule(*name),
-                    span,
-                    ctx,
-                )?;
+                insert_decl(&mut decls, pool.strs(), *name, DeclKind::Rule, span, ctx)?;
                 if *is_override {
                     override_names.insert(*name);
                 }
             }
             Node::ExpandedRule(expand_id) => {
                 let exp = shared.pools.get_expansion(*expand_id);
-                insert_decl(
-                    &mut decls,
-                    pool.strs(),
-                    exp.name,
-                    IdentKind::Rule(exp.name),
-                    span,
-                    ctx,
-                )?;
+                insert_decl(&mut decls, pool.strs(), exp.name, DeclKind::Rule, span, ctx)?;
                 if exp.is_override {
                     override_names.insert(exp.name);
                 }
@@ -204,7 +209,7 @@ fn collect_decls(
                     &mut decls,
                     pool.strs(),
                     config.name.value,
-                    IdentKind::Macro(*macro_id),
+                    DeclKind::Macro(*macro_id),
                     span,
                     ctx,
                 )?;
@@ -214,7 +219,7 @@ fn collect_decls(
                     &mut decls,
                     pool.strs(),
                     *name,
-                    IdentKind::Var(item_id),
+                    DeclKind::Var(item_id),
                     span,
                     ctx,
                 )?;
@@ -237,7 +242,7 @@ fn collect_decls(
                 &mut decls,
                 pool.strs(),
                 var.name,
-                IdentKind::Rule(var.name),
+                DeclKind::Rule,
                 inherit_span,
                 ctx,
             )?;
@@ -257,7 +262,7 @@ fn collect_decls(
                     &mut decls,
                     pool.strs(),
                     name,
-                    IdentKind::Rule(name),
+                    DeclKind::Rule,
                     inherit_span,
                     ctx,
                 )?;
@@ -280,7 +285,7 @@ fn collect_decls(
                 &mut decls,
                 pool.strs(),
                 name,
-                IdentKind::Rule(name),
+                DeclKind::Rule,
                 ir.ref_span,
                 ctx,
             )?;
@@ -311,7 +316,7 @@ fn collect_decls(
         let span = shared.arena.span(item_id);
         decls
             .entry(*name)
-            .or_insert_with(|| Spanned::new(IdentKind::Rule(*name), span));
+            .or_insert_with(|| Spanned::new(DeclKind::Rule, span));
     }
 
     Ok(decls)
@@ -420,7 +425,7 @@ fn resolve_node(
                 let span = arena.span(id);
                 return Err(unknown_ident_error(rcx, rcx.strs.resolve(name), span));
             };
-            arena.resolve_as(id, kind);
+            arena.resolve_as(id, kind.to_ident(name));
             None
         }
         // Alias target: a bare identifier resolves against `decls` like any other
@@ -432,7 +437,7 @@ fn resolve_node(
                 let kind = rcx
                     .decls
                     .get(&name)
-                    .map_or(IdentKind::Rule(name), |s| s.value);
+                    .map_or(IdentKind::Rule(name), |s| s.value.to_ident(name));
                 arena.resolve_as(target, kind);
             } else {
                 stack.push(Resolve::Node(target));
@@ -637,7 +642,7 @@ fn collect_external_names(
         // Bare identifier: follow a let, ignore an already-declared name, or
         // register an unknown name as a new external token.
         Node::Ident(IdentKind::Unresolved(name)) => match ec.decls.get(name).map(|d| d.value) {
-            Some(IdentKind::Var(let_id)) => {
+            Some(DeclKind::Var(let_id)) => {
                 if !ec.expanding_lets.insert(*name) {
                     return Err(ResolveError::new(
                         ResolveErrorKind::InvalidExternalsExpression,
@@ -648,14 +653,7 @@ fn collect_external_names(
                 collect_external_names(shared, ctx, strs, value, ec)?;
                 ec.expanding_lets.remove(name);
             }
-            None => insert_decl(
-                ec.decls,
-                strs,
-                *name,
-                IdentKind::Rule(*name),
-                arena.span(id),
-                ctx,
-            )?,
+            None => insert_decl(ec.decls, strs, *name, DeclKind::Rule, arena.span(id), ctx)?,
             Some(_) => {}
         },
         Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
