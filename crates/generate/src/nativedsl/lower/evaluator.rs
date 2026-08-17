@@ -239,11 +239,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         self.pool.node(id)
     }
 
-    fn intern_span(&mut self, span: Span) -> StrId {
-        let text = self.module_ctx(self.current_module).text(span);
-        self.pool.intern(text)
-    }
-
     fn intern_string_lit(&mut self, span: Span) -> StrId {
         let raw = self.module_ctx(self.current_module).text(span);
         if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
@@ -254,7 +249,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn intern_raw_string_lit(&mut self, span: Span, hash_count: u8) -> StrId {
-        self.intern_span(span.strip_raw(hash_count))
+        let text = self
+            .module_ctx(self.current_module)
+            .text(span.strip_raw(hash_count));
+        self.pool.intern(text)
     }
 
     fn owned_symbol_val(&mut self, name: StrId) -> ValueId {
@@ -551,7 +549,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn try_leaf_rule(&mut self, id: NodeId) -> Option<RuleId> {
         let span = self.shared.arena.span(id);
         let rule = match self.shared.arena.get(id) {
-            Node::Ident(IdentKind::Rule) => Rule::NamedSymbol(self.intern_span(span)),
+            Node::Ident(IdentKind::Rule(name)) => Rule::NamedSymbol(*name),
             Node::StringLit => Rule::String(self.intern_string_lit(span)),
             Node::RawStringLit { hash_count } => {
                 Rule::String(self.intern_raw_string_lit(span, *hash_count))
@@ -636,9 +634,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_task(Task::Expr(rhs));
                 self.push_task(Task::Expr(lhs));
             }
-            Node::Ident(IdentKind::Rule) => {
-                let sid = self.intern_span(span);
-                let rid = self.alloc_rule(Rule::NamedSymbol(sid));
+            Node::Ident(IdentKind::Rule(name)) => {
+                let rid = self.alloc_rule(Rule::NamedSymbol(*name));
                 self.push_val(Value::Rule(rid));
             }
             Node::MacroParam { index, .. } => {
@@ -748,10 +745,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn dispatch_rule(&mut self, id: NodeId) {
         let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
-            Node::Ident(IdentKind::Rule) => {
-                let sid = self.intern_span(span);
-                self.push_rule(Rule::NamedSymbol(sid));
-            }
+            Node::Ident(IdentKind::Rule(name)) => self.push_rule(Rule::NamedSymbol(*name)),
             Node::StringLit => {
                 let sid = self.intern_string_lit(span);
                 self.push_rule(Rule::String(sid));
@@ -810,8 +804,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             &Node::Reserved { context, content } => {
                 if let Some(c) = self.try_leaf_rule(content) {
-                    let sid = self.intern_span(context);
-                    self.push_rule(Rule::Reserved { rule: c, ctx: sid });
+                    self.push_rule(Rule::Reserved {
+                        rule: c,
+                        ctx: context,
+                    });
                 } else {
                     self.push_unary_combine(id, Task::Rule(content));
                 }
@@ -825,7 +821,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::Alias { content, target } => {
                 self.push_combine(id);
                 self.push_task(Task::Rule(content));
-                if !matches!(self.shared.arena.get(target), Node::Ident(IdentKind::Rule)) {
+                if !matches!(
+                    self.shared.arena.get(target),
+                    Node::Ident(IdentKind::Rule(_))
+                ) {
                     self.push_task(Task::Expr(target));
                 }
             }
@@ -1006,10 +1005,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             &Node::Reserved { context, .. } => {
                 let inner = self.pop_rule();
-                let sid = self.intern_span(context);
                 self.push_rule(Rule::Reserved {
                     rule: inner,
-                    ctx: sid,
+                    ctx: context,
                 });
             }
             &Node::Prec { kind, .. } => {
@@ -1041,9 +1039,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 }
             }
             &Node::Alias { target, .. } => {
-                if matches!(self.shared.arena.get(target), Node::Ident(IdentKind::Rule)) {
+                if let &Node::Ident(IdentKind::Rule(value)) = self.shared.arena.get(target) {
                     let inner = self.pop_rule();
-                    let value = self.intern_span(self.shared.arena.span(target));
                     let rule = self.metadata(inner, |p| {
                         p.alias = Some(Alias {
                             value,

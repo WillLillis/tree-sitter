@@ -28,8 +28,10 @@ pub enum BinOp {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IdentKind {
-    Unresolved,
-    Rule,
+    /// Not yet resolved.
+    Unresolved(StrId),
+    /// A rule reference.
+    Rule(StrId),
     Var(NodeId),
     Macro(MacroId),
 }
@@ -135,7 +137,7 @@ pub enum Node {
         content: NodeId,
     },
     Reserved {
-        context: Span,
+        context: StrId,
         content: NodeId,
     },
     /// `concat(a, b, ...)`. Children: `[part0, part1, ...]` - each must be `str_t`.
