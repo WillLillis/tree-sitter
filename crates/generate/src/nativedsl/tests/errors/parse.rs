@@ -233,6 +233,7 @@ fn error_builtin_arg_count_messages() {
         (g!("blank(\"a\")"), TokenKind::KwBlank, 0, 1),
         (g!("blank(\"a\",)"), TokenKind::KwBlank, 0, 1),
         (g!("blank(\"a\", \"b\")"), TokenKind::KwBlank, 0, 2),
+        (g!("eof(\"a\")"), TokenKind::KwEof, 0, 1),
         (g!("repeat()"), TokenKind::KwRepeat, 1, 0),
         (g!("repeat1()"), TokenKind::KwRepeat1, 1, 0),
         (g!("optional()"), TokenKind::KwOptional, 1, 0),

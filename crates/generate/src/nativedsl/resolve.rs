@@ -656,7 +656,7 @@ fn collect_external_names(
             None => insert_decl(ec.decls, strs, *name, DeclKind::Rule, arena.span(id), ctx)?,
             Some(_) => {}
         },
-        Node::List(range) | Node::SeqOrChoice { range, .. } | Node::Tuple(range) => {
+        Node::List(range) | Node::Tuple(range) => {
             for &child in shared.pools.child_slice(*range) {
                 collect_external_names(shared, ctx, strs, child, ec)?;
             }
@@ -667,11 +667,9 @@ fn collect_external_names(
         }
         // Literals don't introduce names, inherited values already registered.
         #[rustfmt::skip]
-        Node::StringLit | Node::RawStringLit { .. } | Node::IntLit(_) | Node::Blank
-        | Node::DynRegex { .. } | Node::GrammarConfig { .. } | Node::FieldAccess { .. }
-        | Node::QualifiedAccess { .. } => {}
-        // Anything else is not a valid externals expression. Externals must be a
-        // list literal, append, or variable reference.
+        Node::StringLit | Node::RawStringLit { .. } | Node::IntLit(_) | Node::DynRegex { .. }
+        | Node::GrammarConfig { .. } | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
+        // Anything else is not a valid `externals` expression.
         _ => Err(ResolveError::new(
             ResolveErrorKind::InvalidExternalsExpression,
             arena.span(id),
@@ -694,7 +692,10 @@ pub enum ResolveErrorKind {
     ComputedNameNotARule(String),
     #[error("'{0}' shadows an existing declaration")]
     ShadowedBinding(String),
-    #[error("externals must be a list literal, append(), or variable reference")]
+    #[error(
+        "`externals` must be a list of token names, strings, or `regexp()` expressions, \
+       formed with list literals, `append()`, or variable/config references"
+    )]
     InvalidExternalsExpression,
     #[error("`flags` must be an object literal `{{ enabled: [...], disabled: [...] }}`")]
     CfgFlagsNotObject,

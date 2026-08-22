@@ -380,7 +380,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
             None
         }
-        Node::Ident(IdentKind::Rule(_)) | Node::Blank | Node::ModuleRule { .. } => {
+        Node::Ident(IdentKind::Rule(_)) | Node::Blank | Node::Eof | Node::ModuleRule { .. } => {
             enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
             None
         }

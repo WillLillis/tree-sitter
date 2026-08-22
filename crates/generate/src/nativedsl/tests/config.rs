@@ -155,7 +155,7 @@ fn json_roundtrip() {
             precedences: [["add", multiply]],
             reserved: { default: ["if", "else"] },
         }
-        rule program { repeat(choice(_expression, blank())) }
+        rule program { seq(repeat(choice(_expression, blank())), eof()) }
         rule _expression { choice(primary, call, prec_left("add", seq(_expression, "+", _expression))) }
         rule primary { identifier }
         rule call { seq(identifier, "(", ")") }

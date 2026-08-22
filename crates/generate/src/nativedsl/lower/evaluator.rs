@@ -555,6 +555,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 Rule::String(self.intern_raw_string_lit(span, *hash_count))
             }
             Node::Blank => Rule::Blank,
+            Node::Eof => Rule::Eof,
             _ => return None,
         };
         Some(self.alloc_rule(rule))
@@ -731,7 +732,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             #[rustfmt::skip]
             Node::SymRef { .. } | Node::SeqOrChoice { .. } | Node::Repeat { .. }
-            | Node::Blank | Node::Field { .. } | Node::Alias { .. }
+            | Node::Blank | Node::Field { .. } | Node::Alias { .. } | Node::Eof
             | Node::Token { .. } | Node::Prec { .. } | Node::Reserved { .. } => {
                 self.push_task(Task::WrapRule);
                 self.push_task(Task::Rule(id));
@@ -755,6 +756,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_rule(Rule::String(sid));
             }
             Node::Blank => self.push_rule(Rule::Blank),
+            Node::Eof => self.push_rule(Rule::Eof),
             &Node::SymRef { expr } => self.push_unary_combine(id, Task::Expr(expr)),
             &Node::SeqOrChoice { seq, range } => {
                 let items = self.shared.pools.child_slice(range);
