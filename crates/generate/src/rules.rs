@@ -353,11 +353,7 @@ impl RulePool {
                 let base = walk.len();
                 walk.extend_from_slice(self.child_slice(range));
                 walk[base..].reverse();
-            } else if !self.children[start..]
-                .iter()
-                .copied()
-                .any(|e| self.subtree_eq_with_scratch(e, id, &mut eq))
-            {
+            } else if !self.choice_contains(&self.children[start..], id, &mut eq) {
                 self.children.push(id);
             }
         }
@@ -368,6 +364,37 @@ impl RulePool {
             len: (self.children.len() - start) as u32,
         };
         self.push_node(Rule::Choice(range))
+    }
+
+    /// Is `id` structurally equal to any element of `prior`? Exact roots and
+    /// leaf pairs are decided inline; only compatible container roots require
+    /// a full subtree walk.
+    fn choice_contains(&self, prev: &[RuleId], id: RuleId, eq: &mut Vec<(RuleId, RuleId)>) -> bool {
+        let candidate = self.node(id);
+        prev.iter().any(|&existing_id| {
+            if existing_id == id {
+                return true;
+            }
+
+            let existing = self.node(existing_id);
+            if existing == candidate {
+                return true;
+            }
+
+            match (existing, candidate) {
+                (Rule::Seq(a), Rule::Seq(b)) | (Rule::Choice(a), Rule::Choice(b)) => {
+                    a.len == b.len && self.subtree_eq_with_scratch(existing_id, id, eq)
+                }
+                (Rule::Reserved { ctx: a, .. }, Rule::Reserved { ctx: b, .. }) => {
+                    a == b && self.subtree_eq_with_scratch(existing_id, id, eq)
+                }
+                (Rule::Repeat(_), Rule::Repeat(_))
+                | (Rule::Metadata { .. }, Rule::Metadata { .. }) => {
+                    self.subtree_eq_with_scratch(existing_id, id, eq)
+                }
+                _ => false,
+            }
+        })
     }
 
     pub fn reserved(&mut self, content: RuleId, ctx: StrId) -> RuleId {
