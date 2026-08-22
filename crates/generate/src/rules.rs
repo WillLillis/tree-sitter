@@ -174,8 +174,10 @@ pub struct RulePool {
     children: Vec<RuleId>,
     params: Vec<MetadataParams>,
     str_pool: StrPool,
-    /// Reusable walk scratch for choice flattening
-    scratch: Vec<RuleId>,
+    /// Reusable traversal stack for choice flattening.
+    choice_walk: Vec<RuleId>,
+    /// Reusable equality stack for choice deduplication.
+    choice_eq: Vec<(RuleId, RuleId)>,
 }
 
 impl RulePool {
@@ -343,51 +345,29 @@ impl RulePool {
         // Elements build directly at the children tail. The walk only reads
         // existing nodes, so nothing else appends while the range grows
         let start = self.children.len();
-        let mut stack = std::mem::take(&mut self.scratch);
-        stack.extend(ids.iter().rev());
-        while let Some(id) = stack.pop() {
+        let mut walk = std::mem::take(&mut self.choice_walk);
+        let mut eq = std::mem::take(&mut self.choice_eq);
+        walk.extend(ids.iter().rev());
+        while let Some(id) = walk.pop() {
             if let Rule::Choice(range) = self.node(id) {
-                let base = stack.len();
-                stack.extend_from_slice(self.child_slice(range));
-                stack[base..].reverse();
+                let base = walk.len();
+                walk.extend_from_slice(self.child_slice(range));
+                walk[base..].reverse();
             } else if !self.children[start..]
                 .iter()
                 .copied()
-                .any(|e| self.subtree_eq(e, id))
+                .any(|e| self.subtree_eq_with_scratch(e, id, &mut eq))
             {
                 self.children.push(id);
             }
         }
-        self.scratch = stack;
+        self.choice_walk = walk;
+        self.choice_eq = eq;
         let range = RuleIdRange {
             start: start as u32,
             len: (self.children.len() - start) as u32,
         };
         self.push_node(Rule::Choice(range))
-    }
-
-    /// Flatten nested `Choice` nodes out of the work stack `walk`, appending the
-    /// deduplicated alternatives to `out`. `walk` holds the alternatives in left
-    /// to right order.
-    pub fn flatten_choice(
-        &self,
-        walk: &mut Vec<RuleId>,
-        out: &mut Vec<RuleId>,
-        dedup_base: usize,
-        eq: &mut Vec<(RuleId, RuleId)>,
-    ) {
-        walk.reverse();
-        while let Some(id) = walk.pop() {
-            if let Rule::Choice(range) = self.node(id) {
-                // push nested choice children in reverse to preserve source order
-                walk.extend(self.child_slice(range).iter().rev().copied());
-            } else if !out[dedup_base..]
-                .iter()
-                .any(|&e| self.subtree_eq_with_scratch(e, id, eq))
-            {
-                out.push(id);
-            }
-        }
     }
 
     pub fn reserved(&mut self, content: RuleId, ctx: StrId) -> RuleId {

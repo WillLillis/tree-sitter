@@ -21,7 +21,6 @@ use super::{
 
 use crate::{
     grammars::{PrecedenceEntry, ReservedWordContext},
-    nativedsl::lower::Scratch,
     rules::{Alias, Associativity, MetadataParams, Precedence, Rule, RuleId, RulePool},
     strpool::StrId,
 };
@@ -187,30 +186,15 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn finish_seq(&mut self, base: usize) -> RuleId {
-        let range = self
-            .pool
-            .push_children(&self.state.scratch.rule_scratch[base..]);
+        let rule = self.pool.seq(&self.state.scratch.rule_scratch[base..]);
         self.state.scratch.rule_scratch.truncate(base);
-        self.alloc_rule(Rule::Seq(range))
+        rule
     }
 
     fn finish_choice(&mut self, base: usize) -> RuleId {
-        let Scratch {
-            rule_scratch,
-            rule_walk,
-            rule_eq,
-            ..
-        } = &mut self.state.scratch;
-        rule_walk.clear();
-        rule_walk.extend(rule_scratch[base..].iter().copied());
-        rule_scratch.truncate(base);
-        self.pool
-            .flatten_choice(rule_walk, rule_scratch, base, rule_eq);
-        let range = self
-            .pool
-            .push_children(&self.state.scratch.rule_scratch[base..]);
+        let rule = self.pool.choice(&self.state.scratch.rule_scratch[base..]);
         self.state.scratch.rule_scratch.truncate(base);
-        self.alloc_rule(Rule::Choice(range))
+        rule
     }
 
     fn alloc_rule(&mut self, rule: Rule) -> RuleId {
