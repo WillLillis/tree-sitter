@@ -32,6 +32,7 @@ pub enum TokenKind {
     KwRepeat1,
     KwOptional,
     KwBlank,
+    KwEof,
     KwField,
     KwAlias,
     KwToken,
@@ -113,18 +114,16 @@ macro_rules! keywords {
 keywords! {
     decls {
         KwGrammar => "grammar", KwRule => "rule", KwRules => "rules", KwLet => "let",
-        KwMacro => "macro", KwOverride => "override", KwExpect => "expect",
-        KwIn => "in",
+        KwMacro => "macro", KwOverride => "override", KwExpect => "expect", KwIn => "in",
     }
     combinators {
-        KwFor => "for", KwSeq => "seq", KwChoice => "choice",
-        KwRepeat => "repeat", KwRepeat1 => "repeat1", KwOptional => "optional",
-        KwBlank => "blank", KwField => "field", KwAlias => "alias", KwToken => "token",
-        KwPrec => "prec", KwPrecLeft => "prec_left", KwPrecRight => "prec_right",
-        KwPrecDynamic => "prec_dynamic", KwReserved => "reserved",
-        KwTokenImmediate => "token_immediate", KwConcat => "concat", KwRegexp => "regexp",
-        KwInherit => "inherit", KwImport => "import",
-        KwAppend => "append", KwGrammarConfig => "grammar_config",
+        KwFor => "for", KwSeq => "seq", KwChoice => "choice", KwRepeat => "repeat",
+        KwRepeat1 => "repeat1", KwOptional => "optional", KwBlank => "blank", KwEof => "eof",
+        KwField => "field", KwAlias => "alias", KwToken => "token", KwPrec => "prec",
+        KwPrecLeft => "prec_left", KwPrecRight => "prec_right", KwPrecDynamic => "prec_dynamic",
+        KwReserved => "reserved", KwTokenImmediate => "token_immediate", KwConcat => "concat",
+        KwRegexp => "regexp", KwInherit => "inherit", KwImport => "import", KwAppend => "append",
+        KwGrammarConfig => "grammar_config",
     }
 }
 

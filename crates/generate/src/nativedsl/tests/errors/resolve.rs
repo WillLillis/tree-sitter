@@ -65,6 +65,16 @@ error_tests! { Resolve {
         rule program { "x" }"#,
         ResolveErrorKind::InvalidExternalsExpression
     }
+    error_externals_with_blank {
+        r#"grammar { language: "test", externals: [blank()] }
+        rule program { "x" }"#,
+        ResolveErrorKind::InvalidExternalsExpression
+    }
+    error_externals_with_eof {
+        r#"grammar { language: "test", externals: [eof()] }
+        rule program { "x" }"#,
+        ResolveErrorKind::InvalidExternalsExpression
+    }
     error_self_referential_let_in_externals {
         r#"let C = C
         grammar { language: "test", externals: [C] }

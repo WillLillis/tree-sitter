@@ -120,6 +120,7 @@ pub(crate) fn rule_to_json(pool: &RulePool, rule: RuleId) -> Value {
 fn build_rule(pool: &RulePool, id: RuleId) -> RuleJSON {
     match pool.node(id) {
         Rule::Blank => RuleJSON::BLANK,
+        Rule::Eof => RuleJSON::EOF,
         Rule::String(s) => RuleJSON::STRING {
             value: pool.resolve(s).into(),
         },

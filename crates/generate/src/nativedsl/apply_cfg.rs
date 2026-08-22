@@ -293,7 +293,7 @@ impl Walker<'_> {
             // Leaves: nothing to descend into.
             #[rustfmt::skip]
             Node::Grammar | Node::Forward { .. } | Node::StringLit | Node::RawStringLit { .. }
-            | Node::IntLit(_) | Node::Ident(_) | Node::Blank | Node::MacroParam { .. }
+            | Node::IntLit(_) | Node::Ident(_) | Node::Blank | Node::Eof | Node::MacroParam { .. }
             | Node::ForBinding { .. } => {}
             // `Cfg` is intercepted by walk(), `ExpandedRule`/`ModuleRule` are emitted by
             // expand/resolve (after apply_cfg), `Unreachable` is the arena sentinel.

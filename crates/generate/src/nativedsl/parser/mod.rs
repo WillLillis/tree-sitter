@@ -806,7 +806,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                     inner,
                 })
             }
-            TokenKind::KwBlank => {
+            TokenKind::KwBlank | TokenKind::KwEof => {
                 self.advance_pos();
                 self.expect(TokenKind::LParen)?;
                 if !self.at(TokenKind::RParen) {
@@ -821,10 +821,15 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                             break;
                         }
                     }
-                    return Err(self.err_arg_count(TokenKind::KwBlank, 0, got, start));
+                    return Err(self.err_arg_count(kw, 0, got, start));
                 }
                 let end = self.expect(TokenKind::RParen)?;
-                Ok(self.shared.arena.push(Node::Blank, start.merge(end)))
+                let node = if kw == TokenKind::KwBlank {
+                    Node::Blank
+                } else {
+                    Node::Eof
+                };
+                Ok(self.shared.arena.push(node, start.merge(end)))
             }
             TokenKind::KwField => self.parse_field(start),
             TokenKind::KwAlias => self.parse_alias(start),

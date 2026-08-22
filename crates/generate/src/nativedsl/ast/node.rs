@@ -119,6 +119,7 @@ pub enum Node {
         inner: NodeId,
     },
     Blank,
+    Eof,
     Field {
         name: StrId,
         content: NodeId,

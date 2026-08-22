@@ -210,6 +210,7 @@ fn collect_undefined(
             }
             Rule::NamedSymbol(_)
             | Rule::Blank
+            | Rule::Eof
             | Rule::String(_)
             | Rule::Pattern(..)
             | Rule::Sym { .. } => {}
