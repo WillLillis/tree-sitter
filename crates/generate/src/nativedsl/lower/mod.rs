@@ -82,10 +82,6 @@ struct Scratch {
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
     /// this is a plain stack.
     combine_bases: Vec<u32>,
-    /// Traversal stack for choice flattening in [`evaluator`]
-    rule_walk: Vec<RuleId>,
-    /// Retained stack for `RulePool::subtree_eq_with_scratch` during choice dedup
-    rule_eq: Vec<(RuleId, RuleId)>,
 }
 
 impl Scratch {
@@ -100,8 +96,6 @@ impl Scratch {
         self.val_scratch.clear();
         self.rule_scratch.clear();
         self.combine_bases.clear();
-        self.rule_walk.clear();
-        self.rule_eq.clear();
     }
 }
 
