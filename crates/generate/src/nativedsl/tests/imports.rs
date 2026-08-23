@@ -628,6 +628,7 @@ fn import_call_depth_shared_across_modules() {
         rule program { h::recurse("x") }
     "#,
     );
+
     let e = assert_err!(err, Lower);
     let LowerErrorKind::CallDepthExceeded(trace) = &e.kind else {
         panic!("expected CallDepthExceeded");
@@ -635,6 +636,15 @@ fn import_call_depth_shared_across_modules() {
     let fixtures = test_fixtures_dir();
     let grammar_path = fixtures.join("grammar.tsg");
     let recursive_path = fixtures.join("import_helpers/recursive.tsg");
+    let (src, path) = e
+        .src
+        .as_deref()
+        .expect("call-depth error must carry its source");
+    assert_eq!(path, &grammar_path);
+    assert!(
+        src.contains(r#"h::recurse("x")"#),
+        "expected root source, got {src:?}"
+    );
     // First frame: call site in root grammar
     assert_eq!(trace[0], ("recurse".into(), grammar_path, 4, 24));
     // Remaining frames: self-recursive calls within the imported helper
