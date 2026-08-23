@@ -32,7 +32,7 @@ impl CfgState {
         &mut self,
         shared: &SharedAst,
         ctx: &mut ModuleContext,
-        strs: &mut StrPool,
+        strs: &StrPool,
     ) -> Result<(), ResolveError> {
         let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) else {
             return Ok(());
@@ -66,14 +66,13 @@ impl CfgState {
             };
             for &elem in shared.pools.child_slice(*items) {
                 let span = shared.arena.span(elem);
-                match shared.arena.get(elem) {
-                    Node::StringLit => {}
+                let name = match shared.arena.get(elem) {
+                    Node::StringLit(sid) => *sid,
                     Node::Cfg { .. } => {
                         return Err(err(ResolveErrorKind::CfgInsideFlags, span));
                     }
                     _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
-                }
-                let name = strs.intern(ctx.text(span));
+                };
                 if let Some(&first_span) = ctx.cfg_declared.get(&name) {
                     return Err(ResolveError::with_note(
                         ResolveErrorKind::CfgFlagDeclaredTwice(strs.resolve(name).to_string()),
@@ -292,8 +291,8 @@ impl Walker<'_> {
             Node::ModuleRef { .. } => self.module_refs.push(id),
             // Leaves: nothing to descend into.
             #[rustfmt::skip]
-            Node::Grammar | Node::Forward { .. } | Node::StringLit | Node::RawStringLit { .. }
-            | Node::IntLit(_) | Node::Ident(_) | Node::Blank | Node::Eof | Node::MacroParam { .. }
+            Node::Grammar | Node::Forward { .. } | Node::StringLit(_) | Node::IntLit(_)
+            | Node::Ident(_) | Node::Blank | Node::Eof | Node::MacroParam { .. }
             | Node::ForBinding { .. } => {}
             // `Cfg` is intercepted by walk(), `ExpandedRule`/`ModuleRule` are emitted by
             // expand/resolve (after apply_cfg), `Unreachable` is the arena sentinel.
