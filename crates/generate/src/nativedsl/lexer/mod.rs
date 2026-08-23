@@ -68,6 +68,8 @@ pub fn is_ident_str(s: &str) -> bool {
 pub struct Lexer<'src> {
     source: &'src [u8],
     pos: usize,
+    /// Start offsets of comments, in source order. Preserved out of band for tooling.
+    pub comment_starts: Vec<u32>,
 }
 
 impl<'src> Lexer<'src> {
@@ -76,17 +78,22 @@ impl<'src> Lexer<'src> {
         Self {
             source: source.as_bytes(),
             pos: 0,
+            comment_starts: Vec::new(),
         }
     }
 
     /// Consume the entire source and return all tokens. The returned vector
-    /// always ends with `TokenKind::Eof`.
+    /// always ends with `TokenKind::Eof`. Line comments are recorded in
+    /// [`comment_starts`](Self::comment_starts).
     ///
     /// # Errors
     ///
     /// Returns [`LexError`] on unterminated strings, invalid escapes, or
     /// unexpected characters.
     pub fn tokenize(&mut self) -> LexResult<Vec<Token>> {
+        self.pos = 0;
+        self.comment_starts.clear();
+        self.comment_starts.reserve(16);
         let mut tokens = Vec::with_capacity(self.source.len() / 4);
         let source = self.source;
         let len = source.len();
@@ -110,10 +117,7 @@ impl<'src> Lexer<'src> {
                     Some(offset) => self.pos += offset,
                     None => self.pos = len,
                 }
-                tokens.push(Token {
-                    kind: TokenKind::Comment,
-                    span: Span::from_usize(start, self.pos),
-                });
+                self.comment_starts.push(start as u32);
                 continue;
             }
             tokens.push(self.next_token()?);
