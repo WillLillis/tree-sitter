@@ -100,6 +100,7 @@ macro_rules! keywords {
             }
 
             /// Map keyword text to a `TokenKind`, or return `Ident`.
+            #[inline]
             pub(super) fn from_keyword(text: &str) -> Self {
                 match text {
                     $($d_str => Self::$d_variant,)*
