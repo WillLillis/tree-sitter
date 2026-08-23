@@ -129,7 +129,7 @@ impl<'src> Lexer<'src> {
         self.source.get(self.pos).copied()
     }
 
-    fn advance(&mut self) -> u8 {
+    const fn advance(&mut self) -> u8 {
         let b = self.source[self.pos];
         self.pos += 1;
         b
