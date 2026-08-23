@@ -1046,11 +1046,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             caller_mod: self.current_module,
         });
         if self.state.scratch.call_stack.len() > usize::from(MAX_CALL_DEPTH) {
-            let root_span = self.state.scratch.call_stack[0].call_span;
-            return Err(self.err(
-                LowerErrorKind::CallDepthExceeded(self.build_call_trace()),
-                root_span,
-            ));
+            let root = self.state.scratch.call_stack[0];
+            let trace = self.build_call_trace();
+            let ctx = self.module_ctx(root.caller_mod);
+            return Err(
+                LowerError::new(LowerErrorKind::CallDepthExceeded(trace), root.call_span)
+                    .with_source(&ctx.source, &ctx.path),
+            );
         }
         Ok(())
     }
