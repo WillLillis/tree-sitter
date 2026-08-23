@@ -667,8 +667,8 @@ fn collect_external_names(
         }
         // Literals don't introduce names, inherited values already registered.
         #[rustfmt::skip]
-        Node::StringLit | Node::RawStringLit { .. } | Node::IntLit(_) | Node::DynRegex { .. }
-        | Node::GrammarConfig { .. } | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
+        Node::StringLit(_) | Node::IntLit(_) | Node::DynRegex { .. } | Node::GrammarConfig { .. }
+        | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
         // Anything else is not a valid `externals` expression.
         _ => Err(ResolveError::new(
             ResolveErrorKind::InvalidExternalsExpression,

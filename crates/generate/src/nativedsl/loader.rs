@@ -71,7 +71,7 @@ impl Loader<'_> {
         // Register this module's flag declarations into the global state. This module's
         // flag values win over flags in any modules it imports.
         self.cfg
-            .merge_module_flags(self.shared, &mut ctx, self.pool.strs_mut())?;
+            .merge_module_flags(self.shared, &mut ctx, self.pool.strs())?;
 
         // Apply cfg gating *before* loading children so cfg-disabled imports don't trigger file
         // loads and other side effects. Skip the whole walk when no cfgs are used.

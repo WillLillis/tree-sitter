@@ -13,7 +13,6 @@ use super::{
             BinOp, ChildRange, ConfigField, ExpandId, ForId, IdentKind, MacroId, ModuleContext,
             Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
-        lexer::unescape_string,
     },
     CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
     repr::{Value, ValueId},
@@ -221,22 +220,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn get_rule(&self, id: RuleId) -> Rule {
         self.pool.node(id)
-    }
-
-    fn intern_string_lit(&mut self, span: Span) -> StrId {
-        let raw = self.module_ctx(self.current_module).text(span);
-        if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-            self.pool.intern(&unescape_string(raw))
-        } else {
-            self.pool.intern(raw)
-        }
-    }
-
-    fn intern_raw_string_lit(&mut self, span: Span, hash_count: u8) -> StrId {
-        let text = self
-            .module_ctx(self.current_module)
-            .text(span.strip_raw(hash_count));
-        self.pool.intern(text)
     }
 
     fn owned_symbol_val(&mut self, name: StrId) -> ValueId {
@@ -531,13 +514,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn try_leaf_rule(&mut self, id: NodeId) -> Option<RuleId> {
-        let span = self.shared.arena.span(id);
         let rule = match self.shared.arena.get(id) {
             Node::Ident(IdentKind::Rule(name)) => Rule::NamedSymbol(*name),
-            Node::StringLit => Rule::String(self.intern_string_lit(span)),
-            Node::RawStringLit { hash_count } => {
-                Rule::String(self.intern_raw_string_lit(span, *hash_count))
-            }
+            Node::StringLit(sid) => Rule::String(*sid),
             Node::Blank => Rule::Blank,
             Node::Eof => Rule::Eof,
             _ => return None,
@@ -593,14 +572,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .map_err(|_| self.err(LowerErrorKind::IntegerOverflow(*n), span))?;
                 self.push_val(Value::Int(v));
             }
-            Node::StringLit => {
-                let sid = self.intern_string_lit(span);
-                self.push_val(Value::Str(sid));
-            }
-            Node::RawStringLit { hash_count } => {
-                let sid = self.intern_raw_string_lit(span, *hash_count);
-                self.push_val(Value::Str(sid));
-            }
+            Node::StringLit(sid) => self.push_val(Value::Str(*sid)),
             Node::Neg(inner) => {
                 // Special-case Neg over a literal so the most negative i32
                 // (-i32::MIN as positive overflows i32, but fits in i64) is
@@ -728,17 +700,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn dispatch_rule(&mut self, id: NodeId) {
-        let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
             Node::Ident(IdentKind::Rule(name)) => self.push_rule(Rule::NamedSymbol(*name)),
-            Node::StringLit => {
-                let sid = self.intern_string_lit(span);
-                self.push_rule(Rule::String(sid));
-            }
-            Node::RawStringLit { hash_count } => {
-                let sid = self.intern_raw_string_lit(span, *hash_count);
-                self.push_rule(Rule::String(sid));
-            }
+            Node::StringLit(sid) => self.push_rule(Rule::String(*sid)),
             Node::Blank => self.push_rule(Rule::Blank),
             Node::Eof => self.push_rule(Rule::Eof),
             &Node::SymRef { expr } => self.push_unary_combine(id, Task::Expr(expr)),

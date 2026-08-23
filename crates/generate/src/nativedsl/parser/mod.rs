@@ -2,19 +2,16 @@ use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
 
-use crate::{
-    nativedsl::ast::Spanned,
-    strpool::{StrId, StrPool},
-};
+use crate::strpool::{StrId, StrPool};
 
 use super::{
     InnerTy, NoteMessage, ParseError,
     ast::{
         BinOp, ChildRange, ConfigField, ForConfig, ForId, GrammarConfig, IdentKind, MacroConfig,
         MacroKind, ModuleContext, Node, NodeId, ObjectField, Param, PrecKind, RepeatKind,
-        SharedAst, Span,
+        SharedAst, Span, Spanned,
     },
-    lexer::{Token, TokenKind},
+    lexer::{Token, TokenKind, unescape_string},
     typecheck::{
         DataTy, ScalarTy, Ty,
         types::{TUPLE_MAX_ARITY, TupleSig},
@@ -717,10 +714,14 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             _ if kw.is_keyword() => self.parse_ident_expr(start),
             TokenKind::StringLit => {
                 self.advance_pos();
-                Ok(self
-                    .shared
-                    .arena
-                    .push(Node::StringLit, start.strip_quotes()))
+                let span = start.strip_quotes();
+                let raw = self.ctx.text(span);
+                let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
+                    self.strs.intern(&unescape_string(raw))
+                } else {
+                    self.strs.intern(raw)
+                };
+                Ok(self.shared.arena.push(Node::StringLit(sid), span))
             }
             TokenKind::IntLit(n) => {
                 self.advance_pos();
@@ -728,10 +729,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             }
             TokenKind::RawStringLit { hash_count } => {
                 self.advance_pos();
-                Ok(self
-                    .shared
-                    .arena
-                    .push(Node::RawStringLit { hash_count }, start))
+                let sid = self.strs.intern(self.ctx.text(start.strip_raw(hash_count)));
+                Ok(self.shared.arena.push(Node::StringLit(sid), start))
             }
             TokenKind::Minus => {
                 self.advance_pos();

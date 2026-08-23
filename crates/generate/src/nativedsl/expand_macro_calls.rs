@@ -16,8 +16,11 @@ use thiserror::Error;
 
 use super::{
     ExpandError, NoteMessage,
-    ast::{Expansion, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span, Spanned},
-    lexer::{is_ident_str, unescape_string},
+    ast::{
+        Expansion, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span,
+        Spanned,
+    },
+    lexer::is_ident_str,
 };
 use crate::strpool::{StrId, StrPool};
 
@@ -61,7 +64,11 @@ pub fn expand_macro_calls(
         let Node::Call { name, .. } = *shared.arena.get(id) else {
             continue;
         };
-        if duplicates.contains(ctx.text(shared.arena.span(name))) {
+        expect_pat!(
+            Node::Ident(IdentKind::Unresolved(name_id)),
+            *shared.arena.get(name)
+        );
+        if duplicates.contains(&name_id) {
             continue;
         }
         expand_one_call(shared, strs, ctx, &macros, id, i)?;
@@ -80,14 +87,14 @@ pub fn expand_macro_calls(
 fn collect_macros(
     shared: &SharedAst,
     ctx: &ModuleContext,
-) -> (FxHashMap<String, MacroId>, FxHashSet<String>) {
-    let mut macros: FxHashMap<String, MacroId> = FxHashMap::default();
-    let mut dups: FxHashSet<String> = FxHashSet::default();
+) -> (FxHashMap<StrId, MacroId>, FxHashSet<StrId>) {
+    let mut macros: FxHashMap<StrId, MacroId> = FxHashMap::default();
+    let mut dups: FxHashSet<StrId> = FxHashSet::default();
     for &id in &ctx.root_items {
         if let Node::Macro(macro_id) = *shared.arena.get(id) {
-            let name = ctx.text(shared.pools.get_macro(macro_id).name.span);
-            if macros.insert(name.to_string(), macro_id).is_some() {
-                dups.insert(name.to_string());
+            let name = shared.pools.get_macro(macro_id).name.value;
+            if macros.insert(name, macro_id).is_some() {
+                dups.insert(name);
             }
         }
     }
@@ -98,7 +105,7 @@ fn expand_one_call(
     shared: &mut SharedAst,
     strs: &mut StrPool,
     ctx: &mut ModuleContext,
-    macros: &FxHashMap<String, MacroId>,
+    macros: &FxHashMap<StrId, MacroId>,
     call_id: NodeId,
     slot: usize,
 ) -> Result<(), ExpandError> {
@@ -106,16 +113,19 @@ fn expand_one_call(
         unreachable!()
     };
     let name_span = shared.arena.span(name);
-    let name_text = ctx.text(name_span);
-    let Some(macro_id) = macros.get(name_text).copied() else {
+    expect_pat!(
+        Node::Ident(IdentKind::Unresolved(name_id)),
+        *shared.arena.get(name)
+    );
+    let Some(macro_id) = macros.get(&name_id).copied() else {
         let mut err = ExpandError::new(
-            ExpandErrorKind::UnknownMacro(name_text.to_string()),
+            ExpandErrorKind::UnknownMacro(strs.resolve(name_id).to_string()),
             name_span,
         );
         // If the name was a cfg-dropped macro, say so - parity with the
         // GatedByDisabledCfg enrichment a cfg-dropped expression-macro
         // reference gets at resolve.
-        if let Some(&cfg_node) = strs.get(name_text).and_then(|id| ctx.cfg_dropped.get(&id))
+        if let Some(&cfg_node) = ctx.cfg_dropped.get(&name_id)
             && let Node::Cfg {
                 name: flag_span, ..
             } = *shared.arena.get(cfg_node)
@@ -134,7 +144,7 @@ fn expand_one_call(
     let body_id = config.body;
     let MacroKind::RuleSet = kind else {
         return Err(ExpandError::new(
-            ExpandErrorKind::ExpressionMacroAsItem(name_text.to_string()),
+            ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(name_id).to_string()),
             name_span,
         ));
     };
@@ -144,7 +154,7 @@ fn expand_one_call(
     if args.len as usize != param_count {
         return Err(ExpandError::new(
             ExpandErrorKind::ArgCountMismatch {
-                macro_name: name_text.to_string(),
+                macro_name: strs.resolve(name_id).to_string(),
                 expected: param_count,
                 got: args.len as usize,
             },
@@ -174,7 +184,7 @@ fn expand_one_call(
                 body,
             } => {
                 let name_span = shared.arena.span(name_expr);
-                let name = eval_name(shared, strs, ctx, args_start, name_expr, name_span)?;
+                let name = eval_name(shared, strs, args_start, name_expr, name_span)?;
                 (is_override, name, body)
             }
             // Parser only places Rule/ComputedRule in a RuleSet body.
@@ -200,7 +210,7 @@ fn expand_one_call(
     for &sym_ref in shared.pools.child_slice(sym_refs) {
         expect_pat!(Node::SymRef { expr }, *shared.arena.get(sym_ref));
         let span = shared.arena.span(sym_ref);
-        let name = eval_name(shared, strs, ctx, args_start, expr, span)?;
+        let name = eval_name(shared, strs, args_start, expr, span)?;
         ctx.computed_refs.push(Spanned::new(name, span));
     }
     Ok(())
@@ -213,13 +223,12 @@ fn expand_one_call(
 fn eval_name(
     shared: &SharedAst,
     strs: &mut StrPool,
-    ctx: &ModuleContext,
     args_start: usize,
     node_id: NodeId,
     name_expr_span: Span,
 ) -> Result<StrId, ExpandError> {
     let mut buf = String::new();
-    eval_name_into(shared, ctx, args_start, node_id, &mut buf)?;
+    eval_name_into(shared, strs, args_start, node_id, &mut buf)?;
     if !is_ident_str(&buf) {
         return Err(ExpandError::new(
             ExpandErrorKind::InvalidRuleName(buf),
@@ -235,7 +244,7 @@ fn eval_name(
 /// it as a macro param instead.
 fn eval_name_into(
     shared: &SharedAst,
-    ctx: &ModuleContext,
+    strs: &StrPool,
     args_start: usize,
     node_id: NodeId,
     out: &mut String,
@@ -243,32 +252,20 @@ fn eval_name_into(
     let node = *shared.arena.get(node_id);
     let span = shared.arena.span(node_id);
     match node {
-        Node::StringLit => {
-            // Decode escapes like a rule-body string (quote-stripped by
-            // parse_primary), so `"a\u{41}"` contributes "aA"; is_ident_str then
-            // validates the decoded name.
-            let raw = ctx.text(span);
-            if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-                out.push_str(&unescape_string(raw));
-            } else {
-                out.push_str(raw);
-            }
-            Ok(())
-        }
-        Node::RawStringLit { hash_count } => {
-            out.push_str(ctx.text(span.strip_raw(hash_count)));
+        Node::StringLit(sid) => {
+            out.push_str(strs.resolve(sid));
             Ok(())
         }
         Node::MacroParam { index, .. } => {
             let arg_id = shared.pools.children[args_start + index as usize];
-            eval_name_into(shared, ctx, args_start, arg_id, out)
+            eval_name_into(shared, strs, args_start, arg_id, out)
         }
         Node::Concat(range) => {
             let start = range.start as usize;
             let end = start + range.len as usize;
             for i in start..end {
                 let child = shared.pools.children[i];
-                eval_name_into(shared, ctx, args_start, child, out)?;
+                eval_name_into(shared, strs, args_start, child, out)?;
             }
             Ok(())
         }

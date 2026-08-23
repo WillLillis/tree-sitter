@@ -88,10 +88,8 @@ pub enum Node {
     Forward {
         name: StrId,
     },
-    StringLit,
-    RawStringLit {
-        hash_count: u8,
-    },
+    /// A string literal's interned value. Delimiters are excluded and escapes are decoded.
+    StringLit(StrId),
     IntLit(i64),
     Ident(IdentKind),
     FieldAccess {

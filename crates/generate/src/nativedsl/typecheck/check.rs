@@ -248,10 +248,7 @@ fn expect_name_ref(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> 
 
 fn expect_name_or_str(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
     let Cx { shared, .. } = cx;
-    if matches!(
-        shared.arena.get(id),
-        Node::StringLit | Node::RawStringLit { .. }
-    ) {
+    if matches!(shared.arena.get(id), Node::StringLit(_)) {
         return Ok(());
     }
     expect_name_ref(cx, id, env)
@@ -376,7 +373,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
             None
         }
-        Node::StringLit | Node::RawStringLit { .. } => {
+        Node::StringLit(_) => {
             enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
             None
         }
