@@ -54,7 +54,11 @@ pub mod serialize;
 mod tests;
 pub mod typecheck;
 
-pub use crate::grammars::InputGrammar;
+pub use crate::{
+    grammars::InputGrammar,
+    rules::{Rule, RuleId, RulePool},
+    strpool::{StrId, StrPool},
+};
 pub use diagnostic::{
     Diagnostic, DslError, DslResult, ExpandError, LexError, LowerError, ModuleError,
     NativeDslError, Note, NoteMessage, ParseError, ResolveError, TypeError,
@@ -76,8 +80,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::IoError;
 use crate::grammars::{PrecedenceEntry, ReservedWordContext, Variable};
-use crate::rules::{Rule, RuleId, RulePool};
-use crate::strpool::StrId;
 
 use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
 use loader::Loader;

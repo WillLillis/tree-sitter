@@ -253,6 +253,7 @@ impl From<Symbol> for Rule {
 }
 
 impl Rule {
+    #[must_use]
     pub const fn symbol(self) -> Option<Symbol> {
         match self {
             Self::Sym(symbol) => Some(symbol),
@@ -562,6 +563,7 @@ impl RulePool {
         hasher.finish()
     }
 
+    #[must_use]
     pub fn subtree_eq(&self, a: RuleId, b: RuleId) -> bool {
         self.subtree_eq_with_scratch(a, b, &mut Vec::new())
     }
@@ -626,6 +628,7 @@ impl RulePool {
     }
 
     /// Whether the subtree at `id` can only match the empty string.
+    #[must_use]
     pub fn subtree_matches_empty_str(&self, id: RuleId) -> bool {
         match self.node(id) {
             Rule::String(sid) => self.resolve(sid).is_empty(),
@@ -652,6 +655,7 @@ impl RulePool {
     ///
     /// For example, if we have an external rule **and** a normal rule both called `foo`,
     /// `foo` should not be thought of as directly used unless it's used within another rule.
+    #[must_use]
     pub fn rule_is_referenced(&self, id: RuleId, target: StrId, is_external: bool) -> bool {
         match self.node(id) {
             Rule::NamedSymbol(name) => name == target && !is_external,
