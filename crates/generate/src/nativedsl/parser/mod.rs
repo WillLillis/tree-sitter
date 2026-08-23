@@ -65,9 +65,9 @@ macro_rules! depth_scope {
 }
 
 impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
-    /// SAFETY:
+    /// # Panics
     ///
-    /// Caller must pass a token stream produced by terminated by `TokenKind::Eof`.
+    /// Panics if `tokens` is not terminated by `TokenKind::Eof`.
     #[must_use]
     pub fn new(
         tokens: &'tok [Token],
@@ -76,6 +76,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         shared: &'shared mut SharedAst,
         strs: &'strs mut StrPool,
     ) -> Self {
+        assert!(tokens.last().is_some_and(|t| t.kind == TokenKind::Eof));
         let root_cap = tokens.len() / 10;
         Self {
             tokens,
@@ -105,11 +106,9 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
 
     pub fn parse(mut self) -> ParseResult<ModuleContext> {
         let start = self.shared.arena.next_id().into();
-        self.skip_comments();
         while !self.at_eof() {
             let id = self.parse_item()?;
             self.ctx.root_items.push(id);
-            self.skip_comments();
         }
         let end = self.shared.arena.next_id().into();
         self.ctx.node_range = start..end;
@@ -122,12 +121,6 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         // SAFETY: Eof terminates the stream and the parser never advances past it,
         // so `self.pos` is always in bounds
         unsafe { self.tokens.get_unchecked(self.pos) }
-    }
-
-    fn skip_comments(&mut self) {
-        while self.current().kind == TokenKind::Comment {
-            self.pos += 1;
-        }
     }
 
     fn span(&self) -> Span {
@@ -146,19 +139,14 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         if self.at_eof() {
             return false;
         }
-        let mut i = self.pos + 1;
         // SAFETY: token stream is terminated by Eof. Since pos is not at Eof,
         // `pos + 1` is at most the Eof position.
-        while unsafe { self.tokens.get_unchecked(i) }.kind == TokenKind::Comment {
-            i += 1;
-        }
-        unsafe { self.tokens.get_unchecked(i) }.kind == kind
+        unsafe { self.tokens.get_unchecked(self.pos + 1) }.kind == kind
     }
 
-    /// Advance past the current token, skipping any comments.
-    fn advance_pos(&mut self) {
+    /// Advance past the current token.
+    const fn advance_pos(&mut self) {
         self.pos += 1;
-        self.skip_comments();
     }
 
     fn eat(&mut self, kind: TokenKind) -> Option<Span> {

@@ -69,7 +69,6 @@ pub enum TokenKind {
     Pound,
     At,
     // Other
-    Comment,
     Eof,
 }
 
@@ -155,7 +154,6 @@ impl std::fmt::Display for TokenKind {
             Self::Gt => "'>'",
             Self::Pound => "'#'",
             Self::At => "'@'",
-            Self::Comment => "comment",
             Self::Eof => "end of file",
             _ => unreachable!(),
         })
