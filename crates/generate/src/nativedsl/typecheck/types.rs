@@ -455,7 +455,7 @@ impl Constraint {
     pub fn satisfies(self, ty: Ty) -> bool {
         match self {
             Self::None => true,
-            Self::Exact(t) => ty.is_compatible(t),
+            Self::Exact(t) => ty == t || ty.is_compatible(t),
             Self::Strict(t) => ty == t,
             Self::AnyObject => ty.is_object(),
             Self::RuleLike => ty.is_rule_like(),
