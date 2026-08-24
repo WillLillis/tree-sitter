@@ -13,7 +13,7 @@ mod error;
 mod evaluator;
 mod repr;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::{
     grammars::{PrecedenceEntry, ReservedWordContext, Variable},
@@ -475,7 +475,8 @@ fn build_grammar(
     previous: &[Module],
     imported_rules: &[ImportedRule],
 ) -> LowerResult<LoweredGrammar> {
-    let mut overrides: FxHashMap<StrId, Spanned<RuleId>> = FxHashMap::default();
+    let mut overrides: FxHashMap<StrId, Spanned<RuleId>> =
+        FxHashMap::with_capacity_and_hasher(result.overrides.len(), FxBuildHasher);
     for (name, rule, span) in result.overrides {
         overrides.insert(name, Spanned::new(rule, span));
     }

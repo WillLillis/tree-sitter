@@ -75,7 +75,7 @@ pub use typecheck::{
 
 use std::path::Path;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::IoError;
@@ -239,13 +239,12 @@ pub fn build_exports(
     rule_pool: &RulePool,
     lowered: LoweredRef,
 ) -> FxHashMap<StrId, Export> {
-    let mut exports: FxHashMap<StrId, Export> = FxHashMap::default();
-    // First-wins. User names share one namespace that collect_decls already
-    // deduped. The only name added twice is a symbol that is both a rule and an
-    // external (rules iterated first below, so it resolves to the rule).
-    let mut add = |name: StrId, export| {
-        exports.entry(name).or_insert(export);
-    };
+    let mut exports: FxHashMap<StrId, Export> =
+        FxHashMap::with_capacity_and_hasher(ctx.root_items.len(), FxBuildHasher);
+    // Every insertion below is first-wins. User names share one namespace that
+    // `collect_decls` already deduped. The only name inserted twice is a symbol that
+    // is both a rule and an external. Rules are inserted before externals, so it
+    // resolves to the rule.
     // AST-level `let` / `macro` bindings.
     for &item_id in &ctx.root_items {
         let (name, kind) = match arena.get(item_id) {
@@ -256,24 +255,32 @@ pub fn build_exports(
             ),
             _ => continue,
         };
-        add(name, Export::Local(kind));
+        exports.entry(name).or_insert(Export::Local(kind));
     }
 
     // Rules and externals
     match lowered {
         LoweredRef::Grammar(g) => {
+            exports.reserve(g.variables.len() + g.external_roots.len());
             for (i, v) in g.variables.iter().enumerate() {
-                add(v.name, Export::Rule(RuleTarget::GrammarRule(i as u32)));
+                exports
+                    .entry(v.name)
+                    .or_insert(Export::Rule(RuleTarget::GrammarRule(i as u32)));
             }
             for (i, r) in g.external_roots.iter().enumerate() {
                 if let Rule::NamedSymbol(n) = rule_pool.node(*r) {
-                    add(n, Export::Rule(RuleTarget::GrammarExternal(i as u32)));
+                    exports
+                        .entry(n)
+                        .or_insert(Export::Rule(RuleTarget::GrammarExternal(i as u32)));
                 }
             }
         }
         LoweredRef::Helper(rules) => {
+            exports.reserve(rules.len());
             for (i, (name, _)) in rules.iter().enumerate() {
-                add(*name, Export::Rule(RuleTarget::HelperRule(i as u32)));
+                exports
+                    .entry(*name)
+                    .or_insert(Export::Rule(RuleTarget::HelperRule(i as u32)));
             }
         }
     }
