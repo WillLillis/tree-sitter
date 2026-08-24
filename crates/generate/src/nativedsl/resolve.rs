@@ -182,7 +182,10 @@ fn collect_decls(
     modules: &[Module],
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<Decls> {
-    let mut decls = FxHashMap::with_capacity_and_hasher(root_items.len(), FxBuildHasher);
+    let decl_capacity = root_items.len()
+        + base.map_or(0, |(grammar, _)| grammar.variables.len())
+        + imported_rules.len();
+    let mut decls = FxHashMap::with_capacity_and_hasher(decl_capacity, FxBuildHasher);
     let mut override_names = FxHashSet::default();
 
     // Register rules, macros, and lets upfront (forward references allowed).
