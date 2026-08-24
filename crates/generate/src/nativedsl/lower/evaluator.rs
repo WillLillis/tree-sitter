@@ -14,7 +14,7 @@ use super::{
             Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
     },
-    CallFrame, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
+    CallFrame, LetState, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
     repr::{Value, ValueId},
 };
 
@@ -76,35 +76,39 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     /// Evaluate a let and its unresolved dependencies.
     pub fn eval_let(&mut self, let_id: NodeId) -> LowerResult<ValueId> {
-        if let Some(&val) = self.state.let_values.get(&let_id) {
+        if let Some(LetState::Resolved(val)) = self.state.lets.get(&let_id).copied() {
             return Ok(val);
         }
-        self.state.scratch.lets_in_progress.insert(let_id);
+        self.state.lets.insert(let_id, LetState::InProgress);
+
         let mut stack = vec![let_id];
         while let Some(&cur) = stack.last() {
             expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(cur));
-            let dep = {
-                let resolved = &self.state.let_values;
-                self.shared.first_unresolved_let_dep(
-                    value,
-                    |id| resolved.contains_key(&id),
-                    &mut self.state.scratch.dep_walk,
-                )
-            };
+            let dep = self.shared.first_unresolved_let_dep(
+                value,
+                |id| matches!(self.state.lets.get(&id), Some(LetState::Resolved(_))),
+                &mut self.state.scratch.dep_walk,
+            );
+
             if let Some((dep, reference)) = dep {
-                if !self.state.scratch.lets_in_progress.insert(dep) {
+                // Resolved lets were filtered above, so an existing entry is in progress.
+                if self.state.lets.insert(dep, LetState::InProgress).is_some() {
                     let span = self.shared.arena.span(reference);
                     return Err(self.circular_let_error(dep, span));
                 }
                 stack.push(dep);
                 continue;
             }
+
             let val = self.eval_expr(value)?;
-            self.state.let_values.insert(cur, val);
-            self.state.scratch.lets_in_progress.remove(&cur);
+            self.state.lets.insert(cur, LetState::Resolved(val));
             stack.pop();
         }
-        Ok(self.state.let_values[&let_id])
+
+        match self.state.lets[&let_id] {
+            LetState::Resolved(val) => Ok(val),
+            LetState::InProgress => unreachable!(),
+        }
     }
 
     fn circular_let_error(&self, let_id: NodeId, reference: Span) -> LowerError {
@@ -618,11 +622,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_val_id(v);
             }
             &Node::Ident(IdentKind::Var(let_id)) => {
-                if self.state.scratch.lets_in_progress.contains(&let_id) {
-                    return Err(self.circular_let_error(let_id, span));
-                }
-                let v = self.eval_let(let_id)?;
-                self.push_val_id(v);
+                let val = match self.state.lets.get(&let_id).copied() {
+                    Some(LetState::InProgress) => {
+                        return Err(self.circular_let_error(let_id, span));
+                    }
+                    Some(LetState::Resolved(val)) => val,
+                    None => self.eval_let(let_id)?,
+                };
+                self.push_val_id(val);
             }
             &Node::GrammarConfig { module, .. } => self.push_unary_combine(id, Task::Expr(module)),
             Node::ModuleRef { module, .. } => {

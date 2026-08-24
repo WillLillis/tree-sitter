@@ -28,7 +28,7 @@ pub enum Value {
 
 /// Pools holding the intermediate IR being built during lowering. Indices
 /// (`ValueId`, `StrId`, `ChildRange`) are stable for the lifetime
-/// of the parse call so the cross-grammar `LoweringState::let_values` cache
+/// of the parse call so the cross-grammar [`LoweringState::lets`] cache
 /// can keep referencing earlier-grammar entries.
 #[derive(Default)]
 pub struct IrPools {
