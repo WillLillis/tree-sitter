@@ -97,32 +97,44 @@ impl<'src> Lexer<'src> {
         let mut tokens = Vec::with_capacity(self.source.len() / 4);
         let source = self.source;
         let len = source.len();
+
         loop {
-            self.skip_whitespace();
-            if self.pos >= len {
-                tokens.push(Token {
-                    kind: TokenKind::Eof,
-                    span: Span::from_usize(self.pos, self.pos),
-                });
-                break;
-            }
-            // SAFETY: the `pos + 1 < len` guard makes both indexes in-bounds.
-            if self.pos + 1 < len
-                && unsafe { *source.get_unchecked(self.pos) == b'/' }
-                && unsafe { *source.get_unchecked(self.pos + 1) == b'/' }
+            let mut token_start = self.pos;
+            let b = loop {
+                if token_start >= len {
+                    self.pos = token_start;
+                    tokens.push(Token {
+                        kind: TokenKind::Eof,
+                        span: Span::from_usize(token_start, token_start),
+                    });
+                    return Ok(tokens);
+                }
+
+                // SAFETY: `token_start < len` checked above
+                let b = unsafe { *source.get_unchecked(token_start) };
+                if !byte_is(b, CLASS_WHITESPACE) {
+                    break b;
+                }
+                token_start += 1;
+            };
+            self.pos = token_start;
+
+            if b == b'/'
+                && token_start + 1 < len
+                // SAFETY: `token_start + 1 < len` above ensures this is in bounds
+                && unsafe { *source.get_unchecked(token_start + 1) == b'/' }
             {
-                let start = self.pos;
                 self.pos += 2;
                 match memchr(b'\n', &source[self.pos..]) {
                     Some(offset) => self.pos += offset,
                     None => self.pos = len,
                 }
-                self.comment_starts.push(start as u32);
+                self.comment_starts.push(token_start as u32);
                 continue;
             }
-            tokens.push(self.next_token()?);
+
+            tokens.push(self.next_token(b)?);
         }
-        Ok(tokens)
     }
 
     fn peek(&self) -> Option<u8> {
@@ -135,18 +147,9 @@ impl<'src> Lexer<'src> {
         b
     }
 
-    fn skip_whitespace(&mut self) {
-        let source = self.source;
-        while self.pos < source.len() // SAFETY: pos < source.len() checked by loop condition.
-            && byte_is(unsafe { *source.get_unchecked(self.pos) }, CLASS_WHITESPACE)
-        {
-            self.pos += 1;
-        }
-    }
-
-    fn next_token(&mut self) -> LexResult<Token> {
+    fn next_token(&mut self, b: u8) -> LexResult<Token> {
         let mut start = self.pos;
-        let b = self.advance();
+        self.pos += 1;
         let kind = match b {
             b'{' => TokenKind::LBrace,
             b'}' => TokenKind::RBrace,
@@ -309,20 +312,30 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_int(&mut self, start: usize) -> LexResult<TokenKind> {
+        const INT_MAX: u64 = u32::MAX as u64;
         let source = self.source;
+        // SAFETY: `start` is the in-bounds digit that dispatched to `lex_int`.
+        let first_digit = unsafe { *source.get_unchecked(start) };
+        let mut value = u64::from(first_digit - b'0');
         let mut pos = self.pos;
-        while pos < source.len() && source[pos].is_ascii_digit() {
+
+        while pos < source.len() {
+            // SAFETY: `pos < source.len()` checked above
+            let digit = unsafe { *source.get_unchecked(pos) };
+            if !digit.is_ascii_digit() {
+                break;
+            }
+            if value <= INT_MAX {
+                value = value * 10 + u64::from(digit - b'0');
+            }
             pos += 1;
         }
         self.pos = pos;
-        // SAFETY: the slice contains only ASCII digits (b'0'..=b'9'), which are valid UTF-8.
-        let text = unsafe { std::str::from_utf8_unchecked(&source[start..pos]) };
-        let value: u32 = text.parse().map_err(|_| {
-            LexError::new(
-                LexErrorKind::IntegerOverflow,
-                Span::from_usize(start, self.pos),
-            )
+
+        let value = u32::try_from(value).map_err(|_| {
+            LexError::new(LexErrorKind::IntegerOverflow, Span::from_usize(start, pos))
         })?;
+
         Ok(TokenKind::IntLit(value))
     }
 
