@@ -214,7 +214,7 @@ impl Loader<'_> {
             return e;
         };
         expect_pat!(Node::Cfg { name: flag, .. }, *self.shared.arena.get(cfg_id));
-        let flag_name = owner.text(flag).to_owned();
+        let flag_name = self.pool.strs().resolve(flag).to_string();
         let decl_span = self.shared.arena.span(cfg_id);
         e.add_note(owner.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
         e

@@ -245,10 +245,14 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                     ));
                 }
                 let end = self.shared.arena.span(child);
-                Ok(self
-                    .shared
-                    .arena
-                    .push(Node::Cfg { name, child }, cfg_start.merge(end)))
+                Ok(self.shared.arena.push(
+                    Node::Cfg {
+                        name: name.value,
+                        name_offset: name.span.start,
+                        child,
+                    },
+                    cfg_start.merge(end),
+                ))
             });
         }
         match &self.current().kind {
@@ -265,8 +269,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     }
 
     /// If the next token is `#`, consume `#[cfg(IDENT)]` and return the
-    /// `(attribute span, flag-name span)` pair. Otherwise return `None`.
-    fn try_parse_cfg_attribute(&mut self) -> ParseResult<Option<(Span, Span)>> {
+    /// `(attribute span, spanned interned flag name)` pair. Otherwise return `None`.
+    fn try_parse_cfg_attribute(&mut self) -> ParseResult<Option<(Span, Spanned<StrId>)>> {
         let Some(start) = self.eat(TokenKind::Pound) else {
             return Ok(None);
         };
@@ -280,7 +284,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             ));
         }
         self.expect(TokenKind::LParen)?;
-        let name = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+        let name = Spanned::new(self.strs.intern(self.ctx.text(name_span)), name_span);
         self.expect(TokenKind::RParen)?;
         let end = self.expect(TokenKind::RBracket)?;
         self.ctx.has_cfg = true;
@@ -294,10 +299,14 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                 self.deepen()?;
                 let child = self.parse_expr_with_cfg()?;
                 let end = self.shared.arena.span(child);
-                Ok(self
-                    .shared
-                    .arena
-                    .push(Node::Cfg { name, child }, cfg_start.merge(end)))
+                Ok(self.shared.arena.push(
+                    Node::Cfg {
+                        name: name.value,
+                        name_offset: name.span.start,
+                        child,
+                    },
+                    cfg_start.merge(end),
+                ))
             });
         }
         self.parse_expr()
@@ -559,10 +568,14 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                 self.deepen()?;
                 let child = self.parse_rule_set_decl()?;
                 let end = self.shared.arena.span(child);
-                Ok(self
-                    .shared
-                    .arena
-                    .push(Node::Cfg { name, child }, cfg_start.merge(end)))
+                Ok(self.shared.arena.push(
+                    Node::Cfg {
+                        name: name.value,
+                        name_offset: name.span.start,
+                        child,
+                    },
+                    cfg_start.merge(end),
+                ))
             });
         }
         match self.current().kind {
@@ -1146,7 +1159,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                     id = self.shared.arena.push(
                         Node::QualifiedAccess {
                             obj: id,
-                            member: member_span,
+                            member,
+                            member_offset: member_span.start,
                         },
                         start.merge(member_span),
                     );

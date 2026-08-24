@@ -101,7 +101,6 @@ pub fn apply_cfg(
         shared: &mut *shared,
         state,
         kind,
-        source: &ctx.source,
         strs,
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
@@ -140,8 +139,7 @@ struct Walker<'a> {
     shared: &'a mut SharedAst,
     state: &'a CfgState,
     kind: ModuleKind,
-    source: &'a str,
-    /// Interner for the cfg-name lookups in [`Self::walk_cfg`].
+    /// Resolves cfg names in [`Self::walk_cfg`].
     strs: &'a StrPool,
     /// Local declared set for the grammar visibility check
     cfg_declared: &'a FxHashMap<StrId, Span>,
@@ -160,8 +158,13 @@ impl Walker<'_> {
     /// `Ok(Some(id))` = keep `id` (an active cfg resolves to its unwrapped child's id)
     /// `Ok(None)` = drop. Shrinks filtered list ranges in place.
     fn walk(&mut self, id: NodeId) -> Result<Option<NodeId>, ResolveError> {
-        if let &Node::Cfg { name, child } = self.shared.arena.get(id) {
-            return self.walk_cfg(id, name, child);
+        if let &Node::Cfg {
+            name,
+            name_offset,
+            child,
+        } = self.shared.arena.get(id)
+        {
+            return self.walk_cfg(id, name, name_offset, child);
         }
         self.walk_children(id)?;
         Ok(Some(id))
@@ -170,27 +173,29 @@ impl Walker<'_> {
     fn walk_cfg(
         &mut self,
         id: NodeId,
-        name: Span,
+        name: StrId,
+        name_offset: u32,
         child: NodeId,
     ) -> Result<Option<NodeId>, ResolveError> {
-        let name_text: &str = name.resolve(self.source);
-        let name_id = self.strs.get(name_text);
-        // Grammar modules require local declaration. Helper modules transparently
+        // Grammar modules require a local declaration. Helper modules transparently
         // see the importing grammar's declared set.
-        let visible = name_id.is_some_and(|id| match self.kind {
-            ModuleKind::Grammar => self.cfg_declared.contains_key(&id),
-            ModuleKind::Helper => self.state.active.contains_key(&id),
-        });
-        if !visible {
-            Err(err(
-                ResolveErrorKind::CfgFlagUnknown(name_text.into()),
-                name,
-            ))?;
-        }
-        let active = name_id
-            .and_then(|id| self.state.active.get(&id))
-            .copied()
-            .unwrap_or(false);
+        let active = match self.kind {
+            ModuleKind::Grammar => self
+                .cfg_declared
+                .contains_key(&name)
+                .then(|| self.state.active.get(&name).copied().unwrap_or(false)),
+            ModuleKind::Helper => self.state.active.get(&name).copied(),
+        };
+
+        let Some(active) = active else {
+            let name_len = self.strs.resolve(name).len() as u32;
+            let name_span = Span::new(name_offset, name_offset + name_len);
+            return Err(err(
+                ResolveErrorKind::CfgFlagUnknown(self.strs.resolve(name).into()),
+                name_span,
+            ));
+        };
+
         if !active {
             // Peel any nested cfg layers to find the underlying item.
             let mut item = child;
