@@ -72,6 +72,8 @@ struct Scratch {
     work: Vec<Task>,
     /// Let bindings whose value is mid-evaluation; reentry signals a cycle.
     lets_in_progress: FxHashSet<NodeId>,
+    /// Scratch for `first_unresolved_let_dep`.
+    dep_walk: Vec<NodeId>,
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
     for_binding_values: Vec<ValueId>,
@@ -89,6 +91,7 @@ impl Scratch {
         self.call_stack.clear();
         self.work.clear();
         self.lets_in_progress.clear();
+        self.dep_walk.clear();
         self.macro_args.clear();
         self.macro_arg_bases.clear();
         self.for_binding_values.clear();

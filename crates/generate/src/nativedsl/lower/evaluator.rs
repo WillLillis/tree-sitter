@@ -85,8 +85,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(cur));
             let dep = {
                 let resolved = &self.state.let_values;
-                self.shared
-                    .first_unresolved_let_dep(value, |id| resolved.contains_key(&id))
+                self.shared.first_unresolved_let_dep(
+                    value,
+                    |id| resolved.contains_key(&id),
+                    &mut self.state.scratch.dep_walk,
+                )
             };
             if let Some((dep, reference)) = dep {
                 if !self.state.scratch.lets_in_progress.insert(dep) {

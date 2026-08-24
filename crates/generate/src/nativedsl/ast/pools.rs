@@ -126,23 +126,23 @@ impl SharedAst {
 
     /// Find the first `let` referenced in `root`'s expression subtree that is not
     /// yet resolved (per `is_resolved`, keyed by the let's `NodeId`), returning
-    /// that let and the referencing node (for a self-reference note). Walks with
-    /// an explicit stack so a deep expression tree cannot overflow; returns `None`
-    /// once every referenced `let` is resolved. Used by typecheck and lower to
-    /// resolve `let` chains iteratively rather than recursively.
+    /// that let and the referencing node (for a self-reference note). Returns `None`
+    /// once every referenced `let` is resolved.
     #[must_use]
     pub fn first_unresolved_let_dep(
         &self,
         root: NodeId,
         is_resolved: impl Fn(NodeId) -> bool,
+        stack: &mut Vec<NodeId>,
     ) -> Option<(NodeId, NodeId)> {
-        let mut stack = vec![root];
+        stack.clear();
+        stack.push(root);
         while let Some(id) = stack.pop() {
             match *self.arena.get(id) {
                 Node::Ident(IdentKind::Var(let_id)) if !is_resolved(let_id) => {
                     return Some((let_id, id));
                 }
-                node => self.push_expr_children(node, &mut stack),
+                node => self.push_expr_children(node, stack),
             }
         }
         None
