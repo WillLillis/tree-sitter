@@ -13,17 +13,17 @@ use serde::{Deserialize, Serialize};
 
 use check::check_item;
 
-use crate::strpool::{StrId, StrPool};
+use crate::strpool::StrPool;
 
 use super::ast::{ModuleContext, NodeId, SharedAst};
 
 #[derive(Clone, Default)]
 pub struct TypeEnv {
     pub vars: FxHashMap<NodeId, Ty>,
-    /// Field names for Object variables, keyed by the Let node's `NodeId`.
-    pub object_fields: FxHashMap<NodeId, Vec<StrId>>,
     /// Lets currently being typed; reentry is a self-reference cycle.
     lets_in_progress: FxHashSet<NodeId>,
+    /// Scratch for `first_unresolved_let_dep`.
+    dep_walk: Vec<NodeId>,
     /// Shared work and results stacks for the iterative `type_of` walk. They
     /// live here (rather than per-call) so every walk - including re-entrant
     /// ones - reuses the same capacity-retaining buffers via base-offset

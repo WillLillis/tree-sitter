@@ -132,9 +132,11 @@ fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> 
             // Only let ids are pushed onto this stack.
             unreachable!()
         };
-        if let Some((dep, reference)) =
-            shared.first_unresolved_let_dep(value, |id| env.vars.contains_key(&id))
-        {
+        if let Some((dep, reference)) = shared.first_unresolved_let_dep(
+            value,
+            |id| env.vars.contains_key(&id),
+            &mut env.dep_walk,
+        ) {
             if !env.lets_in_progress.insert(dep) {
                 let Node::Let { name, .. } = *shared.arena.get(dep) else {
                     // `first_unresolved_let_dep` only reports let dependencies.
@@ -155,20 +157,19 @@ fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> 
             .copied()
             .map_or(Constraint::None, Constraint::Exact);
         let inferred = type_of(cx, value, env, constraint)?;
-        if let Node::Object(range) = *shared.arena.get(value) {
-            let fields: Vec<StrId> = shared
-                .pools
-                .get_object(range)
-                .iter()
-                .map(|f| f.name.value)
-                .collect();
-            env.object_fields.insert(cur, fields);
-        }
         env.vars.insert(cur, inferred);
         env.lets_in_progress.remove(&cur);
         stack.pop();
     }
     Ok(env.vars[&let_id])
+}
+
+fn let_object_fields(shared: &SharedAst, let_id: NodeId) -> Option<&[ObjectField]> {
+    expect_pat!(Node::Let { value, .. }, *shared.arena.get(let_id));
+    match *shared.arena.get(value) {
+        Node::Object(range) => Some(shared.pools.get_object(range)),
+        _ => None,
+    }
 }
 
 /// Typecheck rule decls inside a rule-set macro body at definition time.
@@ -769,36 +770,20 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
         Node::FieldAccess { obj, field } => {
             let obj_ty = pop_result(&mut env.results);
             let inner = obj_ty.object_inner().unwrap();
-            let field_known = match shared.arena.get(obj) {
-                Node::Ident(IdentKind::Var(let_id)) => env
-                    .object_fields
-                    .get(let_id)
-                    .is_none_or(|fields| fields.contains(&field)),
-                Node::Object(range) => {
-                    let fields = shared.pools.get_object(*range);
-                    fields.iter().any(|f| f.name.value == field)
-                }
-                _ => true,
+            // Field names are checkable only when the object's shape is known statically:
+            // a literal, or a variable bound to a literal
+            let known_fields = match *shared.arena.get(obj) {
+                Node::Ident(IdentKind::Var(let_id)) => let_object_fields(shared, let_id),
+                Node::Object(range) => Some(shared.pools.get_object(range)),
+                _ => None,
             };
-            if !field_known {
-                let available = match shared.arena.get(obj) {
-                    Node::Ident(IdentKind::Var(let_id)) => env
-                        .object_fields
-                        .get(let_id)
-                        .map(|obj| {
-                            obj.iter()
-                                .map(|&sid| pool.resolve(sid).to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    Node::Object(range) => shared
-                        .pools
-                        .get_object(*range)
-                        .iter()
-                        .map(|f| pool.resolve(f.name.value).to_string())
-                        .collect(),
-                    _ => Vec::new(),
-                };
+            if let Some(fields) = known_fields
+                && !fields.iter().any(|f| f.name.value == field)
+            {
+                let available = fields
+                    .iter()
+                    .map(|f| pool.resolve(f.name.value).to_string())
+                    .collect();
                 return Err(TypeError::new(
                     TypeErrorKind::FieldNotFound {
                         field: pool.resolve(field).to_string(),

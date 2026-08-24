@@ -23,6 +23,8 @@ use crate::{
     strpool::{StrId, StrPool},
 };
 
+use std::collections::hash_map::Entry;
+
 /// Intermediate resolve environment used during phase 1. Maps declaration
 /// names to their resolved kind (for Ident rewriting) and span
 /// (for duplicate checking / "first defined here" notes). The kind never
@@ -132,18 +134,17 @@ fn insert_decl(
     span: Span,
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
-    if let Some(&Spanned {
-        span: first_span, ..
-    }) = decls.get(&name)
-    {
-        return Err(ResolveError::with_note(
+    match decls.entry(name) {
+        Entry::Occupied(entry) => Err(ResolveError::with_note(
             ResolveErrorKind::DuplicateDeclaration(strs.resolve(name).to_string()),
             span,
-            ctx.note(NoteMessage::FirstDefinedHere, first_span),
-        ));
+            ctx.note(NoteMessage::FirstDefinedHere, entry.get().span),
+        )),
+        Entry::Vacant(entry) => {
+            entry.insert(Spanned::new(kind, span));
+            Ok(())
+        }
     }
-    decls.insert(name, Spanned::new(kind, span));
-    Ok(())
 }
 
 /// Reject a macro-param / for-binding name that shadows a top-level declaration.
@@ -253,11 +254,16 @@ fn collect_decls(
         // `externals` (an external-scanner token with a grammar-rule fallback),
         // putting the name in both lists; it's one symbol, already registered by
         // the rule loop, so skip it rather than colliding with ourselves.
+        let mut base_variable_names: Option<FxHashSet<StrId>> = None;
         for ext in &base_grammar.external_roots {
             if let Rule::NamedSymbol(name) = pool.node(*ext)
                 && !override_names.contains(&name)
-                && !base_grammar.variables.iter().any(|v| v.name == name)
             {
+                let base_variable_names = base_variable_names
+                    .get_or_insert_with(|| base_grammar.variables.iter().map(|v| v.name).collect());
+                if base_variable_names.contains(&name) {
+                    continue;
+                }
                 insert_decl(
                     &mut decls,
                     pool.strs(),
@@ -309,14 +315,16 @@ fn collect_decls(
     // last, so a real definition from any pass above fulfills the declaration
     // rather than colliding with it; the name is added only if still undefined (an
     // unfulfilled `expect` is then caught by the lower symbol-completeness check).
-    for &item_id in root_items {
-        let Node::Forward { name } = shared.arena.get(item_id) else {
-            continue;
-        };
-        let span = shared.arena.span(item_id);
-        decls
-            .entry(*name)
-            .or_insert_with(|| Spanned::new(DeclKind::Rule, span));
+    if ctx.has_forward_decls {
+        for &item_id in root_items {
+            let Node::Forward { name } = shared.arena.get(item_id) else {
+                continue;
+            };
+            let span = shared.arena.span(item_id);
+            decls
+                .entry(*name)
+                .or_insert_with(|| Spanned::new(DeclKind::Rule, span));
+        }
     }
 
     Ok(decls)
