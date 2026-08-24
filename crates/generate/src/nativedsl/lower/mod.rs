@@ -47,17 +47,24 @@ pub(super) struct CallFrame {
 /// Long-lived state shared across grammar lowerings in one `parse_native_dsl`
 /// call.
 ///
-/// Each module's let bindings are evaluated eagerly when it is lowered; the
-/// `let_values` cache (keyed by `Let` node id) then serves cross-module reads
-/// without re-evaluating. `scratch` persists across grammars to reuse allocated
-/// capacity but its contents are cleared between them.
+/// Each module's let bindings are evaluated eagerly when it is lowered. The `lets`
+/// cache, keyed by `Let` node id, then serves cross-module reads without re-evaluating.
+/// `scratch` persists across grammars to reuse allocated capacity but its contents
+/// are cleared between them.
 #[derive(Default)]
 pub struct LoweringState {
     pub(super) ir: IrPools,
-    // Cross-grammar cache: let values keyed by their Let node id, shared across
+    // Cross-grammar cache: let states keyed by their `Let` node id, shared across
     // every module's evaluation in one run.
-    let_values: FxHashMap<NodeId, ValueId>,
+    lets: FxHashMap<NodeId, LetState>,
     scratch: Scratch,
+}
+
+/// The state of a let binding as it progresses through lowering.
+#[derive(Clone, Copy)]
+enum LetState {
+    InProgress,
+    Resolved(ValueId),
 }
 
 /// Per-grammar scratch buffers. Cleared (capacity retained) at the start of
@@ -70,8 +77,6 @@ struct Scratch {
     /// [`evaluator`]; shared across walks (re-entrant macro/for/let evaluation
     /// nests on it via base offsets) so its capacity is retained.
     work: Vec<Task>,
-    /// Let bindings whose value is mid-evaluation; reentry signals a cycle.
-    lets_in_progress: FxHashSet<NodeId>,
     /// Scratch for `first_unresolved_let_dep`.
     dep_walk: Vec<NodeId>,
     macro_args: Vec<ValueId>,
@@ -90,7 +95,6 @@ impl Scratch {
     fn clear(&mut self) {
         self.call_stack.clear();
         self.work.clear();
-        self.lets_in_progress.clear();
         self.dep_walk.clear();
         self.macro_args.clear();
         self.macro_arg_bases.clear();
