@@ -341,8 +341,12 @@ impl<'src> Lexer<'src> {
 
     fn lex_ident(&mut self, start: &mut usize) -> LexResult<TokenKind> {
         self.scan_ident_continue();
-        // SAFETY: the slice contains only ASCII ident chars (a-z, A-Z, 0-9, _), which are valid UTF-8.
-        let text = unsafe { std::str::from_utf8_unchecked(&self.source[*start..self.pos]) };
+        // SAFETY: `next_token` consumed an in-bounds ASCII identifier-start
+        // byte before calling this function, and `scan_ident_continue` advances
+        // only over in-bounds ASCII identifier bytes. Therefore
+        // `*start < self.pos <= self.source.len()` and the range is valid UTF-8.
+        let text =
+            unsafe { std::str::from_utf8_unchecked(self.source.get_unchecked(*start..self.pos)) };
         if text == "r" {
             match (self.peek(), self.source.get(self.pos + 1).copied()) {
                 // r#<ident> - raw identifier. Skip `r#` so the span and
