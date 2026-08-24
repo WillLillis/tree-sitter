@@ -5,6 +5,8 @@
 //! merges its own flags before loading the modules it imports or inherits, so
 //! an importing module overrides the flag values of the modules it pulls in.
 
+use std::collections::hash_map::Entry;
+
 use rustc_hash::FxHashMap;
 
 use crate::strpool::{StrId, StrPool};
@@ -73,14 +75,20 @@ impl CfgState {
                     }
                     _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
                 };
-                if let Some(&first_span) = ctx.cfg_declared.get(&name) {
+                let duplicate = match ctx.cfg_declared.entry(name) {
+                    Entry::Occupied(entry) => Some(*entry.get()),
+                    Entry::Vacant(entry) => {
+                        entry.insert(span);
+                        None
+                    }
+                };
+                if let Some(first_span) = duplicate {
                     return Err(ResolveError::with_note(
                         ResolveErrorKind::CfgFlagDeclaredTwice(strs.resolve(name).to_string()),
                         span,
                         ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
                 }
-                ctx.cfg_declared.insert(name, span);
                 self.active.entry(name).or_insert(enable);
             }
         }
