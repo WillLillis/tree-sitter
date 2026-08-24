@@ -8,7 +8,7 @@ use crate::{
         diagnostic::suggest_name,
         resolve::resolve_module_ref,
         typecheck::{
-            Constraint, TypeEnv, TypeResult,
+            Constraint, LetState, TypeEnv, TypeResult,
             types::{ScalarTy, TUPLE_MAX_ARITY, TUPLE_MIN_ARITY, TupleSig, TupleSigError},
         },
     },
@@ -118,10 +118,10 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
 /// Type a `let` and any transitively referenced `let`s, memoizing each.
 fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> {
     let Cx { shared, ctx, strs } = cx;
-    if let Some(&ty) = env.vars.get(&let_id) {
+    if let Some(LetState::Resolved(ty)) = env.lets.get(&let_id).copied() {
         return Ok(ty);
     }
-    env.lets_in_progress.insert(let_id);
+    env.lets.insert(let_id, LetState::InProgress);
     let mut stack = vec![let_id];
     while let Some(&cur) = stack.last() {
         let Node::Let { value, .. } = *shared.arena.get(cur) else {
@@ -130,10 +130,11 @@ fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> 
         };
         if let Some((dep, reference)) = shared.first_unresolved_let_dep(
             value,
-            |id| env.vars.contains_key(&id),
+            |id| matches!(env.lets.get(&id), Some(LetState::Resolved(_))),
             &mut env.dep_walk,
         ) {
-            if !env.lets_in_progress.insert(dep) {
+            // Resolved lets were filtered above, so an existing entry is in progress.
+            if env.lets.insert(dep, LetState::InProgress).is_some() {
                 let Node::Let { name, .. } = *shared.arena.get(dep) else {
                     // `first_unresolved_let_dep` only reports let dependencies.
                     unreachable!()
@@ -153,11 +154,14 @@ fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> 
             .copied()
             .map_or(Constraint::None, Constraint::Exact);
         let inferred = type_of(cx, value, env, constraint)?;
-        env.vars.insert(cur, inferred);
-        env.lets_in_progress.remove(&cur);
+        env.lets.insert(cur, LetState::Resolved(inferred));
         stack.pop();
     }
-    Ok(env.vars[&let_id])
+
+    match env.lets[&let_id] {
+        LetState::Resolved(ty) => Ok(ty),
+        LetState::InProgress => unreachable!(),
+    }
 }
 
 fn let_object_fields(shared: &SharedAst, let_id: NodeId) -> Option<&[ObjectField]> {
