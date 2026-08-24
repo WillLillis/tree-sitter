@@ -8,7 +8,7 @@ pub mod types;
 pub use error::{TypeErrorKind, TypeResult};
 pub use types::{Constraint, DataTy, ElemTy, InnerTy, ModuleTy, ScalarTy, TupleSig, Ty};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use check::check_item;
@@ -19,9 +19,7 @@ use super::ast::{ModuleContext, NodeId, SharedAst};
 
 #[derive(Clone, Default)]
 pub struct TypeEnv {
-    pub vars: FxHashMap<NodeId, Ty>,
-    /// Lets currently being typed; reentry is a self-reference cycle.
-    lets_in_progress: FxHashSet<NodeId>,
+    lets: FxHashMap<NodeId, LetState>,
     /// Scratch for `first_unresolved_let_dep`.
     dep_walk: Vec<NodeId>,
     /// Shared work and results stacks for the iterative `type_of` walk. They
@@ -30,6 +28,13 @@ pub struct TypeEnv {
     /// tracking, keeping the traversal off the allocator's hot path.
     work: Vec<check::Work>,
     results: Vec<Ty>,
+}
+
+/// The state of a let binding as it progresses through type checking.
+#[derive(Clone, Copy)]
+enum LetState {
+    InProgress,
+    Resolved(Ty),
 }
 
 /// Walks root items and type-checks the now-resolved AST.
