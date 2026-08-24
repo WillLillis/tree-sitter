@@ -75,7 +75,7 @@ pub use typecheck::{
 
 use std::path::Path;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::IoError;
@@ -102,6 +102,24 @@ impl From<u8> for ModuleId {
 impl From<ModuleId> for usize {
     fn from(id: ModuleId) -> Self {
         Self::from(id.0)
+    }
+}
+
+/// Fixed bitset covering every value representable by `ModuleId`.
+#[derive(Default)]
+struct ModuleIdSet([u64; 4]);
+
+impl ModuleIdSet {
+    /// Inserts `id`, returning whether it was newly inserted.
+    #[must_use]
+    fn insert(&mut self, id: ModuleId) -> bool {
+        let index = usize::from(id);
+        let word_idx = index / 64;
+        let bit_idx = index % 64;
+        let mask = 1u64 << bit_idx;
+        let newly_inserted = self.0[word_idx] & mask == 0;
+        self.0[word_idx] |= mask;
+        newly_inserted
     }
 }
 
@@ -284,7 +302,7 @@ pub(crate) fn collect_imported_rules(
     modules: &[Module],
 ) -> Vec<ImportedRule> {
     let mut rules = Vec::new();
-    let mut visited = FxHashSet::default();
+    let mut visited = ModuleIdSet::default();
     let mut stack: Vec<(ModuleId, Span)> = Vec::new();
 
     let seed = |stack: &mut Vec<(ModuleId, Span)>, refs: &[ast::NodeId]| {
