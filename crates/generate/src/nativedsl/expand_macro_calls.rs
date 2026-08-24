@@ -126,12 +126,10 @@ fn expand_one_call(
         // GatedByDisabledCfg enrichment a cfg-dropped expression-macro
         // reference gets at resolve.
         if let Some(&cfg_node) = ctx.cfg_dropped.get(&name_id)
-            && let Node::Cfg {
-                name: flag_span, ..
-            } = *shared.arena.get(cfg_node)
+            && let Node::Cfg { name: flag, .. } = *shared.arena.get(cfg_node)
         {
             err.add_note(ctx.note(
-                NoteMessage::GatedByDisabledCfg(ctx.text(flag_span).to_owned()),
+                NoteMessage::GatedByDisabledCfg(strs.resolve(flag).to_owned()),
                 shared.arena.span(cfg_node),
             ));
         }

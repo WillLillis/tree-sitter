@@ -117,11 +117,7 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
 
 /// Type a `let` and any transitively referenced `let`s, memoizing each.
 fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> {
-    let Cx {
-        shared,
-        ctx,
-        strs: pool,
-    } = cx;
+    let Cx { shared, ctx, strs } = cx;
     if let Some(&ty) = env.vars.get(&let_id) {
         return Ok(ty);
     }
@@ -143,7 +139,7 @@ fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> 
                     unreachable!()
                 };
                 return Err(TypeError::with_note(
-                    TypeErrorKind::CircularLet(pool.resolve(name).to_string()),
+                    TypeErrorKind::CircularLet(strs.resolve(name).to_string()),
                     shared.arena.span(dep),
                     ctx.note(NoteMessage::SelfReferenceHere, shared.arena.span(reference)),
                 ));
@@ -366,7 +362,7 @@ type Descent = Option<(NodeId, Demand)>;
 
 /// Handle a [`Work::Eval`].
 fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult<Descent> {
-    let Cx { shared, ctx, .. } = cx;
+    let Cx { shared, ctx, strs } = cx;
     let Demand { expected, emit } = demand;
     let span = shared.arena.span(id);
     Ok(match *shared.arena.get(id) {
@@ -579,9 +575,14 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             // Preserve recursive error order: receiver before macro name/args.
             type_of(cx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
             let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) else {
-                let macro_name = ctx.text(shared.arena.span(name));
+                // Resolve leaves the name unresolved when the exported member exists
+                // but is not a macro.
+                expect_pat!(
+                    Node::Ident(IdentKind::Unresolved(macro_name)),
+                    *shared.arena.get(name)
+                );
                 return Err(TypeError::new(
-                    TypeErrorKind::ImportMacroNotFound(macro_name.to_string()),
+                    TypeErrorKind::ImportMacroNotFound(strs.resolve(macro_name).to_string()),
                     shared.arena.span(name),
                 ));
             };
@@ -627,11 +628,7 @@ fn append_operands(
 
 /// Handle a [`Work::Combine`].
 fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult<()> {
-    let Cx {
-        shared,
-        ctx,
-        strs: pool,
-    } = cx;
+    let Cx { shared, ctx, strs } = cx;
     let Demand { expected, emit } = demand;
     let span = shared.arena.span(id);
     let ty = match *shared.arena.get(id) {
@@ -782,11 +779,11 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             {
                 let available = fields
                     .iter()
-                    .map(|f| pool.resolve(f.name.value).to_string())
+                    .map(|f| strs.resolve(f.name.value).to_string())
                     .collect();
                 return Err(TypeError::new(
                     TypeErrorKind::FieldNotFound {
-                        field: pool.resolve(field).to_string(),
+                        field: strs.resolve(field).to_string(),
                         available,
                     },
                     span,
@@ -886,11 +883,7 @@ fn enqueue_for(cx: Cx<'_>, node: NodeId, demand: Demand, work: &mut Vec<Work>) -
 }
 
 fn resolve_macro_name(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<MacroId> {
-    let Cx {
-        shared,
-        ctx,
-        strs: pool,
-    } = cx;
+    let Cx { shared, ctx, strs } = cx;
     if let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) {
         return Ok(macro_id);
     }
@@ -898,7 +891,7 @@ fn resolve_macro_name(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<MacroI
     let kind = TypeErrorKind::UndefinedMacro(macro_name.to_string());
     let macros = ctx.root_items.iter().filter_map(|&id| {
         if let Node::Macro(mid) = shared.arena.get(id) {
-            Some(pool.resolve(shared.pools.get_macro(*mid).name.value))
+            Some(strs.resolve(shared.pools.get_macro(*mid).name.value))
         } else {
             None
         }
@@ -1131,16 +1124,14 @@ fn check_duplicate_names<T>(
     name_of: impl Fn(&T) -> Spanned<StrId>,
     make_kind: impl Fn(String) -> TypeErrorKind,
 ) -> TypeResult<()> {
-    let Cx {
-        ctx, strs: pool, ..
-    } = cx;
+    let Cx { ctx, strs, .. } = cx;
     for i in 1..items.len() {
         let curr = name_of(&items[i]);
         for prev in &items[..i] {
             let prev_name = name_of(prev);
             if prev_name.value == curr.value {
                 return Err(TypeError::with_note(
-                    make_kind(pool.resolve(curr.value).to_string()),
+                    make_kind(strs.resolve(curr.value).to_string()),
                     curr.span,
                     ctx.note(NoteMessage::FirstDefinedHere, prev_name.span),
                 ));

@@ -98,7 +98,9 @@ pub enum Node {
     },
     QualifiedAccess {
         obj: NodeId,
-        member: Span,
+        member: StrId,
+        /// Start of the member name token, retained for diagnostics.
+        member_offset: u32,
     },
     /// A `mod::name` reference resolved to a rule (or external symbol) in
     /// another module's lowered output. Replaces a `QualifiedAccess` during
@@ -214,7 +216,9 @@ pub enum Node {
     /// `#[cfg(NAME)] ITEM`: gates `child` on the named flag. Survives parse,
     /// and is then dropped (or unwrapped) by the `apply_cfg` pass before resolve.
     Cfg {
-        name: Span,
+        name: StrId,
+        /// Start of the flag name token, retained for diagnostics.
+        name_offset: u32,
         child: NodeId,
     },
     /// Sentinel value occupying index 0 in the arena. Not part of the public API.

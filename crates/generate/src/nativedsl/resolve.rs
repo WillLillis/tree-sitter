@@ -516,18 +516,20 @@ fn resolve_node(
 fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
     // None when obj isn't a module ref; the type checker reports the error.
     match *arena.get(id) {
-        Node::QualifiedAccess { obj, member } => {
+        Node::QualifiedAccess {
+            obj,
+            member,
+            member_offset,
+        } => {
             if let Some(idx) = resolve_module_id(arena, obj) {
-                let member_name = rcx.ctx.text(member);
-                resolve_qualified_member(rcx, arena, idx, id, member_name, member)?;
+                resolve_qualified_member(rcx, arena, idx, id, member, member_offset)?;
             }
             Ok(())
         }
         Node::QualifiedCall(range) => {
             let (obj, name, _args) = rcx.pools.get_qualified_call(range);
             if let Some(idx) = resolve_module_id(arena, obj) {
-                let macro_name = rcx.ctx.text(arena.span(name));
-                resolve_qualified_call_name(rcx, arena, idx, name, macro_name)?;
+                resolve_qualified_call_name(rcx, arena, idx, name)?;
             }
             Ok(())
         }
@@ -541,15 +543,20 @@ fn resolve_qualified_call_name(
     arena: &mut NodeArena,
     module: ModuleId,
     name_id: NodeId,
-    macro_name: &str,
 ) -> ResolveResult<()> {
+    // the parser stores the call name as an unresolved identifier, and the resolve
+    // walk visits only the receiver and arguments before this.
+    expect_pat!(
+        Node::Ident(IdentKind::Unresolved(name)),
+        *arena.get(name_id)
+    );
     let target = &rcx.modules[usize::from(module)];
-    match rcx.strs.get(macro_name).and_then(|id| target.export(id)) {
+    match target.export(name) {
         Some(Export::Local(kind @ IdentKind::Macro(_))) => arena.set(name_id, Node::Ident(kind)),
         None => Err(import_member_not_found(
             rcx,
             target,
-            macro_name,
+            name,
             arena.span(name_id),
         ))?,
         // member exists but isn't a macro, leave for typechecker to reject
@@ -561,26 +568,25 @@ fn resolve_qualified_call_name(
 /// Resolve a `QualifiedAccess { obj, member }` against the target module's
 /// export table:
 ///   - `let` / `macro` -> `Ident(Var | Macro)`
-///   - lowered rule / external -> `ImportRef` (the lowerer indexes directly)
+///   - lowered rule / external -> `ModuleRule` (the lowerer indexes directly)
 ///   - not found -> error
 fn resolve_qualified_member(
     rcx: &ResolveCtx,
     arena: &mut NodeArena,
     module: ModuleId,
     node_id: NodeId,
-    member_name: &str,
-    member_span: Span,
+    member: StrId,
+    member_offset: u32,
 ) -> ResolveResult<()> {
     let target = &rcx.modules[usize::from(module)];
-    match rcx.strs.get(member_name).and_then(|id| target.export(id)) {
+    match target.export(member) {
         Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
         Some(Export::Rule(target)) => arena.set(node_id, Node::ModuleRule { module, target }),
-        None => Err(import_member_not_found(
-            rcx,
-            target,
-            member_name,
-            member_span,
-        ))?,
+        None => {
+            let member_len = rcx.strs.resolve(member).len() as u32;
+            let member_span = Span::new(member_offset, member_offset + member_len);
+            Err(import_member_not_found(rcx, target, member, member_span))?;
+        }
     }
     Ok(())
 }
@@ -589,9 +595,10 @@ fn resolve_qualified_member(
 fn import_member_not_found(
     rcx: &ResolveCtx,
     target: &Module,
-    name: &str,
+    name: StrId,
     span: Span,
 ) -> ResolveError {
+    let name = rcx.strs.resolve(name);
     let kind = ResolveErrorKind::ImportMemberNotFound(name.to_string());
     let candidates = target.export_keys().map(|id| rcx.strs.resolve(id));
     if let Some(suggestion) = suggest_name(name, candidates) {
