@@ -45,7 +45,7 @@ pub(super) struct Evaluator<'a, 'ast> {
     /// ("root") is not in this slice; it lives in `root_ctx`. Its module id is
     /// `previous.len()` (== `root_id`).
     previous: &'a [Module],
-    root_ctx: &'a ModuleContext,
+    pub(super) root_ctx: &'a ModuleContext,
     root_id: ModuleId,
     /// May equal `root_id` (current module) or index into `previous`.
     current_module: ModuleId,
@@ -541,18 +541,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    fn push_spread_items(&mut self, range: ChildRange, as_rule: bool) {
-        for &item in self.shared.pools.child_slice(range).iter().rev() {
-            let task = match self.shared.arena.get(item) {
-                Node::For { .. } if as_rule => Task::ForRule(item),
-                Node::For { .. } => Task::ForVal(item),
-                _ if as_rule => Task::Rule(item),
-                _ => Task::Expr(item),
-            };
-            self.push_task(task);
-        }
-    }
-
     fn module_rule(&self, module: ModuleId, target: RuleTarget) -> RuleId {
         let target_module = &self.previous[usize::from(module)];
         match target {
@@ -656,7 +644,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             &Node::List(range) | &Node::Tuple(range) => {
                 let base = self.state.scratch.val_scratch.len();
                 self.push_combine_var(id, base);
-                self.push_spread_items(range, false);
+                for &item in self.shared.pools.child_slice(range).iter().rev() {
+                    let task = match self.shared.arena.get(item) {
+                        Node::For { .. } => Task::ForVal(item),
+                        _ => Task::Expr(item),
+                    };
+                    self.push_task(task);
+                }
             }
             &Node::Concat(range) => {
                 let base = self.state.scratch.val_scratch.len();

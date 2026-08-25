@@ -257,11 +257,9 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         }
         match &self.current().kind {
             TokenKind::KwGrammar => self.parse_grammar_block(),
-            TokenKind::KwRule => self.parse_rule_def(false),
-            TokenKind::KwOverride => self.parse_rule_def(true),
+            TokenKind::KwRule | TokenKind::KwOverride => self.parse_rule_def(),
             TokenKind::KwLet => self.parse_let_def(),
-            TokenKind::KwMacro => self.parse_macro_def(),
-            TokenKind::KwRules => self.parse_rule_set_def(),
+            TokenKind::KwMacro | TokenKind::KwRules => self.parse_macro_def(),
             TokenKind::KwExpect => self.parse_expect_decl(),
             TokenKind::At => self.parse_top_level_call(),
             _ => Err(self.error(ParseErrorKind::ExpectedItem)),
@@ -382,7 +380,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         }
     }
 
-    fn parse_rule_def(&mut self, is_override: bool) -> ParseResult<NodeId> {
+    fn parse_rule_def(&mut self) -> ParseResult<NodeId> {
+        let is_override = self.at(TokenKind::KwOverride);
         let start = if is_override {
             let s = self.expect(TokenKind::KwOverride)?;
             self.expect(TokenKind::KwRule)?;
@@ -443,18 +442,13 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         Ok(id)
     }
 
+    /// Parse an expression (`macro`) or rule-set (`rules`) macro definition
     fn parse_macro_def(&mut self) -> ParseResult<NodeId> {
-        let start = self.expect(TokenKind::KwMacro)?;
-        self.parse_macro_like(start, /* rule_set */ false)
-    }
-
-    /// `rules NAME(params) { rule decls... }`
-    fn parse_rule_set_def(&mut self) -> ParseResult<NodeId> {
-        let start = self.expect(TokenKind::KwRules)?;
-        self.parse_macro_like(start, true)
-    }
-
-    fn parse_macro_like(&mut self, start: Span, rule_set: bool) -> ParseResult<NodeId> {
+        let (start, rule_set) = if let Some(start) = self.eat(TokenKind::KwRules) {
+            (start, true)
+        } else {
+            (self.expect(TokenKind::KwMacro)?, false)
+        };
         let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
         self.expect(TokenKind::LParen)?;
         let params = self.comma_sep(TokenKind::RParen, |this| {
@@ -523,7 +517,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             .arena
             .push(Node::Ident(IdentKind::Unresolved(name)), name_span);
         self.expect(TokenKind::LParen)?;
-        let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
+        let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.shared.arena.push(
             Node::Call {
@@ -579,8 +573,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             });
         }
         match self.current().kind {
-            TokenKind::KwRule => self.parse_rule_def(false),
-            TokenKind::KwOverride => self.parse_rule_def(true),
+            TokenKind::KwRule | TokenKind::KwOverride => self.parse_rule_def(),
             _ => Err(self.error(ParseErrorKind::RuleSetBodyRequiresRuleDecl)),
         }
     }
@@ -844,9 +837,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             TokenKind::KwReserved => self.parse_reserved_expr(start),
             TokenKind::KwConcat => self.parse_variadic(start, Node::Concat),
             TokenKind::KwRegexp => self.parse_regexp(start),
-            TokenKind::KwInherit | TokenKind::KwImport => {
-                self.parse_module_path(start, kw, kw == TokenKind::KwImport)
-            }
+            TokenKind::KwInherit | TokenKind::KwImport => self.parse_module_path(start, kw),
             TokenKind::KwAppend => self.parse_append(start),
             TokenKind::KwGrammarConfig => self.parse_grammar_config(start),
             TokenKind::KwFor => self.parse_for(start),
@@ -862,7 +853,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     ) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
-        let range = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr_with_cfg)?;
+        let range = self.comma_sep_children(TokenKind::RParen, Self::parse_expr_with_cfg)?;
         let end = self.expect(TokenKind::RParen)?;
         Ok(self.shared.arena.push(make(range), start.merge(end)))
     }
@@ -1030,12 +1021,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             .push(Node::DynRegex { pattern, flags }, start.merge(end)))
     }
 
-    fn parse_module_path(
-        &mut self,
-        start: Span,
-        kw: TokenKind,
-        is_import: bool,
-    ) -> ParseResult<NodeId> {
+    fn parse_module_path(&mut self, start: Span, kw: TokenKind) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
         if self.at(TokenKind::RParen) {
@@ -1047,7 +1033,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         let end = self.expect(TokenKind::RParen)?;
         let id = self.shared.arena.push(
             Node::ModuleRef {
-                import: is_import,
+                import: kw == TokenKind::KwImport,
                 path: path_span.strip_quotes(),
                 module: None,
             },
@@ -1147,8 +1133,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                             start.merge(member_span),
                         );
                         self.advance_pos();
-                        let args =
-                            self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
+                        let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
                         let end = self.expect(TokenKind::RParen)?;
                         id = self
                             .shared
@@ -1172,7 +1157,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                         return Err(self.error(ParseErrorKind::ExpectedMacroName));
                     }
                     self.advance_pos();
-                    let args = self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
+                    let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
                     let end = self.expect(TokenKind::RParen)?;
                     id = self.shared.arena.push(
                         Node::Call {
@@ -1198,7 +1183,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         item: fn(&mut Self) -> ParseResult<NodeId>,
     ) -> ParseResult<NodeId> {
         self.advance_pos();
-        let range = self.comma_sep_children(&[], close, item)?;
+        let range = self.comma_sep_children(close, item)?;
         let end = self.expect(close)?;
         Ok(self.shared.arena.push(make(range), start.merge(end)))
     }
@@ -1228,16 +1213,12 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     }
 
     /// Parse comma-separated children directly into a [`ChildRange`].
-    /// `prefix` is prepended to the resulting range (e.g. `[obj, name]`
-    /// for a qualified call).
     fn comma_sep_children(
         &mut self,
-        prefix: &[NodeId],
         close: TokenKind,
         mut parse_item: impl FnMut(&mut Self) -> ParseResult<NodeId>,
     ) -> ParseResult<ChildRange> {
         stack_scope!(self.scratch, |saved| {
-            self.scratch.extend_from_slice(prefix);
             while !self.at(close) {
                 let id = parse_item(self)?;
                 self.scratch.push(id);

@@ -64,17 +64,8 @@ fn deep_token_chain(n: usize) -> (SharedAst, ModuleContext, RulePool) {
 fn resolve_deep_nesting_does_not_overflow() {
     // 50k-deep nesting once overflowed resolve_expr's recursion; the iterative
     // walk handles it.
-    let (mut shared, ctx, mut pool) = deep_token_chain(50_000);
-    resolve(
-        &mut shared,
-        &ctx,
-        &mut pool,
-        &[],
-        ModuleId::from(0),
-        None,
-        &[],
-    )
-    .unwrap();
+    let (mut shared, ctx, pool) = deep_token_chain(50_000);
+    resolve(&mut shared, &ctx, &pool, &[], ModuleId::from(0), None, &[]).unwrap();
 }
 
 #[test]

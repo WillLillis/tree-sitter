@@ -81,7 +81,7 @@ use serde::{Deserialize, Serialize};
 use crate::IoError;
 use crate::grammars::{PrecedenceEntry, ReservedWordContext, Variable};
 
-use ast::{AstPools, IdentKind, ModuleContext, Node, NodeArena, RuleTarget, SharedAst, Span};
+use ast::{IdentKind, ModuleContext, Node, RuleTarget, SharedAst, Span};
 use loader::Loader;
 use typecheck::TypeEnv;
 
@@ -233,8 +233,7 @@ pub enum LoweredRef<'a> {
 /// mapped to an ID-based [`Export`]. Built once, when the [`Module`] is constructed.
 #[must_use]
 pub fn build_exports(
-    arena: &NodeArena,
-    pools: &AstPools,
+    shared: &SharedAst,
     ctx: &ModuleContext,
     rule_pool: &RulePool,
     lowered: LoweredRef,
@@ -247,10 +246,10 @@ pub fn build_exports(
     // resolves to the rule.
     // AST-level `let` / `macro` bindings.
     for &item_id in &ctx.root_items {
-        let (name, kind) = match arena.get(item_id) {
+        let (name, kind) = match shared.arena.get(item_id) {
             Node::Let { name, .. } => (*name, IdentKind::Var(item_id)),
             Node::Macro(macro_id) => (
-                pools.get_macro(*macro_id).name.value,
+                shared.pools.get_macro(*macro_id).name.value,
                 IdentKind::Macro(*macro_id),
             ),
             _ => continue,

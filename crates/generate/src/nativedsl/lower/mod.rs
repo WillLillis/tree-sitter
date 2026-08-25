@@ -297,14 +297,10 @@ struct LoweredItem {
 /// Walk `root_items`, evaluating lets and lowering each rule / expanded rule to
 /// a `RuleId` in source order. Shared by grammar and helper lowering; the caller
 /// decides what to do with the `override`-tagged items.
-fn lower_items(
-    eval: &mut Evaluator,
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-) -> LowerResult<Vec<LoweredItem>> {
-    let mut items = Vec::with_capacity(ctx.root_items.len());
-    for &item_id in &ctx.root_items {
-        match shared.arena.get(item_id) {
+fn lower_items(eval: &mut Evaluator) -> LowerResult<Vec<LoweredItem>> {
+    let mut items = Vec::with_capacity(eval.root_ctx.root_items.len());
+    for &item_id in &eval.root_ctx.root_items {
+        match eval.shared.arena.get(item_id) {
             // Grammar block (config is read separately), macros, and externals
             // register names but don't materialize a rule here.
             Node::Grammar | Node::Macro(_) | Node::Forward { .. } => {}
@@ -321,14 +317,14 @@ fn lower_items(
                     name,
                     rule_id,
                     is_override,
-                    span: shared.arena.span(item_id),
+                    span: eval.shared.arena.span(item_id),
                 });
             }
             &Node::ExpandedRule(expand_id) => {
-                let exp = *shared.pools.get_expansion(expand_id);
+                let exp = *eval.shared.pools.get_expansion(expand_id);
                 // expand_macro_calls sets the item span to the macro call site,
                 // used for override attribution diagnostics.
-                let span = shared.arena.span(item_id);
+                let span = eval.shared.arena.span(item_id);
                 let rule_id = eval.lower_expansion(expand_id, span)?;
                 items.push(LoweredItem {
                     name: exp.name,
@@ -357,7 +353,7 @@ pub fn lower_helper(
 ) -> LowerResult<Vec<(StrId, RuleId)>> {
     let mut eval = Evaluator::new(state, pool, shared, previous, current);
     let mut rules = Vec::new();
-    for it in lower_items(&mut eval, shared, current)? {
+    for it in lower_items(&mut eval)? {
         if it.is_override {
             // A helper can't inherit, so an `override` reaching its top level via
             // a called rules-macro (a direct `override rule` is rejected earlier
@@ -383,7 +379,7 @@ fn evaluate(
     let mut eval = Evaluator::new(state, pool, shared, previous, ctx);
     let mut rules: Vec<(StrId, RuleId)> = Vec::new();
     let mut overrides: Vec<(StrId, RuleId, Span)> = Vec::new();
-    for it in lower_items(&mut eval, shared, ctx)? {
+    for it in lower_items(&mut eval)? {
         if it.is_override {
             overrides.push((it.name, it.rule_id, it.span));
         } else {

@@ -51,13 +51,6 @@ impl DeclKind {
     }
 }
 
-/// Context for [`collect_external_names`].
-struct ExternalNameCtx<'a> {
-    decls: &'a mut Decls,
-    /// `let` names currently being expanded; reentry indicates a cycle.
-    expanding_lets: FxHashSet<StrId>,
-}
-
 /// Read-only context threaded through the pass-2 resolve walk
 /// ([`resolve_item`] / [`resolve_expr`] / [`resolve_children`]).
 struct ResolveCtx<'a> {
@@ -77,7 +70,7 @@ struct ResolveCtx<'a> {
 pub fn resolve(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
-    pool: &mut RulePool,
+    pool: &RulePool,
     modules: &[Module],
     current_module: ModuleId,
     base: Option<(&LoweredGrammar, Span)>,
@@ -177,7 +170,7 @@ fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
 fn collect_decls(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
-    pool: &mut RulePool,
+    pool: &RulePool,
     base: Option<(&LoweredGrammar, Span)>,
     modules: &[Module],
     imported_rules: &[ImportedRule],
@@ -313,10 +306,13 @@ fn collect_decls(
         && let Some(ext_id) = config.externals
     {
         let mut ec = ExternalNameCtx {
+            shared,
+            ctx,
+            strs: pool.strs(),
             decls: &mut decls,
             expanding_lets: FxHashSet::default(),
         };
-        collect_external_names(shared, ctx, pool.strs_mut(), ext_id, &mut ec)?;
+        ec.collect(ext_id)?;
     }
 
     // Forward-decls (`expect X`) name a symbol provided elsewhere: a rule (here or
@@ -337,6 +333,69 @@ fn collect_decls(
     }
 
     Ok(decls)
+}
+
+///  State for recursively collecting external token names.
+struct ExternalNameCtx<'a> {
+    shared: &'a SharedAst,
+    ctx: &'a ModuleContext,
+    strs: &'a StrPool,
+    decls: &'a mut Decls,
+    /// `let` names currently being expanded; reentry indicates a cycle.
+    expanding_lets: FxHashSet<StrId>,
+}
+
+impl ExternalNameCtx<'_> {
+    /// Recursively collect external token names from an expression.
+    fn collect(&mut self, id: NodeId) -> ResolveResult<()> {
+        match *self.shared.arena.get(id) {
+            // Bare identifier: follow a let, ignore an already-declared name, or
+            // register an unknown name as a new external token.
+            Node::Ident(IdentKind::Unresolved(name)) => {
+                match self.decls.get(&name).map(|d| d.value) {
+                    Some(DeclKind::Var(let_id)) => {
+                        if !self.expanding_lets.insert(name) {
+                            return Err(ResolveError::new(
+                                ResolveErrorKind::InvalidExternalsExpression,
+                                self.shared.arena.span(id),
+                            ));
+                        }
+                        expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(let_id));
+                        self.collect(value)?;
+                        self.expanding_lets.remove(&name);
+                    }
+                    None => insert_decl(
+                        self.decls,
+                        self.strs,
+                        name,
+                        DeclKind::Rule,
+                        self.shared.arena.span(id),
+                        self.ctx,
+                    )?,
+                    Some(_) => {}
+                }
+            }
+            Node::List(range) | Node::Tuple(range) => {
+                for &child in self.shared.pools.child_slice(range) {
+                    self.collect(child)?;
+                }
+            }
+            Node::Append { left, right } => {
+                self.collect(left)?;
+                self.collect(right)?;
+            }
+            // Literals don't introduce names, inherited values already registered.
+            #[rustfmt::skip]
+            Node::StringLit(_) | Node::IntLit(_) | Node::DynRegex { .. } | Node::GrammarConfig { .. }
+            | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
+            // Anything else is not a valid `externals` expression.
+            _ => Err(ResolveError::new(
+                ResolveErrorKind::InvalidExternalsExpression,
+                self.shared.arena.span(id),
+            ))?,
+        }
+        Ok(())
+    }
 }
 
 /// Pass 2: resolve identifiers within a single top-level item.
@@ -609,55 +668,6 @@ pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<N
         }
     }
     None
-}
-
-/// Recursively collect external token names from an expression.
-fn collect_external_names(
-    shared: &SharedAst,
-    ctx: &ModuleContext,
-    strs: &mut StrPool,
-    id: NodeId,
-    ec: &mut ExternalNameCtx<'_>,
-) -> ResolveResult<()> {
-    let arena = &shared.arena;
-    match arena.get(id) {
-        // Bare identifier: follow a let, ignore an already-declared name, or
-        // register an unknown name as a new external token.
-        Node::Ident(IdentKind::Unresolved(name)) => match ec.decls.get(name).map(|d| d.value) {
-            Some(DeclKind::Var(let_id)) => {
-                if !ec.expanding_lets.insert(*name) {
-                    return Err(ResolveError::new(
-                        ResolveErrorKind::InvalidExternalsExpression,
-                        arena.span(id),
-                    ));
-                }
-                expect_pat!(Node::Let { value, .. }, *arena.get(let_id));
-                collect_external_names(shared, ctx, strs, value, ec)?;
-                ec.expanding_lets.remove(name);
-            }
-            None => insert_decl(ec.decls, strs, *name, DeclKind::Rule, arena.span(id), ctx)?,
-            Some(_) => {}
-        },
-        Node::List(range) | Node::Tuple(range) => {
-            for &child in shared.pools.child_slice(*range) {
-                collect_external_names(shared, ctx, strs, child, ec)?;
-            }
-        }
-        Node::Append { left, right } => {
-            collect_external_names(shared, ctx, strs, *left, ec)?;
-            collect_external_names(shared, ctx, strs, *right, ec)?;
-        }
-        // Literals don't introduce names, inherited values already registered.
-        #[rustfmt::skip]
-        Node::StringLit(_) | Node::IntLit(_) | Node::DynRegex { .. } | Node::GrammarConfig { .. }
-        | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
-        // Anything else is not a valid `externals` expression.
-        _ => Err(ResolveError::new(
-            ResolveErrorKind::InvalidExternalsExpression,
-            arena.span(id),
-        ))?,
-    }
-    Ok(())
 }
 
 pub type ResolveResult<T> = Result<T, ResolveError>;
