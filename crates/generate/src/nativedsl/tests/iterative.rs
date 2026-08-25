@@ -5,6 +5,7 @@
 
 use rustc_hash::FxHashMap;
 
+use crate::nativedsl::ModuleId;
 use crate::nativedsl::ast::{GrammarConfig, ModuleContext, Node, SharedAst, Span};
 use crate::nativedsl::resolve::resolve;
 use crate::nativedsl::typecheck::{self, TypeEnv};
@@ -64,7 +65,16 @@ fn resolve_deep_nesting_does_not_overflow() {
     // 50k-deep nesting once overflowed resolve_expr's recursion; the iterative
     // walk handles it.
     let (mut shared, ctx, mut pool) = deep_token_chain(50_000);
-    resolve(&mut shared, &ctx, &mut pool, &[], None, &[]).unwrap();
+    resolve(
+        &mut shared,
+        &ctx,
+        &mut pool,
+        &[],
+        ModuleId::from(0),
+        None,
+        &[],
+    )
+    .unwrap();
 }
 
 #[test]

@@ -240,7 +240,7 @@ impl Walker<'_> {
             }
             // Fixed-arity / positional members can't be cfg-gated, but recurse to
             // reach any cfg nested deeper inside each.
-            Node::Tuple(r) | Node::QualifiedCall(r) => {
+            Node::Tuple(r) => {
                 for i in r.as_range() {
                     let c = self.shared.pools.children[i];
                     self.walk(c)?;

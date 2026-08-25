@@ -680,20 +680,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     self.shared.arena.get(name)
                 );
                 // Macro expansion stays recursive, bounded by MAX_CALL_DEPTH.
-                let v = self.invoke_macro(*macro_id, args, span, self.current_module)?;
-                self.push_val_id(v);
-            }
-            &Node::QualifiedCall(range) => {
-                let children = self.shared.pools.child_slice(range);
-                let (obj, name) = (children[0], children[1]);
-                let obj_val = self.eval_expr(obj)?;
-                expect_pat!(Value::Module(mod_idx), *self.get_val(obj_val));
-                expect_pat!(
-                    Node::Ident(IdentKind::Macro(macro_id)),
-                    self.shared.arena.get(name)
-                );
-                let args = ChildRange::new(range.start + 2, range.len - 2);
-                let v = self.invoke_macro(*macro_id, args, span, mod_idx)?;
+                let v = self.invoke_macro(*macro_id, args, span)?;
                 self.push_val_id(v);
             }
             #[rustfmt::skip]
@@ -1118,10 +1105,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         macro_id: MacroId,
         args: ChildRange,
         span: Span,
-        def_module: ModuleId,
     ) -> LowerResult<ValueId> {
         let config = self.shared.pools.get_macro(macro_id);
-        let (name, body) = (config.name.value, config.body);
+        let (name, body, def_module) = (config.name.value, config.body, config.def_module());
         self.bind_args_and(name, def_module, args, span, |e| e.eval_expr(body))
     }
 
@@ -1131,8 +1117,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         span: Span,
     ) -> LowerResult<RuleId> {
         let exp = *self.shared.pools.get_expansion(expand_id);
-        let name = self.shared.pools.get_macro(exp.macro_id).name;
-        let def_module = self.current_module;
+        let config = self.shared.pools.get_macro(exp.macro_id);
+        let (name, def_module) = (config.name, config.def_module());
         self.bind_args_and(name.value, def_module, exp.args, span, |e| {
             e.lower_to_rule(exp.body)
         })

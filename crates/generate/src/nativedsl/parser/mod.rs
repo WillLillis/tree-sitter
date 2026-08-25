@@ -497,13 +497,13 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             .push_children(&sym_ref_ids)
             .ok_or_else(|| self.error(ParseErrorKind::TooManyChildren(sym_ref_ids.len())))?;
         let name = self.strs.intern(self.ctx.text(name_span));
-        let macro_idx = self.shared.pools.push_macro(MacroConfig {
-            name: Spanned::new(name, name_span),
+        let macro_idx = self.shared.pools.push_macro(MacroConfig::new(
+            Spanned::new(name, name_span),
             params,
             body,
             kind,
             sym_refs,
-        });
+        ));
         Ok(self
             .shared
             .arena
@@ -1138,22 +1138,22 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                     let member_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
                     let member = self.strs.intern(self.ctx.text(member_span));
                     if self.at(TokenKind::LParen) {
-                        // h::macro_name(args): pack [obj, name, ...args] into one ChildRange
-                        let member_id = self
-                            .shared
-                            .arena
-                            .push(Node::Ident(IdentKind::Unresolved(member)), member_span);
+                        let name = self.shared.arena.push(
+                            Node::QualifiedAccess {
+                                obj: id,
+                                member,
+                                member_offset: member_span.start,
+                            },
+                            start.merge(member_span),
+                        );
                         self.advance_pos();
-                        let range = self.comma_sep_children(
-                            &[id, member_id],
-                            TokenKind::RParen,
-                            Self::parse_expr,
-                        )?;
+                        let args =
+                            self.comma_sep_children(&[], TokenKind::RParen, Self::parse_expr)?;
                         let end = self.expect(TokenKind::RParen)?;
                         id = self
                             .shared
                             .arena
-                            .push(Node::QualifiedCall(range), start.merge(end));
+                            .push(Node::Call { name, args }, start.merge(end));
                         break;
                     }
                     id = self.shared.arena.push(

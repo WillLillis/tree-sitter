@@ -569,28 +569,25 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             None
         }
         Node::Call { name, args } => {
+            // Resolve leaves a qualified name intact only when its receiver does
+            // not resolve to a module. Type the receiver first so that the error
+            // identifies _that_ cause rather than the callee name.
+            if let Node::QualifiedAccess {
+                obj,
+                member,
+                member_offset,
+            } = *shared.arena.get(name)
+            {
+                type_of(cx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
+                let member = strs.resolve(member);
+                return Err(TypeError::new(
+                    TypeErrorKind::ImportMacroNotFound(member.to_string()),
+                    Span::new(member_offset, member_offset + member.len() as u32),
+                ));
+            }
             let macro_id = resolve_macro_name(cx, name, span)?;
             let args = shared.pools.child_slice(args);
-            enqueue_macro_call(cx, macro_id, id, name, args, demand, &mut env.work)?;
-            None
-        }
-        Node::QualifiedCall(range) => {
-            let (obj, name, args) = shared.pools.get_qualified_call(range);
-            // Preserve recursive error order: receiver before macro name/args.
-            type_of(cx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
-            let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) else {
-                // Resolve leaves the name unresolved when the exported member exists
-                // but is not a macro.
-                expect_pat!(
-                    Node::Ident(IdentKind::Unresolved(macro_name)),
-                    *shared.arena.get(name)
-                );
-                return Err(TypeError::new(
-                    TypeErrorKind::ImportMacroNotFound(strs.resolve(macro_name).to_string()),
-                    shared.arena.span(name),
-                ));
-            };
-            enqueue_macro_call(cx, macro_id, id, name, args, demand, &mut env.work)?;
+            enqueue_macro_call(cx, macro_id, id, args, demand, &mut env.work)?;
             None
         }
         Node::For { .. } => {
@@ -734,10 +731,6 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             }
         }
         Node::Call { name, .. } => macro_call_result(cx, name, span)?,
-        Node::QualifiedCall(range) => {
-            let (_, name, _) = shared.pools.get_qualified_call(range);
-            macro_call_result(cx, name, span)?
-        }
         Node::GrammarConfig { module, field } => {
             let module_ty = pop_result(&mut env.results);
             if !matches!(module_ty, Ty::Module(ModuleTy::Grammar(_))) {
@@ -911,17 +904,17 @@ fn enqueue_macro_call(
     cx: Cx<'_>,
     macro_id: MacroId,
     node: NodeId,
-    name: NodeId,
     args: &[NodeId],
     demand: Demand,
     work: &mut Vec<Work>,
 ) -> TypeResult<()> {
-    let Cx { shared, ctx, .. } = cx;
-    let params = shared.pools.get_macro(macro_id).params;
+    let Cx { shared, strs, .. } = cx;
+    let config = shared.pools.get_macro(macro_id);
+    let params = config.params;
     if args.len() != params.len as usize {
         return Err(TypeError::new(
             TypeErrorKind::ArgCountMismatch {
-                macro_name: ctx.text(shared.arena.span(name)).to_string(),
+                macro_name: strs.resolve(config.name.value).to_string(),
                 expected: params.len as usize,
                 got: args.len(),
             },
