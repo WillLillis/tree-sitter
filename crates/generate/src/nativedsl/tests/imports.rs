@@ -76,6 +76,26 @@ fn import_call_member_not_found_suggests_close_name() {
 }
 
 #[test]
+fn import_call_member_not_macro_points_to_definition() {
+    let err = expect_err(parse_with_modules(
+        &[("values.tsg", "let PREC = 1")],
+        r#"
+          let h = import("values.tsg")
+          grammar { language: "test" }
+          rule program { h::PREC() }
+      "#,
+    ));
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::UndefinedMacro("h::PREC".into()));
+    let [note] = e.notes.as_slice() else {
+        panic!("expected one definition note, got {:?}", e.notes);
+    };
+    assert_eq!(note.message, NoteMessage::DefinedHere);
+    assert_eq!(note.path.file_name().unwrap(), "values.tsg");
+    assert_eq!(note.span.resolve(&note.src), "let PREC = 1");
+}
+
+#[test]
 fn error_import_disallowed_items() {
     for (content, expected) in [
         (

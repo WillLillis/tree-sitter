@@ -3,6 +3,7 @@
 //! containers, and the element types they store.
 
 use super::{IdentKind, Node, NodeArena, NodeId};
+use crate::nativedsl::ModuleId;
 use crate::nativedsl::ast::Spanned;
 use crate::nativedsl::typecheck::Ty;
 use crate::strpool::StrId;
@@ -59,6 +60,39 @@ pub struct MacroConfig {
     /// body, recorded by the parser as it builds them. Expand evaluates each
     /// under a call's args; resolve validates the result exists.
     pub sym_refs: ChildRange,
+    /// Set when this macro enters the resolved declaration table, after its module's
+    /// final is known. Lowering never observes `None`.
+    def_module: Option<ModuleId>,
+}
+
+impl MacroConfig {
+    #[must_use]
+    pub(crate) const fn new(
+        name: Spanned<StrId>,
+        params: ChildRange,
+        body: NodeId,
+        kind: MacroKind,
+        sym_refs: ChildRange,
+    ) -> Self {
+        Self {
+            name,
+            params,
+            body,
+            kind,
+            sym_refs,
+            def_module: None,
+        }
+    }
+
+    pub(crate) fn set_def_module(&mut self, module: ModuleId) {
+        debug_assert!(self.def_module.is_none());
+        self.def_module = Some(module);
+    }
+
+    #[must_use]
+    pub(crate) const fn def_module(&self) -> ModuleId {
+        self.def_module.unwrap()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -160,9 +194,6 @@ impl SharedAst {
             Node::Call { name, args } => {
                 stack.push(name);
                 stack.extend(self.pools.child_slice(args).iter().copied());
-            }
-            Node::QualifiedCall(range) => {
-                stack.extend(self.pools.child_slice(range).iter().copied());
             }
             Node::Object(range) => {
                 stack.extend(self.pools.get_object(range).iter().map(|f| f.value));
@@ -287,30 +318,5 @@ impl AstPools {
     #[must_use]
     pub fn param_slice(&self, range: ChildRange) -> &[Param] {
         &self.params[range.as_range()]
-    }
-
-    /// Unpack a `QualifiedCall(range)` into `(obj, name, &[args])`.
-    ///
-    /// SAFETY:
-    ///
-    /// Caller must pass a range from an actual `Node::QualifiedCall` node.
-    #[must_use]
-    pub fn get_qualified_call(&self, range: ChildRange) -> (NodeId, NodeId, &[NodeId]) {
-        let children = self.child_slice(range);
-        // SAFETY: QualifiedCall nodes are always constructed with [obj, name, ...args]
-        // by the parser, so len >= 2 is structurally guaranteed.
-        let len = children.len();
-        debug_assert!(len >= 2);
-        unsafe {
-            (
-                *children.get_unchecked(0),
-                *children.get_unchecked(1),
-                if len > 2 {
-                    children.get_unchecked(2..)
-                } else {
-                    &[]
-                },
-            )
-        }
     }
 }

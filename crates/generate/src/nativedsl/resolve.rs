@@ -79,6 +79,7 @@ pub fn resolve(
     ctx: &ModuleContext,
     pool: &mut RulePool,
     modules: &[Module],
+    current_module: ModuleId,
     base: Option<(&LoweredGrammar, Span)>,
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<()> {
@@ -86,10 +87,10 @@ pub fn resolve(
         shared,
         ctx,
         pool,
-        &ctx.root_items,
         base,
         modules,
         imported_rules,
+        current_module,
     )?;
 
     let rcx = ResolveCtx {
@@ -174,14 +175,15 @@ fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
 /// inherited rule is correctly identified as a known name rather than being
 /// re-registered as a fresh external token.
 fn collect_decls(
-    shared: &SharedAst,
+    shared: &mut SharedAst,
     ctx: &ModuleContext,
     pool: &mut RulePool,
-    root_items: &[NodeId],
     base: Option<(&LoweredGrammar, Span)>,
     modules: &[Module],
     imported_rules: &[ImportedRule],
+    current_module: ModuleId,
 ) -> ResolveResult<Decls> {
+    let root_items = &ctx.root_items;
     let decl_capacity = root_items.len()
         + base.map_or(0, |(grammar, _)| grammar.variables.len())
         + imported_rules.len();
@@ -208,6 +210,10 @@ fn collect_decls(
                 }
             }
             Node::Macro(macro_id) => {
+                shared
+                    .pools
+                    .get_macro_mut(*macro_id)
+                    .set_def_module(current_module);
                 let config = shared.pools.get_macro(*macro_id);
                 insert_decl(
                     &mut decls,
@@ -461,12 +467,6 @@ fn resolve_node(
             stack.push(Resolve::Member(id));
             Some(obj)
         }
-        Node::QualifiedCall(range) => {
-            let (obj, _name, args) = rcx.pools.get_qualified_call(range);
-            stack.push(Resolve::Member(id));
-            stack.extend(args.iter().rev().map(|&c| Resolve::Node(c)));
-            Some(obj)
-        }
         // Variadic: Seq, Choice, List, Tuple, Concat, RuleSet.
         #[rustfmt::skip]
         Node::SeqOrChoice { range, .. } | Node::List(range) | Node::Tuple(range)
@@ -515,55 +515,19 @@ fn resolve_node(
     })
 }
 
-/// Resolve the member/macro name of a `::` access whose object is now resolved.
+/// Resolve a `::` member after its object has been resolved.
 fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> ResolveResult<()> {
-    // None when obj isn't a module ref; the type checker reports the error.
-    match *arena.get(id) {
+    expect_pat!(
         Node::QualifiedAccess {
             obj,
             member,
             member_offset,
-        } => {
-            if let Some(idx) = resolve_module_id(arena, obj) {
-                resolve_qualified_member(rcx, arena, idx, id, member, member_offset)?;
-            }
-            Ok(())
-        }
-        Node::QualifiedCall(range) => {
-            let (obj, name, _args) = rcx.pools.get_qualified_call(range);
-            if let Some(idx) = resolve_module_id(arena, obj) {
-                resolve_qualified_call_name(rcx, arena, idx, name)?;
-            }
-            Ok(())
-        }
-        _ => unreachable!(),
-    }
-}
-
-/// Resolve the name node in a `QualifiedCall` to `Ident(Macro(macro_id))`.
-fn resolve_qualified_call_name(
-    rcx: &ResolveCtx,
-    arena: &mut NodeArena,
-    module: ModuleId,
-    name_id: NodeId,
-) -> ResolveResult<()> {
-    // the parser stores the call name as an unresolved identifier, and the resolve
-    // walk visits only the receiver and arguments before this.
-    expect_pat!(
-        Node::Ident(IdentKind::Unresolved(name)),
-        *arena.get(name_id)
+        },
+        *arena.get(id)
     );
-    let target = &rcx.modules[usize::from(module)];
-    match target.export(name) {
-        Some(Export::Local(kind @ IdentKind::Macro(_))) => arena.set(name_id, Node::Ident(kind)),
-        None => Err(import_member_not_found(
-            rcx,
-            target,
-            name,
-            arena.span(name_id),
-        ))?,
-        // member exists but isn't a macro, leave for typechecker to reject
-        Some(_) => {}
+    // None when obj isn't a module ref; the type checker reports the error.
+    if let Some(idx) = resolve_module_id(arena, obj) {
+        resolve_qualified_member(rcx, arena, idx, id, member, member_offset)?;
     }
     Ok(())
 }

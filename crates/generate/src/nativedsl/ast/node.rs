@@ -161,10 +161,6 @@ pub enum Node {
         module: NodeId,
         field: ConfigField,
     },
-    /// `expr::name(args)` - macro call through `::` access.
-    /// Children layout: `[obj, name, arg0, arg1, ...]` where obj is the
-    /// namespace value and name is the macro identifier.
-    QualifiedCall(ChildRange),
     Append {
         left: NodeId,
         right: NodeId,

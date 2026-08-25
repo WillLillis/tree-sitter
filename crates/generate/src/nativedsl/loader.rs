@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use crate::{
     IoError,
     nativedsl::{
-        DisallowedItemKind, DslError, DslResult, LexError, LexErrorKind, LowerError,
+        DisallowedItemKind, DslError, DslResult, Export, LexError, LexErrorKind, LowerError,
         LowerErrorKind, LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
+        TypeError, TypeErrorKind,
         apply_cfg::{CfgState, apply_cfg},
-        ast::{ModuleContext, Node, SharedAst, Span},
+        ast::{IdentKind, ModuleContext, Node, SharedAst, Span},
         expand_macro_calls, lexer, lower, parser,
         resolve::{self, ResolveErrorKind},
         typecheck::{self, TypeEnv},
@@ -113,6 +114,11 @@ impl Loader<'_> {
 
         self.load_import_children(&ctx, module_dir)?;
 
+        // Child loading is complete, so this module's final table index is fixed.
+        let global_id = u8::try_from(self.modules.len())
+            .map(ModuleId::from)
+            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+
         // Flatten the transitive helper imports once
         let imported_rules =
             super::collect_imported_rules(&self.shared.arena, &ctx.module_refs, self.modules);
@@ -126,20 +132,17 @@ impl Loader<'_> {
             &ctx,
             self.pool,
             self.modules,
+            global_id,
             base,
             &imported_rules,
         )
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         // Child modules already populated `env` during their own `load_module` calls.
-        typecheck::check(self.shared, &ctx, self.env, self.pool.strs())?;
+        typecheck::check(self.shared, &ctx, self.env, self.pool.strs())
+            .map_err(|e| self.enrich_type_error(&ctx, e))?;
         // After typecheck so a cycling inherits chain reports CircularLet.
         self.validate_inherits_binding(&ctx)?;
-        // This module's id. Checked before lowering: the evaluator derives its
-        // root id from `modules.len()`, which must fit u8.
-        let global_id = u8::try_from(self.modules.len())
-            .map(ModuleId::from)
-            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
         let module = match kind {
             ModuleKind::Grammar => {
                 let lowered = Box::new(lower::lower_with_base(
@@ -217,6 +220,73 @@ impl Loader<'_> {
         let flag_name = self.pool.strs().resolve(flag).to_string();
         let decl_span = self.shared.arena.span(cfg_id);
         e.add_note(owner.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
+        e
+    }
+
+    /// Attach a cross-module definition note when `e` is `UndefinedMacro` for a
+    /// qualified call to a non-macro export. Resolve has replaced the qualified
+    /// callee with its target, so recover it from the call span on this error path.
+    fn enrich_type_error(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
+        let TypeErrorKind::UndefinedMacro(_) = e.kind else {
+            return e;
+        };
+        let Some(call_span) = e.span else {
+            return e;
+        };
+        let arena = &self.shared.arena;
+        let Some(callee) = current.iter_own_nodes(arena).find_map(|(id, node)| {
+            if let Node::Call { name, .. } = *node
+                && arena.span(id) == call_span
+            {
+                Some(name)
+            } else {
+                None
+            }
+        }) else {
+            return e;
+        };
+
+        let (module, member) = match *arena.get(callee) {
+            Node::Ident(IdentKind::Var(let_id)) => {
+                expect_pat!(Node::Let { name, .. }, *arena.get(let_id));
+                let Some(module) = self.modules.iter().find(|module| {
+                    matches!(
+                        module.export(name),
+                        Some(Export::Local(IdentKind::Var(id))) if id == let_id
+                    )
+                }) else {
+                    return e;
+                };
+                (module, name)
+            }
+            Node::ModuleRule { module, target } => {
+                let module = &self.modules[usize::from(module)];
+                let Some(name) = module.export_keys().find(
+                    |&name| matches!(module.export(name), Some(Export::Rule(t)) if t == target),
+                ) else {
+                    return e;
+                };
+                (module, name)
+            }
+            _ => return e,
+        };
+
+        let Some(decl) = module.ctx().root_items.iter().copied().find(|&id| {
+            let decl_name = match *arena.get(id) {
+                Node::Let { name, .. } | Node::Rule { name, .. } => name,
+                Node::ExpandedRule(expand_id) => self.shared.pools.get_expansion(expand_id).name,
+                _ => return false,
+            };
+            decl_name == member
+        }) else {
+            return e;
+        };
+
+        e.add_note(
+            module
+                .ctx()
+                .note(NoteMessage::DefinedHere, arena.span(decl)),
+        );
         e
     }
 
