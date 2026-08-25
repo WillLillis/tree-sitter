@@ -234,8 +234,8 @@ impl<'src> Lexer<'src> {
                             // SAFETY: pos < source.len() checked above.
                             match unsafe { *source.get_unchecked(pos) } {
                                 b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
-                                b'x' => pos = validate_hex_escape(source, esc_pos, pos)?,
-                                b'u' => pos = validate_unicode_escape(source, esc_pos, pos)?,
+                                b'x' => pos = validate_hex_escape(source, esc_pos)?,
+                                b'u' => pos = validate_unicode_escape(source, esc_pos)?,
                                 _ => {
                                     // SAFETY: source is valid UTF-8 (from &str).
                                     let rest =

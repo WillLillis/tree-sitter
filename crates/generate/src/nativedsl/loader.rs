@@ -112,7 +112,7 @@ impl Loader<'_> {
             );
         }
 
-        self.load_import_children(&ctx, module_dir)?;
+        self.load_import_children(&ctx)?;
 
         // Child loading is complete, so this module's final table index is fixed.
         let global_id = u8::try_from(self.modules.len())
@@ -154,8 +154,7 @@ impl Loader<'_> {
                     &imported_rules,
                 )?);
                 let exports = super::build_exports(
-                    &self.shared.arena,
-                    &self.shared.pools,
+                    self.shared,
                     &ctx,
                     self.pool,
                     super::LoweredRef::Grammar(&lowered),
@@ -170,8 +169,7 @@ impl Loader<'_> {
                 let lowered_rules =
                     lower::lower_helper(self.state, self.pool, self.shared, self.modules, &ctx)?;
                 let exports = super::build_exports(
-                    &self.shared.arena,
-                    &self.shared.pools,
+                    self.shared,
                     &ctx,
                     self.pool,
                     super::LoweredRef::Helper(&lowered_rules),
@@ -339,11 +337,8 @@ impl Loader<'_> {
     }
 
     /// Resolve `ModuleRef` nodes, loading each child file.
-    fn load_import_children(
-        &mut self,
-        ctx: &ModuleContext,
-        module_dir: &Path,
-    ) -> Result<(), DslError> {
+    fn load_import_children(&mut self, ctx: &ModuleContext) -> Result<(), DslError> {
+        let module_dir = ctx.path.parent().unwrap();
         for &node_id in &ctx.module_refs {
             let &Node::ModuleRef {
                 import: is_import,

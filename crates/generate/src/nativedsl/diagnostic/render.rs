@@ -82,14 +82,14 @@ struct Source<'a> {
     path: &'a Path,
 }
 
-#[derive(Clone)]
-enum SnippetKind {
+#[derive(Clone, Copy)]
+enum SnippetKind<'a> {
     Error,
-    Note(NoteMessage),
+    Note(&'a NoteMessage),
 }
 
-impl SnippetKind {
-    const fn marker(&self) -> SnippetMarker {
+impl SnippetKind<'_> {
+    const fn marker(self) -> SnippetMarker {
         match self {
             Self::Error => ERROR_MARKER,
             Self::Note(_) => NOTE_MARKER,
@@ -143,8 +143,7 @@ impl std::fmt::Display for NativeDslError {
                         text,
                         path,
                     },
-                    SnippetKind::Note(NoteMessage::ReferencedFromHere),
-                    false,
+                    SnippetKind::Note(&NoteMessage::ReferencedFromHere),
                 )?;
             }
 
@@ -175,7 +174,7 @@ fn render_error(
         return Ok(());
     };
 
-    render_snippet(f, Source { span, text, path }, SnippetKind::Error, true)?;
+    render_snippet(f, Source { span, text, path }, SnippetKind::Error)?;
 
     for note in error.notes() {
         writeln!(f)?;
@@ -186,8 +185,7 @@ fn render_error(
                 text: &note.src,
                 path: &note.path,
             },
-            SnippetKind::Note(note.message.clone()),
-            false,
+            SnippetKind::Note(&note.message),
         )?;
     }
 
@@ -214,9 +212,9 @@ fn render_error(
 fn render_snippet(
     f: &mut std::fmt::Formatter<'_>,
     src: Source<'_>,
-    kind: SnippetKind,
-    show_prev_line: bool,
+    kind: SnippetKind<'_>,
 ) -> std::fmt::Result {
+    let show_prev_line = matches!(kind, SnippetKind::Error);
     let marker = kind.marker();
     let ctx = SpanContext::new(src.span, src.text);
     let underline = Paint(

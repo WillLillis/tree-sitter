@@ -107,12 +107,12 @@ fn read_hex_digits(source: &[u8], start: usize, n: usize) -> Result<u32, usize> 
 }
 
 /// Validate `\xHH` (exactly 2 hex digits, value 0x00-0x7F). Returns the new
-/// position past the escape on success. `esc_pos` points at the backslash;
-/// `pos` points at the `x`.
-pub(super) fn validate_hex_escape(source: &[u8], esc_pos: usize, pos: usize) -> LexResult<usize> {
+/// position past the escape on success. `esc_pos` points at the backslash.
+pub(super) fn validate_hex_escape(source: &[u8], esc_pos: usize) -> LexResult<usize> {
     let bad = |e| LexError::new(LexErrorKind::InvalidHexEscape, Span::from_usize(esc_pos, e));
-    let value = read_hex_digits(source, pos + 1, 2).map_err(bad)?;
-    let end = pos + 3; // both digits are ASCII, so this is a char boundary
+    let digits_start = esc_pos + 2;
+    let value = read_hex_digits(source, digits_start, 2).map_err(bad)?;
+    let end = digits_start + 2; // both digits are ASCII, so this is a char boundary
     if value <= 0x7F {
         Ok(end)
     } else {
@@ -122,12 +122,8 @@ pub(super) fn validate_hex_escape(source: &[u8], esc_pos: usize, pos: usize) -> 
 
 /// Validate `\uHHHH` (4 hex digits) or `\u{H..H}` (1-6 hex digits in braces).
 /// Codepoint must be <= 0x10FFFF and not a surrogate (0xD800-0xDFFF).
-pub(super) fn validate_unicode_escape(
-    source: &[u8],
-    esc_pos: usize,
-    pos: usize,
-) -> LexResult<usize> {
-    let after_u = pos + 1;
+pub(super) fn validate_unicode_escape(source: &[u8], esc_pos: usize) -> LexResult<usize> {
+    let after_u = esc_pos + 2;
     let bad = |e: usize| {
         LexError::new(
             LexErrorKind::InvalidUnicodeEscape,
