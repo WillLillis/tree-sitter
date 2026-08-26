@@ -311,8 +311,9 @@ pub(super) enum Work {
     Eval { id: NodeId, demand: Demand },
     /// Type a spread-position item, propagating `demand` to its leaves.
     Spread { id: NodeId, demand: Demand },
-    /// Match a `for`'s iterable type, then type its body under `demand`.
-    ForBindings { node: NodeId, demand: Demand },
+    /// Continue a `for` after its iterable type has been emitted. Match that type
+    /// against the bindings, then schedule the body as another spread.
+    ForBody { node: NodeId, demand: Demand },
     /// Fold a combining node's emitted child types.
     Combine { id: NodeId, demand: Demand },
 }
@@ -346,9 +347,9 @@ fn drive(cx: Cx<'_>, env: &mut TypeEnv, work_base: usize) -> TypeResult<()> {
                 }
             }
             Work::Spread { id, demand } => {
-                enqueue_for(cx, id, demand, &mut env.work)?;
+                schedule_for(cx, id, demand, &mut env.work)?;
             }
-            Work::ForBindings { node, demand } => {
+            Work::ForBody { node, demand } => {
                 let iter_ty = pop_result(&mut env.results);
                 expect_pat!(Node::For { for_id, body }, *shared.arena.get(node));
                 match_for_elem(shared, for_id, iter_ty)?;
@@ -592,7 +593,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
         }
         Node::For { .. } => {
             push_combine(&mut env.work, id, demand);
-            enqueue_for(
+            schedule_for(
                 cx,
                 id,
                 Demand::checking(Constraint::Exact(Ty::RULE)),
@@ -619,12 +620,15 @@ fn append_operands(
     right: NodeId,
     expected: Constraint,
 ) -> (bool, bool) {
-    let is_empty = |id| matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty());
     let is_list_anno = matches!(expected, Constraint::Exact(t) if t.is_list());
     (
-        !is_empty(left) || is_list_anno,
-        !is_empty(right) || is_list_anno,
+        !is_empty_list(shared, left) || is_list_anno,
+        !is_empty_list(shared, right) || is_list_anno,
     )
+}
+
+fn is_empty_list(shared: &SharedAst, id: NodeId) -> bool {
+    matches!(shared.arena.get(id), Node::List(r) if shared.pools.child_slice(*r).is_empty())
 }
 
 /// Handle a [`Work::Combine`].
@@ -860,21 +864,17 @@ fn push_spread_item(shared: &SharedAst, id: NodeId, demand: Demand, work: &mut V
     }
 }
 
-/// Schedule a for-loop's iterable and body.
-fn enqueue_for(cx: Cx<'_>, node: NodeId, demand: Demand, work: &mut Vec<Work>) -> TypeResult<()> {
+/// Schedule a `for` iterable followed by the continuation that checks its element
+/// type and schedules the body.
+fn schedule_for(cx: Cx<'_>, node: NodeId, demand: Demand, work: &mut Vec<Work>) -> TypeResult<()> {
     let Cx { shared, .. } = cx;
     expect_pat!(Node::For { for_id, body }, *shared.arena.get(node));
-    let config = shared.pools.get_for(for_id);
-    let bindings = shared.pools.param_slice(config.bindings);
-    let iterable = config.iterable;
-    validate_for_bindings(cx, bindings, shared.arena.span(body))?;
-    if let Node::List(range) = shared.arena.get(iterable)
-        && shared.pools.child_slice(*range).is_empty()
-    {
+    let iterable = validate_for_header(cx, for_id, body)?;
+    if is_empty_list(shared, iterable) {
         push_spread_item(shared, body, demand, work);
         return Ok(());
     }
-    work.push(Work::ForBindings { node, demand });
+    work.push(Work::ForBody { node, demand });
     push_eval(work, iterable, Demand::emitting(Constraint::None));
     Ok(())
 }
@@ -978,19 +978,31 @@ fn check_spread_item<Leaf>(
     leaf: Leaf,
 ) -> TypeResult<Ty>
 where
-    Leaf: Fn(Cx<'_>, NodeId, &mut TypeEnv) -> TypeResult<Ty> + Copy,
+    Leaf: Fn(Cx<'_>, NodeId, &mut TypeEnv) -> TypeResult<Ty>,
 {
     let Cx { shared, .. } = cx;
-    if let &Node::For { for_id, body } = shared.arena.get(item) {
-        check_for_expr(cx, for_id, body, env, |body, env| {
-            check_spread_item(cx, body, env, leaf)
-        })
-    } else {
-        leaf(cx, item, env)
+    let mut curr_item = item;
+    loop {
+        let Node::For { for_id, body } = *shared.arena.get(curr_item) else {
+            return leaf(cx, curr_item, env);
+        };
+        let iterable = validate_for_header(cx, for_id, body)?;
+        if !is_empty_list(shared, iterable) {
+            let iter_ty = type_of(cx, iterable, env, Constraint::None)?;
+            match_for_elem(shared, for_id, iter_ty)?;
+        }
+        curr_item = body;
     }
 }
 
-fn validate_for_bindings(cx: Cx<'_>, bindings: &[Param], body_span: Span) -> TypeResult<()> {
+/// Validate the binding declarations in a `for` header and return the iterable
+/// expression node for subsequent type checking.
+fn validate_for_header(cx: Cx<'_>, for_id: ForId, body: NodeId) -> TypeResult<NodeId> {
+    let Cx { shared, .. } = cx;
+    let config = shared.pools.get_for(for_id);
+    let bindings = shared.pools.param_slice(config.bindings);
+    let body_span = shared.arena.span(body);
+
     if bindings.is_empty() {
         return Err(TypeError::new(TypeErrorKind::EmptyForBindings, body_span));
     }
@@ -1005,7 +1017,7 @@ fn validate_for_bindings(cx: Cx<'_>, bindings: &[Param], body_span: Span) -> Typ
             }
         }
     }
-    Ok(())
+    Ok(config.iterable)
 }
 
 fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<()> {
@@ -1047,33 +1059,6 @@ fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<
         }
     }
     Ok(())
-}
-
-fn check_for_expr<CheckBody>(
-    cx: Cx<'_>,
-    for_idx: ForId,
-    body: NodeId,
-    env: &mut TypeEnv,
-    check_body: CheckBody,
-) -> TypeResult<Ty>
-where
-    CheckBody: FnOnce(NodeId, &mut TypeEnv) -> TypeResult<Ty>,
-{
-    let Cx { shared, .. } = cx;
-    let config = shared.pools.get_for(for_idx);
-    let bindings = shared.pools.param_slice(config.bindings);
-    let iterable = config.iterable;
-    validate_for_bindings(cx, bindings, shared.arena.span(body))?;
-
-    if let Node::List(range) = shared.arena.get(iterable)
-        && shared.pools.child_slice(*range).is_empty()
-    {
-        return check_body(body, env);
-    }
-
-    let iter_ty = type_of(cx, iterable, env, Constraint::None)?;
-    match_for_elem(shared, for_idx, iter_ty)?;
-    check_body(body, env)
 }
 
 fn empty_container_result(expected: Constraint, kind: ContainerKind, span: Span) -> TypeResult<Ty> {

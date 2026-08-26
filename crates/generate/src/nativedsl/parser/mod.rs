@@ -1068,14 +1068,14 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         }
         self.expect(TokenKind::KwIn)?;
         let iterable = self.parse_expr()?;
-        let bindings = self.shared.pools.push_params(&bindings);
-        let for_id = self.shared.pools.push_for(ForConfig { bindings, iterable });
+        let bindings_range = self.shared.pools.push_params(&bindings);
+        let for_id = self.shared.pools.push_for(ForConfig {
+            bindings: bindings_range,
+            iterable,
+        });
         self.expect(TokenKind::LBrace)?;
         let (body, end) = stack_scope!(self.locals, |_saved| {
-            let bindings = self.shared.pools.get_for(for_id).bindings;
-            for (i, &Param { name, ty }) in
-                self.shared.pools.param_slice(bindings).iter().enumerate()
-            {
+            for (i, &Param { name, ty }) in bindings.iter().enumerate() {
                 self.locals
                     .push((name.value, LocalBinding::ForBinding(for_id, ty, i as u8)));
             }

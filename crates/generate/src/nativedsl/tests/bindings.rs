@@ -59,6 +59,41 @@ rule_tests! {
         rule program { choice(for (name: str_t, n: int_t) in copy { prec(n, name) }) }"#,
         |p| r_choice!(p, [r_prec!(p, Precedence::Integer(1), r_str!(p, "kw_a")), r_prec!(p, Precedence::Integer(2), r_str!(p, "kw_b"))])
     }
+    deeply_nested_for_body_reads_outer_binding {
+        r#"grammar { language: "test" }
+        rule program {
+          choice(for (outer: rule_t) in [a, b] {
+              for (middle: rule_t) in [c] {
+                  for (inner: rule_t) in [d] { seq(outer, middle, inner) }
+              }
+          })
+        }
+        rule a { "a" }
+        rule b { "b" }
+        rule c { "c" }
+        rule d { "d" }"#,
+        |p| r_choice!(p, [
+            r_seq!(p, [r_sym!(p, "a"), r_sym!(p, "c"), r_sym!(p, "d")]),
+            r_seq!(p, [r_sym!(p, "b"), r_sym!(p, "c"), r_sym!(p, "d")]),
+        ])
+    }
+    deeply_nested_for_iterable_reads_outer_binding {
+        r#"grammar { language: "test" }
+        rule program {
+            choice(for (outer: list_t<rule_t>) in [[a, b]] {
+                for (middle: rule_t) in [c] {
+                    for (inner: rule_t) in outer { seq(middle, inner) }
+                }
+            })
+        }
+        rule a { "a" }
+        rule b { "b" }
+        rule c { "c" }"#,
+        |p| r_choice!(p, [
+            r_seq!(p, [r_sym!(p, "c"), r_sym!(p, "a")]),
+            r_seq!(p, [r_sym!(p, "c"), r_sym!(p, "b")]),
+        ])
+    }
     object_field_access_list_value {
         r#"grammar { language: "test" }
         let GROUPS = { kw: ["if", "else"], ops: ["+", "-"] }

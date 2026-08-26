@@ -44,6 +44,13 @@ pub(super) struct CallFrame {
     pub caller_mod: ModuleId,
 }
 
+/// Binding slots for an active `for` loop.
+#[derive(Clone, Copy)]
+struct ForFrame {
+    for_id: ForId,
+    values_base: usize,
+}
+
 /// Long-lived state shared across grammar lowerings in one `parse_native_dsl`
 /// call.
 ///
@@ -82,7 +89,7 @@ struct Scratch {
     macro_args: Vec<ValueId>,
     macro_arg_bases: Vec<usize>,
     for_binding_values: Vec<ValueId>,
-    for_binding_frames: Vec<(ForId, usize)>,
+    for_binding_frames: Vec<ForFrame>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
     /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
