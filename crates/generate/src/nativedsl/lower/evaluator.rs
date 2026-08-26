@@ -14,7 +14,7 @@ use super::{
             Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
         },
     },
-    CallFrame, LetState, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
+    CallFrame, ForFrame, LetState, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
     repr::{Value, ValueId},
 };
 
@@ -29,8 +29,8 @@ use crate::{
 pub(super) enum Task {
     Expr(NodeId),
     Rule(NodeId),
-    ForVal(NodeId),
-    ForRule(NodeId),
+    SpreadValues(NodeId),
+    SpreadRules(NodeId),
     Combine(NodeId),
     WrapRule,
     ExtractRule,
@@ -448,13 +448,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.dispatch_rule(id);
                 Ok(())
             }
-            Task::ForVal(node) => {
+            Task::SpreadValues(node) => {
                 expect_pat!(Node::For { for_id, body }, *self.shared.arena.get(node));
-                self.eval_for_to_values(for_id, body)
+                self.expand_for_values(for_id, body)
             }
-            Task::ForRule(node) => {
+            Task::SpreadRules(node) => {
                 expect_pat!(Node::For { for_id, body }, *self.shared.arena.get(node));
-                self.eval_for_to_rules(for_id, body)
+                self.expand_for_rules(for_id, body)
             }
             Task::Combine(id) => self.combine(id),
             Task::WrapRule => {
@@ -603,9 +603,9 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .for_binding_frames
                     .iter()
                     .rev()
-                    .find(|(fid, _)| *fid == for_id)
+                    .find(|frame| frame.for_id == for_id)
                     .unwrap()
-                    .1;
+                    .values_base;
                 let v = self.state.scratch.for_binding_values[base + index];
                 self.push_val_id(v);
             }
@@ -646,7 +646,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_combine_var(id, base);
                 for &item in self.shared.pools.child_slice(range).iter().rev() {
                     let task = match self.shared.arena.get(item) {
-                        Node::For { .. } => Task::ForVal(item),
+                        Node::For { .. } => Task::SpreadValues(item),
                         _ => Task::Expr(item),
                     };
                     self.push_task(task);
@@ -718,7 +718,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_combine_var(id, base);
                 for &item in items[i..].iter().rev() {
                     let task = match self.shared.arena.get(item) {
-                        Node::For { .. } => Task::ForRule(item),
+                        Node::For { .. } => Task::SpreadRules(item),
                         _ => Task::Rule(item),
                     };
                     self.push_task(task);
@@ -1118,77 +1118,77 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         })
     }
 
-    fn eval_for_to_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
-        self.eval_for_each(for_id, |evaluator| {
-            if let &Node::For {
-                for_id: inner,
-                body: inner_body,
-            } = evaluator.shared.arena.get(body)
-            {
-                evaluator.eval_for_to_rules(inner, inner_body)
-            } else {
-                let rule_id = evaluator.lower_to_rule(body)?;
-                evaluator.state.scratch.rule_scratch.push(rule_id);
-                Ok(())
-            }
+    fn expand_for_rules(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
+        self.expand_for(for_id, body, &mut |evaluator, leaf| {
+            let rule_id = evaluator.lower_to_rule(leaf)?;
+            evaluator.state.scratch.rule_scratch.push(rule_id);
+            Ok(())
         })
     }
 
-    fn eval_for_to_values(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
-        self.eval_for_each(for_id, |evaluator| {
-            if let &Node::For {
-                for_id: inner,
-                body: inner_body,
-            } = evaluator.shared.arena.get(body)
-            {
-                evaluator.eval_for_to_values(inner, inner_body)
-            } else {
-                let value_id = evaluator.eval_expr(body)?;
-                evaluator.state.scratch.val_scratch.push(value_id);
-                Ok(())
-            }
+    fn expand_for_values(&mut self, for_id: ForId, body: NodeId) -> LowerResult<()> {
+        self.expand_for(for_id, body, &mut |evaluator, leaf| {
+            let value_id = evaluator.eval_expr(leaf)?;
+            evaluator.state.scratch.val_scratch.push(value_id);
+            Ok(())
         })
     }
 
-    fn eval_for_each<EachIter>(&mut self, for_id: ForId, mut each_iter: EachIter) -> LowerResult<()>
+    /// Expand a spread-position `for`, recursively flattening nested `for` bodies
+    /// and passing each terminal body to `emit`.
+    fn expand_for<Emit>(&mut self, for_id: ForId, body: NodeId, emit: &mut Emit) -> LowerResult<()>
     where
-        EachIter: FnMut(&mut Self) -> LowerResult<()>,
+        Emit: FnMut(&mut Self, NodeId) -> LowerResult<()>,
     {
         let for_config = self.shared.pools.get_for(for_id);
         let iterable = for_config.iterable;
         let n_bindings = usize::from(for_config.bindings.len);
+        // A loop's bindings are not in scope for its own iterable. Same-name references
+        // there belong to an outer loop.
         let iter_vid = self.eval_expr(iterable)?;
         let iter_range = self.list_range(iter_vid);
-        let n_items = usize::from(iter_range.len);
+        let nested_for = match *self.shared.arena.get(body) {
+            Node::For { for_id, body } => Some((for_id, body)),
+            _ => None,
+        };
+
         stack_scope!(
             self.state.scratch.for_binding_values => base,
             self.state.scratch.for_binding_frames => _frames_base;
             {
-                self.state.scratch.for_binding_frames.push((for_id, base));
-                for i in 0..n_items {
-                    let item_id = self.state.ir.value_children[iter_range.start as usize + i];
-                    for j in 0..n_bindings {
-                        // Typecheck guarantees tuple destructuring shape.
-                        let val = if n_bindings == 1 {
-                            item_id
-                        } else {
-                            match *self.get_val(item_id) {
-                                Value::Tuple(range) => {
-                                    self.state.ir.value_children[range.start as usize + j]
-                                }
-                                _ => unreachable!(),
-                            }
-                        };
-                        if i == 0 {
-                            self.state.scratch.for_binding_values.push(val);
-                        } else {
-                            self.state.scratch.for_binding_values[base + j] = val;
-                        }
+                self.state.scratch.for_binding_frames.push(ForFrame {
+                    for_id,
+                    values_base: base,
+                });
+                for item_index in iter_range.as_range() {
+                    let item_id = self.state.ir.value_children[item_index];
+
+                    // Rebuild the binding row before entering the body.
+                    self.state.scratch.for_binding_values.truncate(base);
+                    if n_bindings == 1 {
+                        self.state.scratch.for_binding_values.push(item_id);
+                    } else {
+                        self.push_for_tuple_bindings(item_id);
                     }
-                    each_iter(self)?;
+
+                    if let Some((inner, inner_body)) = nested_for {
+                        self.expand_for(inner, inner_body, emit)?;
+                    } else {
+                        emit(self, body)?;
+                    }
                 }
                 Ok(())
             }
         )
+    }
+
+    fn push_for_tuple_bindings(&mut self, item_id: ValueId) {
+        // Typecheck guarantees tuple destructuring shape and arity.
+        expect_pat!(Value::Tuple(range), *self.get_val(item_id));
+        let values = &self.state.ir.value_children[range.as_range()];
+        self.state
+            .scratch
+            .for_binding_values
+            .extend_from_slice(values);
     }
 }
