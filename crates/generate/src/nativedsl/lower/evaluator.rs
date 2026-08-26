@@ -591,7 +591,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_val(Value::Rule(rid));
             }
             Node::MacroParam { index, .. } => {
-                let base = *self.state.scratch.macro_arg_bases.last().unwrap();
+                let base = usize::from(*self.state.scratch.macro_arg_bases.last().unwrap());
                 let v = self.state.scratch.macro_args[base + usize::from(*index)];
                 self.push_val_id(v);
             }
@@ -605,7 +605,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     .rev()
                     .find(|frame| frame.for_id == for_id)
                     .unwrap()
-                    .values_base;
+                    .values_base as usize;
                 let v = self.state.scratch.for_binding_values[base + index];
                 self.push_val_id(v);
             }
@@ -1084,7 +1084,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     let v = self.eval_expr(arg_id)?;
                     self.state.scratch.macro_args.push(v);
                 }
-                self.state.scratch.macro_arg_bases.push(args_base);
+                self.state.scratch.macro_arg_bases.push(args_base as u16);
                 let saved = self.current_module;
                 self.current_module = def_module;
                 let result = body_eval(self);
@@ -1156,9 +1156,10 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             self.state.scratch.for_binding_values => base,
             self.state.scratch.for_binding_frames => _frames_base;
             {
+                let values_base = u32::try_from(base).unwrap();
                 self.state.scratch.for_binding_frames.push(ForFrame {
                     for_id,
-                    values_base: base,
+                    values_base,
                 });
                 for item_index in iter_range.as_range() {
                     let item_id = self.state.ir.value_children[item_index];

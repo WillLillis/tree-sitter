@@ -157,9 +157,9 @@ struct Walker<'a> {
     /// walk visits each one - a nested cfg-dropped ref is never collected.
     module_refs: &'a mut Vec<NodeId>,
     /// Write head into the active rule-set macro's `sym_refs` range while its
-    /// body is walked; `None` outside a macro body. Surviving `@<expr>` refs are
-    /// compacted to the front of the range in place
-    sym_ref_cursor: Option<usize>,
+    /// body is walked. `None` outside a macro body. Surviving `@<expr>` refs are
+    /// compacted to the front of the range in place.
+    sym_ref_cursor: Option<u32>,
 }
 
 impl Walker<'_> {
@@ -271,7 +271,7 @@ impl Walker<'_> {
             // the enclosing macro's sym_refs range in place, then walk the expr.
             Node::SymRef { expr } => {
                 if let Some(w) = self.sym_ref_cursor.as_mut() {
-                    self.shared.pools.children[*w] = id;
+                    self.shared.pools.children[*w as usize] = id;
                     *w += 1;
                 }
                 self.walk(expr)?;
@@ -294,9 +294,9 @@ impl Walker<'_> {
             Node::Macro(macro_id) => {
                 let sym_refs = self.shared.pools.get_macro(macro_id).sym_refs;
                 let body = self.shared.pools.get_macro(macro_id).body;
-                self.sym_ref_cursor = Some(sym_refs.start as usize);
+                self.sym_ref_cursor = Some(sym_refs.start);
                 self.walk(body)?;
-                let kept = (self.sym_ref_cursor.take().unwrap() - sym_refs.start as usize) as u16;
+                let kept = (self.sym_ref_cursor.take().unwrap() - sym_refs.start) as u16;
                 self.shared.pools.get_macro_mut(macro_id).sym_refs.len = kept;
             }
             // Import/inherit ref: collected so resolve and lower see the

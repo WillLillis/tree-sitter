@@ -48,8 +48,11 @@ pub(super) struct CallFrame {
 #[derive(Clone, Copy)]
 struct ForFrame {
     for_id: ForId,
-    values_base: usize,
+    /// Base offset into [`Scratch::for_binding_values`].
+    values_base: u32,
 }
+
+const _: () = assert!(std::mem::size_of::<ForFrame>() == 8);
 
 /// Long-lived state shared across grammar lowerings in one `parse_native_dsl`
 /// call.
@@ -87,7 +90,9 @@ struct Scratch {
     /// Scratch for `first_unresolved_let_dep`.
     dep_walk: Vec<NodeId>,
     macro_args: Vec<ValueId>,
-    macro_arg_bases: Vec<usize>,
+    /// Bases into `macro_args`. Lowered calls have at most `u8::MAX` arguments
+    /// and nesting is limited to `MAX_CALL_DEPTH`, so every base fits in `u16`.
+    macro_arg_bases: Vec<u16>,
     for_binding_values: Vec<ValueId>,
     for_binding_frames: Vec<ForFrame>,
     val_scratch: Vec<ValueId>,
