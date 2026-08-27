@@ -479,7 +479,6 @@ fn resolve_expr(
 /// `stack` (reversed, to pop in source order), and return its first child to
 /// descend into directly (no stack round-trip). The node is read once; an alias
 /// target and a `::` member/name are resolved specially.
-#[inline]
 fn resolve_node(
     arena: &mut NodeArena,
     rcx: &ResolveCtx,

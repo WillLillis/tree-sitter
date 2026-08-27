@@ -305,11 +305,13 @@ impl AstPools {
         &self.expansions[id.index()]
     }
 
+    #[inline]
     #[must_use]
     pub fn get_object(&self, range: ChildRange) -> &[ObjectField] {
         &self.object_fields[range.as_range()]
     }
 
+    #[inline]
     #[must_use]
     pub fn child_slice(&self, range: ChildRange) -> &[NodeId] {
         &self.children[range.as_range()]
