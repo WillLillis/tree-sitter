@@ -177,9 +177,16 @@ fn collect_decls(
     current_module: ModuleId,
 ) -> ResolveResult<Decls> {
     let root_items = &ctx.root_items;
+    let external_capacity = ctx
+        .grammar_config
+        .as_ref()
+        .and_then(|config| config.externals)
+        .and_then(|id| shared.arena.get(id).child_range())
+        .map_or(0, |range| range.len as usize);
     let decl_capacity = root_items.len()
         + base.map_or(0, |(grammar, _)| grammar.variables.len())
-        + imported_rules.len();
+        + imported_rules.len()
+        + external_capacity;
     let mut decls = FxHashMap::with_capacity_and_hasher(decl_capacity, FxBuildHasher);
     let mut override_names = FxHashSet::default();
 
