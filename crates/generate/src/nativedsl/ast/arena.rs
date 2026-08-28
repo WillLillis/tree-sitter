@@ -54,6 +54,11 @@ impl NodeArena {
         Self { nodes, spans }
     }
 
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.nodes.reserve(additional);
+        self.spans.reserve(additional);
+    }
+
     #[inline]
     pub fn push(&mut self, node: Node, span: Span) -> NodeId {
         let index = self.nodes.len() as u32;

@@ -57,6 +57,11 @@ impl Loader<'_> {
             Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
         }
 
+        // The root's capacity is seeded by `parse_native_dsl`. Reserve here for children.
+        if self.ancestor_paths.len() > 1 {
+            self.shared.reserve_for_module(source.len());
+        }
+
         let module_dir = path.parent().unwrap();
 
         let tokens = lexer::Lexer::new(source).tokenize()?;
