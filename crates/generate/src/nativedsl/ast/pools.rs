@@ -144,11 +144,12 @@ pub struct AstPools {
 
 impl SharedAst {
     #[must_use]
-    pub fn new(estimated_cap: usize) -> Self {
+    pub fn new(estimated_nodes: usize) -> Self {
         Self {
-            arena: NodeArena::new(estimated_cap),
+            arena: NodeArena::new(estimated_nodes),
             pools: AstPools {
-                children: Vec::with_capacity(estimated_cap),
+                // Empirical estimate of ~1 pooled child per 2 AST nodes
+                children: Vec::with_capacity(estimated_nodes / 2),
                 macro_configs: Vec::new(),
                 for_configs: Vec::new(),
                 object_fields: Vec::new(),
@@ -156,6 +157,13 @@ impl SharedAst {
                 expansions: Vec::new(),
             },
         }
+    }
+
+    pub(crate) fn reserve_for_module(&mut self, source_len: usize) {
+        // Modules average ~16 source bytes per node, leave room for denser ones
+        let estimated_nodes = source_len / 12;
+        self.arena.reserve(estimated_nodes);
+        self.pools.children.reserve(estimated_nodes / 2);
     }
 
     /// Find the first `let` referenced in `root`'s expression subtree that is not
