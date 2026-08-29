@@ -11,7 +11,7 @@ use super::{
         MacroKind, ModuleContext, Node, NodeId, ObjectField, Param, PrecKind, RepeatKind,
         SharedAst, Span, Spanned,
     },
-    lexer::{Token, TokenKind, unescape_string},
+    lexer::{Token, TokenKind, unescape_string_into},
     typecheck::{
         DataTy, ScalarTy, Ty,
         types::{TUPLE_MAX_ARITY, TupleSig},
@@ -42,6 +42,7 @@ pub struct Parser<'tok, 'shared, 'strs> {
     depth: u16,
     /// `Some` while parsing a `rules` macro def, holding the `SymRef` node ids created.
     pending_sym_refs: Option<Vec<NodeId>>,
+    unescape_buf: String,
 }
 
 /// Snapshot `self.depth`, run the body (which may `deepen()` one or more times),
@@ -98,6 +99,7 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
             locals: Vec::new(),
             depth: 0,
             pending_sym_refs: None,
+            unescape_buf: String::new(),
         }
     }
 
@@ -723,7 +725,8 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
                 let span = start.strip_quotes();
                 let raw = self.ctx.text(span);
                 let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
-                    self.strs.intern(&unescape_string(raw))
+                    unescape_string_into(raw, &mut self.unescape_buf);
+                    self.strs.intern(&self.unescape_buf)
                 } else {
                     self.strs.intern(raw)
                 };

@@ -1,45 +1,50 @@
-//! String escape-sequence decoding ([`unescape_string`]) and the validators the
-//! lexer uses while scanning a string literal.
+//! String escape-sequence decoding ([`unescape_string_into`]) and the validators
+//! the lexer uses while scanning a string literal.
 
 use memchr::memchr;
 
 use crate::nativedsl::{LexError, LexErrorKind, LexResult, ast::Span};
 
-/// Decode the escape sequences in a quote-stripped string literal's text.
+/// Decode the escape sequences in a quote-stripped string literal's text into
+/// `out`, replacing its previous contents.
+///
 /// Assumes [`lex_string`](super::Lexer) already validated every escape is
-/// well-formed, so the unwraps below cannot fail.
-pub fn unescape_string(raw: &str) -> String {
+/// well-formed.
+pub fn unescape_string_into(raw: &str, out: &mut String) {
     let bytes = raw.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
+    out.clear();
+    out.reserve(raw.len());
     let mut i = 0;
     while let Some(off) = memchr(b'\\', &bytes[i..]) {
-        out.extend_from_slice(&bytes[i..i + off]);
+        // SAFETY: `i` is a UTF-8 boundary and `i+off` points at an ASCII backslash,
+        // so both ends of the slice are valid UTF-8 boundaries.
+        out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + off]) });
         let after = i + off + 1;
         match bytes[after] {
             c @ (b'"' | b'\\') => {
-                out.push(c);
+                out.push(char::from(c));
                 i = after + 1;
             }
             b'n' => {
-                out.push(b'\n');
+                out.push('\n');
                 i = after + 1;
             }
             b't' => {
-                out.push(b'\t');
+                out.push('\t');
                 i = after + 1;
             }
             b'r' => {
-                out.push(b'\r');
+                out.push('\r');
                 i = after + 1;
             }
             b'0' => {
-                out.push(0);
+                out.push('\0');
                 i = after + 1;
             }
             b'x' => {
                 // \xHH - 2 hex digits, ASCII range, push as single byte.
                 let hex = unsafe { std::str::from_utf8_unchecked(&bytes[after + 1..after + 3]) };
-                out.push(u8::from_str_radix(hex, 16).unwrap());
+                out.push(char::from(u8::from_str_radix(hex, 16).unwrap()));
                 i = after + 3;
             }
             b'u' => {
@@ -55,17 +60,15 @@ pub fn unescape_string(raw: &str) -> String {
                 let cp = u32::from_str_radix(hex, 16).unwrap();
                 // SAFETY: lexer rejected surrogates and values > 0x10FFFF.
                 let ch = unsafe { char::from_u32_unchecked(cp) };
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                out.push(ch);
                 i = end;
             }
             _ => unreachable!(),
         }
     }
-    out.extend_from_slice(&bytes[i..]);
-    // SAFETY: input was UTF-8 and every escape resolves to valid UTF-8
-    // (ASCII for simple/\x, UTF-8-encoded codepoint for \u).
-    unsafe { String::from_utf8_unchecked(out) }
+
+    // SAFETY: `i` follows a validated escape and is therefore a UTF-8 boundary.
+    out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..]) });
 }
 
 /// First char boundary strictly after byte `i` (or `source.len()` if `i` is at

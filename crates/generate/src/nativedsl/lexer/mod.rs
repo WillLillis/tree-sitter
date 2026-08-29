@@ -9,7 +9,7 @@ mod escape;
 mod token;
 
 pub use error::{LexErrorKind, LexResult};
-pub(crate) use escape::unescape_string;
+pub(crate) use escape::unescape_string_into;
 pub use token::{Token, TokenKind};
 
 use memchr::{memchr, memchr2};
