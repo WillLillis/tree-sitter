@@ -142,6 +142,20 @@ cargo xtask generate-fixtures --wasm
 cargo xtask test-wasm
 ```
 
+### Formatting TOML
+
+TOML files are formatted with [Taplo][taplo] according to `.taplo.toml`. Install the Taplo CLI with:
+
+```sh
+cargo install taplo-cli --locked
+```
+
+After editing a TOML file, format it by passing its path to Taplo:
+
+```sh
+taplo fmt path/to/file.toml
+```
+
 #### Wasm Stdlib
 
 The libc sources shared by Wasm external scanners and
@@ -367,6 +381,7 @@ and the tree-sitter module is fetched from [here][js url]. This, along with the 
 [pypi]: https://pypi.org
 [rust]: https://rustup.rs
 [tags crate]: https://crates.io/crates/tree-sitter-tags
+[taplo]: https://taplo.tamasfe.dev
 [ts repo]: https://github.com/tree-sitter/tree-sitter
 [wasi_sdk]: https://github.com/WebAssembly/wasi-sdk
 [wasi-sdk-releases]: https://github.com/WebAssembly/wasi-sdk/releases
