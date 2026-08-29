@@ -124,6 +124,7 @@ lint:
 	cargo update --workspace --locked --quiet
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
+	taplo format --check
 
 lint-web:
 	npm --prefix lib/binding_web ci
