@@ -59,6 +59,7 @@ pub fn expand_macro_calls(
     // into its own slot; the rest are pushed to the end. A call whose set has
     // zero decls (empty or fully cfg-gated) leaves its Call node in the slot.
     let original_len = ctx.root_items.len();
+    let mut name_buf = String::new();
     for i in 0..original_len {
         let id = ctx.root_items[i];
         let Node::Call { name, .. } = *shared.arena.get(id) else {
@@ -71,7 +72,7 @@ pub fn expand_macro_calls(
         if duplicates.contains(&name_id) {
             continue;
         }
-        expand_one_call(shared, strs, ctx, &macros, id, i)?;
+        expand_one_call(shared, strs, ctx, &macros, id, i, &mut name_buf)?;
     }
     // A zero-decl expansion contributes nothing, so drop any Call left in place
     // (a duplicate-skipped call also lands here; resolve rejects the dup anyway).
@@ -108,6 +109,7 @@ fn expand_one_call(
     macros: &FxHashMap<StrId, MacroId>,
     call_id: NodeId,
     slot: usize,
+    name_buf: &mut String,
 ) -> Result<(), ExpandError> {
     let Node::Call { name, args } = *shared.arena.get(call_id) else {
         unreachable!()
@@ -182,7 +184,7 @@ fn expand_one_call(
                 body,
             } => {
                 let name_span = shared.arena.span(name_expr);
-                let name = eval_name(shared, strs, args_start, name_expr, name_span)?;
+                let name = eval_name(shared, strs, args_start, name_expr, name_span, name_buf)?;
                 (is_override, name, body)
             }
             // Parser only places Rule/ComputedRule in a RuleSet body.
@@ -208,7 +210,7 @@ fn expand_one_call(
     for &sym_ref in shared.pools.child_slice(sym_refs) {
         expect_pat!(Node::SymRef { expr }, *shared.arena.get(sym_ref));
         let span = shared.arena.span(sym_ref);
-        let name = eval_name(shared, strs, args_start, expr, span)?;
+        let name = eval_name(shared, strs, args_start, expr, span, name_buf)?;
         ctx.computed_refs.push(Spanned::new(name, span));
     }
     Ok(())
@@ -224,16 +226,17 @@ fn eval_name(
     args_start: usize,
     node_id: NodeId,
     name_expr_span: Span,
+    name_buf: &mut String,
 ) -> Result<StrId, ExpandError> {
-    let mut buf = String::new();
-    eval_name_into(shared, strs, args_start, node_id, &mut buf)?;
-    if !is_ident_str(&buf) {
+    name_buf.clear();
+    eval_name_into(shared, strs, args_start, node_id, name_buf)?;
+    if !is_ident_str(name_buf) {
         return Err(ExpandError::new(
-            ExpandErrorKind::InvalidRuleName(buf),
+            ExpandErrorKind::InvalidRuleName(std::mem::take(name_buf)),
             name_expr_span,
         ));
     }
-    Ok(strs.intern(&buf))
+    Ok(strs.intern(name_buf))
 }
 
 /// Build a computed rule name (`@<expr>`) at expand time, before resolve - so
