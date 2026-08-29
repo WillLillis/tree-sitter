@@ -124,14 +124,18 @@ lint:
 	cargo update --workspace --locked --quiet
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
-	taplo format --check
 
 lint-web:
 	npm --prefix lib/binding_web ci
 	npm --prefix lib/binding_web run lint
 
+lint-toml:
+	taplo check
+	taplo format --check --diff
+
 format:
 	cargo fmt --all
+	taplo format
 
 changelog:
 	@git-cliff --config .github/cliff.toml --prepend CHANGELOG.md --latest --github-token $(shell gh auth token)
