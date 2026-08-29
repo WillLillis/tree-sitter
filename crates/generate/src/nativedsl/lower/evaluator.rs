@@ -880,12 +880,14 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             Node::Concat(_) => {
                 let base = self.pop_combine_base();
-                let mut result = String::new();
+                let mut result = std::mem::take(&mut self.state.scratch.concat_buf);
                 for &vid in &self.state.scratch.val_scratch[base..] {
                     result.push_str(self.pool.resolve(self.str_id(vid)));
                 }
                 self.state.scratch.val_scratch.truncate(base);
                 let sid = self.pool.intern(&result);
+                result.clear();
+                self.state.scratch.concat_buf = result;
                 self.push_val(Value::Str(sid));
             }
             Node::DynRegex { .. } => {

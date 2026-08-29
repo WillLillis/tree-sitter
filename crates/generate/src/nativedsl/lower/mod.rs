@@ -97,6 +97,7 @@ struct Scratch {
     for_binding_frames: Vec<ForFrame>,
     val_scratch: Vec<ValueId>,
     rule_scratch: Vec<RuleId>,
+    concat_buf: String,
     /// Result-stack bases for variable-arity [`Task::Combine`]s, kept out of the
     /// `Task` itself so the work stack stays 8 bytes/entry. Combines nest LIFO, so
     /// this is a plain stack.
@@ -114,6 +115,7 @@ impl Scratch {
         self.for_binding_frames.clear();
         self.val_scratch.clear();
         self.rule_scratch.clear();
+        self.concat_buf.clear();
         self.combine_bases.clear();
     }
 }
@@ -163,7 +165,8 @@ pub fn lower_with_base(
         previous,
         imported_rules,
     )?;
-    check_symbol_completeness(shared, current, previous, pool, &grammar)?;
+    let stack = &mut state.scratch.rule_scratch;
+    check_symbol_completeness(shared, current, previous, pool, &grammar, stack)?;
     Ok(grammar)
 }
 
@@ -176,6 +179,7 @@ fn check_symbol_completeness(
     previous: &[Module],
     pool: &RulePool,
     grammar: &LoweredGrammar,
+    stack: &mut Vec<RuleId>,
 ) -> LowerResult<()> {
     if !current.has_forward_decls && !previous.iter().any(|m| m.ctx().has_forward_decls) {
         return Ok(());
@@ -188,7 +192,7 @@ fn check_symbol_completeness(
     }
     let mut undefined: Vec<StrId> = Vec::new();
     for v in &grammar.variables {
-        collect_undefined(pool, v.root, &defined, &mut undefined);
+        collect_undefined(pool, v.root, &defined, &mut undefined, stack);
     }
     if undefined.is_empty() {
         return Ok(());
@@ -210,8 +214,10 @@ fn collect_undefined(
     root: RuleId,
     defined: &FxHashSet<StrId>,
     out: &mut Vec<StrId>,
+    stack: &mut Vec<RuleId>,
 ) {
-    let mut stack = vec![root];
+    stack.clear();
+    stack.push(root);
     while let Some(id) = stack.pop() {
         match pool.node(id) {
             Rule::NamedSymbol(name) if !defined.contains(&name) => out.push(name),
