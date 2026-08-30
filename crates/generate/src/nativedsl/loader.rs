@@ -226,9 +226,7 @@ impl Loader<'_> {
         e
     }
 
-    /// Attach a cross-module definition note when `e` is `UndefinedMacro` for a
-    /// qualified call to a non-macro export. Resolve has replaced the qualified
-    /// callee with its target, so recover it from the call span on this error path.
+    /// Attach a cross-module definition note when a qualified call targets a non-macro export.
     fn enrich_type_error(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
         let TypeErrorKind::UndefinedMacro(_) = e.kind else {
             return e;
@@ -262,14 +260,9 @@ impl Loader<'_> {
                 };
                 (module, name)
             }
-            Node::ModuleRule { module, target } => {
+            Node::ModuleRule { module, member, .. } => {
                 let module = &self.modules[usize::from(module)];
-                let Some(name) = module.export_keys().find(
-                    |&name| matches!(module.export(name), Some(Export::Rule(t)) if t == target),
-                ) else {
-                    return e;
-                };
-                (module, name)
+                (module, member)
             }
             _ => return e,
         };

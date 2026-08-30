@@ -11,7 +11,7 @@ use super::{
         LowerError, Module, ModuleId, NoteMessage,
         ast::{
             BinOp, ChildRange, ConfigField, ExpandId, ForId, IdentKind, MacroId, ModuleContext,
-            Node, NodeId, ObjectField, PrecKind, RepeatKind, RuleTarget, SharedAst, Span,
+            Node, NodeId, ObjectField, PrecKind, RepeatKind, SharedAst, Span,
         },
     },
     CallFrame, ForFrame, LetState, LowerErrorKind, LowerResult, LoweringState, MAX_CALL_DEPTH,
@@ -541,24 +541,6 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         }
     }
 
-    fn module_rule(&self, module: ModuleId, target: RuleTarget) -> RuleId {
-        let target_module = &self.previous[usize::from(module)];
-        match target {
-            RuleTarget::HelperRule(i) => {
-                expect_pat!(Module::Helper { lowered_rules, .. }, target_module);
-                lowered_rules[i as usize].1
-            }
-            RuleTarget::GrammarRule(i) => {
-                expect_pat!(Module::Grammar { lowered, .. }, target_module);
-                lowered.variables[i as usize].root
-            }
-            RuleTarget::GrammarExternal(i) => {
-                expect_pat!(Module::Grammar { lowered, .. }, target_module);
-                lowered.external_roots[i as usize]
-            }
-        }
-    }
-
     fn dispatch_expr(&mut self, id: NodeId) -> LowerResult<()> {
         let span = self.shared.arena.span(id);
         match self.shared.arena.get(id) {
@@ -630,10 +612,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_task(Task::Expr(left));
             }
             &Node::FieldAccess { obj, .. } => self.push_unary_combine(id, Task::Expr(obj)),
-            &Node::ModuleRule { module, target } => {
-                let rid = self.module_rule(module, target);
-                self.push_val(Value::Rule(rid));
-            }
+            &Node::ModuleRule { rule, .. } => self.push_val(Value::Rule(rule)),
             &Node::Object(range) => {
                 let base = self.state.scratch.val_scratch.len();
                 self.push_combine_var(id, base);

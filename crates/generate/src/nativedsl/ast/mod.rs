@@ -15,7 +15,7 @@ mod span;
 
 pub use arena::{NodeArena, NodeId};
 pub use module::{ConfigField, GrammarConfig, ModuleContext};
-pub use node::{BinOp, IdentKind, Node, PrecKind, RepeatKind, RuleTarget};
+pub use node::{BinOp, IdentKind, Node, PrecKind, RepeatKind};
 pub use pools::{
     AstPools, ChildRange, ExpandId, Expansion, ForConfig, ForId, MacroConfig, MacroId, MacroKind,
     ObjectField, Param, SharedAst,

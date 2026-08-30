@@ -3,6 +3,7 @@
 use super::{ChildRange, ConfigField, ExpandId, ForId, MacroId, NodeId, Span};
 use crate::nativedsl::ModuleId;
 use crate::nativedsl::typecheck::Ty;
+use crate::rules::RuleId;
 use crate::strpool::StrId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,22 +35,6 @@ pub enum IdentKind {
     Rule(StrId),
     Var(NodeId),
     Macro(MacroId),
-}
-
-/// Where a [`Node::ModuleRule`] reference points within another module's
-/// lowered output.
-///
-/// Each variant carries an index, so the lowerer dereferences directly instead
-/// of scanning by name. Cross-module names that resolve to an AST-level
-/// `let`/`macro` become [`IdentKind`] instead; see [`Export`](crate::nativedsl::Export).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RuleTarget {
-    /// Index into the target grammar's `lowered.variables`.
-    GrammarRule(u32),
-    /// Index into the target grammar's `lowered.external_roots`.
-    GrammarExternal(u32),
-    /// Index into the target helper's `lowered_rules`.
-    HelperRule(u32),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -107,7 +92,8 @@ pub enum Node {
     /// resolve once the target is found.
     ModuleRule {
         module: ModuleId,
-        target: RuleTarget,
+        member: StrId,
+        rule: RuleId,
     },
     /// `seq(a, b, ...)` or `choice(a, b, ...)`. Children: `[member0, member1, ...]`
     SeqOrChoice {

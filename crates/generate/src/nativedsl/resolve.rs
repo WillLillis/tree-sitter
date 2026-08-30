@@ -76,15 +76,7 @@ pub fn resolve(
     base: Option<(&LoweredGrammar, Span)>,
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<()> {
-    let decls = collect_decls(
-        shared,
-        ctx,
-        pool,
-        base,
-        modules,
-        imported_rules,
-        current_module,
-    )?;
+    let decls = collect_decls(shared, ctx, pool, base, imported_rules, current_module)?;
 
     let rcx = ResolveCtx {
         pools: &shared.pools,
@@ -172,7 +164,6 @@ fn collect_decls(
     ctx: &ModuleContext,
     pool: &RulePool,
     base: Option<(&LoweredGrammar, Span)>,
-    modules: &[Module],
     imported_rules: &[ImportedRule],
     current_module: ModuleId,
 ) -> ResolveResult<Decls> {
@@ -285,21 +276,15 @@ fn collect_decls(
         }
     }
 
-    // Register bare names for every transitively-imported helper rule, from the
-    // shared imported-rule list.
+    // Register bare names for every transitively imported helper rule.
     for ir in imported_rules {
-        expect_pat!(
-            Module::Helper { lowered_rules, .. },
-            &modules[usize::from(ir.module)]
-        );
-        let name = lowered_rules[ir.index as usize].0;
         // First source of an overridden name claims the override. A later
         // source is no longer skipped and collides (see the base loop above).
-        if !override_names.remove(&name) {
+        if !override_names.remove(&ir.name) {
             insert_decl(
                 &mut decls,
                 pool.strs(),
-                name,
+                ir.name,
                 DeclKind::Rule,
                 ir.ref_span,
                 ctx,
@@ -600,7 +585,7 @@ fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Resolv
 /// Resolve a `QualifiedAccess { obj, member }` against the target module's
 /// export table:
 ///   - `let` / `macro` -> `Ident(Var | Macro)`
-///   - lowered rule / external -> `ModuleRule` (the lowerer indexes directly)
+///   - lowered rule / external -> `ModuleRule`
 ///   - not found -> error
 fn resolve_qualified_member(
     rcx: &ResolveCtx,
@@ -613,7 +598,14 @@ fn resolve_qualified_member(
     let target = &rcx.modules[usize::from(module)];
     match target.export(member) {
         Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
-        Some(Export::Rule(target)) => arena.set(node_id, Node::ModuleRule { module, target }),
+        Some(Export::Rule(rule)) => arena.set(
+            node_id,
+            Node::ModuleRule {
+                module,
+                member,
+                rule,
+            },
+        ),
         None => {
             let member_len = rcx.strs.resolve(member).len() as u32;
             let member_span = Span::new(member_offset, member_offset + member_len);
