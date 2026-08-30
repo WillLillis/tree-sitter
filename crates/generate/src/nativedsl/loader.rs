@@ -162,7 +162,8 @@ impl Loader<'_> {
                     self.shared,
                     &ctx,
                     self.pool,
-                    super::LoweredRef::Grammar(&lowered),
+                    &lowered.variables,
+                    &lowered.external_roots,
                 );
                 Module::Grammar {
                     ctx,
@@ -173,12 +174,8 @@ impl Loader<'_> {
             ModuleKind::Helper => {
                 let lowered_rules =
                     lower::lower_helper(self.state, self.pool, self.shared, self.modules, &ctx)?;
-                let exports = super::build_exports(
-                    self.shared,
-                    &ctx,
-                    self.pool,
-                    super::LoweredRef::Helper(&lowered_rules),
-                );
+                let exports =
+                    super::build_exports(self.shared, &ctx, self.pool, &lowered_rules, &[]);
                 Module::Helper {
                     ctx,
                     lowered_rules,
