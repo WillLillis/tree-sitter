@@ -128,7 +128,9 @@ impl StrPool {
         unsafe { buf.get_unchecked(range) }
     }
 
+    #[must_use]
     pub fn get(&self, s: &str) -> Option<StrId> {
-        self.str_ids.get(s).copied()
+        let hash = FxBuildHasher.hash_one(s);
+        self.ids.find(hash, |&id| self.resolve(id) == s).copied()
     }
 }
