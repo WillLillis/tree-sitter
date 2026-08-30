@@ -4,7 +4,7 @@
 //! Pipeline:
 //! 1. `evaluate` walks the root grammar's items, emitting rules into the shared
 //!    `RulePool` and values into the `repr::IrPools` value pool.
-//! 2. `build_grammar` consumes the `EvalResult` and the optional inherited base
+//! 2. `build_grammar` consumes the [`EvalResult`] and the optional inherited base
 //!    grammar, materializing a final
 //!    [`LoweredGrammar`](crate::nativedsl::LoweredGrammar) with overrides
 //!    applied and unset fields inherited.
@@ -128,7 +128,7 @@ impl LoweringState {
 
 struct EvalResult {
     language: StrId,
-    rules: Vec<(StrId, RuleId)>,
+    rules: Vec<Variable>,
     overrides: Vec<(StrId, RuleId, Span)>,
     extras: Option<Vec<RuleId>>,
     externals: Option<Vec<RuleId>>,
@@ -294,12 +294,10 @@ fn forward_decl_span(shared: &SharedAst, ctx: &ModuleContext, name: StrId) -> Op
         })
 }
 
-/// One lowered top-level item: a rule (plain or `override`) as a `RuleId`, tagged
-/// so grammar lowering can split overrides out while helper lowering treats them
-/// all as plain rules. Built in source order.
+/// One lowered top-level item, tagged so grammar lowering can separate overrides
+/// and helper lowering can reject them. Built in source order.
 struct LoweredItem {
-    name: StrId,
-    rule_id: RuleId,
+    variable: Variable,
     is_override: bool,
     /// Attribution span for an override (the rule name, or the macro call site).
     span: Span,
@@ -323,10 +321,9 @@ fn lower_items(eval: &mut Evaluator) -> LowerResult<Vec<LoweredItem>> {
                 name,
                 body,
             } => {
-                let rule_id = eval.lower_to_rule(body)?;
+                let root = eval.lower_to_rule(body)?;
                 items.push(LoweredItem {
-                    name,
-                    rule_id,
+                    variable: Variable { name, root },
                     is_override,
                     span: eval.shared.arena.span(item_id),
                 });
@@ -336,10 +333,12 @@ fn lower_items(eval: &mut Evaluator) -> LowerResult<Vec<LoweredItem>> {
                 // expand_macro_calls sets the item span to the macro call site,
                 // used for override attribution diagnostics.
                 let span = eval.shared.arena.span(item_id);
-                let rule_id = eval.lower_expansion(expand_id, span)?;
+                let root = eval.lower_expansion(expand_id, span)?;
                 items.push(LoweredItem {
-                    name: exp.name,
-                    rule_id,
+                    variable: Variable {
+                        name: exp.name,
+                        root,
+                    },
                     is_override: exp.is_override,
                     span,
                 });
@@ -361,7 +360,7 @@ pub fn lower_helper(
     shared: &SharedAst,
     previous: &[super::Module],
     current: &super::ModuleContext,
-) -> LowerResult<Vec<(StrId, RuleId)>> {
+) -> LowerResult<Vec<Variable>> {
     let mut eval = Evaluator::new(state, pool, shared, previous, current);
     let mut rules = Vec::new();
     for it in lower_items(&mut eval)? {
@@ -375,7 +374,7 @@ pub fn lower_helper(
                 it.span,
             ));
         }
-        rules.push((it.name, it.rule_id));
+        rules.push(it.variable);
     }
     Ok(rules)
 }
@@ -388,13 +387,13 @@ fn evaluate(
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
     let mut eval = Evaluator::new(state, pool, shared, previous, ctx);
-    let mut rules: Vec<(StrId, RuleId)> = Vec::new();
+    let mut rules = Vec::new();
     let mut overrides: Vec<(StrId, RuleId, Span)> = Vec::new();
     for it in lower_items(&mut eval)? {
         if it.is_override {
-            overrides.push((it.name, it.rule_id, it.span));
+            overrides.push((it.variable.name, it.variable.root, it.span));
         } else {
-            rules.push((it.name, it.rule_id));
+            rules.push(it.variable);
         }
     }
     // grammar_config is guaranteed present by `validate_grammar`, language
@@ -509,9 +508,7 @@ fn build_grammar(
         }
     }
 
-    for (name, rule) in result.rules {
-        variables.push(Variable { name, root: rule });
-    }
+    variables.extend(result.rules);
 
     // Imported helper rules can also be override targets.
     for ir in imported_rules {

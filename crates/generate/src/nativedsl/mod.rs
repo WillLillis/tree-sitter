@@ -163,7 +163,7 @@ pub enum Module {
     /// bindings. Their rules are lowered eagerly into `lowered_rules`.
     Helper {
         ctx: ModuleContext,
-        lowered_rules: Vec<(StrId, RuleId)>,
+        lowered_rules: Vec<Variable>,
         exports: FxHashMap<StrId, Export>,
     },
     /// `Grammar` modules come from `inherit(...)` (or the root grammar) and carry
@@ -219,13 +219,6 @@ impl Module {
     }
 }
 
-/// The lowered output a module exposes, passed to [`build_exports`].
-#[derive(Clone, Copy)]
-pub enum LoweredRef<'a> {
-    Grammar(&'a LoweredGrammar),
-    Helper(&'a [(StrId, RuleId)]),
-}
-
 /// Build a module's export table: each name this module exposes to `mod::name` refs,
 /// mapped to an ID-based [`Export`]. Built once, when the [`Module`] is constructed.
 #[must_use]
@@ -233,7 +226,8 @@ pub fn build_exports(
     shared: &SharedAst,
     ctx: &ModuleContext,
     rule_pool: &RulePool,
-    lowered: LoweredRef,
+    variables: &[Variable],
+    external_roots: &[RuleId],
 ) -> FxHashMap<StrId, Export> {
     let mut exports: FxHashMap<StrId, Export> =
         FxHashMap::with_capacity_and_hasher(ctx.root_items.len(), FxBuildHasher);
@@ -255,25 +249,16 @@ pub fn build_exports(
     }
 
     // Rules and externals
-    match lowered {
-        LoweredRef::Grammar(g) => {
-            exports.reserve(g.variables.len() + g.external_roots.len());
-            for v in &g.variables {
-                exports.entry(v.name).or_insert(Export::Rule(v.root));
-            }
-            for r in &g.external_roots {
-                if let Rule::NamedSymbol(n) = rule_pool.node(*r) {
-                    exports.entry(n).or_insert(Export::Rule(*r));
-                }
-            }
-        }
-        LoweredRef::Helper(rules) => {
-            exports.reserve(rules.len());
-            for &(name, rule) in rules {
-                exports.entry(name).or_insert(Export::Rule(rule));
-            }
+    exports.reserve(variables.len() + external_roots.len());
+    for &Variable { name, root } in variables {
+        exports.entry(name).or_insert(Export::Rule(root));
+    }
+    for &root in external_roots {
+        if let Rule::NamedSymbol(name) = rule_pool.node(root) {
+            exports.entry(name).or_insert(Export::Rule(root));
         }
     }
+
     exports
 }
 
@@ -318,10 +303,10 @@ pub(crate) fn collect_imported_rules(
         }
         let module = &modules[usize::from(idx)];
         if let Module::Helper { lowered_rules, .. } = module {
-            for &(name, rule) in lowered_rules {
+            for &Variable { name, root } in lowered_rules {
                 rules.push(ImportedRule {
                     name,
-                    rule,
+                    rule: root,
                     ref_span,
                 });
             }
