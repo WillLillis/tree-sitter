@@ -157,14 +157,7 @@ pub fn lower_with_base(
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
     let result = evaluate(state, pool, shared, previous, current)?;
-    let grammar = build_grammar(
-        current,
-        pool,
-        result,
-        base_grammar,
-        previous,
-        imported_rules,
-    )?;
+    let grammar = build_grammar(current, pool, result, base_grammar, imported_rules)?;
     let stack = &mut state.scratch.rule_scratch;
     check_symbol_completeness(shared, current, previous, pool, &grammar, stack)?;
     Ok(grammar)
@@ -490,7 +483,6 @@ fn build_grammar(
     pool: &mut RulePool,
     result: EvalResult,
     base: Option<&LoweredGrammar>,
-    previous: &[Module],
     imported_rules: &[ImportedRule],
 ) -> LowerResult<LoweredGrammar> {
     let mut overrides: FxHashMap<StrId, Spanned<RuleId>> =
@@ -503,7 +495,7 @@ fn build_grammar(
         base.map_or(0, |b| b.variables.len()) + result.rules.len() + imported_rules.len(),
     );
 
-    // Base rules first - preserves the inherited grammar's start rule.
+    // Add base rules first to preserve the inherited grammar's start rule.
     if let Some(base) = base {
         for v in &base.variables {
             if let Some(Spanned { value: rule, .. }) = overrides.remove(&v.name) {
@@ -521,17 +513,11 @@ fn build_grammar(
         variables.push(Variable { name, root: rule });
     }
 
-    // Helper rules reached through the shared imported-rule list can also be
-    // override targets.
+    // Imported helper rules can also be override targets.
     for ir in imported_rules {
-        expect_pat!(
-            Module::Helper { lowered_rules, .. },
-            &previous[usize::from(ir.module)]
-        );
-        let &(name, rule) = &lowered_rules[ir.index as usize];
-        let final_rule = overrides.remove(&name).map_or(rule, |s| s.value);
+        let final_rule = overrides.remove(&ir.name).map_or(ir.rule, |s| s.value);
         variables.push(Variable {
-            name,
+            name: ir.name,
             root: final_rule,
         });
     }

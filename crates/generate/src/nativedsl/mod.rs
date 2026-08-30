@@ -81,14 +81,11 @@ use serde::{Deserialize, Serialize};
 use crate::IoError;
 use crate::grammars::{PrecedenceEntry, ReservedWordContext, Variable};
 
-use ast::{IdentKind, ModuleContext, Node, RuleTarget, SharedAst, Span};
+use ast::{IdentKind, ModuleContext, Node, SharedAst, Span};
 use loader::Loader;
 use typecheck::TypeEnv;
 
 /// Global module index. Every loaded module gets a unique `ModuleId`.
-///
-/// A newtype over the module-table index, distinct from the other `u8`/`u32`
-/// indices in the pipeline so they can't be confused at a use site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModuleId(u8);
@@ -105,7 +102,7 @@ impl From<ModuleId> for usize {
     }
 }
 
-/// Fixed bitset covering every value representable by `ModuleId`.
+/// Fixed bitset covering every value representable by [`ModuleId`].
 #[derive(Default)]
 struct ModuleIdSet([u64; 4]);
 
@@ -185,7 +182,7 @@ pub enum Export {
     Local(IdentKind),
     /// A rule / external in the module's lowered output (resolves to
     /// `Node::ModuleRule`).
-    Rule(RuleTarget),
+    Rule(RuleId),
 }
 
 impl Module {
@@ -261,47 +258,36 @@ pub fn build_exports(
     match lowered {
         LoweredRef::Grammar(g) => {
             exports.reserve(g.variables.len() + g.external_roots.len());
-            for (i, v) in g.variables.iter().enumerate() {
-                exports
-                    .entry(v.name)
-                    .or_insert(Export::Rule(RuleTarget::GrammarRule(i as u32)));
+            for v in &g.variables {
+                exports.entry(v.name).or_insert(Export::Rule(v.root));
             }
-            for (i, r) in g.external_roots.iter().enumerate() {
+            for r in &g.external_roots {
                 if let Rule::NamedSymbol(n) = rule_pool.node(*r) {
-                    exports
-                        .entry(n)
-                        .or_insert(Export::Rule(RuleTarget::GrammarExternal(i as u32)));
+                    exports.entry(n).or_insert(Export::Rule(*r));
                 }
             }
         }
         LoweredRef::Helper(rules) => {
             exports.reserve(rules.len());
-            for (i, (name, _)) in rules.iter().enumerate() {
-                exports
-                    .entry(*name)
-                    .or_insert(Export::Rule(RuleTarget::HelperRule(i as u32)));
+            for &(name, rule) in rules {
+                exports.entry(name).or_insert(Export::Rule(rule));
             }
         }
     }
     exports
 }
 
-/// A rule contributed by a transitively-imported helper, exposed as a handle
-/// into the owning helper's `lowered_rules`.
-///
-/// Resolved once after child modules load and shared by resolve (bare-name
-/// registration) and lower (materialization), so the two passes can't disagree
-/// about what an import contributes.
+/// A rule provided by a transitively imported helper.
 #[derive(Clone, Copy)]
 pub struct ImportedRule {
-    pub module: ModuleId,
-    pub index: u32,
-    /// The import statement that brought the rule into scope, for error locations.
+    pub name: StrId,
+    pub rule: RuleId,
+    /// The import statement that brought the rule into scope.
     pub ref_span: Span,
 }
 
-/// Flatten the transitive helper imports into an ordered handle list. Each helper
-/// is visited once, yielding one handle per rule in source order.
+/// Collect rules from transitive helper imports in source order. Each helper is
+/// visited once.
 pub(crate) fn collect_imported_rules(
     arena: &ast::NodeArena,
     initial_refs: &[ast::NodeId],
@@ -312,8 +298,7 @@ pub(crate) fn collect_imported_rules(
     let mut stack: Vec<(ModuleId, Span)> = Vec::new();
 
     let seed = |stack: &mut Vec<(ModuleId, Span)>, refs: &[ast::NodeId]| {
-        // Reverse so the LIFO stack pops imports in source order (a pre-order
-        // DFS visits siblings left-to-right when pushed right-to-left).
+        // Push in reverse so the LIFO walk preserves source order.
         for &mref_id in refs.iter().rev() {
             if let &ast::Node::ModuleRef {
                 import: true,
@@ -333,10 +318,10 @@ pub(crate) fn collect_imported_rules(
         }
         let module = &modules[usize::from(idx)];
         if let Module::Helper { lowered_rules, .. } = module {
-            for index in 0..lowered_rules.len() {
+            for &(name, rule) in lowered_rules {
                 rules.push(ImportedRule {
-                    module: idx,
-                    index: index as u32,
+                    name,
+                    rule,
                     ref_span,
                 });
             }
