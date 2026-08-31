@@ -500,6 +500,121 @@ fn wrapper_overrides_base_extension_flags() {
 }
 
 #[test]
+fn cfg_base_flag_does_not_leak_to_sibling_import() {
+    let modules = [
+        (
+            "base.tsg",
+            r#"
+              grammar { language: "base", flags: { enabled: ["BASE_FEATURE"] } }
+              rule base_rule { "b" }
+              "#,
+        ),
+        (
+            "helper.tsg",
+            "#[cfg(BASE_FEATURE)]\nrule helper_rule { \"h\" }",
+        ),
+    ];
+
+    for refs in [
+        r#"
+          let base = inherit("base.tsg")
+          let helper = import("helper.tsg")
+          "#,
+        r#"
+          let helper = import("helper.tsg")
+          let base = inherit("base.tsg")
+          "#,
+    ] {
+        let root = format!(
+            r#"
+              {refs}
+              grammar {{ language: "root", inherits: base }}
+              rule program {{ helper_rule }}
+              "#
+        );
+        let err = expect_err(parse_with_modules(&modules, &root));
+        let inner = *assert_err!(err, Module).inner;
+        let error = assert_err!(inner, Resolve);
+        assert!(
+            matches!(
+                error.kind,
+                ResolveErrorKind::CfgFlagUnknown(ref name)
+                    if name == "BASE_FEATURE"
+            ),
+            "got {:?}",
+            error.kind
+        );
+    }
+}
+
+#[test]
+fn cfg_cached_helper_respects_current_flags() {
+    let err = expect_err(parse_with_modules(
+        &[
+            (
+                "base.tsg",
+                r#"
+                  let shared = import("shared.tsg")
+                  grammar { language: "base", flags: { enabled: ["F"] } }
+                  rule base_rule { shared_rule }
+                  "#,
+            ),
+            ("shared.tsg", "#[cfg(F)]\nrule shared_rule { \"s\" }"),
+        ],
+        r#"
+          let base = inherit("base.tsg")
+          let shared = import("shared.tsg")
+          grammar { language: "root", inherits: base }
+          rule program { "p" }
+          "#,
+    ));
+
+    let inner = *assert_err!(err, Module).inner;
+    let error = assert_err!(inner, Resolve);
+    assert!(
+        matches!(
+            error.kind,
+            ResolveErrorKind::CfgFlagUnknown(ref name) if name == "F"
+        ),
+        "got {:?}",
+        error.kind
+    );
+}
+
+#[test]
+fn cfg_base_flag_is_visible_to_its_import() {
+    let mut grammar = parse_with_modules(
+        &[
+            (
+                "base.tsg",
+                r#"
+                  let helper = import("helper.tsg")
+                  grammar { language: "base", flags: { enabled: ["F"] } }
+                  rule base_rule { helper::gated() }
+                  "#,
+            ),
+            (
+                "helper.tsg",
+                r#"macro gated() rule_t { choice("a", #[cfg(F)] "b") }"#,
+            ),
+        ],
+        r#"
+          let base = inherit("base.tsg")
+          grammar { language: "root", inherits: base }
+          rule program { "p" }
+          "#,
+    )
+    .unwrap();
+
+    let actual = find_rule(&grammar, "base_rule");
+    let expected = {
+        let pool = &mut grammar.pool;
+        r_choice!(pool, [r_str!(pool, "a"), r_str!(pool, "b")])
+    };
+    assert_rule_eq(&grammar.pool, actual, expected);
+}
+
+#[test]
 fn cfg_disabled_nested_import_does_not_load() {
     // A cfg-disabled import nested in a list (not a top-level let) must not load
     // (module_refs was once rebuilt only when a top-level item dropped).

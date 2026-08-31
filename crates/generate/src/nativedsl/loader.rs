@@ -8,7 +8,7 @@ use crate::{
         DisallowedItemKind, DslError, DslResult, Export, LexError, LexErrorKind, LowerError,
         LowerErrorKind, LoweringState, MAX_MODULE_DEPTH, Module, ModuleError, ModuleId,
         NoteMessage, ResolveError, TypeError, TypeErrorKind,
-        apply_cfg::{CfgState, apply_cfg},
+        apply_cfg::{CfgEnvId, CfgState, apply_cfg},
         ast::{IdentKind, ModuleContext, Node, SharedAst, Span},
         expand_macro_calls, lexer, lower, parser,
         resolve::{self, ResolveErrorKind},
@@ -26,7 +26,7 @@ pub struct Loader<'a> {
     pool: &'a mut RulePool,
     cfg: &'a mut CfgState,
     ancestor_paths: Vec<PathBuf>,
-    /// Module dedup cache. Each (canonical path, kind) loads at most once
+    /// Module dedup cache keyed by canonical path, kind, and cfg environment.
     loaded: Vec<LoadedModuleRef>,
 }
 
@@ -43,6 +43,7 @@ struct LoadedModuleRef {
     /// Canonicalized path to the module on disk.
     path: PathBuf,
     kind: ModuleKind,
+    cfg_env: CfgEnvId,
     /// Index into the global [`Loader::modules`] table.
     gid: ModuleId,
 }
@@ -105,8 +106,8 @@ impl<'a> Loader<'a> {
         )
         .parse()?;
 
-        // Register this module's flag declarations into the global state. This module's
-        // flag values win over flags in any modules it imports.
+        // Merge this module's flags into the current environment. Existing values
+        // win, so parent declarations override child declarations.
         self.cfg
             .merge_module_flags(self.shared, &mut ctx, self.pool.strs())?;
 
@@ -297,11 +298,10 @@ impl<'a> Loader<'a> {
         span: Span,
         kind: ModuleKind,
     ) -> DslResult<ModuleId> {
-        if let Some(module_ref) = self
-            .loaded
-            .iter()
-            .find(|module| module.kind == kind && module.path == module_path)
-        {
+        let cfg_env = self.cfg.env_id();
+        if let Some(module_ref) = self.loaded.iter().find(|module| {
+            module.kind == kind && module.cfg_env == cfg_env && module.path == module_path
+        }) {
             return Ok(module_ref.gid);
         }
 
@@ -330,14 +330,17 @@ impl<'a> Loader<'a> {
         }
 
         self.ancestor_paths.push(module_path.to_path_buf());
+        let checkpoint = self.cfg.checkpoint();
         let result = self
             .load_module(&content, module_path, kind)
             .map_err(|inner| ModuleError::new(inner, content, module_path, span));
+        self.cfg.restore(checkpoint);
         self.ancestor_paths.pop();
         let gid = result?;
         self.loaded.push(LoadedModuleRef {
             path: module_path.to_path_buf(),
             kind,
+            cfg_env,
             gid,
         });
         Ok(gid)

@@ -1,9 +1,8 @@
 //! Cfg attribute evaluation. Runs between parse and resolve. Drops disabled
 //! `#[cfg(X)]` subtrees in place; unwraps active ones.
 //!
-//! Active flag set is built in load order with first-write-wins. Each module
-//! merges its own flags before loading the modules it imports or inherits, so
-//! an importing module overrides the flag values of the modules it pulls in.
+//! Active flags are scoped to the current module path. A module's declarations
+//! apply throughout its subtree, while flags from its parent take precedence.
 
 use std::collections::hash_map::Entry;
 
@@ -20,16 +19,29 @@ use super::{
     loader::ModuleKind,
 };
 
-/// `name -> enabled?`. First write wins. A module merges before loading its
-/// imports, so importers override imported modules.
+/// Identity of an effective cfg environment.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct CfgEnvId(u32);
+
+/// State captured before loading a child module.
+#[derive(Clone, Copy)]
+pub(super) struct CfgCheckpoint {
+    inserted_len: usize,
+    env_id: CfgEnvId,
+}
+
+/// Active flag values along the current module path.
 #[derive(Default)]
 pub struct CfgState {
-    pub active: FxHashMap<StrId, bool>,
+    active: FxHashMap<StrId, bool>,
+    inserted: Vec<StrId>,
+    env_id: CfgEnvId,
+    last_env_id: u32,
 }
 
 impl CfgState {
     /// Read this module's `flags: { enabled: [...], disabled: [...] }`,
-    /// populate `ctx.cfg_declared`, and merge into global state.
+    /// populate `ctx.cfg_declared`, and merge into the active environment.
     pub fn merge_module_flags(
         &mut self,
         shared: &SharedAst,
@@ -45,6 +57,7 @@ impl CfgState {
                 shared.arena.span(flags_id),
             ));
         };
+        let mut assigned_env = false;
         for &ObjectField {
             name: key,
             value: value_id,
@@ -89,10 +102,42 @@ impl CfgState {
                         ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
                 }
-                self.active.entry(name).or_insert(enable);
+                if let Entry::Vacant(entry) = self.active.entry(name) {
+                    entry.insert(enable);
+                    self.inserted.push(name);
+
+                    if !std::mem::replace(&mut assigned_env, true) {
+                        self.last_env_id += 1;
+                        self.env_id = CfgEnvId(self.last_env_id);
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// Iterate over the effective flag names and their enabled state.
+    pub fn flags(&self) -> impl Iterator<Item = (StrId, bool)> + '_ {
+        self.active.iter().map(|(&name, &enabled)| (name, enabled))
+    }
+
+    pub(super) const fn env_id(&self) -> CfgEnvId {
+        self.env_id
+    }
+
+    pub(super) const fn checkpoint(&self) -> CfgCheckpoint {
+        CfgCheckpoint {
+            inserted_len: self.inserted.len(),
+            env_id: self.env_id,
+        }
+    }
+
+    pub(super) fn restore(&mut self, checkpoint: CfgCheckpoint) {
+        for name in self.inserted.drain(checkpoint.inserted_len..) {
+            let removed = self.active.remove(&name);
+            debug_assert!(removed.is_some());
+        }
+        self.env_id = checkpoint.env_id;
     }
 }
 
