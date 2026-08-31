@@ -247,7 +247,6 @@ pub fn build_exports(
     // `collect_decls` already deduped. The only name inserted twice is a symbol that
     // is both a rule and an external. Rules are inserted before externals, so it
     // resolves to the rule.
-    // AST-level `let` / `macro` bindings.
     for &item_id in &ctx.root_items {
         let (name, kind) = match shared.arena.get(item_id) {
             Node::Let { name, .. } => (*name, IdentKind::Var(item_id)),
@@ -260,7 +259,6 @@ pub fn build_exports(
         exports.entry(name).or_insert(Export::Local(kind));
     }
 
-    // Rules and externals
     exports.reserve(variables.len() + external_roots.len());
     for &Variable { name, root } in variables {
         exports.entry(name).or_insert(Export::Rule(root));

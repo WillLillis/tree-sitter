@@ -197,85 +197,6 @@ impl<'a> Loader<'a> {
         Ok(global_id)
     }
 
-    /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped declaration,
-    /// attach a note pointing at the gated decl with the cfg flag name.
-    fn enrich_resolve_error(&self, current: &ModuleContext, mut e: ResolveError) -> ResolveError {
-        let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
-            return e;
-        };
-        let Some(name_id) = self.pool.strs().get(name) else {
-            return e;
-        };
-        let Some((cfg_id, owner)) = self.find_cfg_drop(current, name_id) else {
-            return e;
-        };
-        expect_pat!(Node::Cfg { name: flag, .. }, *self.shared.arena.get(cfg_id));
-        let flag_name = self.pool.strs().resolve(flag).to_string();
-        let decl_span = self.shared.arena.span(cfg_id);
-        e.add_note(owner.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
-        e
-    }
-
-    /// Attach a cross-module definition note when a qualified call targets a non-macro export.
-    fn enrich_type_error(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
-        let TypeErrorKind::UndefinedMacro(_) = e.kind else {
-            return e;
-        };
-        let Some(call_span) = e.span else {
-            return e;
-        };
-        let arena = &self.shared.arena;
-        let Some(callee) = current.iter_own_nodes(arena).find_map(|(id, node)| {
-            if let Node::Call { name, .. } = *node
-                && arena.span(id) == call_span
-            {
-                Some(name)
-            } else {
-                None
-            }
-        }) else {
-            return e;
-        };
-
-        let (module, member) = match *arena.get(callee) {
-            Node::Ident(IdentKind::Var(let_id)) => {
-                expect_pat!(Node::Let { name, .. }, *arena.get(let_id));
-                let Some(module) = self.modules.iter().find(|module| {
-                    matches!(
-                        module.export(name),
-                        Some(Export::Local(IdentKind::Var(id))) if id == let_id
-                    )
-                }) else {
-                    return e;
-                };
-                (module, name)
-            }
-            Node::ModuleRule { module, member, .. } => {
-                let module = &self.modules[usize::from(module)];
-                (module, member)
-            }
-            _ => return e,
-        };
-
-        let Some(decl) = module.ctx().root_items.iter().copied().find(|&id| {
-            let decl_name = match *arena.get(id) {
-                Node::Let { name, .. } | Node::Rule { name, .. } => name,
-                Node::ExpandedRule(expand_id) => self.shared.pools.get_expansion(expand_id).name,
-                _ => return false,
-            };
-            decl_name == member
-        }) else {
-            return e;
-        };
-
-        e.add_note(
-            module
-                .ctx()
-                .note(NoteMessage::DefinedHere, arena.span(decl)),
-        );
-        e
-    }
-
     fn load_child_module(
         &mut self,
         module_path: &Path,
@@ -432,6 +353,85 @@ impl<'a> Loader<'a> {
             ))?;
         }
         Ok(())
+    }
+
+    /// If `e` is `UnknownIdentifier(name)` and `name` matches a cfg-dropped declaration,
+    /// attach a note pointing at the gated decl with the cfg flag name.
+    fn enrich_resolve_error(&self, current: &ModuleContext, mut e: ResolveError) -> ResolveError {
+        let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
+            return e;
+        };
+        let Some(name_id) = self.pool.strs().get(name) else {
+            return e;
+        };
+        let Some((cfg_id, owner)) = self.find_cfg_drop(current, name_id) else {
+            return e;
+        };
+        expect_pat!(Node::Cfg { name: flag, .. }, *self.shared.arena.get(cfg_id));
+        let flag_name = self.pool.strs().resolve(flag).to_string();
+        let decl_span = self.shared.arena.span(cfg_id);
+        e.add_note(owner.note(NoteMessage::GatedByDisabledCfg(flag_name), decl_span));
+        e
+    }
+
+    /// Attach a cross-module definition note when a qualified call targets a non-macro export.
+    fn enrich_type_error(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
+        let TypeErrorKind::UndefinedMacro(_) = e.kind else {
+            return e;
+        };
+        let Some(call_span) = e.span else {
+            return e;
+        };
+        let arena = &self.shared.arena;
+        let Some(callee) = current.iter_own_nodes(arena).find_map(|(id, node)| {
+            if let Node::Call { name, .. } = *node
+                && arena.span(id) == call_span
+            {
+                Some(name)
+            } else {
+                None
+            }
+        }) else {
+            return e;
+        };
+
+        let (module, member) = match *arena.get(callee) {
+            Node::Ident(IdentKind::Var(let_id)) => {
+                expect_pat!(Node::Let { name, .. }, *arena.get(let_id));
+                let Some(module) = self.modules.iter().find(|module| {
+                    matches!(
+                        module.export(name),
+                        Some(Export::Local(IdentKind::Var(id))) if id == let_id
+                    )
+                }) else {
+                    return e;
+                };
+                (module, name)
+            }
+            Node::ModuleRule { module, member, .. } => {
+                let module = &self.modules[usize::from(module)];
+                (module, member)
+            }
+            _ => return e,
+        };
+
+        let Some(decl) = module.ctx().root_items.iter().copied().find(|&id| {
+            let decl_name = match *arena.get(id) {
+                Node::Let { name, .. } | Node::Rule { name, .. } => name,
+                Node::ExpandedRule(expand_id) => self.shared.pools.get_expansion(expand_id).name,
+                _ => return false,
+            };
+            decl_name == member
+        }) else {
+            return e;
+        };
+
+        e.add_note(
+            module
+                .ctx()
+                .note(NoteMessage::DefinedHere, arena.span(decl)),
+        );
+        e
     }
 
     fn find_cfg_drop<'b>(
