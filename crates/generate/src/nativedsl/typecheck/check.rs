@@ -33,6 +33,24 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
         Node::Grammar => {
             // INVARIANT: validate_grammar enforces `grammar_config.is_some()`
             let config = ctx.grammar_config.as_ref().unwrap();
+            if let Some(inherits_id) = config.inherits {
+                let ty = type_of(cx, inherits_id, env, Constraint::None)?;
+                let base = ctx.inherit_module(&shared.arena);
+                if !matches!(
+                    ty,
+                    Ty::Module(ModuleTy::Grammar(module))
+                    if base.is_some_and(|(expected, _)| module == expected)
+                ) {
+                    let mut error = TypeError::new(
+                        TypeErrorKind::InheritsMustReferenceBase,
+                        shared.arena.span(inherits_id),
+                    );
+                    if let Some((_, span)) = base {
+                        error.add_note(ctx.note(NoteMessage::BaseInheritedHere, span));
+                    }
+                    return Err(error);
+                }
+            }
             for id in [config.extras, config.externals].into_iter().flatten() {
                 expect_list(cx, id, env, expect_rule, Ty::LIST_RULE)?;
             }

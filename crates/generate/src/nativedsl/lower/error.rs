@@ -59,8 +59,6 @@ pub enum LowerErrorKind {
     ConfigFieldUnset,
     #[error("inherit() requires 'inherits' to be set in the grammar config")]
     InheritWithoutConfig,
-    #[error("'inherits' must reference a variable bound to inherit()")]
-    InheritsWithoutInherit,
     #[error("too many elements ({0}, maximum {max})", max = u16::MAX)]
     TooManyChildren(usize),
     #[error("maximum macro call depth ({MAX_CALL_DEPTH}) exceeded")]

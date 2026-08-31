@@ -59,6 +59,8 @@ pub enum TypeErrorKind {
     ExpectedRuleName,
     #[error("grammar_config() requires an inherited grammar, not an imported module")]
     GrammarConfigRequiresInherit,
+    #[error("'inherits' must resolve to this grammar's inherit() call")]
+    InheritsMustReferenceBase,
     #[error(
         "tuples must have {min} to {max} elements (there is no grouping operator, so `(x)` is not a value); got {0}",
         min = types::TUPLE_MIN_ARITY,

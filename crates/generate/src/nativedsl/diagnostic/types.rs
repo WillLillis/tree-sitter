@@ -131,6 +131,7 @@ pub struct Note {
 pub enum NoteMessage {
     FirstDefinedHere,
     DefinedHere,
+    BaseInheritedHere,
     ReferencedFromHere,
     OverrideDeclaredHere,
     /// One per redundant `inherit()` beyond the first in a `MultipleInherits` error
@@ -156,6 +157,7 @@ impl std::fmt::Display for NoteMessage {
         match self {
             Self::FirstDefinedHere => write!(f, "first defined here"),
             Self::DefinedHere => write!(f, "defined here"),
+            Self::BaseInheritedHere => write!(f, "base grammar inherited here"),
             Self::ReferencedFromHere => write!(f, "referenced from here"),
             Self::OverrideDeclaredHere => write!(f, "override declared here"),
             Self::AlsoInheritedHere => write!(f, "also inherited here"),

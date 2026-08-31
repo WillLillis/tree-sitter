@@ -121,9 +121,9 @@ impl<'a> Loader<'a> {
             ModuleKind::Helper => self.validate_import_items(&ctx)?,
         }
 
-        // Inline top-level rule-set macro invocations into `ExpandedRule`
-        // decls. Runs before child loads so all nodes this module owns
-        // sit in one contiguous arena range.
+        // Inline top-level rule-set macro invocations into `ExpandedRule` decls.
+        // Runs before child loads so this module's nodes all sit in one contiguous
+        // arena range.
         expand_macro_calls::expand_macro_calls(self.shared, self.pool.strs_mut(), &mut ctx)?;
         ctx.node_range.end = self.shared.arena.next_id().into();
 
@@ -152,11 +152,9 @@ impl<'a> Loader<'a> {
         )
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
-        // Child modules already populated `env` during their own `load_module` calls.
+        // Child modules already populated `self.env` during their own `load_module` calls.
         typecheck::check(self.shared, &ctx, self.env, self.pool.strs())
             .map_err(|e| self.enrich_type_error(&ctx, e))?;
-        // After typecheck so a cycling inherits chain reports CircularLet.
-        self.validate_inherits_binding(&ctx)?;
         let module = match kind {
             ModuleKind::Grammar => {
                 let lowered = Box::new(lower::lower_with_base(
@@ -377,7 +375,7 @@ impl<'a> Loader<'a> {
         Ok(())
     }
 
-    /// Validate that grammar block exists, `inherits` field consistency, <= 1 `inherit`
+    /// Validate that grammar block exists and structural constraints on `inherit()` calls
     fn validate_grammar(&self, ctx: &ModuleContext) -> DslResult<()> {
         let Some(config) = ctx.grammar_config.as_ref() else {
             return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
@@ -422,33 +420,6 @@ impl<'a> Loader<'a> {
             ))?;
         }
 
-        // `inherits` in config but doesn't resolve to an inherit() call
-        if let Some(id) = config.inherits
-            && inherits.is_empty()
-        {
-            Err(LowerError::new(
-                LowerErrorKind::InheritsWithoutInherit,
-                self.shared.arena.span(id),
-            ))?;
-        }
-
-        Ok(())
-    }
-
-    /// `inherits` must resolve to this module's `inherit()` call. Presence
-    /// pairing alone (see [`Self::validate_grammar`]) would let a stray
-    /// inherit in a let be used while `inherits` points at an unrelated value.
-    fn validate_inherits_binding(&self, ctx: &ModuleContext) -> DslResult<()> {
-        let Some(inherits_id) = ctx.grammar_config.as_ref().and_then(|c| c.inherits) else {
-            return Ok(());
-        };
-        let arena = &self.shared.arena;
-        if resolve::resolve_module_ref(arena, inherits_id) != ctx.inherits(arena).next() {
-            Err(LowerError::new(
-                LowerErrorKind::InheritsWithoutInherit,
-                arena.span(inherits_id),
-            ))?;
-        }
         Ok(())
     }
 

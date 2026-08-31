@@ -80,6 +80,23 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::ANY_MODULE, got: Ty::STR }
     }
+    error_inherits_without_inherit {
+        r#"grammar { language: "test", inherits: "not_inherit" }
+        rule program { "x" }"#,
+        TypeErrorKind::InheritsMustReferenceBase
+    }
+    error_inherits_not_bound_to_inherit {
+        r#"let base = inherit("inherit_base/grammar.tsg")
+        grammar { language: "derived", inherits: some_rule }
+        rule some_rule { "x" }"#,
+        TypeErrorKind::InheritsMustReferenceBase
+    }
+    error_inherits_references_ancestor_of_base {
+        r#"let parent = inherit("inherit_base/nested_parent.tsg")
+        grammar { language: "child", inherits: parent::gp }
+        rule child_rule { "c" }"#,
+        TypeErrorKind::InheritsMustReferenceBase
+    }
     error_rule_called_as_function {
         r#"grammar { language: "test", word: ident }
         rule ident { regexp("[a-z]+") }

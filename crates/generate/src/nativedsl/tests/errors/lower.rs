@@ -84,19 +84,6 @@ error_tests! { match Lower {
         rule program { "x" }"#,
         LowerErrorKind::InheritWithoutConfig
     }
-    error_inherits_without_inherit {
-        r#"grammar { language: "test", inherits: "not_inherit" }
-        rule program { "x" }"#,
-        LowerErrorKind::InheritsWithoutInherit
-    }
-    error_inherits_not_bound_to_inherit {
-        // `inherits:` must name the inherit() binding; the stray inherit in
-        // the let must not be silently used while `inherits` points elsewhere.
-        r#"let base = inherit("inherit_base/grammar.tsg")
-        grammar { language: "derived", inherits: some_rule }
-        rule some_rule { "x" }"#,
-        LowerErrorKind::InheritsWithoutInherit
-    }
     error_config_field_unset {
         r#"let base = inherit("inherit_base_no_word/grammar.tsg")
         grammar { language: "test", inherits: base, word: grammar_config(base, word) }
