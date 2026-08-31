@@ -19,38 +19,73 @@ use crate::{
 
 /// Mutable pipeline state passed through the load/lower recursion.
 pub struct Loader<'a> {
-    pub shared: &'a mut SharedAst,
-    pub modules: &'a mut Vec<Module>,
-    pub env: &'a mut TypeEnv,
-    pub state: &'a mut LoweringState,
-    pub pool: &'a mut RulePool,
-    pub cfg: &'a mut CfgState,
-    pub ancestor_paths: Vec<PathBuf>,
+    shared: &'a mut SharedAst,
+    modules: &'a mut Vec<Module>,
+    env: &'a mut TypeEnv,
+    state: &'a mut LoweringState,
+    pool: &'a mut RulePool,
+    cfg: &'a mut CfgState,
+    ancestor_paths: Vec<PathBuf>,
     /// Module dedup cache. Each (canonical path, kind) loads at most once
-    pub loaded: Vec<(PathBuf, ModuleKind, ModuleId)>,
+    loaded: Vec<LoadedModuleRef>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ModuleKind {
+pub(super) enum ModuleKind {
     /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
     /// Helper file (imported). Anything except a grammar block or override rule.
     Helper,
 }
 
-impl Loader<'_> {
-    /// Load a tsg module, imported either via `import` or `inherit`.
+/// A reference to a module loaded into [`Loader::modules`].
+struct LoadedModuleRef {
+    /// Canonicalized path to the module on disk.
+    path: PathBuf,
+    kind: ModuleKind,
+    /// Index into the global [`Loader::modules`] table.
+    gid: ModuleId,
+}
+
+impl<'a> Loader<'a> {
+    pub const fn new(
+        shared: &'a mut SharedAst,
+        modules: &'a mut Vec<Module>,
+        env: &'a mut TypeEnv,
+        state: &'a mut LoweringState,
+        pool: &'a mut RulePool,
+        cfg: &'a mut CfgState,
+    ) -> Self {
+        Self {
+            shared,
+            modules,
+            env,
+            state,
+            pool,
+            cfg,
+            ancestor_paths: Vec::new(),
+            loaded: Vec::new(),
+        }
+    }
+
+    /// Load a root tsg grammar module.
     ///
     /// # Errors
     ///
     /// Returns `Err` if the module isn't valid tsg source.
-    #[expect(clippy::missing_panics_doc)]
-    pub fn load_module(
-        &mut self,
-        source: &str,
-        path: &Path,
-        kind: ModuleKind,
-    ) -> DslResult<ModuleId> {
+    pub fn load_root(mut self, source: &str, path: &Path) -> DslResult<()> {
+        let canonical = dunce::canonicalize(path).map_err(|error| {
+            LowerError::without_span(LowerErrorKind::ModuleResolveFailed(IoError {
+                error,
+                path: Some(path.to_path_buf()),
+            }))
+        })?;
+        self.ancestor_paths.push(canonical.clone());
+        _ = self.load_module(source, &canonical, ModuleKind::Grammar)?;
+        Ok(())
+    }
+
+    fn load_module(&mut self, source: &str, path: &Path, kind: ModuleKind) -> DslResult<ModuleId> {
         if source.len() >= u32::MAX as usize {
             Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
         }
@@ -59,8 +94,6 @@ impl Loader<'_> {
         if self.ancestor_paths.len() > 1 {
             self.shared.reserve_for_module(source.len());
         }
-
-        let module_dir = path.parent().unwrap();
 
         let tokens = lexer::Lexer::new(source).tokenize()?;
         let mut ctx = parser::Parser::new(
@@ -77,8 +110,7 @@ impl Loader<'_> {
         self.cfg
             .merge_module_flags(self.shared, &mut ctx, self.pool.strs())?;
 
-        // Apply cfg gating *before* loading children so cfg-disabled imports don't trigger file
-        // loads and other side effects. Skip the whole walk when no cfgs are used.
+        // Apply cfg gating *before* loading children so cfg-disabled imports aren't evaluated.
         if ctx.has_cfg {
             apply_cfg(self.shared, &mut ctx, self.pool.strs(), self.cfg, kind)?;
         }
@@ -94,28 +126,7 @@ impl Loader<'_> {
         expand_macro_calls::expand_macro_calls(self.shared, self.pool.strs_mut(), &mut ctx)?;
         ctx.node_range.end = self.shared.arena.next_id().into();
 
-        // Load inherited grammar (Grammar kind only, must happen before typecheck).
-        let inherit_id = ctx.inherits(&self.shared.arena).next();
-        if let Some(inherit_id) = inherit_id
-            && let Node::ModuleRef {
-                import: false,
-                path: ref_path,
-                ..
-            } = *self.shared.arena.get(inherit_id)
-        {
-            let child_path = resolve_path(&module_dir.join(ctx.text(ref_path)), ref_path)?;
-            let child_id = self.load_child_module(&child_path, ref_path, ModuleKind::Grammar)?;
-            self.shared.arena.set(
-                inherit_id,
-                Node::ModuleRef {
-                    import: false,
-                    path: ref_path,
-                    module: Some(child_id),
-                },
-            );
-        }
-
-        self.load_import_children(&ctx)?;
+        self.load_children(&ctx)?;
 
         // Child loading is complete, so this module's final table index is fixed.
         let global_id = ModuleId::from_index(self.modules.len())
@@ -286,12 +297,12 @@ impl Loader<'_> {
         span: Span,
         kind: ModuleKind,
     ) -> DslResult<ModuleId> {
-        if let Some(&(_, _, gid)) = self
+        if let Some(module_ref) = self
             .loaded
             .iter()
-            .find(|(p, k, _)| *k == kind && p == module_path)
+            .find(|module| module.kind == kind && module.path == module_path)
         {
-            return Ok(gid);
+            return Ok(module_ref.gid);
         }
 
         if self.ancestor_paths.len() >= MAX_MODULE_DEPTH {
@@ -324,40 +335,40 @@ impl Loader<'_> {
             .map_err(|inner| ModuleError::new(inner, content, module_path, span));
         self.ancestor_paths.pop();
         let gid = result?;
-        self.loaded.push((module_path.to_path_buf(), kind, gid));
+        self.loaded.push(LoadedModuleRef {
+            path: module_path.to_path_buf(),
+            kind,
+            gid,
+        });
         Ok(gid)
     }
 
-    /// Resolve `ModuleRef` nodes, loading each child file.
-    fn load_import_children(&mut self, ctx: &ModuleContext) -> Result<(), DslError> {
+    /// Resolve `Import` and `Inherit` nodes, loading each child file.
+    fn load_children(&mut self, ctx: &ModuleContext) -> Result<(), DslError> {
         let module_dir = ctx.path.parent().unwrap();
         for &node_id in &ctx.module_refs {
-            let &Node::ModuleRef {
-                import: is_import,
-                path: path_span,
-                module: None,
-            } = self.shared.arena.get(node_id)
-            else {
-                continue; // Already resolved
-            };
-            let kind = if is_import {
-                ModuleKind::Helper
-            } else {
-                ModuleKind::Grammar
+            let (kind, &path) = match self.shared.arena.get(node_id) {
+                Node::Inherit { path, module: None } => (ModuleKind::Grammar, path),
+                Node::Import { path, module: None } => (ModuleKind::Helper, path),
+                Node::Inherit {
+                    module: Some(_), ..
+                }
+                | Node::Import {
+                    module: Some(_), ..
+                } => continue, // Already resolved
+                _ => unreachable!(),
             };
 
-            let path_str = ctx.text(path_span);
-            let canonical = resolve_path(&module_dir.join(path_str), path_span)?;
-            let gid = self.load_child_module(&canonical, path_span, kind)?;
+            let path_str = ctx.text(path);
+            let canonical = resolve_path(&module_dir.join(path_str), path)?;
+            let gid = self.load_child_module(&canonical, path, kind)?;
 
-            self.shared.arena.set(
-                node_id,
-                Node::ModuleRef {
-                    import: is_import,
-                    path: path_span,
-                    module: Some(gid),
-                },
-            );
+            match self.shared.arena.get_mut(node_id) {
+                Node::Inherit { module, .. } | Node::Import { module, .. } => {
+                    *module = Some(gid);
+                }
+                _ => unreachable!(),
+            }
         }
 
         Ok(())

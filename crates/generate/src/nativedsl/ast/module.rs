@@ -64,9 +64,8 @@ pub struct ModuleContext {
     pub path: PathBuf,
     pub grammar_config: Option<GrammarConfig>,
     pub root_items: Vec<NodeId>,
-    /// All `ModuleRef` nodes (`import(...)` and `inherit(...)`) in source order,
-    /// collected by the parser so the loader can iterate without scanning the
-    /// arena.
+    /// All `Import` and `Inherit` nodes in source order, collected by the parser
+    /// so the loader can iterate without scanning the arena.
     pub module_refs: Vec<NodeId>,
     /// `true` if the parser pushed at least one `Node::Cfg` for this module.
     /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
@@ -101,13 +100,13 @@ impl ModuleContext {
         span.resolve(&self.source)
     }
 
-    /// The `inherit()` `ModuleRef`s in source order, derived from `module_refs`. The first
+    /// The [`Node::Inherit`] nodes in source order, derived from `module_refs`. The first
     /// is the active base, a second means `MultipleInherits` (reported by `validate_grammar`).
     pub fn inherits<'a>(&'a self, arena: &'a NodeArena) -> impl Iterator<Item = NodeId> + 'a {
         self.module_refs
             .iter()
             .copied()
-            .filter(move |&r| matches!(arena.get(r), Node::ModuleRef { import: false, .. }))
+            .filter(move |&r| matches!(arena.get(r), Node::Inherit { .. }))
     }
 
     /// The resolved inherited-module index and its `inherit(...)` call span,
@@ -116,7 +115,7 @@ impl ModuleContext {
     #[must_use]
     pub fn inherit_module(&self, arena: &NodeArena) -> Option<(ModuleId, Span)> {
         let id = self.inherits(arena).next()?;
-        let &Node::ModuleRef {
+        let &Node::Inherit {
             module: Some(idx), ..
         } = arena.get(id)
         else {

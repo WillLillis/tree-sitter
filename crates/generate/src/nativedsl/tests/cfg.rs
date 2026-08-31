@@ -242,8 +242,8 @@ fn cfg_attribute_nesting_is_bounded() {
 
 #[test]
 fn cfg_disabled_import_does_not_load_file() {
-    // Early cfg gating drops the disabled import before load_import_children
-    // runs, so the nonexistent path is never read (old order: ModuleReadFailed).
+    // Early cfg gating drops the disabled import before load_children runs, so
+    // the nonexistent path is never read.
     let input = r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
         #[cfg(GFM)]

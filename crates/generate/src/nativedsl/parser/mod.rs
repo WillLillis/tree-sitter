@@ -1034,14 +1034,13 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
         let path_span = self.expect_string()?;
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        let id = self.shared.arena.push(
-            Node::ModuleRef {
-                import: kw == TokenKind::KwImport,
-                path: path_span.strip_quotes(),
-                module: None,
-            },
-            start.merge(end),
-        );
+        let path = path_span.strip_quotes();
+        let node = match kw {
+            TokenKind::KwImport => Node::Import { path, module: None },
+            TokenKind::KwInherit => Node::Inherit { path, module: None },
+            _ => unreachable!(),
+        };
+        let id = self.shared.arena.push(node, start.merge(end));
         self.ctx.module_refs.push(id);
         Ok(id)
     }

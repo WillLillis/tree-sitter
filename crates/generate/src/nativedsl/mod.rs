@@ -78,7 +78,6 @@ use std::path::Path;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
 
-use crate::IoError;
 use crate::grammars::{PrecedenceEntry, ReservedWordContext, Variable};
 
 use ast::{IdentKind, ModuleContext, Node, SharedAst, Span};
@@ -298,10 +297,8 @@ pub(crate) fn collect_imported_rules(
     let seed = |stack: &mut Vec<(ModuleId, Span)>, refs: &[ast::NodeId]| {
         // Push in reverse so the LIFO walk preserves source order.
         for &mref_id in refs.iter().rev() {
-            if let &ast::Node::ModuleRef {
-                import: true,
-                module: Some(idx),
-                ..
+            if let &ast::Node::Import {
+                module: Some(idx), ..
             } = arena.get(mref_id)
             {
                 stack.push((idx, arena.span(mref_id)));
@@ -335,29 +332,21 @@ pub(crate) fn collect_imported_rules(
 ///
 /// Returns [`DslError`] if any pipeline stage fails.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
-    let canonical = dunce::canonicalize(grammar_path).map_err(|error| {
-        LowerError::without_span(LowerErrorKind::ModuleResolveFailed(IoError {
-            error,
-            path: Some(grammar_path.to_path_buf()),
-        }))
-    })?;
     let mut shared = SharedAst::new(input.len() / 10);
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
     let mut pool = RulePool::default();
     let mut cfg = apply_cfg::CfgState::default();
-    let mut dsl_loader = Loader {
-        shared: &mut shared,
-        modules: &mut modules,
-        env: &mut env,
-        state: &mut state,
-        pool: &mut pool,
-        cfg: &mut cfg,
-        ancestor_paths: vec![canonical.clone()],
-        loaded: Vec::new(),
-    };
-    dsl_loader.load_module(input, &canonical, loader::ModuleKind::Grammar)?;
+    let dsl_loader = Loader::new(
+        &mut shared,
+        &mut modules,
+        &mut env,
+        &mut state,
+        &mut pool,
+        &mut cfg,
+    );
+    dsl_loader.load_root(input, grammar_path)?;
     // Root is the last-pushed module by construction.
     expect_pat!(Some(Module::Grammar { ctx, lowered, .. }), modules.pop());
     if lowered.variables.is_empty() {

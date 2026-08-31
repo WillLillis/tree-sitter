@@ -97,7 +97,7 @@ impl CfgState {
 }
 
 /// Walk this module's AST: drop disabled cfg subtrees, unwrap active ones.
-pub fn apply_cfg(
+pub(super) fn apply_cfg(
     shared: &mut SharedAst,
     ctx: &mut ModuleContext,
     strs: &StrPool,
@@ -300,8 +300,8 @@ impl Walker<'_> {
                 self.shared.pools.get_macro_mut(macro_id).sym_refs.len = kept;
             }
             // Import/inherit ref: collected so resolve and lower see the
-            // surviving set; no children to descend into.
-            Node::ModuleRef { .. } => self.module_refs.push(id),
+            // surviving set.
+            Node::Import { .. } | Node::Inherit { .. } => self.module_refs.push(id),
             // Leaves: nothing to descend into.
             #[rustfmt::skip]
             Node::Grammar | Node::Forward { .. } | Node::StringLit(_) | Node::IntLit(_)

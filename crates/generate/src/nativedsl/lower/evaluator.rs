@@ -602,8 +602,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.push_val_id(val);
             }
             &Node::GrammarConfig { module, .. } => self.push_unary_combine(id, Task::Expr(module)),
-            Node::ModuleRef { module, .. } => {
-                let global_id = module.expect("module index not set by loading pre-pass");
+            Node::Inherit { module, .. } | Node::Import { module, .. } => {
+                let global_id = module.unwrap();
                 self.push_val(Value::Module(global_id));
             }
             &Node::Append { left, right } => {

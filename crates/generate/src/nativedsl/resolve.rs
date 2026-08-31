@@ -637,20 +637,23 @@ fn import_member_not_found(
 }
 
 /// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
-/// a `ModuleRef`, returning its module id.
+/// an `Import` or `Inherit`, returning its module id.
 fn resolve_module_id(arena: &NodeArena, obj: NodeId) -> Option<ModuleId> {
     let ref_id = resolve_module_ref(arena, obj)?;
     match arena.get(ref_id) {
-        Node::ModuleRef {
+        Node::Inherit {
+            module: Some(idx), ..
+        }
+        | Node::Import {
             module: Some(idx), ..
         } => Some(*idx),
         _ => None,
     }
 }
 
-/// Walk `Ident(Var) -> Let.value` chains to find the underlying `ModuleRef` node.
-/// A self-referential or mutually-recursive `let` (e.g. `let a = a`) bails with
-/// `None`; the cycle is then reported gracefully by typecheck (`CircularLet`).
+/// Walk `Ident(Var) -> Let.value` chains to find the underlying `Import` or `Inherit`
+/// node. A self-referential or mutually-recursive `let` (e.g. `let a = a`) bails with
+/// `None`. The cycle is then reported by typecheck (`CircularLet`).
 pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<NodeId> {
     // A chain longer than the arena has necessarily revisited a let, i.e. cycled.
     for _ in 0..arena.len() {
@@ -661,7 +664,7 @@ pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<N
                 };
                 obj = *value;
             }
-            Node::ModuleRef { .. } => return Some(obj),
+            Node::Inherit { .. } | Node::Import { .. } => return Some(obj),
             _ => return None,
         }
     }

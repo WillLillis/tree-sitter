@@ -386,14 +386,24 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
             None
         }
-        Node::ModuleRef { import, module, .. } => {
-            let idx = module.expect("module index not set by loading pre-pass");
-            let ty = Ty::Module(if import {
-                ModuleTy::Import(idx)
-            } else {
-                ModuleTy::Grammar(idx)
-            });
-            enforce_leaf(&mut env.results, demand, ty, span)?;
+        Node::Import { module, .. } => {
+            let idx = module.unwrap();
+            enforce_leaf(
+                &mut env.results,
+                demand,
+                Ty::Module(ModuleTy::Import(idx)),
+                span,
+            )?;
+            None
+        }
+        Node::Inherit { module, .. } => {
+            let idx = module.unwrap();
+            enforce_leaf(
+                &mut env.results,
+                demand,
+                Ty::Module(ModuleTy::Grammar(idx)),
+                span,
+            )?;
             None
         }
         Node::MacroParam { ty, .. } | Node::ForBinding { ty, .. } => {
@@ -744,7 +754,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
                 let err_kind = TypeErrorKind::GrammarConfigRequiresInherit;
                 let arg_span = shared.arena.span(module);
                 if let Some(ref_id) = resolve_module_ref(&shared.arena, module)
-                    && let Node::ModuleRef { path, .. } = shared.arena.get(ref_id)
+                    && let Node::Import { path, .. } = shared.arena.get(ref_id)
                 {
                     let path_text = ctx.text(*path).to_string();
                     return Err(TypeError::with_note(

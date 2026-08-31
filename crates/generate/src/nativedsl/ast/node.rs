@@ -134,10 +134,15 @@ pub enum Node {
         pattern: NodeId,
         flags: Option<NodeId>,
     },
-    /// `inherit("path.tsg")` or `import("path.tsg")`. `module` is `None`
-    /// after parsing, set to a global module index by the loading pre-pass.
-    ModuleRef {
-        import: bool,
+    /// `import("...")`. `module` is `None` after parsing, set to a global index
+    /// by the loading pre-pass.
+    Import {
+        path: Span,
+        module: Option<ModuleId>,
+    },
+    /// `inherit("...")`. `module` is `None` after parsing, set to a global index
+    /// by the loading pre-pass.
+    Inherit {
         path: Span,
         module: Option<ModuleId>,
     },
