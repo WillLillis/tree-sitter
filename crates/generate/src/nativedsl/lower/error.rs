@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::MAX_CALL_DEPTH;
 use crate::IoError;
-use crate::nativedsl::LowerError;
+use crate::nativedsl::{LowerError, MAX_MODULE_COUNT, MAX_MODULE_DEPTH};
 
 pub type LowerResult<T> = Result<T, LowerError>;
 
@@ -34,9 +34,9 @@ pub enum LowerErrorKind {
     ModuleResolveFailed(IoError),
     #[error("failed to read '{}': {}", .0.path.as_deref().unwrap_or_else(|| Path::new("<unknown>")).display(), .0.error)]
     ModuleReadFailed(IoError),
-    #[error("too many modules (max 256)")]
+    #[error("too many modules (max {MAX_MODULE_COUNT})")]
     ModuleTooMany,
-    #[error("module import chain too deep (max 256)")]
+    #[error("module dependency chain too deep (max {MAX_MODULE_DEPTH})")]
     ModuleDepthExceeded,
     #[error("imported files cannot contain a {}", format_disallowed(*.0))]
     ModuleDisallowedItem(DisallowedItemKind),

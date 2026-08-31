@@ -6,8 +6,8 @@ use crate::{
     IoError,
     nativedsl::{
         DisallowedItemKind, DslError, DslResult, Export, LexError, LexErrorKind, LowerError,
-        LowerErrorKind, LoweringState, Module, ModuleError, ModuleId, NoteMessage, ResolveError,
-        TypeError, TypeErrorKind,
+        LowerErrorKind, LoweringState, MAX_MODULE_DEPTH, Module, ModuleError, ModuleId,
+        NoteMessage, ResolveError, TypeError, TypeErrorKind,
         apply_cfg::{CfgState, apply_cfg},
         ast::{IdentKind, ModuleContext, Node, SharedAst, Span},
         expand_macro_calls, lexer, lower, parser,
@@ -16,8 +16,6 @@ use crate::{
     },
     rules::RulePool,
 };
-
-const MAX_MODULE_DEPTH: usize = 256;
 
 /// Mutable pipeline state passed through the load/lower recursion.
 pub struct Loader<'a> {
@@ -120,9 +118,8 @@ impl Loader<'_> {
         self.load_import_children(&ctx)?;
 
         // Child loading is complete, so this module's final table index is fixed.
-        let global_id = u8::try_from(self.modules.len())
-            .map(ModuleId::from)
-            .map_err(|_| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+        let global_id = ModuleId::from_index(self.modules.len())
+            .ok_or_else(|| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
 
         // Flatten the transitive helper imports once
         let imported_rules =

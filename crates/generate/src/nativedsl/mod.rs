@@ -85,6 +85,9 @@ use ast::{IdentKind, ModuleContext, Node, SharedAst, Span};
 use loader::Loader;
 use typecheck::TypeEnv;
 
+const MAX_MODULE_COUNT: usize = u8::MAX as usize + 1;
+const MAX_MODULE_DEPTH: usize = MAX_MODULE_COUNT;
+
 /// Global module index. Every loaded module gets a unique `ModuleId`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -102,9 +105,19 @@ impl From<ModuleId> for usize {
     }
 }
 
+impl ModuleId {
+    const fn from_index(index: usize) -> Option<Self> {
+        if index < MAX_MODULE_COUNT {
+            Some(Self(index as u8))
+        } else {
+            None
+        }
+    }
+}
+
 /// Fixed bitset covering every value representable by [`ModuleId`].
 #[derive(Default)]
-struct ModuleIdSet([u64; 4]);
+struct ModuleIdSet([u64; MAX_MODULE_COUNT / 64]);
 
 impl ModuleIdSet {
     /// Inserts `id`, returning whether it was newly inserted.
@@ -328,8 +341,7 @@ pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGram
             path: Some(grammar_path.to_path_buf()),
         }))
     })?;
-    let cap = input.len() / 10;
-    let mut shared = SharedAst::new(cap);
+    let mut shared = SharedAst::new(input.len() / 10);
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
