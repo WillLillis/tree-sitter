@@ -141,11 +141,9 @@ struct EvalResult {
     reserved: Option<Vec<ReservedWordContext>>,
 }
 
-/// Lower a fully resolved and type-checked AST into an [`InputGrammar`].
-/// - `previous` contains the modules already loaded
-/// - `current` is the root module being lowered (not yet pushed into `previous`)
-/// - `state` persists across the whole `parse_native_dsl` pipeline.
-pub fn lower_with_base(
+/// Lower a resolved and type-checked grammar module, merging its inherited grammar
+/// and imported rules.
+pub fn lower_grammar(
     state: &mut LoweringState,
     pool: &mut RulePool,
     shared: &SharedAst,

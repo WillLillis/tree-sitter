@@ -7,14 +7,15 @@ use crate::{
     nativedsl::{
         DisallowedItemKind, DslError, DslResult, Export, LexError, LexErrorKind, LowerError,
         LowerErrorKind, LoweringState, MAX_MODULE_DEPTH, Module, ModuleError, ModuleId,
-        NoteMessage, ResolveError, TypeError, TypeErrorKind,
+        ModuleIdSet, NoteMessage, ResolveError, TypeError, TypeErrorKind,
         apply_cfg::{CfgEnvId, CfgState, apply_cfg},
-        ast::{IdentKind, ModuleContext, Node, SharedAst, Span},
+        ast::{IdentKind, ModuleContext, Node, NodeId, SharedAst, Span},
         expand_macro_calls, lexer, lower, parser,
         resolve::{self, ResolveErrorKind},
         typecheck::{self, TypeEnv},
     },
     rules::RulePool,
+    strpool::StrId,
 };
 
 /// Mutable pipeline state passed through the load/lower recursion.
@@ -157,7 +158,7 @@ impl<'a> Loader<'a> {
             .map_err(|e| self.enrich_type_error(&ctx, e))?;
         let module = match kind {
             ModuleKind::Grammar => {
-                let lowered = Box::new(lower::lower_with_base(
+                let lowered = Box::new(lower::lower_grammar(
                     self.state,
                     self.pool,
                     self.shared,
@@ -190,7 +191,6 @@ impl<'a> Loader<'a> {
                 }
             }
         };
-        // The id is this module's final index; lowering must not grow the list.
         debug_assert_eq!(usize::from(global_id), self.modules.len());
         self.modules.push(module);
 
@@ -203,24 +203,10 @@ impl<'a> Loader<'a> {
         let ResolveErrorKind::UnknownIdentifier(name) = &e.kind else {
             return e;
         };
-        // The module that recorded the drop also parsed it, so its ctx is where
-        // the cfg flag span resolves. Prefer the failing module's own drops (the
-        // collision case where two modules gate the same name), then any loaded
-        // module so inherited / imported drops are still attributed correctly.
         let Some(name_id) = self.pool.strs().get(name) else {
             return e;
         };
-        let Some((cfg_id, owner)) = current
-            .cfg_dropped
-            .get(&name_id)
-            .map(|&id| (id, current))
-            .or_else(|| {
-                self.modules
-                    .iter()
-                    .map(Module::ctx)
-                    .find_map(|m| m.cfg_dropped.get(&name_id).map(|&id| (id, m)))
-            })
-        else {
+        let Some((cfg_id, owner)) = self.find_cfg_drop(current, name_id) else {
             return e;
         };
         expect_pat!(Node::Cfg { name: flag, .. }, *self.shared.arena.get(cfg_id));
@@ -446,6 +432,47 @@ impl<'a> Loader<'a> {
             ))?;
         }
         Ok(())
+    }
+
+    fn find_cfg_drop<'b>(
+        &'b self,
+        current: &'b ModuleContext,
+        name: StrId,
+    ) -> Option<(NodeId, &'b ModuleContext)> {
+        if let Some(&id) = current.cfg_dropped.get(&name) {
+            return Some((id, current));
+        }
+
+        let mut visited = ModuleIdSet::default();
+        let mut stack = Vec::new();
+        let push_deps = |ctx: &ModuleContext, stack: &mut Vec<ModuleId>| {
+            for &ref_id in ctx.module_refs.iter().rev() {
+                if let &Node::Import {
+                    module: Some(module),
+                    ..
+                } = self.shared.arena.get(ref_id)
+                {
+                    stack.push(module);
+                }
+            }
+            if let Some((base, _)) = ctx.inherit_module(&self.shared.arena) {
+                stack.push(base);
+            }
+        };
+
+        // Search only modules whose declarations are visible from the failing module.
+        push_deps(current, &mut stack);
+        while let Some(module) = stack.pop() {
+            if !visited.insert(module) {
+                continue;
+            }
+            let ctx = self.modules[usize::from(module)].ctx();
+            if let Some(&id) = ctx.cfg_dropped.get(&name) {
+                return Some((id, ctx));
+            }
+            push_deps(ctx, &mut stack);
+        }
+        None
     }
 }
 
