@@ -52,7 +52,7 @@ pub(super) struct CfgEnvId(u32);
 /// State captured before loading a child module.
 #[derive(Clone, Copy)]
 pub(super) struct CfgCheckpoint {
-    inserted_len: usize,
+    inserted_len: u32,
     env_id: CfgEnvId,
 }
 
@@ -145,13 +145,14 @@ impl CfgState {
 
     pub(super) const fn checkpoint(&self) -> CfgCheckpoint {
         CfgCheckpoint {
-            inserted_len: self.inserted.len(),
+            // `self.inserted` contains unique `StrId`s, so its length fits in `u32`.
+            inserted_len: self.inserted.len() as u32,
             env_id: self.env_id,
         }
     }
 
     pub(super) fn restore(&mut self, checkpoint: CfgCheckpoint) {
-        for name in self.inserted.drain(checkpoint.inserted_len..) {
+        for name in self.inserted.drain(checkpoint.inserted_len as usize..) {
             let removed = self.active.remove(&name);
             debug_assert!(removed.is_some());
         }
