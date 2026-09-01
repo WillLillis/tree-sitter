@@ -128,16 +128,22 @@ impl NodeArena {
     }
 
     /// Iterate a half-open `[start, end)` slice of `NodeId`s and their nodes.
-    /// Caller must ensure both bounds are valid arena indices.
-    pub(super) fn iter_range(
+    ///
+    /// # Safety
+    ///
+    /// Every index yielded by `range` must be nonzero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any index yielded by `range` exceeds the bounds of the backing arena.
+    pub(super) unsafe fn iter_range(
         &self,
         range: std::ops::Range<u32>,
     ) -> impl Iterator<Item = (NodeId, &Node)> {
         range.map(|i| {
-            // SAFETY: i in [start, end), both produced by ModuleContext after
-            // a successful Parser::parse, so within self.nodes bounds.
+            // SAFETY: Caller guarantees that every index is nonzero.
             let id = NodeId(unsafe { NonZeroU32::new_unchecked(i) });
-            (id, unsafe { self.nodes.get_unchecked(i as usize) })
+            (id, &self.nodes[i as usize])
         })
     }
 }

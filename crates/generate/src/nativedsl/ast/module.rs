@@ -124,13 +124,21 @@ impl ModuleContext {
         Some((idx, arena.span(id)))
     }
 
-    /// Iterate just this module's own nodes, paired with their `NodeId`s.
-    /// Avoids scanning unrelated modules' entries in the shared arena.
+    /// Iterate just this module's own nodes in allocation order.
+    ///
+    /// `arena` must be the shared arena backing this context.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recorded node range is uninitialized.The returned iterator
+    /// panics if the recorded range exceeds `arena`.
     pub fn iter_own_nodes<'a>(
         &self,
         arena: &'a NodeArena,
     ) -> impl Iterator<Item = (NodeId, &'a Node)> {
-        arena.iter_range(self.node_range.clone())
+        assert_ne!(self.node_range.start, 0);
+        // SAFETY: assertion guarantees the range cannot yield 0.
+        unsafe { arena.iter_range(self.node_range.clone()) }
     }
 
     /// Build a [`Note`] anchored to this module's source.
