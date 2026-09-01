@@ -11,46 +11,82 @@ use crate::{
     strpool::StrId,
 };
 
-/// All grammar config fields. Used for parsing the grammar block, `grammar_config()`
-/// access (Language/Inherits excluded by the parser), and iterating config node fields.
-#[derive(Clone, Copy, Debug)]
-pub enum ConfigField {
-    Language,
-    Inherits,
-    Extras,
-    Externals,
-    Supertypes,
-    Inline,
-    Word,
-    Conflicts,
-    Precedences,
-    Reserved,
-    Start,
-    Flags,
+macro_rules! define_grammar_config {
+    (
+        values {
+            $(
+                $value_field:ident: $value_ty:ty =
+                    $value_variant:ident($value_name:literal)
+            ),* $(,)?
+        }
+        nodes {
+            $(
+                $node_field:ident = $node_variant:ident($node_name:literal)
+            ),* $(,)?
+        }
+    ) => {
+        /// Identifies a field in the grammar configuration block.
+        #[derive(Clone, Copy, Debug)]
+        pub enum ConfigField {
+            $($value_variant,)*
+            $($node_variant,)*
+        }
+
+        impl ConfigField {
+            pub const COUNT: usize = [
+                $(Self::$value_variant,)*
+                $(Self::$node_variant,)*
+            ]
+            .len();
+        }
+
+        impl TryFrom<&str> for ConfigField {
+            type Error = ();
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                Ok(match value {
+                    $($value_name => Self::$value_variant,)*
+                    $($node_name => Self::$node_variant,)*
+                    _ => return Err(()),
+                })
+            }
+        }
+
+        #[derive(Clone, Default, Debug)]
+        pub struct GrammarConfig {
+            $(pub $value_field: Option<$value_ty>,)*
+            $(pub $node_field: Option<NodeId>,)*
+        }
+
+        impl GrammarConfig {
+            /// All node-valued config fields with their `ConfigField` kind.
+            pub fn node_fields(&self) -> impl Iterator<Item = (ConfigField, NodeId)> + '_ {
+                let fields = [
+                    $((ConfigField::$node_variant, self.$node_field),)*
+                ];
+                fields
+                    .into_iter()
+                    .filter_map(|(field, id)| id.map(|id| (field, id)))
+            }
+        }
+    };
 }
 
-impl ConfigField {
-    pub const COUNT: usize = 12;
-}
-
-impl TryFrom<&str> for ConfigField {
-    type Error = ();
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Ok(match value {
-            "language" => Self::Language,
-            "inherits" => Self::Inherits,
-            "extras" => Self::Extras,
-            "externals" => Self::Externals,
-            "supertypes" => Self::Supertypes,
-            "inline" => Self::Inline,
-            "word" => Self::Word,
-            "conflicts" => Self::Conflicts,
-            "precedences" => Self::Precedences,
-            "reserved" => Self::Reserved,
-            "start" => Self::Start,
-            "flags" => Self::Flags,
-            _ => return Err(()),
-        })
+define_grammar_config! {
+    values {
+        language: StrId = Language("language"),
+    }
+    nodes {
+        inherits = Inherits("inherits"),
+        extras = Extras("extras"),
+        externals = Externals("externals"),
+        supertypes = Supertypes("supertypes"),
+        inline = Inline("inline"),
+        word = Word("word"),
+        conflicts = Conflicts("conflicts"),
+        precedences = Precedences("precedences"),
+        reserved = Reserved("reserved"),
+        start = Start("start"),
+        flags = Flags("flags"),
     }
 }
 
@@ -119,12 +155,11 @@ impl ModuleContext {
         self.module_refs
             .iter()
             .copied()
-            .filter(move |&r| matches!(arena.get(r), Node::Inherit { .. }))
+            .filter(|&r| matches!(arena.get(r), Node::Inherit { .. }))
     }
 
     /// The resolved inherited-module index and its `inherit(...)` call span,
-    /// once the loader has populated it. `None` for non-inheriting modules
-    /// or before child loading completes.
+    /// once the loader has populated it. `None` before child loading completes.
     #[must_use]
     pub fn inherit_module(&self, arena: &NodeArena) -> Option<(ModuleId, Span)> {
         let id = self.inherits(arena).next()?;
@@ -137,7 +172,7 @@ impl ModuleContext {
         Some((idx, arena.span(id)))
     }
 
-    /// Iterate just this module's own nodes in allocation order.
+    /// Iterate this module's own [`Node`]s in allocation order.
     ///
     /// `arena` must be the shared arena backing this context.
     ///
@@ -165,69 +200,5 @@ impl ModuleContext {
             path: self.path.clone(),
             src: self.source.clone(),
         }
-    }
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct GrammarConfig {
-    pub language: Option<StrId>,
-    pub inherits: Option<NodeId>,
-    pub extras: Option<NodeId>,
-    pub externals: Option<NodeId>,
-    pub inline: Option<NodeId>,
-    pub supertypes: Option<NodeId>,
-    pub word: Option<NodeId>,
-    pub conflicts: Option<NodeId>,
-    pub precedences: Option<NodeId>,
-    pub reserved: Option<NodeId>,
-    pub start: Option<NodeId>,
-    pub flags: Option<NodeId>,
-}
-
-impl GrammarConfig {
-    /// All node-valued config fields with their `ConfigField` kind.
-    pub fn node_fields(&self) -> impl Iterator<Item = (ConfigField, NodeId)> + '_ {
-        use ConfigField as C;
-        #[rustfmt::skip]
-        let fields = [
-            (C::Inherits, self.inherits),     (C::Extras, self.extras),
-            (C::Externals, self.externals),   (C::Inline, self.inline),
-            (C::Supertypes, self.supertypes), (C::Word, self.word),
-            (C::Conflicts, self.conflicts),   (C::Precedences, self.precedences),
-            (C::Reserved, self.reserved),     (C::Start, self.start),
-            (C::Flags, self.flags),
-        ];
-        fields
-            .into_iter()
-            .filter_map(|(f, opt)| opt.map(|id| (f, id)))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn node_fields_covers_every_config_field() {
-        // A ConfigField missing from node_fields silently skips cfg gating
-        // and resolution; the exhaustive literal forces new fields through
-        // this test.
-        let id = NodeId::from_index(1);
-        let config = GrammarConfig {
-            language: Some(StrId::default()),
-            inherits: Some(id),
-            extras: Some(id),
-            externals: Some(id),
-            inline: Some(id),
-            supertypes: Some(id),
-            word: Some(id),
-            conflicts: Some(id),
-            precedences: Some(id),
-            reserved: Some(id),
-            start: Some(id),
-            flags: Some(id),
-        };
-        // COUNT minus `language`, the one non-node (string-valued) field.
-        assert_eq!(config.node_fields().count(), ConfigField::COUNT - 1);
     }
 }
