@@ -5,9 +5,9 @@ use crate::nativedsl::lexer::TokenKind;
 use crate::rules::{Alias, Associativity, MetadataParams, Precedence, Rule, RuleId, RulePool};
 
 use super::{
-    Constraint, ContainerKind, DataTy, DisallowedItemKind, DslError, ElemTy, ExpandErrorKind,
-    InnerTy, LexErrorKind, LowerErrorKind, NativeDslError, NoteMessage, ParseErrorKind,
-    ResolveErrorKind, ScalarTy, TupleSig, Ty, TypeErrorKind, parse_native_dsl,
+    CfgErrorKind, Constraint, ContainerKind, DataTy, DisallowedItemKind, DslError, ElemTy,
+    ExpandErrorKind, InnerTy, LexErrorKind, LowerErrorKind, NativeDslError, NoteMessage,
+    ParseErrorKind, ResolveErrorKind, ScalarTy, TupleSig, Ty, TypeErrorKind, parse_native_dsl,
 };
 
 // Raw builders for test expectations.

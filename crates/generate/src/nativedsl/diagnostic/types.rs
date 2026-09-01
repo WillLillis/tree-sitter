@@ -6,18 +6,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::nativedsl::{
-    ast::Span, expand_macro_calls::ExpandErrorKind, lexer::LexErrorKind, lower::LowerErrorKind,
-    parser::ParseErrorKind, resolve::ResolveErrorKind, typecheck::TypeErrorKind,
+    apply_cfg::CfgErrorKind, ast::Span, expand_macro_calls::ExpandErrorKind, lexer::LexErrorKind,
+    lower::LowerErrorKind, parser::ParseErrorKind, resolve::ResolveErrorKind,
+    typecheck::TypeErrorKind,
 };
 
 pub type DslResult<T> = Result<T, DslError>;
 
 pub type LexError = Diagnostic<LexErrorKind>;
 pub type ParseError = Diagnostic<ParseErrorKind>;
+pub type CfgError = Diagnostic<CfgErrorKind>;
+pub type ExpandError = Diagnostic<ExpandErrorKind>;
 pub type ResolveError = Diagnostic<ResolveErrorKind>;
 pub type TypeError = Diagnostic<TypeErrorKind>;
 pub type LowerError = Diagnostic<LowerErrorKind>;
-pub type ExpandError = Diagnostic<ExpandErrorKind>;
 
 /// Diagnostic error shared by all pipeline stages.
 #[derive(Debug, Serialize, Deserialize, Error)]
@@ -85,6 +87,7 @@ impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
 pub enum DslError {
     Lex(#[from] LexError),
     Parse(#[from] ParseError),
+    Cfg(#[from] CfgError),
     Expand(#[from] ExpandError),
     Resolve(#[from] ResolveError),
     Type(#[from] TypeError),
@@ -193,6 +196,7 @@ impl DslError {
         match self {
             Self::Lex(e) => e.span,
             Self::Parse(e) => e.span,
+            Self::Cfg(e) => e.span,
             Self::Expand(e) => e.span,
             Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
@@ -217,6 +221,7 @@ impl DslError {
         match self {
             Self::Lex(e) => &e.notes,
             Self::Parse(e) => &e.notes,
+            Self::Cfg(e) => &e.notes,
             Self::Expand(e) => &e.notes,
             Self::Resolve(e) => &e.notes,
             Self::Type(e) => &e.notes,
@@ -233,6 +238,7 @@ impl DslError {
         let src = match self {
             Self::Lex(e) => &e.src,
             Self::Parse(e) => &e.src,
+            Self::Cfg(e) => &e.src,
             Self::Expand(e) => &e.src,
             Self::Resolve(e) => &e.src,
             Self::Type(e) => &e.src,

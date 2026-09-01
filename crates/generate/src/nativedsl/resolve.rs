@@ -690,24 +690,6 @@ pub enum ResolveErrorKind {
        formed with list literals, `append()`, or variable/config references"
     )]
     InvalidExternalsExpression,
-    #[error("`flags` must be an object literal `{{ enabled: [...], disabled: [...] }}`")]
-    CfgFlagsNotObject,
-    #[error("`flags` only accepts `enabled` and `disabled` keys, got '{0}'")]
-    CfgFlagsUnknownKey(String),
-    #[error("`flags.{{enabled,disabled}}` must be a list literal of string flag names")]
-    CfgFlagsNotList,
-    #[error(
-        "`flags.{{enabled,disabled}}` entries must be plain string literals (not raw strings or expressions)"
-    )]
-    CfgFlagsNonLiteral,
-    #[error(
-        "`#[cfg(...)]` is not allowed inside the `flags` field; flag declarations are read before cfg gating runs"
-    )]
-    CfgInsideFlags,
-    #[error("`#[cfg({0})]` references an unknown flag")]
-    CfgFlagUnknown(String),
-    #[error("flag '{0}' is declared more than once in this grammar's `flags`")]
-    CfgFlagDeclaredTwice(String),
 }
 
 /// Build an `UnknownIdentifier` error, attaching a "did you mean" note if appropriate

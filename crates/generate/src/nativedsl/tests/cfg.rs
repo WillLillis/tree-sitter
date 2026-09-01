@@ -25,10 +25,10 @@ fn cfg_flag_declared_twice_errors() {
         rule program { "x" }
     "#,
     );
-    let e = assert_err!(err, Resolve);
+    let e = assert_err!(err, Cfg);
     assert!(matches!(
         e.kind,
-        ResolveErrorKind::CfgFlagDeclaredTwice(ref n) if n == "X"
+        CfgErrorKind::FlagDeclaredTwice(ref n) if n == "X"
     ));
     let note = e.notes.first().expect("expected FirstDefinedHere note");
     assert!(matches!(note.message, NoteMessage::FirstDefinedHere));
@@ -534,11 +534,11 @@ fn cfg_base_flag_does_not_leak_to_sibling_import() {
         );
         let err = expect_err(parse_with_modules(&modules, &root));
         let inner = *assert_err!(err, Module).inner;
-        let error = assert_err!(inner, Resolve);
+        let error = assert_err!(inner, Cfg);
         assert!(
             matches!(
                 error.kind,
-                ResolveErrorKind::CfgFlagUnknown(ref name)
+                CfgErrorKind::FlagUnknown(ref name)
                     if name == "BASE_FEATURE"
             ),
             "got {:?}",
@@ -570,11 +570,11 @@ fn cfg_cached_helper_respects_current_flags() {
     ));
 
     let inner = *assert_err!(err, Module).inner;
-    let error = assert_err!(inner, Resolve);
+    let error = assert_err!(inner, Cfg);
     assert!(
         matches!(
             error.kind,
-            ResolveErrorKind::CfgFlagUnknown(ref name) if name == "F"
+            CfgErrorKind::FlagUnknown(ref name) if name == "F"
         ),
         "got {:?}",
         error.kind
@@ -818,6 +818,53 @@ rule_names_tests! {
     }
 }
 
+error_tests! { Cfg {
+    cfg_unknown_flag_errors {
+        r#"
+        grammar { language: "t", flags: { enabled: ["GFM"] } }
+        rule program { choice("a", #[cfg(TYPO)] "b") }
+    "#,
+        CfgErrorKind::FlagUnknown("TYPO".into())
+    }
+    cfg_flags_not_object_errors {
+        r#"
+        grammar { language: "t", flags: ["X"] }
+        rule program { "x" }
+    "#,
+        CfgErrorKind::FlagsNotObject
+    }
+    cfg_flags_not_list_errors {
+        r#"
+        grammar { language: "t", flags: { enabled: "X" } }
+        rule program { "x" }
+    "#,
+        CfgErrorKind::FlagsNotList
+    }
+    cfg_flags_unknown_key_errors {
+        r#"
+        grammar { language: "t", flags: { active: ["GFM"] } }
+        rule program { "x" }
+    "#,
+        CfgErrorKind::FlagsUnknownKey("active".into())
+    }
+    cfg_inside_flags_errors {
+        // cfg inside `flags` is nonsensical: flags are read before cfg gating runs.
+        r#"
+        grammar { language: "t", flags: { enabled: ["X", #[cfg(X)] "FOO"] } }
+        rule program { "x" }
+    "#,
+        CfgErrorKind::InsideFlags
+    }
+    cfg_flags_non_string_errors {
+        // GFM here is an identifier, not a string literal.
+        r#"
+        grammar { language: "t", flags: { enabled: [GFM] } }
+        rule program { "x" }
+    "#,
+        CfgErrorKind::FlagsNonLiteral
+    }
+}}
+
 error_tests! { Resolve {
     cfg_rule_def_disabled {
         // The cfg-dropped rule is gone, so the reference is undefined.
@@ -828,50 +875,6 @@ error_tests! { Resolve {
         rule strikethrough { "~~" }
     "#,
         ResolveErrorKind::UnknownIdentifier("strikethrough".into())
-    }
-    cfg_unknown_flag_errors {
-        r#"
-        grammar { language: "t", flags: { enabled: ["GFM"] } }
-        rule program { choice("a", #[cfg(TYPO)] "b") }
-    "#,
-        ResolveErrorKind::CfgFlagUnknown("TYPO".into())
-    }
-    cfg_flags_not_object_errors {
-        r#"
-        grammar { language: "t", flags: ["X"] }
-        rule program { "x" }
-    "#,
-        ResolveErrorKind::CfgFlagsNotObject
-    }
-    cfg_flags_not_list_errors {
-        r#"
-        grammar { language: "t", flags: { enabled: "X" } }
-        rule program { "x" }
-    "#,
-        ResolveErrorKind::CfgFlagsNotList
-    }
-    cfg_flags_unknown_key_errors {
-        r#"
-        grammar { language: "t", flags: { active: ["GFM"] } }
-        rule program { "x" }
-    "#,
-        ResolveErrorKind::CfgFlagsUnknownKey("active".into())
-    }
-    cfg_inside_flags_errors {
-        // cfg inside `flags` is nonsensical: flags are read before cfg gating runs.
-        r#"
-        grammar { language: "t", flags: { enabled: ["X", #[cfg(X)] "FOO"] } }
-        rule program { "x" }
-    "#,
-        ResolveErrorKind::CfgInsideFlags
-    }
-    cfg_flags_non_string_errors {
-        // GFM here is an identifier, not a string literal.
-        r#"
-        grammar { language: "t", flags: { enabled: [GFM] } }
-        rule program { "x" }
-    "#,
-        ResolveErrorKind::CfgFlagsNonLiteral
     }
     cfg_rule_in_rule_set_dropped_reference_is_undefined {
         // Referencing a rule gated out of the set is undefined, exactly as for a

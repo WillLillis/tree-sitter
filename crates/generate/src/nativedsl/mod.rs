@@ -59,8 +59,9 @@ pub use crate::{
     rules::{Rule, RuleId, RulePool},
     strpool::{StrId, StrPool},
 };
+pub use apply_cfg::{CfgErrorKind, CfgResult};
 pub use diagnostic::{
-    Diagnostic, DslError, DslResult, ExpandError, LexError, LowerError, ModuleError,
+    CfgError, Diagnostic, DslError, DslResult, ExpandError, LexError, LowerError, ModuleError,
     NativeDslError, Note, NoteMessage, ParseError, ResolveError, TypeError,
 };
 pub use expand_macro_calls::ExpandErrorKind;

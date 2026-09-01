@@ -7,17 +7,43 @@
 use std::collections::hash_map::Entry;
 
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::strpool::{StrId, StrPool};
 
 use super::{
-    Diagnostic, NoteMessage, ResolveError, ResolveErrorKind,
+    CfgError, NoteMessage,
     ast::{
         ChildRange, ConfigField, GrammarConfig, ModuleContext, Node, NodeId, ObjectField,
         SharedAst, Span,
     },
     loader::ModuleKind,
 };
+
+pub type CfgResult<T> = Result<T, CfgError>;
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum CfgErrorKind {
+    #[error("`flags` must be an object literal `{{ enabled: [...], disabled: [...] }}`")]
+    FlagsNotObject,
+    #[error("`flags` only accepts `enabled` and `disabled` keys, got '{0}'")]
+    FlagsUnknownKey(String),
+    #[error("`flags.{{enabled,disabled}}` must be a list literal of string flag names")]
+    FlagsNotList,
+    #[error(
+        "`flags.{{enabled,disabled}}` entries must be plain string literals (no raw strings or expressions)"
+    )]
+    FlagsNonLiteral,
+    #[error(
+        "`#[cfg(...)]` is not allowed inside the `flags` field. `flags` declarations are read before cfg gating"
+    )]
+    InsideFlags,
+    #[error("`#[cfg({0})]` references an unknown flag")]
+    FlagUnknown(String),
+    #[error("flag '{0}' is declared more than once in this grammar's `flags`")]
+    FlagDeclaredTwice(String),
+}
 
 /// Identity of an effective cfg environment.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -47,13 +73,13 @@ impl CfgState {
         shared: &SharedAst,
         ctx: &mut ModuleContext,
         strs: &StrPool,
-    ) -> Result<(), ResolveError> {
+    ) -> CfgResult<()> {
         let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) else {
             return Ok(());
         };
         let Node::Object(range) = *shared.arena.get(flags_id) else {
             return Err(err(
-                ResolveErrorKind::CfgFlagsNotObject,
+                CfgErrorKind::FlagsNotObject,
                 shared.arena.span(flags_id),
             ));
         };
@@ -67,26 +93,18 @@ impl CfgState {
                 "enabled" => true,
                 "disabled" => false,
                 other => {
-                    return Err(err(
-                        ResolveErrorKind::CfgFlagsUnknownKey(other.into()),
-                        key.span,
-                    ));
+                    return Err(err(CfgErrorKind::FlagsUnknownKey(other.into()), key.span));
                 }
             };
             let Node::List(items) = shared.arena.get(value_id) else {
-                return Err(err(
-                    ResolveErrorKind::CfgFlagsNotList,
-                    shared.arena.span(value_id),
-                ));
+                return Err(err(CfgErrorKind::FlagsNotList, shared.arena.span(value_id)));
             };
             for &elem in shared.pools.child_slice(*items) {
                 let span = shared.arena.span(elem);
                 let name = match shared.arena.get(elem) {
                     Node::StringLit(sid) => *sid,
-                    Node::Cfg { .. } => {
-                        return Err(err(ResolveErrorKind::CfgInsideFlags, span));
-                    }
-                    _ => return Err(err(ResolveErrorKind::CfgFlagsNonLiteral, span)),
+                    Node::Cfg { .. } => return Err(err(CfgErrorKind::InsideFlags, span)),
+                    _ => return Err(err(CfgErrorKind::FlagsNonLiteral, span)),
                 };
                 let duplicate = match ctx.cfg_declared.entry(name) {
                     Entry::Occupied(entry) => Some(*entry.get()),
@@ -96,8 +114,8 @@ impl CfgState {
                     }
                 };
                 if let Some(first_span) = duplicate {
-                    return Err(ResolveError::with_note(
-                        ResolveErrorKind::CfgFlagDeclaredTwice(strs.resolve(name).to_string()),
+                    return Err(CfgError::with_note(
+                        CfgErrorKind::FlagDeclaredTwice(strs.resolve(name).to_string()),
                         span,
                         ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
@@ -148,7 +166,7 @@ pub(super) fn apply_cfg(
     strs: &StrPool,
     state: &CfgState,
     kind: ModuleKind,
-) -> Result<(), ResolveError> {
+) -> CfgResult<()> {
     ctx.module_refs.clear(); // rebuilt during cfg walk
     let mut w = Walker {
         shared: &mut *shared,
@@ -210,7 +228,7 @@ struct Walker<'a> {
 impl Walker<'_> {
     /// `Ok(Some(id))` = keep `id` (an active cfg resolves to its unwrapped child's id)
     /// `Ok(None)` = drop. Shrinks filtered list ranges in place.
-    fn walk(&mut self, id: NodeId) -> Result<Option<NodeId>, ResolveError> {
+    fn walk(&mut self, id: NodeId) -> CfgResult<Option<NodeId>> {
         if let &Node::Cfg {
             name,
             name_offset,
@@ -229,7 +247,7 @@ impl Walker<'_> {
         name: StrId,
         name_offset: u32,
         child: NodeId,
-    ) -> Result<Option<NodeId>, ResolveError> {
+    ) -> CfgResult<Option<NodeId>> {
         // Grammar modules require a local declaration. Helper modules transparently
         // see the importing grammar's declared set.
         let active = match self.kind {
@@ -244,7 +262,7 @@ impl Walker<'_> {
             let name_len = self.strs.resolve(name).len() as u32;
             let name_span = Span::new(name_offset, name_offset + name_len);
             return Err(err(
-                ResolveErrorKind::CfgFlagUnknown(self.strs.resolve(name).into()),
+                CfgErrorKind::FlagUnknown(self.strs.resolve(name).into()),
                 name_span,
             ));
         };
@@ -273,7 +291,7 @@ impl Walker<'_> {
         }
     }
 
-    fn walk_children(&mut self, id: NodeId) -> Result<(), ResolveError> {
+    fn walk_children(&mut self, id: NodeId) -> CfgResult<()> {
         let node = *self.shared.arena.get(id);
         match node {
             // List-shaped variants whose members can be cfg-gated. Filter dropped
@@ -365,7 +383,7 @@ impl Walker<'_> {
     /// Filter a child range in place and shrink `id`'s range to match. Walk each
     /// `NodeId` slot, then overwrite earlier slots with survivors. Slots past the
     /// new end are orphaned but no `ChildRange` references them.
-    fn filter(&mut self, id: NodeId, range: ChildRange) -> Result<(), ResolveError> {
+    fn filter(&mut self, id: NodeId, range: ChildRange) -> CfgResult<()> {
         let start = range.start as usize;
         let mut write = start;
         for read in start..start + range.len as usize {
@@ -384,6 +402,6 @@ impl Walker<'_> {
     }
 }
 
-const fn err(kind: ResolveErrorKind, span: Span) -> ResolveError {
-    Diagnostic::new(kind, span)
+const fn err(kind: CfgErrorKind, span: Span) -> CfgError {
+    CfgError::new(kind, span)
 }

@@ -11,6 +11,6 @@ mod types;
 pub use render::NativeDslError;
 pub(crate) use suggest::suggest_name;
 pub use types::{
-    Diagnostic, DslError, DslResult, ExpandError, LexError, LowerError, ModuleError, Note,
-    NoteMessage, ParseError, ResolveError, TypeError,
+    CfgError, Diagnostic, DslError, DslResult, ExpandError, LexError, LowerError, ModuleError,
+    Note, NoteMessage, ParseError, ResolveError, TypeError,
 };
