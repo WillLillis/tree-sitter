@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use rustc_hash::FxHashMap;
 
 use super::{Node, NodeArena, NodeId, Span, Spanned};
-use crate::nativedsl::typecheck::Ty;
-use crate::nativedsl::{ModuleId, Note, NoteMessage};
-use crate::strpool::StrId;
+use crate::{
+    nativedsl::{ModuleId, Note, NoteMessage, typecheck::Ty},
+    strpool::StrId,
+};
 
 /// All grammar config fields. Used for parsing the grammar block, `grammar_config()`
 /// access (Language/Inherits excluded by the parser), and iterating config node fields.
@@ -55,21 +56,17 @@ impl TryFrom<&str> for ConfigField {
 
 /// Per-module data produced by the parser.
 ///
-/// Each loaded module (root, inherited, imported) has its own `ModuleContext`
-/// containing source text and module-specific configuration, while sharing a
-/// single [`SharedAst`](super::SharedAst) for all node data.
+/// Owns the module's source text and module-specific state. Its nodes live in
+/// the [`SharedAst`](super::SharedAst) shared by the entire grammar.
 #[derive(Debug)]
 pub struct ModuleContext {
     pub source: String,
     pub path: PathBuf,
     pub grammar_config: Option<GrammarConfig>,
     pub root_items: Vec<NodeId>,
-    /// All `Import` and `Inherit` nodes in source order, collected by the parser
-    /// so the loader can iterate without scanning the arena.
+    /// All `Import` and `Inherit` nodes in source order, collected by the parser.
     pub module_refs: Vec<NodeId>,
     /// `true` if the parser pushed at least one `Node::Cfg` for this module.
-    /// Lets the loader skip `apply_cfg` entirely when no `#[cfg(...)]`
-    /// attributes appear in source.
     pub has_cfg: bool,
     /// `true` if the parser pushed at least one `Node::Forward` for this module.
     pub has_forward_decls: bool,
@@ -81,20 +78,36 @@ pub struct ModuleContext {
     pub cfg_dropped: FxHashMap<StrId, NodeId>,
     /// Computed-name references (`@<expr>`) from rule-set macro instances,
     /// evaluated under each call's args at expand time, paired with their span.
-    /// Resolve validates each against the rule-name table.
     pub computed_refs: Vec<Spanned<StrId>>,
     /// Optional `let name: ty` annotations, keyed by the `Node::Let` id. Stored
-    /// out-of-line (most lets have none) so the annotation doesn't widen `Node`.
-    /// Written by the parser, read by typecheck.
     pub let_types: FxHashMap<NodeId, Ty>,
-    /// Half-open `[start, end)` range of `NodeId`s this module owns in the
-    /// shared arena. The parser pushes all of a module's nodes contiguously
-    /// before any child loads, so this slice is well-defined and stable.
-    /// Populated by `Parser::parse`; default `0..0` means "uninitialized".
-    pub(crate) node_range: std::ops::Range<u32>,
+    /// Half-open range of nodes this module owns in the shared arena.
+    node_range: std::ops::Range<NodeId>,
 }
 
 impl ModuleContext {
+    pub(crate) fn new(
+        source: String,
+        path: PathBuf,
+        root_capacity: usize,
+        node_start: NodeId,
+    ) -> Self {
+        Self {
+            source,
+            path,
+            grammar_config: None,
+            root_items: Vec::with_capacity(root_capacity),
+            module_refs: Vec::new(),
+            has_cfg: false,
+            has_forward_decls: false,
+            cfg_declared: FxHashMap::default(),
+            cfg_dropped: FxHashMap::default(),
+            computed_refs: Vec::new(),
+            let_types: FxHashMap::default(),
+            node_range: node_start..node_start,
+        }
+    }
+
     #[must_use]
     pub fn text(&self, span: Span) -> &str {
         span.resolve(&self.source)
@@ -130,15 +143,17 @@ impl ModuleContext {
     ///
     /// # Panics
     ///
-    /// Panics if the recorded node range is uninitialized.The returned iterator
-    /// panics if the recorded range exceeds `arena`.
+    /// The returned iterator panics if the recorded range exceeds `arena`.
     pub fn iter_own_nodes<'a>(
         &self,
         arena: &'a NodeArena,
     ) -> impl Iterator<Item = (NodeId, &'a Node)> {
-        assert_ne!(self.node_range.start, 0);
-        // SAFETY: assertion guarantees the range cannot yield 0.
-        unsafe { arena.iter_range(self.node_range.clone()) }
+        arena.iter_range(self.node_range.clone())
+    }
+
+    pub(crate) fn set_node_end(&mut self, end: NodeId) {
+        debug_assert!(end.index() >= self.node_range.end.index());
+        self.node_range.end = end;
     }
 
     /// Build a [`Note`] anchored to this module's source.

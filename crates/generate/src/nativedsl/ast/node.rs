@@ -1,10 +1,11 @@
 //! The core AST [`Node`] enum and the small payload enums it carries.
 
 use super::{ChildRange, ConfigField, ExpandId, ForId, MacroId, NodeId, Span};
-use crate::nativedsl::ModuleId;
-use crate::nativedsl::typecheck::Ty;
-use crate::rules::RuleId;
-use crate::strpool::StrId;
+use crate::{
+    nativedsl::{ModuleId, typecheck::Ty},
+    rules::RuleId,
+    strpool::StrId,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrecKind {
@@ -105,6 +106,7 @@ pub enum Node {
         inner: NodeId,
     },
     Blank,
+    // The `eof()` rule
     Eof,
     Field {
         name: StrId,
@@ -146,7 +148,7 @@ pub enum Node {
         path: Span,
         module: Option<ModuleId>,
     },
-    /// `grammar_config(module, field)` - access a specific config field from
+    /// `grammar_config(module, field)`: access a specific config field from
     /// an inherited grammar module.
     GrammarConfig {
         module: NodeId,

@@ -3,11 +3,12 @@
 //! containers, and the element types they store.
 
 use super::{IdentKind, Node, NodeArena, NodeId};
-use crate::nativedsl::ModuleId;
-use crate::nativedsl::ast::Spanned;
-use crate::nativedsl::typecheck::Ty;
-use crate::strpool::StrId;
+use crate::{
+    nativedsl::{ModuleId, ast::Spanned, typecheck::Ty},
+    strpool::StrId,
+};
 
+/// Define compact `u32` handles into the AST side tables.
 macro_rules! id_type {
     ($name:ident) => {
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -58,10 +59,10 @@ pub struct MacroConfig {
     pub kind: MacroKind,
     /// Computed-name references (`@<expr>` -> `SymRef`) in a rule-set macro's
     /// body, recorded by the parser as it builds them. Expand evaluates each
-    /// under a call's args; resolve validates the result exists.
+    /// under a call's args. `resolve` validates the result exists.
     pub sym_refs: ChildRange,
     /// Set when this macro enters the resolved declaration table, after its module's
-    /// final is known. Lowering never observes `None`.
+    /// final is known.
     def_module: Option<ModuleId>,
 }
 
@@ -97,9 +98,9 @@ impl MacroConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub enum MacroKind {
-    /// Body is an expression typechecking to the carried return type.
+    /// `macro name(...) ty { expr }`, called as `name(...)` in expression position.
     Expression(Ty),
-    /// Body is `Node::RuleSet`; expanded inline at each top-level call site.
+    /// `rules name(...) { ... }`, called as `@name(...)` to emit top-level rules.
     RuleSet,
 }
 
@@ -125,8 +126,8 @@ pub struct Expansion {
     pub args: ChildRange,
 }
 
-/// Shared AST data across all modules in a grammar. All `NodeId`, `MacroId`,
-/// `ForId`, and `ChildRange` values are globally valid within this structure.
+/// AST storage shared by every module in a grammar. `arena` owns the nodes,
+/// while the side tables within `pools` own their out-of-line data.
 pub struct SharedAst {
     pub arena: NodeArena,
     pub pools: AstPools,
@@ -160,7 +161,7 @@ impl SharedAst {
     }
 
     pub(crate) fn reserve_for_module(&mut self, source_len: usize) {
-        // Modules average ~16 source bytes per node, leave room for denser ones
+        // Modules loosely average ~16 source bytes per node, leave some room.
         let estimated_nodes = source_len / 12;
         self.arena.reserve(estimated_nodes);
         self.pools.children.reserve(estimated_nodes / 2);
@@ -190,9 +191,7 @@ impl SharedAst {
         None
     }
 
-    /// Push the child node ids of an expression node onto `stack`. Mirrors the
-    /// expression children walked by [`resolve_expr`](crate::nativedsl::resolve);
-    /// keep the two in sync.
+    /// Push children that can contain a  referenced `let`.
     fn push_expr_children(&self, node: Node, stack: &mut Vec<NodeId>) {
         if let Some(range) = node.child_range() {
             stack.extend(self.pools.child_slice(range).iter().copied());
@@ -214,18 +213,11 @@ impl SharedAst {
                 stack.push(content);
                 stack.push(target);
             }
+            #[rustfmt::skip]
             Node::Append { left: a, right: b }
             | Node::BinOp { lhs: a, rhs: b, .. }
-            | Node::Prec {
-                value: a,
-                content: b,
-                ..
-            }
-            | Node::ComputedRule {
-                name_expr: a,
-                body: b,
-                ..
-            } => {
+            | Node::Prec { value: a, content: b, .. }
+            | Node::ComputedRule { name_expr: a, body: b, .. } => {
                 stack.push(a);
                 stack.push(b);
             }
@@ -233,18 +225,12 @@ impl SharedAst {
                 stack.push(pattern);
                 stack.extend(flags);
             }
-            Node::Repeat { inner: c, .. }
-            | Node::Token { inner: c, .. }
-            | Node::Neg(c)
-            | Node::GrammarConfig { module: c, .. }
-            | Node::Field { content: c, .. }
-            | Node::Reserved { content: c, .. }
-            | Node::Rule { body: c, .. }
-            | Node::SymRef { expr: c }
-            | Node::FieldAccess { obj: c, .. }
-            | Node::QualifiedAccess { obj: c, .. }
-            | Node::Let { value: c, .. }
-            | Node::Cfg { child: c, .. } => stack.push(c),
+            #[rustfmt::skip]
+            Node::Repeat { inner: c, .. } | Node::Token { inner: c, .. } | Node::Neg(c)
+            | Node::GrammarConfig { module: c, .. } | Node::Field { content: c, .. }
+            | Node::Reserved { content: c, .. } | Node::Rule { body: c, .. } | Node::SymRef { expr: c }
+            | Node::FieldAccess { obj: c, .. } | Node::QualifiedAccess { obj: c, .. }
+            | Node::Let { value: c, .. } | Node::Cfg { child: c, .. } => stack.push(c),
             _ => {}
         }
     }
@@ -283,11 +269,10 @@ impl AstPools {
         Some(ChildRange::new(start, len))
     }
 
-    /// Pool a macro's params or a for-loop's bindings. Both are bounded to
-    /// `u8::MAX` at parse time (their indices are `u8`), so the count always
-    /// fits `ChildRange::len` and cannot overflow.
+    /// Pool a macro's params or  a for loop's bindings.
     pub fn push_params(&mut self, params: &[Param]) -> ChildRange {
         let start = self.params.len() as u32;
+        // the parser caps this to `u8::MAX` because binding indices are `u8`.
         debug_assert!(u8::try_from(params.len()).is_ok());
         let len = params.len() as u16;
         self.params.extend_from_slice(params);

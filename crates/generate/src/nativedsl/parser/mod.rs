@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use rustc_hash::FxHashMap;
-
 use crate::strpool::{StrId, StrPool};
 
 use super::{
@@ -76,25 +74,13 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     ) -> Self {
         assert!(tokens.last().is_some_and(|t| t.kind == TokenKind::Eof));
         let root_cap = tokens.len() / 10;
+        let node_start = shared.arena.next_id();
         Self {
             tokens,
             pos: 0,
             shared,
             strs,
-            ctx: ModuleContext {
-                source,
-                path: grammar_path,
-                grammar_config: None,
-                root_items: Vec::with_capacity(root_cap),
-                module_refs: Vec::new(),
-                node_range: 0..0,
-                has_cfg: false,
-                has_forward_decls: false,
-                cfg_declared: FxHashMap::default(),
-                cfg_dropped: FxHashMap::default(),
-                computed_refs: Vec::new(),
-                let_types: FxHashMap::default(),
-            },
+            ctx: ModuleContext::new(source, grammar_path, root_cap, node_start),
             scratch: Vec::with_capacity(32),
             locals: Vec::new(),
             depth: 0,
@@ -104,13 +90,11 @@ impl<'tok, 'shared, 'strs> Parser<'tok, 'shared, 'strs> {
     }
 
     pub fn parse(mut self) -> ParseResult<ModuleContext> {
-        let start = self.shared.arena.next_id().into();
         while !self.at_eof() {
             let id = self.parse_item()?;
             self.ctx.root_items.push(id);
         }
-        let end = self.shared.arena.next_id().into();
-        self.ctx.node_range = start..end;
+        self.ctx.set_node_end(self.shared.arena.next_id());
         Ok(self.ctx)
     }
 

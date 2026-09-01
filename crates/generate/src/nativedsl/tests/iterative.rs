@@ -3,8 +3,6 @@
 //! parser caps source nesting at `MAX_PARSE_DEPTH`, so the deep AST is built
 //! directly via the arena to exercise a single pass past that bound.
 
-use rustc_hash::FxHashMap;
-
 use crate::nativedsl::ModuleId;
 use crate::nativedsl::ast::{GrammarConfig, ModuleContext, Node, SharedAst, Span};
 use crate::nativedsl::resolve::resolve;
@@ -22,6 +20,7 @@ fn deep_token_chain(n: usize) -> (SharedAst, ModuleContext, RulePool) {
     let span = Span::from_usize(0, source.len());
     let name = pool.intern(&source);
     let mut shared = SharedAst::new(n + 4);
+    let node_start = shared.arena.next_id();
     let mut inner = shared.arena.push(Node::Blank, span);
     for _ in 0..n {
         inner = shared.arena.push(
@@ -40,23 +39,13 @@ fn deep_token_chain(n: usize) -> (SharedAst, ModuleContext, RulePool) {
         },
         span,
     );
-    let ctx = ModuleContext {
-        source,
-        path: std::path::PathBuf::from("deep.tsg"),
-        grammar_config: Some(GrammarConfig {
-            language: Some(pool.intern("deep")),
-            ..GrammarConfig::default()
-        }),
-        root_items: vec![rule],
-        module_refs: Vec::new(),
-        has_cfg: false,
-        has_forward_decls: false,
-        cfg_declared: FxHashMap::default(),
-        cfg_dropped: FxHashMap::default(),
-        computed_refs: Vec::new(),
-        let_types: FxHashMap::default(),
-        node_range: 0..0,
-    };
+    let mut ctx = ModuleContext::new(source, std::path::PathBuf::from("deep.tsg"), 1, node_start);
+    ctx.grammar_config = Some(GrammarConfig {
+        language: Some(pool.intern("deep")),
+        ..GrammarConfig::default()
+    });
+    ctx.root_items.push(rule);
+    ctx.set_node_end(shared.arena.next_id());
     (shared, ctx, pool)
 }
 

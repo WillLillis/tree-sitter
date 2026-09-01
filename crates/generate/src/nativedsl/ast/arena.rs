@@ -136,12 +136,15 @@ impl NodeArena {
     /// # Panics
     ///
     /// Panics if any index yielded by `range` exceeds the bounds of the backing arena.
-    pub(super) unsafe fn iter_range(
+    pub(super) fn iter_range(
         &self,
-        range: std::ops::Range<u32>,
+        range: std::ops::Range<NodeId>,
     ) -> impl Iterator<Item = (NodeId, &Node)> {
-        range.map(|i| {
-            // SAFETY: Caller guarantees that every index is nonzero.
+        let start = u32::from(range.start);
+        let end = u32::from(range.end);
+
+        (start..end).map(|i| {
+            // SAFETY: `start` is nonzero, so every yielded index is nonzero.
             let id = NodeId(unsafe { NonZeroU32::new_unchecked(i) });
             (id, &self.nodes[i as usize])
         })

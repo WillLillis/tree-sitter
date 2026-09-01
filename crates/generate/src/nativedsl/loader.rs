@@ -126,7 +126,7 @@ impl<'a> Loader<'a> {
         // Runs before child loads so this module's nodes all sit in one contiguous
         // arena range.
         expand_macro_calls::expand_macro_calls(self.shared, self.pool.strs_mut(), &mut ctx)?;
-        ctx.node_range.end = self.shared.arena.next_id().into();
+        ctx.set_node_end(self.shared.arena.next_id());
 
         self.load_children(&ctx)?;
 
