@@ -7,18 +7,18 @@ macro_rules! inherit_error_tests {
     ($variant:ident { $($name:ident { $base:expr, $expected:expr })* }) => {
         $(#[test] fn $name() {
             let (err, base_path) = inherit_err($base);
-            let DslError::Module(m) = &err else { panic!("expected Module, got {err:?}") };
+            let DslError::Module(m) = &err.error else { panic!("expected Module, got {err:?}") };
             let DslError::$variant(e) = m.inner.as_ref() else {
                 panic!(concat!("expected ", stringify!($variant), ", got {:?}"), m.inner)
             };
             assert_eq!(e.kind, $expected);
-            assert_eq!(m.path, base_path);
+            assert_eq!(err.document(m.target_document()).path(), base_path);
         })*
     };
     (match $variant:ident { $($name:ident { $base:expr, $expected:pat $(if $guard:expr)? })* }) => {
         $(#[test] fn $name() {
             let (err, base_path) = inherit_err($base);
-            let DslError::Module(m) = &err else { panic!("expected Module, got {err:?}") };
+            let DslError::Module(m) = &err.error else { panic!("expected Module, got {err:?}") };
             let DslError::$variant(e) = m.inner.as_ref() else {
                 panic!(concat!("expected ", stringify!($variant), ", got {:?}"), m.inner)
             };
@@ -26,7 +26,7 @@ macro_rules! inherit_error_tests {
                 matches!(&e.kind, $expected $(if $guard)?),
                 "unexpected error kind: {:?}", e.kind
             );
-            assert_eq!(m.path, base_path);
+            assert_eq!(err.document(m.target_document()).path(), base_path);
         })*
     };
 }

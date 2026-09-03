@@ -14,7 +14,7 @@ pub use token::{Token, TokenKind};
 
 use memchr::{memchr, memchr2};
 
-use crate::nativedsl::{LexError, ast::Span};
+use crate::nativedsl::{DocumentId, DocumentRef, LexError, ast::Span};
 
 use escape::{validate_hex_escape, validate_unicode_escape};
 
@@ -67,6 +67,7 @@ pub fn is_ident_str(s: &str) -> bool {
 
 pub struct Lexer<'src> {
     source: &'src [u8],
+    document: DocumentId,
     pos: usize,
     /// Start offsets of comments, in source order. Preserved out of band for tooling.
     pub comment_starts: Vec<u32>,
@@ -74,9 +75,10 @@ pub struct Lexer<'src> {
 
 impl<'src> Lexer<'src> {
     #[must_use]
-    pub const fn new(source: &'src str) -> Self {
+    pub fn new(document: DocumentRef<'src>) -> Self {
         Self {
-            source: source.as_bytes(),
+            source: document.text().as_bytes(),
+            document: document.id(),
             pos: 0,
             comment_starts: Vec::new(),
         }
@@ -184,6 +186,7 @@ impl<'src> Lexer<'src> {
                 self.pos = start + ch.len_utf8();
                 return Err(LexError::new(
                     LexErrorKind::UnexpectedChar(ch),
+                    self.document,
                     Span::from_usize(start, self.pos),
                 ));
             }
@@ -205,6 +208,7 @@ impl<'src> Lexer<'src> {
                 None => {
                     Err(LexError::new(
                         LexErrorKind::UnterminatedString,
+                        self.document,
                         Span::from_usize(start, source.len()),
                     ))?;
                 }
@@ -212,6 +216,7 @@ impl<'src> Lexer<'src> {
                     if let Some(nl) = memchr2(b'\n', b'\r', &source[pos..pos + offset]) {
                         Err(LexError::new(
                             LexErrorKind::NewlineInString,
+                            self.document,
                             Span::from_usize(start, pos + nl),
                         ))?;
                     }
@@ -228,14 +233,17 @@ impl<'src> Lexer<'src> {
                             if pos >= source.len() {
                                 Err(LexError::new(
                                     LexErrorKind::UnterminatedEscape,
+                                    self.document,
                                     Span::from_usize(esc_pos, source.len()),
                                 ))?;
                             }
                             // SAFETY: pos < source.len() checked above.
                             match unsafe { *source.get_unchecked(pos) } {
                                 b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
-                                b'x' => pos = validate_hex_escape(source, esc_pos)?,
-                                b'u' => pos = validate_unicode_escape(source, esc_pos)?,
+                                b'x' => pos = validate_hex_escape(source, self.document, esc_pos)?,
+                                b'u' => {
+                                    pos = validate_unicode_escape(source, self.document, esc_pos)?;
+                                }
                                 _ => {
                                     // SAFETY: source is valid UTF-8 (from &str).
                                     let rest =
@@ -243,6 +251,7 @@ impl<'src> Lexer<'src> {
                                     let ch = rest.chars().next().unwrap();
                                     Err(LexError::new(
                                         LexErrorKind::InvalidEscape(ch),
+                                        self.document,
                                         Span::from_usize(esc_pos, pos + ch.len_utf8()),
                                     ))?;
                                 }
@@ -269,12 +278,14 @@ impl<'src> Lexer<'src> {
         let Ok(hash_count) = u8::try_from(hash_count) else {
             return Err(LexError::new(
                 LexErrorKind::TooManyHashes(hash_count as u32),
+                self.document,
                 Span::from_usize(start, self.pos),
             ));
         };
         if self.peek() != Some(b'"') {
             Err(LexError::new(
                 LexErrorKind::ExpectedRawStringQuote,
+                self.document,
                 Span::from_usize(start, self.pos),
             ))?;
         }
@@ -287,6 +298,7 @@ impl<'src> Lexer<'src> {
                 None => {
                     return Err(LexError::new(
                         LexErrorKind::UnterminatedRawString,
+                        self.document,
                         Span::from_usize(start, source.len()),
                     ));
                 }
@@ -333,7 +345,11 @@ impl<'src> Lexer<'src> {
         self.pos = pos;
 
         let value = u32::try_from(value).map_err(|_| {
-            LexError::new(LexErrorKind::IntegerOverflow, Span::from_usize(start, pos))
+            LexError::new(
+                LexErrorKind::IntegerOverflow,
+                self.document,
+                Span::from_usize(start, pos),
+            )
         })?;
 
         Ok(TokenKind::IntLit(value))

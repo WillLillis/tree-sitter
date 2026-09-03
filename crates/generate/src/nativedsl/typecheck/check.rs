@@ -1,6 +1,6 @@
 use crate::{
     nativedsl::{
-        ContainerKind, DataTy, InnerTy, ModuleTy, NoteMessage, Ty, TypeError, TypeErrorKind,
+        ContainerKind, DataTy, InnerTy, ModuleTy, Note, NoteMessage, Ty, TypeError, TypeErrorKind,
         ast::{
             ForId, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, ObjectField, Param,
             PrecKind, SharedAst, Span, Spanned,
@@ -15,14 +15,27 @@ use crate::{
     strpool::{StrId, StrPool},
 };
 
-/// The immutable context threaded through every typecheck walk: the AST being
-/// read, the module the current item came from (for spans and diagnostics), and
-/// the string/rule arena.
+/// Immutable state threaded through the typecheck walk.
 #[derive(Clone, Copy)]
 pub(super) struct Cx<'a> {
     pub shared: &'a SharedAst,
     pub ctx: &'a ModuleContext,
+    pub source: &'a str,
     pub strs: &'a StrPool,
+}
+
+impl<'a> Cx<'a> {
+    const fn error(self, kind: TypeErrorKind, span: Span) -> TypeError {
+        TypeError::new(kind, self.ctx.document, span)
+    }
+
+    fn with_note(self, kind: TypeErrorKind, span: Span, note: Note) -> TypeError {
+        TypeError::with_note(kind, self.ctx.document, span, note)
+    }
+
+    fn text(self, span: Span) -> &'a str {
+        span.resolve(self.source)
+    }
 }
 
 type CheckFn = fn(Cx<'_>, NodeId, &mut TypeEnv) -> TypeResult<()>;
@@ -41,7 +54,7 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
                     Ty::Module(ModuleTy::Grammar(module))
                     if base.is_some_and(|(expected, _)| module == expected)
                 ) {
-                    let mut error = TypeError::new(
+                    let mut error = cx.error(
                         TypeErrorKind::InheritsMustReferenceBase,
                         shared.arena.span(inherits_id),
                     );
@@ -106,11 +119,11 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
                 TypeErrorKind::DuplicateParameter,
             )?;
             for p in shared.pools.param_slice(params) {
-                reject_module_type(p.ty, p.name.span)?;
+                reject_module_type(cx, p.ty, p.name.span)?;
             }
             match kind {
                 MacroKind::Expression(return_ty) => {
-                    reject_module_type(return_ty, name.span)?;
+                    reject_module_type(cx, return_ty, name.span)?;
                     type_of(cx, body, env, Constraint::Exact(return_ty))?;
                 }
                 MacroKind::RuleSet => check_rule_set_body(cx, body, env)?,
@@ -135,7 +148,9 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
 
 /// Type a `let` and any transitively referenced `let`s, memoizing each.
 fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> {
-    let Cx { shared, ctx, strs } = cx;
+    let Cx {
+        shared, ctx, strs, ..
+    } = cx;
     if let Some(LetState::Resolved(ty)) = env.lets.get(&let_id).copied() {
         return Ok(ty);
     }
@@ -157,7 +172,7 @@ fn type_of_let(cx: Cx<'_>, let_id: NodeId, env: &mut TypeEnv) -> TypeResult<Ty> 
                     // `first_unresolved_let_dep` only reports let dependencies.
                     unreachable!()
                 };
-                return Err(TypeError::with_note(
+                return Err(cx.with_note(
                     TypeErrorKind::CircularLet(strs.resolve(name).to_string()),
                     shared.arena.span(dep),
                     ctx.note(NoteMessage::SelfReferenceHere, shared.arena.span(reference)),
@@ -237,7 +252,9 @@ fn expect_name_list(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()>
 }
 
 fn expect_name_ref(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
-    let Cx { shared, ctx, strs } = cx;
+    let Cx {
+        shared, ctx, strs, ..
+    } = cx;
     match shared.arena.get(id) {
         Node::Ident(IdentKind::Rule(_)) => Ok(()),
         Node::Ident(IdentKind::Var(_))
@@ -252,7 +269,7 @@ fn expect_name_ref(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> 
         // bare name, which is in scope.
         Node::ModuleRule { member, .. } => {
             let span = shared.arena.span(id);
-            Err(TypeError::with_note(
+            Err(cx.with_note(
                 TypeErrorKind::ExpectedRuleName,
                 span,
                 ctx.note(
@@ -261,10 +278,7 @@ fn expect_name_ref(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> 
                 ),
             ))
         }
-        _ => Err(TypeError::new(
-            TypeErrorKind::ExpectedRuleName,
-            shared.arena.span(id),
-        )),
+        _ => Err(cx.error(TypeErrorKind::ExpectedRuleName, shared.arena.span(id))),
     }
 }
 
@@ -280,10 +294,7 @@ fn expect_name_or_str(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<(
 fn expect_reserved(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResult<()> {
     let Cx { shared, .. } = cx;
     let Node::Object(range) = shared.arena.get(id) else {
-        return Err(TypeError::new(
-            TypeErrorKind::ReservedMustBeLiteral,
-            shared.arena.span(id),
-        ));
+        return Err(cx.error(TypeErrorKind::ReservedMustBeLiteral, shared.arena.span(id)));
     };
     let fields = shared.pools.get_object(*range);
     check_duplicate_names(cx, fields, |f| f.name, TypeErrorKind::DuplicateObjectKey)?;
@@ -373,7 +384,7 @@ fn drive(cx: Cx<'_>, env: &mut TypeEnv, work_base: usize) -> TypeResult<()> {
             Work::ForBody { node, demand } => {
                 let iter_ty = pop_result(&mut env.results);
                 expect_pat!(Node::For { for_id, body }, *shared.arena.get(node));
-                match_for_elem(shared, for_id, iter_ty)?;
+                match_for_elem(cx, shared, for_id, iter_ty)?;
                 push_spread_item(shared, body, demand, &mut env.work);
             }
             Work::Combine { id, demand } => {
@@ -388,25 +399,26 @@ type Descent = Option<(NodeId, Demand)>;
 
 /// Handle a [`Work::Eval`].
 fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult<Descent> {
-    let Cx { shared, ctx, strs } = cx;
+    let Cx { shared, strs, .. } = cx;
     let Demand { expected, emit } = demand;
     let span = shared.arena.span(id);
     Ok(match *shared.arena.get(id) {
         Node::IntLit(_) => {
-            enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::INT, span)?;
             None
         }
         Node::StringLit(_) => {
-            enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::STR, span)?;
             None
         }
         Node::Ident(IdentKind::Rule(_)) | Node::Blank | Node::Eof | Node::ModuleRule { .. } => {
-            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::RULE, span)?;
             None
         }
         Node::Import { module, .. } => {
             let idx = module.unwrap();
             enforce_leaf(
+                cx,
                 &mut env.results,
                 demand,
                 Ty::Module(ModuleTy::Import(idx)),
@@ -417,6 +429,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
         Node::Inherit { module, .. } => {
             let idx = module.unwrap();
             enforce_leaf(
+                cx,
                 &mut env.results,
                 demand,
                 Ty::Module(ModuleTy::Grammar(idx)),
@@ -425,12 +438,12 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             None
         }
         Node::MacroParam { ty, .. } | Node::ForBinding { ty, .. } => {
-            enforce_leaf(&mut env.results, demand, ty, span)?;
+            enforce_leaf(cx, &mut env.results, demand, ty, span)?;
             None
         }
         Node::Ident(IdentKind::Macro(_)) => {
-            return Err(TypeError::new(
-                TypeErrorKind::MacroUsedAsValue(ctx.text(span).to_string()),
+            return Err(cx.error(
+                TypeErrorKind::MacroUsedAsValue(cx.text(span).to_string()),
                 span,
             ));
         }
@@ -439,26 +452,26 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
         // reports any self-reference cycle.
         Node::Ident(IdentKind::Var(let_id)) => {
             let ty = type_of_let(cx, let_id, env)?;
-            enforce_leaf(&mut env.results, demand, ty, span)?;
+            enforce_leaf(cx, &mut env.results, demand, ty, span)?;
             None
         }
         Node::SymRef { expr } => {
-            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::RULE, span)?;
             Some((expr, Demand::checking(Constraint::Exact(Ty::STR))))
         }
         Node::Neg(inner) => {
-            enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::INT, span)?;
             Some((inner, Demand::checking(Constraint::Exact(Ty::INT))))
         }
         Node::Repeat { inner, .. }
         | Node::Token { inner, .. }
         | Node::Field { content: inner, .. }
         | Node::Reserved { content: inner, .. } => {
-            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::RULE, span)?;
             Some((inner, Demand::checking(Constraint::Exact(Ty::RULE))))
         }
         Node::BinOp { lhs, rhs, .. } => {
-            enforce_leaf(&mut env.results, demand, Ty::INT, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::INT, span)?;
             push_eval(
                 &mut env.work,
                 rhs,
@@ -476,7 +489,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             } else {
                 Constraint::IntOrStr
             };
-            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::RULE, span)?;
             push_eval(
                 &mut env.work,
                 content,
@@ -485,7 +498,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             Some((value, Demand::checking(value_expected)))
         }
         Node::DynRegex { pattern, flags } => {
-            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::RULE, span)?;
             if let Some(fid) = flags {
                 push_eval(
                     &mut env.work,
@@ -496,7 +509,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             Some((pattern, Demand::checking(Constraint::Exact(Ty::STR))))
         }
         Node::Concat(range) => {
-            enforce_leaf(&mut env.results, demand, Ty::STR, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::STR, span)?;
             descend_eval(
                 shared.pools.child_slice(range),
                 Constraint::Exact(Ty::STR),
@@ -504,7 +517,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             )
         }
         Node::SeqOrChoice { range, .. } => {
-            enforce_leaf(&mut env.results, demand, Ty::RULE, span)?;
+            enforce_leaf(cx, &mut env.results, demand, Ty::RULE, span)?;
             for &member in shared.pools.child_slice(range).iter().rev() {
                 push_spread_item(
                     shared,
@@ -558,7 +571,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
         Node::Object(range) => {
             let fields = shared.pools.get_object(range);
             if fields.is_empty() {
-                let ty = empty_container_result(expected, ContainerKind::Object, span)?;
+                let ty = empty_container_result(cx, expected, ContainerKind::Object, span)?;
                 if emit {
                     env.results.push(ty);
                 }
@@ -575,7 +588,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
         Node::List(range) => {
             let items = shared.pools.child_slice(range);
             if items.is_empty() {
-                let ty = empty_container_result(expected, ContainerKind::List, span)?;
+                let ty = empty_container_result(cx, expected, ContainerKind::List, span)?;
                 if emit {
                     env.results.push(ty);
                 }
@@ -592,7 +605,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             let items = shared.pools.child_slice(range);
             let n = items.len();
             if !(TUPLE_MIN_ARITY..=TUPLE_MAX_ARITY).contains(&n) {
-                return Err(TypeError::new(TypeErrorKind::TupleArityInvalid(n), span));
+                return Err(cx.error(TypeErrorKind::TupleArityInvalid(n), span));
             }
             push_combine(&mut env.work, id, demand);
             for &item in items.iter().rev() {
@@ -612,7 +625,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
             {
                 type_of(cx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
                 let member = strs.resolve(member);
-                return Err(TypeError::new(
+                return Err(cx.error(
                     TypeErrorKind::ImportMacroNotFound(member.to_string()),
                     Span::new(member_offset, member_offset + member.len() as u32),
                 ));
@@ -664,7 +677,9 @@ fn is_empty_list(shared: &SharedAst, id: NodeId) -> bool {
 
 /// Handle a [`Work::Combine`].
 fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult<()> {
-    let Cx { shared, ctx, strs } = cx;
+    let Cx {
+        shared, ctx, strs, ..
+    } = cx;
     let Demand { expected, emit } = demand;
     let span = shared.arena.span(id);
     let ty = match *shared.arena.get(id) {
@@ -675,7 +690,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             for (k, &item) in items.iter().enumerate().skip(1) {
                 let got = env.results[base + k];
                 widest = widest.widen(got).ok_or_else(|| {
-                    TypeError::new(
+                    cx.error(
                         TypeErrorKind::ListElementTypeMismatch { first: widest, got },
                         shared.arena.span(item),
                     )
@@ -684,7 +699,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             env.results.truncate(base);
             widest
                 .to_list()
-                .ok_or_else(|| TypeError::new(TypeErrorKind::InvalidListElement(widest), span))?
+                .ok_or_else(|| cx.error(TypeErrorKind::InvalidListElement(widest), span))?
         }
         Node::Object(range) => {
             let fields = shared.pools.get_object(range);
@@ -693,7 +708,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             for (k, field) in fields.iter().enumerate().skip(1) {
                 let got = env.results[base + k];
                 widest = widest.widen(got).ok_or_else(|| {
-                    TypeError::new(
+                    cx.error(
                         TypeErrorKind::ObjectFieldTypeMismatch { first: widest, got },
                         shared.arena.span(field.value),
                     )
@@ -701,7 +716,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             }
             env.results.truncate(base);
             let invalid = || {
-                TypeError::new(
+                cx.error(
                     TypeErrorKind::InvalidObjectValue(widest),
                     shared.arena.span(fields[0].value),
                 )
@@ -720,7 +735,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             for (k, &item) in items.iter().enumerate() {
                 let got = env.results[base + k];
                 let Ty::Data(DataTy::Scalar(s)) = got else {
-                    return Err(TypeError::new(
+                    return Err(cx.error(
                         TypeErrorKind::TupleElementNotScalar(got),
                         shared.arena.span(item),
                     ));
@@ -729,7 +744,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             }
             env.results.truncate(base);
             let sig = TupleSig::new(&scalars[..n]).map_err(|TupleSigError(bad)| {
-                TypeError::new(TypeErrorKind::TupleArityInvalid(bad), span)
+                cx.error(TypeErrorKind::TupleArityInvalid(bad), span)
             })?;
             Ty::Data(DataTy::Tuple(sig))
         }
@@ -740,25 +755,25 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             match (l_ty, r_ty) {
                 (Some(l), Some(r)) => {
                     if !l.is_list() {
-                        return Err(TypeError::new(
+                        return Err(cx.error(
                             TypeErrorKind::AppendRequiresList(l),
                             shared.arena.span(left),
                         ));
                     }
                     if !r.is_list() {
-                        return Err(mismatch(l, r, shared.arena.span(right)));
+                        return Err(mismatch(cx, l, r, shared.arena.span(right)));
                     }
                     l.widen(r)
-                        .ok_or_else(|| mismatch(l, r, shared.arena.span(right)))?
+                        .ok_or_else(|| mismatch(cx, l, r, shared.arena.span(right)))?
                 }
                 (Some(t), None) | (None, Some(t)) => {
                     if !t.is_list() {
-                        return Err(TypeError::new(TypeErrorKind::AppendRequiresList(t), span));
+                        return Err(cx.error(TypeErrorKind::AppendRequiresList(t), span));
                     }
                     t
                 }
                 (None, None) => {
-                    return Err(TypeError::new(
+                    return Err(cx.error(
                         TypeErrorKind::EmptyContainerNeedsAnnotation(ContainerKind::List),
                         span,
                     ));
@@ -774,8 +789,8 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
                 if let Some(ref_id) = resolve_module_ref(&shared.arena, module)
                     && let Node::Import { path, .. } = shared.arena.get(ref_id)
                 {
-                    let path_text = ctx.text(*path).to_string();
-                    return Err(TypeError::with_note(
+                    let path_text = cx.text(*path).to_string();
+                    return Err(cx.with_note(
                         err_kind,
                         arg_span,
                         ctx.note(
@@ -784,7 +799,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
                         ),
                     ));
                 }
-                return Err(TypeError::new(err_kind, arg_span));
+                return Err(cx.error(err_kind, arg_span));
             }
             use crate::nativedsl::ast::ConfigField as C;
             match field {
@@ -813,7 +828,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
                     .iter()
                     .map(|f| strs.resolve(f.name.value).to_string())
                     .collect();
-                return Err(TypeError::new(
+                return Err(cx.error(
                     TypeErrorKind::FieldNotFound {
                         field: strs.resolve(field).to_string(),
                         available,
@@ -827,7 +842,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
             let target_ty = pop_result(&mut env.results);
             if let Node::ModuleRule { member, .. } = shared.arena.get(target) {
                 let target_span = shared.arena.span(target);
-                return Err(TypeError::with_note(
+                return Err(cx.with_note(
                     TypeErrorKind::InvalidAliasTarget(target_ty),
                     target_span,
                     ctx.note(
@@ -846,7 +861,7 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
                     | Node::GrammarConfig { .. }
             ) || target_ty == Ty::STR;
             if !target_ty.is_rule_like() || !is_valid {
-                return Err(TypeError::new(
+                return Err(cx.error(
                     TypeErrorKind::InvalidAliasTarget(target_ty),
                     shared.arena.span(target),
                 ));
@@ -855,15 +870,12 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
         }
         Node::QualifiedAccess { .. } => {
             let obj_ty = pop_result(&mut env.results);
-            return Err(TypeError::new(
-                TypeErrorKind::MemberAccessRequiresModule(obj_ty),
-                span,
-            ));
+            return Err(cx.error(TypeErrorKind::MemberAccessRequiresModule(obj_ty), span));
         }
-        Node::For { .. } => return Err(TypeError::new(TypeErrorKind::BoundForLoop, span)),
+        Node::For { .. } => return Err(cx.error(TypeErrorKind::BoundForLoop, span)),
         _ => unreachable!(),
     };
-    enforce(expected, ty, span)?;
+    enforce(cx, expected, ty, span)?;
     if emit {
         env.results.push(ty);
     }
@@ -871,16 +883,16 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
 }
 
 fn macro_call_result(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<Ty> {
-    let Cx { shared, ctx, .. } = cx;
+    let Cx { shared, .. } = cx;
     let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) else {
         // Call names are resolved before the combine step is queued.
         unreachable!()
     };
     match shared.pools.get_macro(macro_id).kind {
         MacroKind::Expression(return_ty) => Ok(return_ty),
-        MacroKind::RuleSet => Err(TypeError::new(
+        MacroKind::RuleSet => Err(cx.error(
             TypeErrorKind::RuleSetMacroInExpressionContext(
-                ctx.text(shared.arena.span(name)).to_string(),
+                cx.text(shared.arena.span(name)).to_string(),
             ),
             span,
         )),
@@ -911,11 +923,13 @@ fn schedule_for(cx: Cx<'_>, node: NodeId, demand: Demand, work: &mut Vec<Work>) 
 }
 
 fn resolve_macro_name(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<MacroId> {
-    let Cx { shared, ctx, strs } = cx;
+    let Cx {
+        shared, ctx, strs, ..
+    } = cx;
     if let Node::Ident(IdentKind::Macro(macro_id)) = *shared.arena.get(name) {
         return Ok(macro_id);
     }
-    let macro_name = ctx.text(shared.arena.span(name));
+    let macro_name = cx.text(shared.arena.span(name));
     let kind = TypeErrorKind::UndefinedMacro(macro_name.to_string());
     let macros = ctx.root_items.iter().filter_map(|&id| {
         if let Node::Macro(mid) = shared.arena.get(id) {
@@ -924,7 +938,7 @@ fn resolve_macro_name(cx: Cx<'_>, name: NodeId, span: Span) -> TypeResult<MacroI
             None
         }
     });
-    let mut err = TypeError::new(kind, span);
+    let mut err = cx.error(kind, span);
     if let Some(suggestion) = suggest_name(macro_name, macros) {
         err.add_note(ctx.note(NoteMessage::DidYouMean(suggestion.to_string()), span));
     }
@@ -943,7 +957,7 @@ fn enqueue_macro_call(
     let config = shared.pools.get_macro(macro_id);
     let params = config.params;
     if args.len() != params.len as usize {
-        return Err(TypeError::new(
+        return Err(cx.error(
             TypeErrorKind::ArgCountMismatch {
                 macro_name: strs.resolve(config.name.value).to_string(),
                 expected: params.len as usize,
@@ -962,7 +976,7 @@ fn enqueue_macro_call(
     Ok(())
 }
 
-fn enforce(expected: Constraint, ty: Ty, span: Span) -> TypeResult<()> {
+fn enforce(cx: Cx<'_>, expected: Constraint, ty: Ty, span: Span) -> TypeResult<()> {
     if expected == Constraint::None {
         return Ok(());
     }
@@ -974,13 +988,19 @@ fn enforce(expected: Constraint, ty: Ty, span: Span) -> TypeResult<()> {
             },
             _ => TypeErrorKind::ConstraintMismatch { expected, got: ty },
         };
-        return Err(TypeError::new(kind, span));
+        return Err(cx.error(kind, span));
     }
     Ok(())
 }
 
-fn enforce_leaf(results: &mut Vec<Ty>, demand: Demand, ty: Ty, span: Span) -> TypeResult<()> {
-    enforce(demand.expected, ty, span)?;
+fn enforce_leaf(
+    cx: Cx<'_>,
+    results: &mut Vec<Ty>,
+    demand: Demand,
+    ty: Ty,
+    span: Span,
+) -> TypeResult<()> {
+    enforce(cx, demand.expected, ty, span)?;
     if demand.emit {
         results.push(ty);
     }
@@ -1020,7 +1040,7 @@ where
         let iterable = validate_for_header(cx, for_id, body)?;
         if !is_empty_list(shared, iterable) {
             let iter_ty = type_of(cx, iterable, env, Constraint::None)?;
-            match_for_elem(shared, for_id, iter_ty)?;
+            match_for_elem(cx, shared, for_id, iter_ty)?;
         }
         curr_item = body;
     }
@@ -1035,13 +1055,13 @@ fn validate_for_header(cx: Cx<'_>, for_id: ForId, body: NodeId) -> TypeResult<No
     let body_span = shared.arena.span(body);
 
     if bindings.is_empty() {
-        return Err(TypeError::new(TypeErrorKind::EmptyForBindings, body_span));
+        return Err(cx.error(TypeErrorKind::EmptyForBindings, body_span));
     }
     check_duplicate_names(cx, bindings, |p| p.name, TypeErrorKind::DuplicateBinding)?;
     if bindings.len() >= 2 {
         for param in bindings {
             if !matches!(param.ty, Ty::Data(DataTy::Scalar(_))) {
-                return Err(TypeError::new(
+                return Err(cx.error(
                     TypeErrorKind::TupleElementNotScalar(param.ty),
                     param.name.span,
                 ));
@@ -1051,12 +1071,12 @@ fn validate_for_header(cx: Cx<'_>, for_id: ForId, body: NodeId) -> TypeResult<No
     Ok(config.iterable)
 }
 
-fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<()> {
+fn match_for_elem(cx: Cx<'_>, shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<()> {
     let config = shared.pools.get_for(for_id);
     let bindings = shared.pools.param_slice(config.bindings);
     let iterable = config.iterable;
     let Some(elem_ty) = iter_ty.list_elem() else {
-        return Err(TypeError::new(
+        return Err(cx.error(
             TypeErrorKind::ForRequiresList(iter_ty),
             shared.arena.span(iterable),
         ));
@@ -1064,17 +1084,17 @@ fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<
     if bindings.len() == 1 {
         let Param { name, ty: declared } = bindings[0];
         if !elem_ty.is_compatible(declared) {
-            return Err(mismatch(declared, elem_ty, name.span));
+            return Err(mismatch(cx, declared, elem_ty, name.span));
         }
     } else {
         let Ty::Data(DataTy::Tuple(sig)) = elem_ty else {
-            return Err(TypeError::new(
+            return Err(cx.error(
                 TypeErrorKind::ForRequiresTuples,
                 shared.arena.span(iterable),
             ));
         };
         if sig.arity() != bindings.len() {
-            return Err(TypeError::new(
+            return Err(cx.error(
                 TypeErrorKind::ForBindingCountMismatch {
                     bindings: bindings.len(),
                     tuple_elements: sig.arity(),
@@ -1085,38 +1105,40 @@ fn match_for_elem(shared: &SharedAst, for_id: ForId, iter_ty: Ty) -> TypeResult<
         for (i, param) in bindings.iter().enumerate() {
             let elem_scalar = Ty::Data(DataTy::Scalar(sig.elem(i)));
             if !elem_scalar.is_compatible(param.ty) {
-                return Err(mismatch(param.ty, elem_scalar, param.name.span));
+                return Err(mismatch(cx, param.ty, elem_scalar, param.name.span));
             }
         }
     }
     Ok(())
 }
 
-fn empty_container_result(expected: Constraint, kind: ContainerKind, span: Span) -> TypeResult<Ty> {
+fn empty_container_result(
+    cx: Cx<'_>,
+    expected: Constraint,
+    kind: ContainerKind,
+    span: Span,
+) -> TypeResult<Ty> {
     let matches_kind = |ty: Ty| match kind {
         ContainerKind::List => ty.is_list(),
         ContainerKind::Object => ty.is_object(),
     };
     match expected {
         Constraint::Exact(ty) if matches_kind(ty) => Ok(ty),
-        Constraint::Exact(declared) => Err(TypeError::new(
+        Constraint::Exact(declared) => Err(cx.error(
             TypeErrorKind::EmptyContainerAnnotationMismatch { declared, kind },
             span,
         )),
-        _ => Err(TypeError::new(
-            TypeErrorKind::EmptyContainerNeedsAnnotation(kind),
-            span,
-        )),
+        _ => Err(cx.error(TypeErrorKind::EmptyContainerNeedsAnnotation(kind), span)),
     }
 }
 
-const fn mismatch(expected: Ty, got: Ty, span: Span) -> TypeError {
-    TypeError::new(TypeErrorKind::TypeMismatch { expected, got }, span)
+const fn mismatch(cx: Cx<'_>, expected: Ty, got: Ty, span: Span) -> TypeError {
+    cx.error(TypeErrorKind::TypeMismatch { expected, got }, span)
 }
 
-const fn reject_module_type(ty: Ty, span: Span) -> TypeResult<()> {
+const fn reject_module_type(cx: Cx<'_>, ty: Ty, span: Span) -> TypeResult<()> {
     if matches!(ty, Ty::Module(_)) {
-        return Err(TypeError::new(TypeErrorKind::ModuleTypeNotAllowed, span));
+        return Err(cx.error(TypeErrorKind::ModuleTypeNotAllowed, span));
     }
     Ok(())
 }
@@ -1133,7 +1155,7 @@ fn check_duplicate_names<T>(
         for prev in &items[..i] {
             let prev_name = name_of(prev);
             if prev_name.value == curr.value {
-                return Err(TypeError::with_note(
+                return Err(cx.with_note(
                     make_kind(strs.resolve(curr.value).to_string()),
                     curr.span,
                     ctx.note(NoteMessage::FirstDefinedHere, prev_name.span),

@@ -95,6 +95,7 @@ pub fn resolve(
             Some(DeclKind::Rule) => {}
             Some(_) => Err(ResolveError::new(
                 ResolveErrorKind::ComputedNameNotARule(rcx.strs.resolve(name).to_string()),
+                rcx.ctx.document,
                 span,
             ))?,
             None => Err(unknown_ident_error(&rcx, rcx.strs.resolve(name), span))?,
@@ -123,6 +124,7 @@ fn insert_decl(
     match decls.entry(name) {
         Entry::Occupied(entry) => Err(ResolveError::with_note(
             ResolveErrorKind::DuplicateDeclaration(strs.resolve(name).to_string()),
+            ctx.document,
             span,
             ctx.note(NoteMessage::FirstDefinedHere, entry.get().span),
         )),
@@ -142,6 +144,7 @@ fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
         {
             return Err(ResolveError::with_note(
                 ResolveErrorKind::ShadowedBinding(rcx.strs.resolve(binding.name.value).to_string()),
+                rcx.ctx.document,
                 binding.name.span,
                 rcx.ctx.note(NoteMessage::FirstDefinedHere, first_span),
             ));
@@ -349,6 +352,7 @@ impl ExternalNameCtx<'_> {
                         if !self.expanding_lets.insert(name) {
                             return Err(ResolveError::new(
                                 ResolveErrorKind::InvalidExternalsExpression,
+                                self.ctx.document,
                                 self.shared.arena.span(id),
                             ));
                         }
@@ -383,6 +387,7 @@ impl ExternalNameCtx<'_> {
             // Anything else is not a valid `externals` expression.
             _ => Err(ResolveError::new(
                 ResolveErrorKind::InvalidExternalsExpression,
+                self.ctx.document,
                 self.shared.arena.span(id),
             ))?,
         }
@@ -628,12 +633,13 @@ fn import_member_not_found(
     if let Some(suggestion) = suggest_name(name, candidates) {
         return ResolveError::with_note(
             kind,
+            rcx.ctx.document,
             span,
             rcx.ctx
                 .note(NoteMessage::DidYouMean(suggestion.to_string()), span),
         );
     }
-    ResolveError::new(kind, span)
+    ResolveError::new(kind, rcx.ctx.document, span)
 }
 
 /// Follow a chain of `Ident(Var(_))` -> `Let { value }` bindings until we hit
@@ -703,10 +709,11 @@ fn unknown_ident_error(rcx: &ResolveCtx, name: &str, span: Span) -> ResolveError
     if let Some(suggestion) = suggest_name(name, candidates) {
         return ResolveError::with_note(
             kind,
+            rcx.ctx.document,
             span,
             rcx.ctx
                 .note(NoteMessage::DidYouMean(suggestion.to_string()), span),
         );
     }
-    ResolveError::new(kind, span)
+    ResolveError::new(kind, rcx.ctx.document, span)
 }

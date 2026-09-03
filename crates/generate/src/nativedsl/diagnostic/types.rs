@@ -1,14 +1,14 @@
 //! Error types shared by every native-DSL pipeline stage.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::nativedsl::{
-    apply_cfg::CfgErrorKind, ast::Span, expand_macro_calls::ExpandErrorKind, lexer::LexErrorKind,
-    lower::LowerErrorKind, parser::ParseErrorKind, resolve::ResolveErrorKind,
-    typecheck::TypeErrorKind,
+    DocumentId, DocumentSpan, apply_cfg::CfgErrorKind, ast::Span,
+    expand_macro_calls::ExpandErrorKind, lexer::LexErrorKind, lower::LowerErrorKind,
+    parser::ParseErrorKind, resolve::ResolveErrorKind, typecheck::TypeErrorKind,
 };
 
 pub type DslResult<T> = Result<T, DslError>;
@@ -25,50 +25,38 @@ pub type LowerError = Diagnostic<LowerErrorKind>;
 #[derive(Debug, Serialize, Deserialize, Error)]
 pub struct Diagnostic<K> {
     pub kind: K,
+    pub document: DocumentId,
     pub span: Option<Span>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<Note>,
-    /// Source + path the primary `span` indexes into, when that differs from the
-    /// module the error surfaces in (a lower error born evaluating an imported
-    /// module's macro body). `None` uses the caller-supplied source.
-    #[serde(skip)]
-    pub src: Option<Box<(String, PathBuf)>>,
 }
 
 impl<K> Diagnostic<K> {
-    pub const fn new(kind: K, span: Span) -> Self {
+    pub const fn new(kind: K, document: DocumentId, span: Span) -> Self {
         Self {
             kind,
+            document,
             span: Some(span),
             notes: Vec::new(),
-            src: None,
         }
     }
 
-    pub const fn without_span(kind: K) -> Self {
+    pub const fn without_span(kind: K, document: DocumentId) -> Self {
         Self {
             kind,
+            document,
             span: None,
             notes: Vec::new(),
-            src: None,
         }
     }
 
-    pub fn with_note(kind: K, span: Span, note: Note) -> Self {
+    pub fn with_note(kind: K, document: DocumentId, span: Span, note: Note) -> Self {
         Self {
             kind,
+            document,
             span: Some(span),
             notes: vec![note],
-            src: None,
         }
-    }
-
-    /// Stamp the source + path the primary span belongs to, so a cross-module
-    /// error renders against the right file. See [`Diagnostic::src`].
-    #[must_use]
-    pub fn with_source(mut self, source: &str, path: &Path) -> Self {
-        self.src = Some(Box::new((source.to_owned(), path.to_owned())));
-        self
     }
 
     pub fn add_note(&mut self, note: Note) {
@@ -82,6 +70,12 @@ impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
     }
 }
 
+/// A failure produced by a native DSL compilation stage.
+///
+/// This is the compact diagnostic payload used inside the compiler. Its [`DocumentId`]
+/// values index the document map owned by [`NativeDslError`](crate::nativedsl::NativeDslError).
+/// Public callers should retain `NativeDslError` and use this type to inspect the
+/// error kind. By itself, this type cannot resolve source text or paths.
 #[derive(Debug, Error, Serialize, Deserialize)]
 #[error(transparent)]
 pub enum DslError {
@@ -95,26 +89,29 @@ pub enum DslError {
     Module(#[from] ModuleError),
 }
 
-/// Error from loading a child module (inherited or imported).
+/// Error from loading a child module.
 #[derive(Debug, Serialize, Deserialize, Error)]
 #[error("{inner}")]
 pub struct ModuleError {
     pub inner: Box<DslError>,
-    #[serde(skip)]
-    pub source_text: String,
-    #[serde(skip)]
-    pub path: PathBuf,
-    pub reference_span: Span,
+    pub reference: DocumentSpan,
 }
 
 impl ModuleError {
     #[must_use]
-    pub fn new(inner: DslError, source_text: String, path: &Path, reference_span: Span) -> Self {
+    pub fn new(inner: DslError, reference: DocumentSpan) -> Self {
         Self {
             inner: Box::new(inner),
-            source_text,
-            path: path.to_path_buf(),
-            reference_span,
+            reference,
+        }
+    }
+
+    /// The child document this module reference loaded.
+    #[must_use]
+    pub fn target_document(&self) -> DocumentId {
+        match self.inner.as_ref() {
+            DslError::Module(next) => next.reference.document,
+            error => error.document(),
         }
     }
 }
@@ -123,11 +120,7 @@ impl ModuleError {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
     pub message: NoteMessage,
-    pub span: Span,
-    #[serde(skip)]
-    pub path: PathBuf,
-    #[serde(skip)]
-    pub src: String,
+    pub location: DocumentSpan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +185,20 @@ impl std::fmt::Display for NoteMessage {
 
 impl DslError {
     #[must_use]
+    pub const fn document(&self) -> DocumentId {
+        match self {
+            Self::Lex(e) => e.document,
+            Self::Parse(e) => e.document,
+            Self::Cfg(e) => e.document,
+            Self::Expand(e) => e.document,
+            Self::Resolve(e) => e.document,
+            Self::Type(e) => e.document,
+            Self::Lower(e) => e.document,
+            Self::Module(e) => e.reference.document,
+        }
+    }
+
+    #[must_use]
     pub const fn span(&self) -> Option<Span> {
         match self {
             Self::Lex(e) => e.span,
@@ -201,7 +208,7 @@ impl DslError {
             Self::Resolve(e) => e.span,
             Self::Type(e) => e.span,
             Self::Lower(e) => e.span,
-            Self::Module(e) => Some(e.reference_span),
+            Self::Module(e) => Some(e.reference.span),
         }
     }
 
@@ -228,23 +235,5 @@ impl DslError {
             Self::Lower(e) => &e.notes,
             Self::Module(e) => e.inner.notes(),
         }
-    }
-
-    /// Source + path the primary span belongs to, when the error carries one (a
-    /// lower error from an imported module's macro body). Lets the renderer put
-    /// the caret in that module's file instead of the root's.
-    #[must_use]
-    pub fn primary_source(&self) -> Option<(&str, &Path)> {
-        let src = match self {
-            Self::Lex(e) => &e.src,
-            Self::Parse(e) => &e.src,
-            Self::Cfg(e) => &e.src,
-            Self::Expand(e) => &e.src,
-            Self::Resolve(e) => &e.src,
-            Self::Type(e) => &e.src,
-            Self::Lower(e) => &e.src,
-            Self::Module(e) => return e.inner.primary_source(),
-        };
-        src.as_deref().map(|(s, p)| (s.as_str(), p.as_path()))
     }
 }

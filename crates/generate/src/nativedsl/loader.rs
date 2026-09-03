@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::{
     IoError,
     nativedsl::{
-        DisallowedItemKind, DslError, DslResult, Export, LexError, LexErrorKind, LowerError,
-        LowerErrorKind, LoweringState, MAX_MODULE_DEPTH, Module, ModuleError, ModuleId,
-        ModuleIdSet, NoteMessage, ResolveError, TypeError, TypeErrorKind,
+        DisallowedItemKind, DocumentId, DocumentMap, DocumentSpan, DslError, DslResult, Export,
+        LexError, LexErrorKind, LowerError, LowerErrorKind, LoweringState, MAX_MODULE_DEPTH,
+        Module, ModuleError, ModuleId, ModuleIdSet, NoteMessage, ResolveError, TypeError,
+        TypeErrorKind,
         apply_cfg::{CfgEnvId, CfgState, apply_cfg},
         ast::{IdentKind, ModuleContext, Node, NodeId, SharedAst, Span},
         expand_macro_calls, lexer, lower, parser,
@@ -26,7 +27,8 @@ pub struct Loader<'a> {
     state: &'a mut LoweringState,
     pool: &'a mut RulePool,
     cfg: &'a mut CfgState,
-    ancestor_paths: Vec<PathBuf>,
+    documents: &'a mut DocumentMap,
+    ancestor_documents: Vec<DocumentId>,
     /// Module dedup cache keyed by canonical path, kind, and cfg environment.
     loaded: Vec<LoadedModuleRef>,
 }
@@ -41,8 +43,7 @@ pub(super) enum ModuleKind {
 
 /// A reference to a module loaded into [`Loader::modules`].
 struct LoadedModuleRef {
-    /// Canonicalized path to the module on disk.
-    path: PathBuf,
+    document: DocumentId,
     kind: ModuleKind,
     cfg_env: CfgEnvId,
     /// Index into the global [`Loader::modules`] table.
@@ -57,6 +58,7 @@ impl<'a> Loader<'a> {
         state: &'a mut LoweringState,
         pool: &'a mut RulePool,
         cfg: &'a mut CfgState,
+        documents: &'a mut DocumentMap,
     ) -> Self {
         Self {
             shared,
@@ -65,7 +67,8 @@ impl<'a> Loader<'a> {
             state,
             pool,
             cfg,
-            ancestor_paths: Vec::new(),
+            documents,
+            ancestor_documents: Vec::new(),
             loaded: Vec::new(),
         }
     }
@@ -77,40 +80,46 @@ impl<'a> Loader<'a> {
     /// Returns `Err` if the module isn't valid tsg source.
     pub fn load_root(mut self, source: &str, path: &Path) -> DslResult<()> {
         let canonical = dunce::canonicalize(path).map_err(|error| {
-            LowerError::without_span(LowerErrorKind::ModuleResolveFailed(IoError {
-                error,
-                path: Some(path.to_path_buf()),
-            }))
+            let document = self.documents.insert(path.to_owned(), source.to_string());
+            LowerError::without_span(
+                LowerErrorKind::ModuleResolveFailed(IoError {
+                    error,
+                    path: Some(path.to_path_buf()),
+                }),
+                document,
+            )
         })?;
-        self.ancestor_paths.push(canonical.clone());
-        _ = self.load_module(source, &canonical, ModuleKind::Grammar)?;
+        let document = self.documents.insert(canonical, source.to_string());
+        self.ancestor_documents.push(document);
+        _ = self.load_module(document, ModuleKind::Grammar)?;
         Ok(())
     }
 
-    fn load_module(&mut self, source: &str, path: &Path, kind: ModuleKind) -> DslResult<ModuleId> {
+    fn load_module(&mut self, document: DocumentId, kind: ModuleKind) -> DslResult<ModuleId> {
+        let source_document = self.documents.document(document);
+        let source = source_document.text();
+
         if source.len() >= u32::MAX as usize {
-            Err(LexError::without_span(LexErrorKind::InputTooLarge))?;
+            Err(LexError::without_span(
+                LexErrorKind::InputTooLarge,
+                document,
+            ))?;
         }
 
         // The root's capacity is seeded by `parse_native_dsl`. Reserve here for children.
-        if self.ancestor_paths.len() > 1 {
+        if self.ancestor_documents.len() > 1 {
             self.shared.reserve_for_module(source.len());
         }
 
-        let tokens = lexer::Lexer::new(source).tokenize()?;
-        let mut ctx = parser::Parser::new(
-            &tokens,
-            source.to_string(),
-            path.to_path_buf(),
-            self.shared,
-            self.pool.strs_mut(),
-        )
-        .parse()?;
+        let tokens = lexer::Lexer::new(source_document).tokenize()?;
+        let mut ctx =
+            parser::Parser::new(&tokens, source_document, self.shared, self.pool.strs_mut())
+                .parse()?;
 
         // Merge this module's flags into the current environment. Existing values
         // win, so parent declarations override child declarations.
         self.cfg
-            .merge_module_flags(self.shared, &mut ctx, self.pool.strs())?;
+            .merge_module_flags(self.shared, &mut ctx, source, self.pool.strs())?;
 
         // Apply cfg gating *before* loading children so cfg-disabled imports aren't evaluated.
         if ctx.has_cfg {
@@ -132,7 +141,7 @@ impl<'a> Loader<'a> {
 
         // Child loading is complete, so this module's final table index is fixed.
         let global_id = ModuleId::from_index(self.modules.len())
-            .ok_or_else(|| LowerError::without_span(LowerErrorKind::ModuleTooMany))?;
+            .ok_or_else(|| LowerError::without_span(LowerErrorKind::ModuleTooMany, document))?;
 
         // Flatten the transitive helper imports once
         let imported_rules =
@@ -154,7 +163,8 @@ impl<'a> Loader<'a> {
         .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
 
         // Child modules already populated `self.env` during their own `load_module` calls.
-        typecheck::check(self.shared, &ctx, self.env, self.pool.strs())
+        let source = self.documents.document(document).text();
+        typecheck::check(self.shared, &ctx, source, self.env, self.pool.strs())
             .map_err(|e| self.enrich_type_error(&ctx, e))?;
         let module = match kind {
             ModuleKind::Grammar => {
@@ -163,6 +173,7 @@ impl<'a> Loader<'a> {
                     self.pool,
                     self.shared,
                     self.modules,
+                    self.documents,
                     &ctx,
                     &imported_rules,
                 )?);
@@ -180,8 +191,14 @@ impl<'a> Loader<'a> {
                 }
             }
             ModuleKind::Helper => {
-                let lowered_rules =
-                    lower::lower_helper(self.state, self.pool, self.shared, self.modules, &ctx)?;
+                let lowered_rules = lower::lower_helper(
+                    self.state,
+                    self.pool,
+                    self.shared,
+                    self.modules,
+                    self.documents,
+                    &ctx,
+                )?;
                 let exports =
                     super::build_exports(self.shared, &ctx, self.pool, &lowered_rules, &[]);
                 Module::Helper {
@@ -199,51 +216,66 @@ impl<'a> Loader<'a> {
 
     fn load_child_module(
         &mut self,
+        parent_document: DocumentId,
         module_path: &Path,
         span: Span,
         kind: ModuleKind,
     ) -> DslResult<ModuleId> {
         let cfg_env = self.cfg.env_id();
-        if let Some(module_ref) = self.loaded.iter().find(|module| {
-            module.kind == kind && module.cfg_env == cfg_env && module.path == module_path
-        }) {
+        let existing_document = self.documents.id_for_path(module_path);
+
+        if let Some(document) = existing_document
+            && let Some(module_ref) = self.loaded.iter().find(|module| {
+                module.document == document && module.kind == kind && module.cfg_env == cfg_env
+            })
+        {
             return Ok(module_ref.gid);
         }
 
-        if self.ancestor_paths.len() >= MAX_MODULE_DEPTH {
-            return Err(LowerError::new(LowerErrorKind::ModuleDepthExceeded, span).into());
-        }
-
-        let content = std::fs::read_to_string(module_path).map_err(|error| {
-            LowerError::new(
-                LowerErrorKind::ModuleReadFailed(IoError {
-                    error,
-                    path: Some(module_path.to_path_buf()),
-                }),
-                span,
-            )
-        })?;
-
-        if self.ancestor_paths.iter().any(|p| p == module_path) {
-            return Err(ModuleError::new(
-                LowerError::without_span(LowerErrorKind::ModuleCycle).into(),
-                content,
-                module_path,
+        if self.ancestor_documents.len() >= MAX_MODULE_DEPTH {
+            return Err(LowerError::new(
+                LowerErrorKind::ModuleDepthExceeded,
+                parent_document,
                 span,
             )
             .into());
         }
 
-        self.ancestor_paths.push(module_path.to_path_buf());
+        let document = if let Some(document) = existing_document {
+            document
+        } else {
+            let source = std::fs::read_to_string(module_path).map_err(|error| {
+                LowerError::new(
+                    LowerErrorKind::ModuleReadFailed(IoError {
+                        error,
+                        path: Some(module_path.to_path_buf()),
+                    }),
+                    parent_document,
+                    span,
+                )
+            })?;
+            self.documents.insert(module_path.to_path_buf(), source)
+        };
+
+        if self.ancestor_documents.contains(&document) {
+            return Err(ModuleError::new(
+                LowerError::without_span(LowerErrorKind::ModuleCycle, document).into(),
+                DocumentSpan::new(parent_document, span),
+            )
+            .into());
+        }
+
+        self.ancestor_documents.push(document);
         let checkpoint = self.cfg.checkpoint();
         let result = self
-            .load_module(&content, module_path, kind)
-            .map_err(|inner| ModuleError::new(inner, content, module_path, span));
+            .load_module(document, kind)
+            .map_err(|inner| ModuleError::new(inner, DocumentSpan::new(parent_document, span)));
         self.cfg.restore(checkpoint);
-        self.ancestor_paths.pop();
+        self.ancestor_documents.pop();
+
         let gid = result?;
         self.loaded.push(LoadedModuleRef {
-            path: module_path.to_path_buf(),
+            document,
             kind,
             cfg_env,
             gid,
@@ -253,7 +285,6 @@ impl<'a> Loader<'a> {
 
     /// Resolve `Import` and `Inherit` nodes, loading each child file.
     fn load_children(&mut self, ctx: &ModuleContext) -> Result<(), DslError> {
-        let module_dir = ctx.path.parent().unwrap();
         for &node_id in &ctx.module_refs {
             let (kind, &path) = match self.shared.arena.get(node_id) {
                 Node::Inherit { path, module: None } => (ModuleKind::Grammar, path),
@@ -267,9 +298,14 @@ impl<'a> Loader<'a> {
                 _ => unreachable!(),
             };
 
-            let path_str = ctx.text(path);
-            let canonical = resolve_path(&module_dir.join(path_str), path)?;
-            let gid = self.load_child_module(&canonical, path, kind)?;
+            let source_document = self.documents.document(ctx.document);
+            let candidate = source_document
+                .path()
+                .parent()
+                .unwrap()
+                .join(path.resolve(source_document.text()));
+            let canonical = resolve_path(&candidate, ctx.document, path)?;
+            let gid = self.load_child_module(ctx.document, &canonical, path, kind)?;
 
             match self.shared.arena.get_mut(node_id) {
                 Node::Inherit { module, .. } | Node::Import { module, .. } => {
@@ -285,7 +321,11 @@ impl<'a> Loader<'a> {
     /// Validate that grammar block exists and structural constraints on `inherit()` calls
     fn validate_grammar(&self, ctx: &ModuleContext) -> DslResult<()> {
         let Some(config) = ctx.grammar_config.as_ref() else {
-            return Err(LowerError::without_span(LowerErrorKind::MissingGrammarBlock).into());
+            return Err(LowerError::without_span(
+                LowerErrorKind::MissingGrammarBlock,
+                ctx.document,
+            )
+            .into());
         };
         if config.language.is_none() {
             let block = ctx
@@ -295,6 +335,7 @@ impl<'a> Loader<'a> {
                 .unwrap();
             Err(LowerError::new(
                 LowerErrorKind::MissingLanguageField,
+                ctx.document,
                 self.shared.arena.span(*block),
             ))?;
         }
@@ -302,6 +343,7 @@ impl<'a> Loader<'a> {
         if let [first, second, rest @ ..] = inherits.as_slice() {
             let mut err = LowerError::with_note(
                 LowerErrorKind::MultipleInherits,
+                ctx.document,
                 self.shared.arena.span(*second),
                 ctx.note(
                     NoteMessage::FirstDefinedHere,
@@ -323,6 +365,7 @@ impl<'a> Loader<'a> {
         {
             Err(LowerError::new(
                 LowerErrorKind::InheritWithoutConfig,
+                ctx.document,
                 self.shared.arena.span(inherit_ref),
             ))?;
         }
@@ -336,6 +379,7 @@ impl<'a> Loader<'a> {
         if let Some(inherit_id) = ctx.inherits(&self.shared.arena).next() {
             Err(LowerError::new(
                 LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::Inherit),
+                ctx.document,
                 self.shared.arena.span(inherit_id),
             ))?;
         }
@@ -349,6 +393,7 @@ impl<'a> Loader<'a> {
             };
             Err(LowerError::new(
                 LowerErrorKind::ModuleDisallowedItem(kind),
+                ctx.document,
                 self.shared.arena.span(item_id),
             ))?;
         }
@@ -476,13 +521,14 @@ impl<'a> Loader<'a> {
     }
 }
 
-fn resolve_path(path: &Path, span: Span) -> DslResult<PathBuf> {
+fn resolve_path(path: &Path, document: DocumentId, span: Span) -> DslResult<PathBuf> {
     dunce::canonicalize(path).map_err(|error| {
         LowerError::new(
             LowerErrorKind::ModuleResolveFailed(IoError {
                 error,
                 path: Some(path.to_path_buf()),
             }),
+            document,
             span,
         )
         .into()

@@ -344,7 +344,7 @@ pub(super) fn assert_rules_eq(pool: &RulePool, actual: &[RuleId], expected: &[Ru
 /// the whole arena formattable in the shared backend's public surface purely for
 /// test convenience. Not worth it for an unwrap.
 #[track_caller]
-pub(super) fn expect_err(r: Result<InputGrammar, DslError>) -> DslError {
+pub(super) fn expect_err<E>(r: Result<InputGrammar, E>) -> E {
     match r {
         Err(e) => e,
         Ok(_) => panic!("expected an error, got a grammar"),
@@ -384,6 +384,7 @@ pub(super) fn dsl_err(input: &str) -> DslError {
         input,
         &test_fixtures_dir().join("grammar.tsg"),
     ))
+    .into_err()
 }
 
 /// Write `modules` (filename -> source) into a fresh tempdir and parse `root`
@@ -395,6 +396,13 @@ pub(super) fn parse_with_modules(
     modules: &[(&str, &str)],
     root: &str,
 ) -> Result<InputGrammar, DslError> {
+    parse_with_module_documents(modules, root).map_err(NativeDslError::into_err)
+}
+
+pub(super) fn parse_with_module_documents(
+    modules: &[(&str, &str)],
+    root: &str,
+) -> Result<InputGrammar, NativeDslError> {
     let dir = tempfile::tempdir().unwrap();
     for (name, src) in modules {
         std::fs::write(dir.path().join(name), src).unwrap();
@@ -436,7 +444,7 @@ pub(super) fn sep_by1_rule(p: &mut RulePool, sep: &str, item: &str) -> RuleId {
 /// Parse a grammar that inherits from a tempfile base, returning the error.
 /// `base_content` is written to `base.tsg`, and the parent grammar is:
 /// `let base = inherit("base.tsg") grammar { language: "derived", inherits: base } rule extra { "hello" }`
-pub(super) fn inherit_err(base_content: &str) -> (DslError, PathBuf) {
+pub(super) fn inherit_err(base_content: &str) -> (NativeDslError, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let base_path = dir.path().join("base.tsg");
     std::fs::write(&base_path, base_content).unwrap();

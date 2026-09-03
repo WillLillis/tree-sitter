@@ -17,7 +17,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::{
     grammars::{PrecedenceEntry, ReservedWordContext, Variable},
-    nativedsl::{ImportedRule, LoweredGrammar, Module, ast::ModuleContext},
+    nativedsl::{DocumentMap, ImportedRule, LoweredGrammar, Module, ast::ModuleContext},
     rules::{Rule, RuleId, RulePool},
     strpool::{StrId, StrPool},
 };
@@ -148,13 +148,14 @@ pub fn lower_grammar(
     pool: &mut RulePool,
     shared: &SharedAst,
     previous: &[Module],
+    documents: &DocumentMap,
     current: &ModuleContext,
     imported_rules: &[ImportedRule],
 ) -> LowerResult<LoweredGrammar> {
     let base_grammar = current
         .inherit_module(&shared.arena)
         .and_then(|(idx, _)| previous[usize::from(idx)].lowered());
-    let result = evaluate(state, pool, shared, previous, current)?;
+    let result = evaluate(state, pool, shared, previous, documents, current)?;
     let grammar = build_grammar(current, pool, result, base_grammar, imported_rules)?;
     let stack = &mut state.scratch.rule_scratch;
     check_symbol_completeness(shared, current, previous, pool, &grammar, stack)?;
@@ -252,11 +253,11 @@ fn undefined_symbols_error(
             .iter()
             .find(|&&id| matches!(shared.arena.get(id), Node::Grammar));
         return match block {
-            Some(&id) => LowerError::new(kind, shared.arena.span(id)),
-            None => LowerError::without_span(kind),
+            Some(&id) => LowerError::new(kind, current.document, shared.arena.span(id)),
+            None => LowerError::without_span(kind, current.document),
         };
     };
-    let mut err = LowerError::new(kind, primary.span).with_source(&primary.src, &primary.path);
+    let mut err = LowerError::new(kind, primary.location.document, primary.location.span);
     for note in notes {
         err.add_note(note);
     }
@@ -357,9 +358,10 @@ pub fn lower_helper(
     pool: &mut RulePool,
     shared: &SharedAst,
     previous: &[super::Module],
+    documents: &DocumentMap,
     current: &super::ModuleContext,
 ) -> LowerResult<Vec<Variable>> {
-    let mut eval = Evaluator::new(state, pool, shared, previous, current);
+    let mut eval = Evaluator::new(state, pool, shared, previous, documents, current);
     let mut rules = Vec::new();
     for it in lower_items(&mut eval)? {
         if it.is_override {
@@ -369,6 +371,7 @@ pub fn lower_helper(
             // than silently demoting it to a plain rule.
             return Err(LowerError::new(
                 LowerErrorKind::ModuleDisallowedItem(DisallowedItemKind::OverrideRule),
+                current.document,
                 it.span,
             ));
         }
@@ -382,9 +385,10 @@ fn evaluate(
     pool: &mut RulePool,
     shared: &SharedAst,
     previous: &[super::Module],
+    documents: &DocumentMap,
     ctx: &super::ModuleContext,
 ) -> LowerResult<EvalResult> {
-    let mut eval = Evaluator::new(state, pool, shared, previous, ctx);
+    let mut eval = Evaluator::new(state, pool, shared, previous, documents, ctx);
     let mut rules = Vec::new();
     let mut overrides: Vec<(StrId, RuleId, Span)> = Vec::new();
     for it in lower_items(&mut eval)? {
@@ -533,7 +537,11 @@ fn build_grammar(
             .collect();
         names.sort_unstable();
         let (_, primary) = entries[0];
-        let mut err = LowerError::new(LowerErrorKind::OverrideRuleNotFound(names), primary);
+        let mut err = LowerError::new(
+            LowerErrorKind::OverrideRuleNotFound(names),
+            ctx.document,
+            primary,
+        );
         for (_, span) in &entries[1..] {
             err.add_note(ctx.note(NoteMessage::OverrideDeclaredHere, *span));
         }
@@ -552,6 +560,7 @@ fn build_grammar(
             .ok_or_else(|| {
                 LowerError::new(
                     LowerErrorKind::ExternalCannotBeStart(pool.resolve(name).to_string()),
+                    ctx.document,
                     span,
                 )
             })?;

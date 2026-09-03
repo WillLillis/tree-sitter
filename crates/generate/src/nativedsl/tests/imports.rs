@@ -77,7 +77,7 @@ fn import_call_member_not_found_suggests_close_name() {
 
 #[test]
 fn import_call_member_not_macro_points_to_definition() {
-    let err = expect_err(parse_with_modules(
+    let err = expect_err(parse_with_module_documents(
         &[("values.tsg", "let PREC = 1")],
         r#"
           let h = import("values.tsg")
@@ -85,14 +85,17 @@ fn import_call_member_not_macro_points_to_definition() {
           rule program { h::PREC() }
       "#,
     ));
-    let e = assert_err!(err, Type);
+    let DslError::Type(e) = &err.error else {
+        panic!("expected type error, got {:?}", err.error)
+    };
     assert_eq!(e.kind, TypeErrorKind::UndefinedMacro("h::PREC".into()));
     let [note] = e.notes.as_slice() else {
         panic!("expected one definition note, got {:?}", e.notes);
     };
     assert_eq!(note.message, NoteMessage::DefinedHere);
-    assert_eq!(note.path.file_name().unwrap(), "values.tsg");
-    assert_eq!(note.span.resolve(&note.src), "let PREC = 1");
+    let document = err.document(note.location.document);
+    assert_eq!(document.path().file_name().unwrap(), "values.tsg");
+    assert_eq!(note.location.span.resolve(document.text()), "let PREC = 1");
 }
 
 #[test]
@@ -189,7 +192,7 @@ fn too_many_modules_err(tail: &str) -> DslError {
     root.push_str(tail);
     let root_path = dir.path().join("root.tsg");
     std::fs::write(&root_path, &root).unwrap();
-    expect_err(parse_native_dsl(&root, &root_path))
+    expect_err(parse_native_dsl(&root, &root_path)).into_err()
 }
 
 #[test]
@@ -641,29 +644,28 @@ fn import_helper_rule_set_macro_expands_locally() {
 
 #[test]
 fn import_call_depth_shared_across_modules() {
-    let err = dsl_err(
-        r#"
+    let source = r#"
         let h = import("import_helpers/recursive.tsg")
         grammar { language: "test" }
         rule program { h::recurse("x") }
-    "#,
-    );
+    "#;
+    let grammar_path = test_fixtures_dir().join("grammar.tsg");
+    let err = expect_err(parse_native_dsl(source, &grammar_path));
 
-    let e = assert_err!(err, Lower);
+    let DslError::Lower(e) = &err.error else {
+        panic!("expected lower error, got {:?}", err.error)
+    };
     let LowerErrorKind::CallDepthExceeded(trace) = &e.kind else {
         panic!("expected CallDepthExceeded");
     };
     let fixtures = test_fixtures_dir();
-    let grammar_path = fixtures.join("grammar.tsg");
     let recursive_path = fixtures.join("import_helpers/recursive.tsg");
-    let (src, path) = e
-        .src
-        .as_deref()
-        .expect("call-depth error must carry its source");
-    assert_eq!(path, &grammar_path);
+    let document = err.document(e.document);
+    assert_eq!(document.path(), grammar_path);
     assert!(
-        src.contains(r#"h::recurse("x")"#),
-        "expected root source, got {src:?}"
+        document.text().contains(r#"h::recurse("x")"#),
+        "expected root source, got {:?}",
+        document.text()
     );
     // First frame: call site in root grammar
     assert_eq!(trace[0], ("recurse".into(), grammar_path, 4, 24));

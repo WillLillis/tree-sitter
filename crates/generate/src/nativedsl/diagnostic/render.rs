@@ -1,6 +1,6 @@
 //! Diagnostic rendering for DSL errors.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use anstyle::{AnsiColor, Color, Style};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{DslError, NoteMessage};
-use crate::nativedsl::ast::Span;
+use crate::nativedsl::{DocumentId, DocumentMap, DocumentRef, DocumentSpan, ast::Span};
 
 struct Paint<T>(Style, T);
 
@@ -97,14 +97,33 @@ impl SnippetKind<'_> {
     }
 }
 
-/// A [`DslError`] bundled with source text and file path for diagnostic rendering.
+/// the self contained error returned by [`parse_native_dsl`](crate::nativedsl::parse_native_dsl).
+///
+/// Owns both the pipeline's [`DslError`] and every source document referenced by
+/// its diagnostics. Retain this wrapper to render locations or resolve a [`DocumentId`].
 #[derive(Debug, Error, Serialize, Deserialize)]
 pub struct NativeDslError {
     pub error: DslError,
-    #[serde(skip)]
-    pub src: String,
-    #[serde(skip)]
-    pub path: PathBuf,
+    documents: Box<DocumentMap>,
+}
+
+impl NativeDslError {
+    pub(crate) fn new(error: DslError, documents: DocumentMap) -> Self {
+        Self {
+            error,
+            documents: Box::new(documents),
+        }
+    }
+
+    #[must_use]
+    pub const fn document(&self, id: DocumentId) -> DocumentRef<'_> {
+        self.documents.document(id)
+    }
+
+    #[must_use]
+    pub fn into_err(self) -> DslError {
+        self.error
+    }
 }
 
 impl std::fmt::Display for NativeDslError {
@@ -118,31 +137,17 @@ impl std::fmt::Display for NativeDslError {
                 modules.push(m);
                 current = &m.inner;
             }
-            let innermost = modules.last().unwrap();
 
-            // Render the leaf error with the innermost module's source context
-            render_error(f, current, &innermost.source_text, &innermost.path)?;
+            render_error(f, current, &self.documents)?;
 
-            // Each module is referenced *from* its parent's source: modules[0]
-            // from the root, modules[i] from modules[i-1]. Render innermost-out,
-            // deriving each module's parent context by index.
-            for (i, m) in modules.iter().enumerate().rev() {
-                let (text, path) = if i == 0 {
-                    (self.src.as_str(), self.path.as_path())
-                } else {
-                    (
-                        modules[i - 1].source_text.as_str(),
-                        modules[i - 1].path.as_path(),
-                    )
-                };
+            // Each wrapper carries its reference location in the parent document.
+            // Render teh chain from the innnermost reference outward.
+            for module in modules.iter().rev() {
                 writeln!(f)?;
-                render_snippet(
+                render_document_span(
                     f,
-                    Source {
-                        span: m.reference_span,
-                        text,
-                        path,
-                    },
+                    &self.documents,
+                    module.reference,
                     SnippetKind::Note(&NoteMessage::ReferencedFromHere),
                 )?;
             }
@@ -150,41 +155,42 @@ impl std::fmt::Display for NativeDslError {
             return Ok(());
         }
 
-        render_error(f, &self.error, &self.src, &self.path)
+        render_error(f, &self.error, &self.documents)
     }
 }
 
 fn render_error(
     f: &mut std::fmt::Formatter<'_>,
     error: &DslError,
-    text: &str,
-    path: &Path,
+    documents: &DocumentMap,
 ) -> std::fmt::Result {
     writeln!(f, "{ERROR}: {error}")?;
-
-    // A lower error born evaluating an imported module's macro body carries that
-    // module's source, so the caret lands in the right file. Everything else
-    // falls back to the caller-supplied source.
-    let (text, path) = error.primary_source().unwrap_or((text, path));
+    let document = documents.document(error.document());
 
     // A file-level error (e.g. a missing grammar block) has no location within
     // the source, located errors fall through to the snippet below.
     let Some(span) = error.span() else {
-        writeln!(f, " {ARROW} {}", path.display())?;
+        writeln!(f, " {ARROW} {}", document.path().display())?;
         return Ok(());
     };
 
-    render_snippet(f, Source { span, text, path }, SnippetKind::Error)?;
+    // TODO: Change argument type of `Source`?
+    render_snippet(
+        f,
+        Source {
+            span,
+            text: document.text(),
+            path: document.path(),
+        },
+        SnippetKind::Error,
+    )?;
 
     for note in error.notes() {
         writeln!(f)?;
-        render_snippet(
+        render_document_span(
             f,
-            Source {
-                span: note.span,
-                text: &note.src,
-                path: &note.path,
-            },
+            documents,
+            note.location,
             SnippetKind::Note(&note.message),
         )?;
     }
@@ -206,6 +212,24 @@ fn render_error(
     }
 
     Ok(())
+}
+
+fn render_document_span(
+    f: &mut std::fmt::Formatter<'_>,
+    documents: &DocumentMap,
+    location: DocumentSpan,
+    kind: SnippetKind<'_>,
+) -> std::fmt::Result {
+    let document = documents.document(location.document);
+    render_snippet(
+        f,
+        Source {
+            span: location.span,
+            text: document.text(),
+            path: document.path(),
+        },
+        kind,
+    )
 }
 
 /// Render a source snippet with a location header, source line, and underline.

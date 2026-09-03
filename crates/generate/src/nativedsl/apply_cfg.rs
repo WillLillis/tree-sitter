@@ -10,7 +10,10 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::strpool::{StrId, StrPool};
+use crate::{
+    nativedsl::DocumentId,
+    strpool::{StrId, StrPool},
+};
 
 use super::{
     CfgError, NoteMessage,
@@ -72,6 +75,7 @@ impl CfgState {
         &mut self,
         shared: &SharedAst,
         ctx: &mut ModuleContext,
+        source: &str,
         strs: &StrPool,
     ) -> CfgResult<()> {
         let Some(flags_id) = ctx.grammar_config.as_ref().and_then(|c| c.flags) else {
@@ -80,6 +84,7 @@ impl CfgState {
         let Node::Object(range) = *shared.arena.get(flags_id) else {
             return Err(err(
                 CfgErrorKind::FlagsNotObject,
+                ctx.document,
                 shared.arena.span(flags_id),
             ));
         };
@@ -89,22 +94,32 @@ impl CfgState {
             value: value_id,
         } in shared.pools.get_object(range)
         {
-            let enable = match ctx.text(key.span) {
+            let enable = match key.span.resolve(source) {
                 "enabled" => true,
                 "disabled" => false,
                 other => {
-                    return Err(err(CfgErrorKind::FlagsUnknownKey(other.into()), key.span));
+                    return Err(err(
+                        CfgErrorKind::FlagsUnknownKey(other.into()),
+                        ctx.document,
+                        key.span,
+                    ));
                 }
             };
             let Node::List(items) = shared.arena.get(value_id) else {
-                return Err(err(CfgErrorKind::FlagsNotList, shared.arena.span(value_id)));
+                return Err(err(
+                    CfgErrorKind::FlagsNotList,
+                    ctx.document,
+                    shared.arena.span(value_id),
+                ));
             };
             for &elem in shared.pools.child_slice(*items) {
                 let span = shared.arena.span(elem);
                 let name = match shared.arena.get(elem) {
                     Node::StringLit(sid) => *sid,
-                    Node::Cfg { .. } => return Err(err(CfgErrorKind::InsideFlags, span)),
-                    _ => return Err(err(CfgErrorKind::FlagsNonLiteral, span)),
+                    Node::Cfg { .. } => {
+                        return Err(err(CfgErrorKind::InsideFlags, ctx.document, span));
+                    }
+                    _ => return Err(err(CfgErrorKind::FlagsNonLiteral, ctx.document, span)),
                 };
                 let duplicate = match ctx.cfg_declared.entry(name) {
                     Entry::Occupied(entry) => Some(*entry.get()),
@@ -116,6 +131,7 @@ impl CfgState {
                 if let Some(first_span) = duplicate {
                     return Err(CfgError::with_note(
                         CfgErrorKind::FlagDeclaredTwice(strs.resolve(name).to_string()),
+                        ctx.document,
                         span,
                         ctx.note(NoteMessage::FirstDefinedHere, first_span),
                     ));
@@ -173,6 +189,7 @@ pub(super) fn apply_cfg(
         shared: &mut *shared,
         state,
         kind,
+        document: ctx.document,
         strs,
         cfg_declared: &ctx.cfg_declared,
         cfg_dropped: &mut ctx.cfg_dropped,
@@ -211,6 +228,7 @@ struct Walker<'a> {
     shared: &'a mut SharedAst,
     state: &'a CfgState,
     kind: ModuleKind,
+    document: DocumentId,
     /// Resolves cfg names in [`Self::walk_cfg`].
     strs: &'a StrPool,
     /// Local declared set for the grammar visibility check
@@ -264,6 +282,7 @@ impl Walker<'_> {
             let name_span = Span::new(name_offset, name_offset + name_len);
             return Err(err(
                 CfgErrorKind::FlagUnknown(self.strs.resolve(name).into()),
+                self.document,
                 name_span,
             ));
         };
@@ -403,6 +422,6 @@ impl Walker<'_> {
     }
 }
 
-const fn err(kind: CfgErrorKind, span: Span) -> CfgError {
-    CfgError::new(kind, span)
+const fn err(kind: CfgErrorKind, document: DocumentId, span: Span) -> CfgError {
+    CfgError::new(kind, document, span)
 }

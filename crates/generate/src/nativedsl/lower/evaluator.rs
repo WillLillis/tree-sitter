@@ -20,6 +20,7 @@ use super::{
 
 use crate::{
     grammars::{PrecedenceEntry, ReservedWordContext},
+    nativedsl::DocumentMap,
     rules::{Alias, Associativity, MetadataParams, Precedence, Rule, RuleId, RulePool},
     strpool::StrId,
 };
@@ -45,7 +46,8 @@ pub(super) struct Evaluator<'a, 'ast> {
     /// ("root") is not in this slice; it lives in `root_ctx`. Its module id is
     /// `previous.len()` (== `root_id`).
     previous: &'a [Module],
-    pub(super) root_ctx: &'a ModuleContext,
+    documents: &'a DocumentMap,
+    pub(crate) root_ctx: &'a ModuleContext,
     root_id: ModuleId,
     /// May equal `root_id` (current module) or index into `previous`.
     current_module: ModuleId,
@@ -57,6 +59,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         pool: &'a mut RulePool,
         shared: &'ast SharedAst,
         previous: &'a [Module],
+        documents: &'a DocumentMap,
         root_ctx: &'a ModuleContext,
     ) -> Self {
         // The loader bounds the module count to u8 before lowering runs.
@@ -68,6 +71,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             pool,
             shared,
             previous,
+            documents,
             root_ctx,
             root_id,
             current_module: root_id,
@@ -134,7 +138,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
 
     fn err(&self, kind: LowerErrorKind, span: Span) -> LowerError {
         let ctx = self.module_ctx(self.current_module);
-        LowerError::new(kind, span).with_source(&ctx.source, &ctx.path)
+        LowerError::new(kind, ctx.document, span)
     }
 
     fn checked_len(&self, n: usize, span: Span) -> LowerResult<u16> {
@@ -1021,10 +1025,11 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             let root = self.state.scratch.call_stack[0];
             let trace = self.build_call_trace();
             let ctx = self.module_ctx(root.caller_mod);
-            return Err(
-                LowerError::new(LowerErrorKind::CallDepthExceeded(trace), root.call_span)
-                    .with_source(&ctx.source, &ctx.path),
-            );
+            return Err(LowerError::new(
+                LowerErrorKind::CallDepthExceeded(trace),
+                ctx.document,
+                root.call_span,
+            ));
         }
         Ok(())
     }
@@ -1037,11 +1042,12 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             .map(|frame| {
                 let name = self.pool.resolve(frame.name).to_string();
                 let call_ctx = self.module_ctx(frame.caller_mod);
+                let document = self.documents.document(call_ctx.document);
                 let offset = frame.call_span.start as usize;
-                let bytes = &call_ctx.source.as_bytes()[..offset];
+                let bytes = &document.text().as_bytes()[..offset];
                 let line = memchr::memchr_iter(b'\n', bytes).count() + 1;
                 let col = offset - memchr::memrchr(b'\n', bytes).map_or(0, |i| i + 1) + 1;
-                (name, call_ctx.path.clone(), line, col)
+                (name, document.path().to_owned(), line, col)
             })
             .collect()
     }

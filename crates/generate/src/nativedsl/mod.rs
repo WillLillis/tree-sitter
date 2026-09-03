@@ -43,6 +43,7 @@ macro_rules! expect_pat {
 pub mod apply_cfg;
 pub mod ast;
 pub mod diagnostic;
+pub mod document;
 pub mod expand_macro_calls;
 pub mod lexer;
 pub mod loader;
@@ -64,6 +65,7 @@ pub use diagnostic::{
     CfgError, Diagnostic, DslError, DslResult, ExpandError, LexError, LowerError, ModuleError,
     NativeDslError, Note, NoteMessage, ParseError, ResolveError, TypeError,
 };
+pub use document::{DocumentId, DocumentMap, DocumentRef, DocumentSpan};
 pub use expand_macro_calls::ExpandErrorKind;
 pub use lexer::{LexErrorKind, LexResult};
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
@@ -330,32 +332,44 @@ pub(crate) fn collect_imported_rules(
 /// # Errors
 ///
 /// Returns [`DslError`] if any pipeline stage fails.
-pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> DslResult<InputGrammar> {
+/// // TODO: Result type def?
+pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> Result<InputGrammar, NativeDslError> {
+    let mut documents = DocumentMap::default();
     let mut shared = SharedAst::new(input.len() / 10);
     let mut modules: Vec<Module> = Vec::new();
     let mut env = TypeEnv::default();
     let mut state = LoweringState::default();
     let mut pool = RulePool::default();
     let mut cfg = apply_cfg::CfgState::default();
-    let dsl_loader = Loader::new(
-        &mut shared,
-        &mut modules,
-        &mut env,
-        &mut state,
-        &mut pool,
-        &mut cfg,
-    );
-    dsl_loader.load_root(input, grammar_path)?;
-    // Root is the last-pushed module by construction.
-    expect_pat!(Some(Module::Grammar { ctx, lowered, .. }), modules.pop());
-    if lowered.variables.is_empty() {
-        let g_span = ctx
-            .root_items
-            .iter()
-            .find(|&&id| matches!(shared.arena.get(id), Node::Grammar))
-            .map(|&id| shared.arena.span(id))
-            .unwrap();
-        Err(LowerError::new(LowerErrorKind::GrammarHasNoRules, g_span))?;
-    }
-    Ok(lowered.into_input(pool))
+
+    let result: DslResult<InputGrammar> = (|| {
+        let dsl_loader = Loader::new(
+            &mut shared,
+            &mut modules,
+            &mut env,
+            &mut state,
+            &mut pool,
+            &mut cfg,
+            &mut documents,
+        );
+        dsl_loader.load_root(input, grammar_path)?;
+        // Root is the last-pushed module by construction.
+        expect_pat!(Some(Module::Grammar { ctx, lowered, .. }), modules.pop());
+        if lowered.variables.is_empty() {
+            let g_span = ctx
+                .root_items
+                .iter()
+                .find(|&&id| matches!(shared.arena.get(id), Node::Grammar))
+                .map(|&id| shared.arena.span(id))
+                .unwrap();
+            Err(LowerError::new(
+                LowerErrorKind::GrammarHasNoRules,
+                ctx.document,
+                g_span,
+            ))?;
+        }
+        Ok(lowered.into_input(pool))
+    })();
+
+    result.map_err(|e| NativeDslError::new(e, documents))
 }

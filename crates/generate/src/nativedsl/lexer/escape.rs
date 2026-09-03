@@ -3,7 +3,7 @@
 
 use memchr::memchr;
 
-use crate::nativedsl::{LexError, LexErrorKind, LexResult, ast::Span};
+use crate::nativedsl::{DocumentId, LexError, LexErrorKind, LexResult, ast::Span};
 
 /// Decode the escape sequences in a quote-stripped string literal's text into
 /// `out`, replacing its previous contents.
@@ -77,8 +77,7 @@ const fn past_char(source: &[u8], i: usize) -> usize {
     if i >= source.len() {
         return source.len();
     }
-    // SAFETY: the lexer's source is the bytes of a `&str` (`Lexer::new` takes
-    // `&str`), so it is valid UTF-8.
+    // SAFETY: the lexer's source comes from `DocumentRef::text`, so it is valid UTF-8.
     let s = unsafe { std::str::from_utf8_unchecked(source) };
     let mut j = i + 1;
     while !s.is_char_boundary(j) {
@@ -111,8 +110,18 @@ fn read_hex_digits(source: &[u8], start: usize, n: usize) -> Result<u32, usize> 
 
 /// Validate `\xHH` (exactly 2 hex digits, value 0x00-0x7F). Returns the new
 /// position past the escape on success. `esc_pos` points at the backslash.
-pub(super) fn validate_hex_escape(source: &[u8], esc_pos: usize) -> LexResult<usize> {
-    let bad = |e| LexError::new(LexErrorKind::InvalidHexEscape, Span::from_usize(esc_pos, e));
+pub(super) fn validate_hex_escape(
+    source: &[u8],
+    document: DocumentId,
+    esc_pos: usize,
+) -> LexResult<usize> {
+    let bad = |e| {
+        LexError::new(
+            LexErrorKind::InvalidHexEscape,
+            document,
+            Span::from_usize(esc_pos, e),
+        )
+    };
     let digits_start = esc_pos + 2;
     let value = read_hex_digits(source, digits_start, 2).map_err(bad)?;
     let end = digits_start + 2; // both digits are ASCII, so this is a char boundary
@@ -125,11 +134,16 @@ pub(super) fn validate_hex_escape(source: &[u8], esc_pos: usize) -> LexResult<us
 
 /// Validate `\uHHHH` (4 hex digits) or `\u{H..H}` (1-6 hex digits in braces).
 /// Codepoint must be <= 0x10FFFF and not a surrogate (0xD800-0xDFFF).
-pub(super) fn validate_unicode_escape(source: &[u8], esc_pos: usize) -> LexResult<usize> {
+pub(super) fn validate_unicode_escape(
+    source: &[u8],
+    document: DocumentId,
+    esc_pos: usize,
+) -> LexResult<usize> {
     let after_u = esc_pos + 2;
     let bad = |e: usize| {
         LexError::new(
             LexErrorKind::InvalidUnicodeEscape,
+            document,
             Span::from_usize(esc_pos, e.min(source.len())),
         )
     };

@@ -45,10 +45,16 @@ enum LetState {
 pub fn check(
     shared: &SharedAst,
     ctx: &ModuleContext,
+    source: &str,
     env: &mut TypeEnv,
     strs: &StrPool,
 ) -> TypeResult<()> {
-    let cx = check::Cx { shared, ctx, strs };
+    let cx = check::Cx {
+        shared,
+        ctx,
+        source,
+        strs,
+    };
     for &item_id in &ctx.root_items {
         check_item(cx, item_id, env)?;
     }

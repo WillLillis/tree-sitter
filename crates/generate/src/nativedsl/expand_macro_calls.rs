@@ -22,7 +22,10 @@ use super::{
     },
     lexer::is_ident_str,
 };
-use crate::strpool::{StrId, StrPool};
+use crate::{
+    nativedsl::DocumentId,
+    strpool::{StrId, StrPool},
+};
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ExpandErrorKind {
@@ -122,6 +125,7 @@ fn expand_one_call(
     let Some(macro_id) = macros.get(&name_id).copied() else {
         let mut err = ExpandError::new(
             ExpandErrorKind::UnknownMacro(strs.resolve(name_id).to_string()),
+            ctx.document,
             name_span,
         );
         // If the name was a cfg-dropped macro, say so - parity with the
@@ -145,6 +149,7 @@ fn expand_one_call(
     let MacroKind::RuleSet = kind else {
         return Err(ExpandError::new(
             ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(name_id).to_string()),
+            ctx.document,
             name_span,
         ));
     };
@@ -158,6 +163,7 @@ fn expand_one_call(
                 expected: param_count,
                 got: args.len as usize,
             },
+            ctx.document,
             shared.arena.span(call_id),
         ));
     }
@@ -184,7 +190,15 @@ fn expand_one_call(
                 body,
             } => {
                 let name_span = shared.arena.span(name_expr);
-                let name = eval_name(shared, strs, args_start, name_expr, name_span, name_buf)?;
+                let name = eval_name(
+                    shared,
+                    strs,
+                    ctx.document,
+                    args_start,
+                    name_expr,
+                    name_span,
+                    name_buf,
+                )?;
                 (is_override, name, body)
             }
             // Parser only places Rule/ComputedRule in a RuleSet body.
@@ -210,7 +224,7 @@ fn expand_one_call(
     for &sym_ref in shared.pools.child_slice(sym_refs) {
         expect_pat!(Node::SymRef { expr }, *shared.arena.get(sym_ref));
         let span = shared.arena.span(sym_ref);
-        let name = eval_name(shared, strs, args_start, expr, span, name_buf)?;
+        let name = eval_name(shared, strs, ctx.document, args_start, expr, span, name_buf)?;
         ctx.computed_refs.push(Spanned::new(name, span));
     }
     Ok(())
@@ -223,16 +237,18 @@ fn expand_one_call(
 fn eval_name(
     shared: &SharedAst,
     strs: &mut StrPool,
+    document: DocumentId,
     args_start: usize,
     node_id: NodeId,
     name_expr_span: Span,
     name_buf: &mut String,
 ) -> Result<StrId, ExpandError> {
     name_buf.clear();
-    eval_name_into(shared, strs, args_start, node_id, name_buf)?;
+    eval_name_into(shared, strs, document, args_start, node_id, name_buf)?;
     if !is_ident_str(name_buf) {
         return Err(ExpandError::new(
             ExpandErrorKind::InvalidRuleName(std::mem::take(name_buf)),
+            document,
             name_expr_span,
         ));
     }
@@ -246,6 +262,7 @@ fn eval_name(
 fn eval_name_into(
     shared: &SharedAst,
     strs: &StrPool,
+    document: DocumentId,
     args_start: usize,
     node_id: NodeId,
     out: &mut String,
@@ -259,17 +276,21 @@ fn eval_name_into(
         }
         Node::MacroParam { index, .. } => {
             let arg_id = shared.pools.children[args_start + index as usize];
-            eval_name_into(shared, strs, args_start, arg_id, out)
+            eval_name_into(shared, strs, document, args_start, arg_id, out)
         }
         Node::Concat(range) => {
             let start = range.start as usize;
             let end = start + range.len as usize;
             for i in start..end {
                 let child = shared.pools.children[i];
-                eval_name_into(shared, strs, args_start, child, out)?;
+                eval_name_into(shared, strs, document, args_start, child, out)?;
             }
             Ok(())
         }
-        _ => Err(ExpandError::new(ExpandErrorKind::NonStringInName, span)),
+        _ => Err(ExpandError::new(
+            ExpandErrorKind::NonStringInName,
+            document,
+            span,
+        )),
     }
 }

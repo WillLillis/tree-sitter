@@ -1,13 +1,11 @@
 //! Per-module parser output: [`ModuleContext`], the grammar block
 //! ([`GrammarConfig`]/[`ConfigField`]), and their accessors.
 
-use std::path::PathBuf;
-
 use rustc_hash::FxHashMap;
 
 use super::{Node, NodeArena, NodeId, Span, Spanned};
 use crate::{
-    nativedsl::{ModuleId, Note, NoteMessage, typecheck::Ty},
+    nativedsl::{DocumentId, DocumentSpan, ModuleId, Note, NoteMessage, typecheck::Ty},
     strpool::StrId,
 };
 
@@ -90,14 +88,11 @@ define_grammar_config! {
     }
 }
 
-/// Per-module data produced by the parser.
-///
-/// Owns the module's source text and module-specific state. Its nodes live in
-/// the [`SharedAst`](super::SharedAst) shared by the entire grammar.
+/// Per-module state produced by the parser. Its nodes live in the
+/// [`SharedAst`](super::SharedAst) shared by the entire grammar.
 #[derive(Debug)]
 pub struct ModuleContext {
-    pub source: String,
-    pub path: PathBuf,
+    pub document: DocumentId,
     pub grammar_config: Option<GrammarConfig>,
     pub root_items: Vec<NodeId>,
     /// All `Import` and `Inherit` nodes in source order, collected by the parser.
@@ -122,15 +117,9 @@ pub struct ModuleContext {
 }
 
 impl ModuleContext {
-    pub(crate) fn new(
-        source: String,
-        path: PathBuf,
-        root_capacity: usize,
-        node_start: NodeId,
-    ) -> Self {
+    pub(crate) fn new(document: DocumentId, root_capacity: usize, node_start: NodeId) -> Self {
         Self {
-            source,
-            path,
+            document,
             grammar_config: None,
             root_items: Vec::with_capacity(root_capacity),
             module_refs: Vec::new(),
@@ -142,11 +131,6 @@ impl ModuleContext {
             let_types: FxHashMap::default(),
             node_range: node_start..node_start,
         }
-    }
-
-    #[must_use]
-    pub fn text(&self, span: Span) -> &str {
-        span.resolve(&self.source)
     }
 
     /// The [`Node::Inherit`] nodes in source order, derived from `module_refs`. The first
@@ -193,12 +177,10 @@ impl ModuleContext {
 
     /// Build a [`Note`] anchored to this module's source.
     #[must_use]
-    pub fn note(&self, message: NoteMessage, span: Span) -> Note {
+    pub const fn note(&self, message: NoteMessage, span: Span) -> Note {
         Note {
             message,
-            span,
-            path: self.path.clone(),
-            src: self.source.clone(),
+            location: DocumentSpan::new(self.document, span),
         }
     }
 }

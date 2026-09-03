@@ -214,18 +214,13 @@ fn error_module_read_failure_renders_without_panic() {
     let error = expect_err(parse_native_dsl(&parent_src, &parent_path));
     assert!(
         matches!(
-            &error,
+            &error.error,
             DslError::Lower(e)
                 if matches!(&e.kind, LowerErrorKind::ModuleReadFailed(io) if io.path.is_some())
         ),
         "expected ModuleReadFailed carrying a path, got {error:?}"
     );
-    let wrapped = NativeDslError {
-        error,
-        src: parent_src,
-        path: parent_path,
-    };
-    let _rendered = format!("{wrapped}");
+    let _rendered = format!("{error}");
 }
 
 #[test]
@@ -233,7 +228,7 @@ fn helper_lower_error_carries_helper_source() {
     // A lower error born inside an imported helper (an integer overflow in the
     // helper's macro body) tags the diagnostic with the helper's source + path,
     // so it renders against helper.tsg, not the root that imported it.
-    let err = expect_err(parse_with_modules(
+    let err = expect_err(parse_with_module_documents(
         &[(
             "helper.tsg",
             "macro big() rule_t { prec(1000000000 + 2000000000, \"x\") }\n",
@@ -244,16 +239,17 @@ fn helper_lower_error_carries_helper_source() {
         rule program { h::big() }
     "#,
     ));
-    let e = assert_err!(err, Lower);
+    let DslError::Lower(e) = &err.error else {
+        panic!("expected lower error, got {:?}", err.error)
+    };
     assert!(
         matches!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000)),
         "got {:?}",
         e.kind
     );
-    let (src, path) = e
-        .src
-        .as_deref()
-        .expect("helper lower error must carry the helper's source");
+    let document = err.document(e.document);
+    let src = document.text();
+    let path = document.path();
     assert!(
         path.ends_with("helper.tsg"),
         "expected helper.tsg, got {path:?}"
@@ -302,11 +298,19 @@ fn error_inherit_cycle() {
     let source = std::fs::read_to_string(&a_path).unwrap();
     let err = expect_err(parse_native_dsl(&source, &a_path));
     let mut chain = Vec::new();
-    let mut current: &DslError = &err;
+    let mut current: &DslError = &err.error;
     loop {
         match current {
             DslError::Module(m) => {
-                chain.push(m.path.file_name().unwrap().to_str().unwrap().to_string());
+                chain.push(
+                    err.document(m.target_document())
+                        .path()
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                );
                 current = &m.inner;
             }
             DslError::Lower(e) => {
