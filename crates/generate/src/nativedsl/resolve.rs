@@ -702,7 +702,7 @@ pub enum ResolveErrorKind {
 fn unknown_ident_error(rcx: &ResolveCtx, name: &str, span: Span) -> ResolveError {
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
     let candidates = rcx.decls.keys().map(|&id| rcx.strs.resolve(id)).chain(
-        super::lexer::TokenKind::COMBINATOR_KEYWORD_NAMES
+        super::lexer::TokenKind::EXPRESSION_KEYWORD_NAMES
             .iter()
             .copied(),
     );

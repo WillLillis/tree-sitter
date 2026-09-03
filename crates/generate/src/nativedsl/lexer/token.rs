@@ -1,23 +1,31 @@
-//! Token vocabulary: the [`TokenKind`] enum (plus its keyword table) and
-//! [`Token`]. Shared with the parser, which consumes these directly.
+//! Token kinds and keyword lookup shared by the lexer and parser.
 
 use serde::{Deserialize, Serialize};
 
 use crate::nativedsl::ast::Span;
 
+/// A token and its source span.
+#[derive(Clone)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
 /// The kind of a lexer token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenKind {
-    // Identifiers and literals
+    /// Identifier. Raw identifier spans exclude the `r#` prefix.
     Ident,
-    /// String literal. Token span covers `"..."` including quotes.
+    /// String literal. The token span includes its quotes.
     StringLit,
-    /// Raw string literal. Token span covers `r"..."`, `r#"..."#`, etc.
+    /// Raw string literal. The token span includes its quotes and delimiters.
     RawStringLit {
+        /// Number of `#` delimiters on each side of the literal.
         hash_count: u8,
     },
+    /// Integer literal decoded to its value.
     IntLit(u32),
-    // Structural keywords
+    // Keywords
     KwGrammar,
     KwRule,
     KwRules,
@@ -25,7 +33,6 @@ pub enum TokenKind {
     KwMacro,
     KwFor,
     KwIn,
-    // Combinator keywords
     KwSeq,
     KwChoice,
     KwRepeat,
@@ -68,28 +75,27 @@ pub enum TokenKind {
     Gt,
     Pound,
     At,
-    // Other
+    /// Synthetic token marking the end of input.
     Eof,
 }
 
-/// Maps keyword text to `TokenKind` variant. Used by the lexer, Display, and `is_keyword`.
+/// Defines keyword spellings and their lookup helpers.
 macro_rules! keywords {
     (
         decls { $($d_variant:ident => $d_str:literal),* $(,)? }
-        combinators { $($c_variant:ident => $c_str:literal),* $(,)? }
+        expressions { $($c_variant:ident => $c_str:literal),* $(,)? }
     ) => {
         impl TokenKind {
-            /// Keywords callable in expression position. Used to seed
-            /// "did you mean?" suggestions when an identifier in a rule body
-            /// fails to resolve.
-            pub(crate) const COMBINATOR_KEYWORD_NAMES: &'static [&'static str] = &[$($c_str),*];
+            /// Expression keywords considered when suggesting a replacement for an
+            /// unknown identifier.
+            pub(crate) const EXPRESSION_KEYWORD_NAMES: &'static [&'static str] = &[$($c_str),*];
 
             #[must_use]
             pub const fn is_keyword(self) -> bool {
                 matches!(self, $(Self::$d_variant)|* $(| Self::$c_variant)*)
             }
 
-            /// Return the keyword string if this is a keyword token, or `None`.
+            /// Returns this token's source spelling, if it is a keyword.
             const fn keyword_str(self) -> Option<&'static str> {
                 match self {
                     $(Self::$d_variant => Some($d_str),)*
@@ -98,7 +104,7 @@ macro_rules! keywords {
                 }
             }
 
-            /// Map keyword text to a `TokenKind`, or return `Ident`.
+            /// Returns the token for a known keyword, or `Ident` otherwise.
             #[inline]
             pub(super) fn from_keyword(text: &str) -> Self {
                 match text {
@@ -116,7 +122,7 @@ keywords! {
         KwGrammar => "grammar", KwRule => "rule", KwRules => "rules", KwLet => "let",
         KwMacro => "macro", KwOverride => "override", KwExpect => "expect", KwIn => "in",
     }
-    combinators {
+    expressions {
         KwFor => "for", KwSeq => "seq", KwChoice => "choice", KwRepeat => "repeat",
         KwRepeat1 => "repeat1", KwOptional => "optional", KwBlank => "blank", KwEof => "eof",
         KwField => "field", KwAlias => "alias", KwToken => "token", KwPrec => "prec",
@@ -158,10 +164,4 @@ impl std::fmt::Display for TokenKind {
             _ => unreachable!(),
         })
     }
-}
-
-#[derive(Clone)]
-pub struct Token {
-    pub kind: TokenKind,
-    pub span: Span,
 }
