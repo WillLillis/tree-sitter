@@ -303,7 +303,7 @@ fn error_inherit_cycle() {
         match current {
             DslError::Module(m) => {
                 chain.push(
-                    err.document(m.target_document())
+                    err.document(m.child_document())
                         .path()
                         .file_name()
                         .unwrap()

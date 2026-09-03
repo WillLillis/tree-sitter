@@ -1,8 +1,5 @@
-//! Diagnostics for the native DSL.
-//!
-//! The error types shared by every pipeline stage ([`types`]), their terminal
-//! rendering ([`render`]), and the Levenshtein-based name suggestions.
-//! "did you mean" notes ([`suggest`]).
+//! Shared native DSL error types, terminal rendering, and Levenshtein-based suggestions
+//! for "did you mean" notes.
 
 mod render;
 mod suggest;

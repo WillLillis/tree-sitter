@@ -103,6 +103,7 @@ impl SnippetKind<'_> {
 /// its diagnostics. Retain this wrapper to render locations or resolve a [`DocumentId`].
 #[derive(Debug, Error, Serialize, Deserialize)]
 pub struct NativeDslError {
+    #[source]
     pub error: DslError,
     documents: Box<DocumentMap>,
 }

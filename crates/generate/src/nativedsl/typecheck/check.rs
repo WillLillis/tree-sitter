@@ -789,12 +789,12 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
                 if let Some(ref_id) = resolve_module_ref(&shared.arena, module)
                     && let Node::Import { path, .. } = shared.arena.get(ref_id)
                 {
-                    let path_text = cx.text(*path).to_string();
+                    let path_text = cx.text(*path);
                     return Err(cx.with_note(
                         err_kind,
                         arg_span,
                         ctx.note(
-                            NoteMessage::SwitchImportToInherit(path_text),
+                            NoteMessage::DidYouMean(format!("inherit(\"{path_text}\")")),
                             shared.arena.span(ref_id),
                         ),
                     ));

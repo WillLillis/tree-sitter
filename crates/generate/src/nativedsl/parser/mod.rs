@@ -985,11 +985,15 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                         .span(arg_id)
                         .resolve(self.source)
                         .to_owned();
-                    let is_left = matches!(kind, PrecKind::Left);
-                    err.add_note(self.ctx.note(
-                        NoteMessage::PrecNeedsExplicitPrecedence { is_left, arg },
-                        start,
-                    ));
+                    let name = if kind == PrecKind::Left {
+                        "prec_left"
+                    } else {
+                        "prec_right"
+                    };
+                    err.add_note(
+                        self.ctx
+                            .note(NoteMessage::DidYouMean(format!("{name}(0, {arg})")), start),
+                    );
                 }
                 return Err(err);
             }

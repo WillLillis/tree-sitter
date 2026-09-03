@@ -12,7 +12,7 @@ macro_rules! inherit_error_tests {
                 panic!(concat!("expected ", stringify!($variant), ", got {:?}"), m.inner)
             };
             assert_eq!(e.kind, $expected);
-            assert_eq!(err.document(m.target_document()).path(), base_path);
+            assert_eq!(err.document(m.child_document()).path(), base_path);
         })*
     };
     (match $variant:ident { $($name:ident { $base:expr, $expected:pat $(if $guard:expr)? })* }) => {
@@ -26,7 +26,7 @@ macro_rules! inherit_error_tests {
                 matches!(&e.kind, $expected $(if $guard)?),
                 "unexpected error kind: {:?}", e.kind
             );
-            assert_eq!(err.document(m.target_document()).path(), base_path);
+            assert_eq!(err.document(m.child_document()).path(), base_path);
         })*
     };
 }

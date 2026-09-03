@@ -93,6 +93,7 @@ pub enum DslError {
 #[derive(Debug, Serialize, Deserialize, Error)]
 #[error("{inner}")]
 pub struct ModuleError {
+    #[source]
     pub inner: Box<DslError>,
     pub reference: DocumentSpan,
 }
@@ -108,11 +109,8 @@ impl ModuleError {
 
     /// The child document this module reference loaded.
     #[must_use]
-    pub fn target_document(&self) -> DocumentId {
-        match self.inner.as_ref() {
-            DslError::Module(next) => next.reference.document,
-            error => error.document(),
-        }
+    pub fn child_document(&self) -> DocumentId {
+        self.inner.document()
     }
 }
 
@@ -123,29 +121,31 @@ pub struct Note {
     pub location: DocumentSpan,
 }
 
+/// Message attached to a secondary diagnostic location.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteMessage {
+    /// Points to the first location involved in a duplicate or repeated construct.
     FirstDefinedHere,
+    /// Points to the declaration associated with the primary error.
     DefinedHere,
+    /// Points to the `inherit()` call that selected the grammar's base.
     BaseInheritedHere,
+    /// Points to the parent module reference through which a failing child was loaded.
     ReferencedFromHere,
+    /// Points to an additional override declaration covered by the primary error.
     OverrideDeclaredHere,
-    /// One per redundant `inherit()` beyond the first in a `MultipleInherits` error
+    /// Points to an additional redundant `inherit()` call.
     AlsoInheritedHere,
-    /// Points at an `expect` forward-decl whose promised symbol was never defined.
+    /// Points to an `expect` declaration whose promised symbol was never defined.
     ForwardDeclaredHere,
-    /// Carries the cfg flag name, the note's span points at the gated decl.
+    /// Points to a matching declaration removed by the named cfg flag.
     GatedByDisabledCfg(String),
+    /// Carries replacement text suggested for the primary error.
     DidYouMean(String),
-    /// Emitted alongside `GrammarConfigRequiresInherit`. Carries the imported path string.
-    SwitchImportToInherit(String),
-    /// A module-qualified reference in a name position. Carries the bare name.
+    /// Points to a module-qualified rule reference and carries its bare name.
     UseBareName(String),
+    /// Points to the reference that closes a circular `let` dependency.
     SelfReferenceHere,
-    PrecNeedsExplicitPrecedence {
-        is_left: bool,
-        arg: String,
-    },
 }
 
 impl std::fmt::Display for NoteMessage {
@@ -162,9 +162,6 @@ impl std::fmt::Display for NoteMessage {
                 write!(f, "this declaration is disabled by `#[cfg({flag})]`")
             }
             Self::DidYouMean(name) => write!(f, "did you mean `{name}`?"),
-            Self::SwitchImportToInherit(path) => {
-                write!(f, "switch `import(\"{path}\")` to `inherit(\"{path}\")`")
-            }
             Self::UseBareName(name) => {
                 write!(
                     f,
@@ -172,13 +169,6 @@ impl std::fmt::Display for NoteMessage {
                 )
             }
             Self::SelfReferenceHere => write!(f, "self-reference here"),
-            Self::PrecNeedsExplicitPrecedence { is_left, arg } => {
-                let name = if *is_left { "prec_left" } else { "prec_right" };
-                write!(
-                    f,
-                    "{name} requires a precedence, did you mean `{name}(0, {arg})`?"
-                )
-            }
         }
     }
 }
@@ -213,17 +203,6 @@ impl DslError {
     }
 
     #[must_use]
-    pub fn call_trace(&self) -> Option<&[(String, PathBuf, usize, usize)]> {
-        if let Self::Lower(e) = self
-            && let LowerErrorKind::CallDepthExceeded(trace) = &e.kind
-        {
-            Some(trace)
-        } else {
-            None
-        }
-    }
-
-    #[must_use]
     pub fn notes(&self) -> &[Note] {
         match self {
             Self::Lex(e) => &e.notes,
@@ -234,6 +213,17 @@ impl DslError {
             Self::Type(e) => &e.notes,
             Self::Lower(e) => &e.notes,
             Self::Module(e) => e.inner.notes(),
+        }
+    }
+
+    #[must_use]
+    pub fn call_trace(&self) -> Option<&[(String, PathBuf, usize, usize)]> {
+        if let Self::Lower(e) = self
+            && let LowerErrorKind::CallDepthExceeded(trace) = &e.kind
+        {
+            Some(trace)
+        } else {
+            None
         }
     }
 }
