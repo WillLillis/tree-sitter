@@ -29,10 +29,6 @@ error_tests! { Lex {
         r#"grammar { language: r## } rule program { "x" }"#,
         LexErrorKind::ExpectedRawStringQuote
     }
-    error_integer_overflow {
-        r#"grammar { language: "test" } rule program { prec(99999999999, "x") }"#,
-        LexErrorKind::IntegerOverflow
-    }
     error_too_many_raw_string_hashes {
         &format!("let x = r{}\"test\"", "#".repeat(256)),
         LexErrorKind::TooManyHashes(256)

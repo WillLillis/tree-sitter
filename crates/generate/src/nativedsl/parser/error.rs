@@ -29,6 +29,8 @@ pub enum ParseErrorKind {
     QuotedName,
     #[error("expected expression")]
     ExpectedExpression,
+    #[error("integer literal out of range (maximum {})", i64::MAX)]
+    IntegerOverflow,
     #[error("expected type")]
     ExpectedType,
     #[error("expected a top-level item (grammar, rule, override, let, macro, rules, external)")]

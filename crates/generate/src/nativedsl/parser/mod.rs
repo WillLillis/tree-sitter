@@ -735,9 +735,32 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                 };
                 Ok(self.shared.arena.push(Node::StringLit(sid), span))
             }
-            TokenKind::IntLit(n) => {
+            TokenKind::IntLit => {
+                const MAX_I64_DIGITS: usize = 19;
+
+                let mut digits = start.resolve(self.source).as_bytes();
+                if digits.len() > MAX_I64_DIGITS {
+                    let leading_zeros = digits.iter().take_while(|&&digit| digit == b'0').count();
+                    digits = &digits[leading_zeros..];
+
+                    if digits.len() > MAX_I64_DIGITS {
+                        return Err(self.error(ParseErrorKind::IntegerOverflow));
+                    }
+                }
+
+                // Any 19-digit decimal value fits in u64, so the accumulator cannot overflow.
+                let mut value: u64 = 0;
+                for &digit in digits {
+                    value = value * 10 + u64::from(digit - b'0');
+                }
+
+                if value > i64::MAX as u64 {
+                    return Err(self.error(ParseErrorKind::IntegerOverflow));
+                }
+                let value = value as i64;
                 self.advance_pos();
-                Ok(self.shared.arena.push(Node::IntLit(i64::from(n)), start))
+
+                Ok(self.shared.arena.push(Node::IntLit(value), start))
             }
             TokenKind::RawStringLit { hash_count } => {
                 self.advance_pos();

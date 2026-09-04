@@ -177,7 +177,7 @@ impl<'src> Lexer<'src> {
             b'#' => TokenKind::Pound,
             b'@' => TokenKind::At,
             b'"' => self.lex_string(start)?,
-            b'0'..=b'9' => self.lex_int(start)?,
+            b'0'..=b'9' => self.lex_int(),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(&mut start)?,
             _ => {
                 // SAFETY: source originates from &str (Lexer::new takes &str).
@@ -323,12 +323,8 @@ impl<'src> Lexer<'src> {
         Ok(TokenKind::RawStringLit { hash_count })
     }
 
-    fn lex_int(&mut self, start: usize) -> LexResult<TokenKind> {
-        const INT_MAX: u64 = u32::MAX as u64;
+    fn lex_int(&mut self) -> TokenKind {
         let source = self.source;
-        // SAFETY: `start` is the in-bounds digit that dispatched to `lex_int`.
-        let first_digit = unsafe { *source.get_unchecked(start) };
-        let mut value = u64::from(first_digit - b'0');
         let mut pos = self.pos;
 
         while pos < source.len() {
@@ -337,22 +333,10 @@ impl<'src> Lexer<'src> {
             if !digit.is_ascii_digit() {
                 break;
             }
-            if value <= INT_MAX {
-                value = value * 10 + u64::from(digit - b'0');
-            }
             pos += 1;
         }
         self.pos = pos;
-
-        let value = u32::try_from(value).map_err(|_| {
-            LexError::new(
-                LexErrorKind::IntegerOverflow,
-                self.document,
-                Span::from_usize(start, pos),
-            )
-        })?;
-
-        Ok(TokenKind::IntLit(value))
+        TokenKind::IntLit
     }
 
     fn lex_ident(&mut self, start: &mut usize) -> LexResult<TokenKind> {

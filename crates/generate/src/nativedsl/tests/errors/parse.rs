@@ -13,6 +13,10 @@ error_tests! { Parse {
         r#"grammar { language: "test" } rule program { seq(,) }"#,
         ParseErrorKind::ExpectedExpression
     }
+    error_integer_overflow {
+        r#"grammar { language: "test" } rule program { prec(9223372036854775808, "x") }"#,
+        ParseErrorKind::IntegerOverflow
+    }
     error_expected_item {
         r#"grammar { language: "test" } "stray_string""#,
         ParseErrorKind::ExpectedItem

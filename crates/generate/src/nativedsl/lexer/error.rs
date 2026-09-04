@@ -30,8 +30,6 @@ pub enum LexErrorKind {
     NewlineInString,
     #[error("expected '\"' after 'r' and '#' delimiters")]
     ExpectedRawStringQuote,
-    #[error("integer literal out of range (maximum {})", u32::MAX)]
-    IntegerOverflow,
     #[error("raw string has {0} '#' delimiters (maximum 255)")]
     TooManyHashes(u32),
     #[error("input exceeds the maximum size ({} bytes)", u32::MAX)]

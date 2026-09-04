@@ -23,8 +23,8 @@ pub enum TokenKind {
         /// Number of `#` delimiters on each side of the literal.
         hash_count: u8,
     },
-    /// Integer literal decoded to its value.
-    IntLit(u32),
+    /// Integer literal.
+    IntLit,
     // Keywords
     KwGrammar,
     KwRule,
@@ -142,7 +142,7 @@ impl std::fmt::Display for TokenKind {
             Self::Ident => "identifier",
             Self::StringLit => "string literal",
             Self::RawStringLit { .. } => "raw string literal",
-            Self::IntLit(_) => "integer literal",
+            Self::IntLit => "integer literal",
             Self::LBrace => "'{'",
             Self::RBrace => "'}'",
             Self::LParen => "'('",
