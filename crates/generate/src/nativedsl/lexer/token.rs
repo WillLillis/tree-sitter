@@ -19,10 +19,7 @@ pub enum TokenKind {
     /// String literal. The token span includes its quotes.
     StringLit,
     /// Raw string literal. The token span includes its quotes and delimiters.
-    RawStringLit {
-        /// Number of `#` delimiters on each side of the literal.
-        hash_count: u8,
-    },
+    RawStringLit,
     /// Integer literal.
     IntLit,
     // Keywords
@@ -78,6 +75,8 @@ pub enum TokenKind {
     /// Synthetic token marking the end of input.
     Eof,
 }
+
+const _: () = assert!(std::mem::size_of::<TokenKind>() == 1);
 
 /// Defines keyword spellings and their lookup helpers.
 macro_rules! keywords {
@@ -141,7 +140,7 @@ impl std::fmt::Display for TokenKind {
         f.write_str(match self {
             Self::Ident => "identifier",
             Self::StringLit => "string literal",
-            Self::RawStringLit { .. } => "raw string literal",
+            Self::RawStringLit => "raw string literal",
             Self::IntLit => "integer literal",
             Self::LBrace => "'{'",
             Self::RBrace => "'}'",

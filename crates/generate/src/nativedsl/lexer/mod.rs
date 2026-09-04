@@ -320,7 +320,7 @@ impl<'src> Lexer<'src> {
             }
         }
         self.pos = pos;
-        Ok(TokenKind::RawStringLit { hash_count })
+        Ok(TokenKind::RawStringLit)
     }
 
     fn lex_int(&mut self) -> TokenKind {

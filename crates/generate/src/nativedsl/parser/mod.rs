@@ -163,7 +163,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             let span = self.span();
             self.advance_pos();
             Ok(span)
-        } else if matches!(kind, TokenKind::StringLit | TokenKind::RawStringLit { .. }) {
+        } else if matches!(kind, TokenKind::StringLit | TokenKind::RawStringLit) {
             // Names here (field names, object/config keys) are bare identifiers.
             // A quoted string is the common mistake (it's how grammar.js writes
             // field names), so point at the quotes rather than a generic error.
@@ -762,8 +762,13 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
 
                 Ok(self.shared.arena.push(Node::IntLit(value), start))
             }
-            TokenKind::RawStringLit { hash_count } => {
+            TokenKind::RawStringLit => {
                 self.advance_pos();
+
+                let raw = start.resolve(self.source).as_bytes();
+                // The lexer guarantees an opening quote after at most `u8::MAX` delimiters.
+                let hash_count = raw[1..].iter().position(|&byte| byte == b'"').unwrap() as u8;
+
                 let sid = self
                     .strs
                     .intern(start.strip_raw(hash_count).resolve(self.source));
