@@ -149,24 +149,25 @@ pub(super) fn validate_unicode_escape(
     };
     let (codepoint, end) = if source.get(after_u) == Some(&b'{') {
         let digits_start = after_u + 1;
-        let Some(close_offset) = source[digits_start..].iter().position(|&byte| byte == b'}')
-        else {
-            return Err(bad(source.len()));
-        };
-        let close = digits_start + close_offset;
-        if !(1..=6).contains(&(close - digits_start)) {
-            return Err(bad(close + 1));
+        let mut codepoint = 0;
+        let mut pos = digits_start;
+
+        for _ in 0..6 {
+            let Some(digit) = source
+                .get(pos)
+                .and_then(|&byte| char::from(byte).to_digit(16))
+            else {
+                break;
+            };
+            codepoint = codepoint * 16 + digit;
+            pos += 1;
         }
-        // `digits_start..close` lies between the ASCII `{` and `}`, so it is
-        // boundary-aligned; non-hex (incl. multibyte) content just fails to parse.
-        let Ok(codepoint) = std::str::from_utf8(&source[digits_start..close])
-            .ok()
-            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-            .ok_or(())
-        else {
-            return Err(bad(close + 1));
-        };
-        (codepoint, close + 1)
+
+        if pos == digits_start || source.get(pos) != Some(&b'}') {
+            return Err(bad(past_char(source, pos)));
+        }
+
+        (codepoint, pos + 1)
     } else {
         // `\uHHHH`: four ASCII hex digits.
         let codepoint = read_hex_digits(source, after_u, 4).map_err(bad)?;
