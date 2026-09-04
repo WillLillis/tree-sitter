@@ -51,7 +51,7 @@ pub fn unescape_string_into(raw: &str, out: &mut String) {
                 // \uHHHH (4 hex) or \u{H..H} (1-6 hex in braces), UTF-8 encoded.
                 let (hex, end) = if bytes[after + 1] == b'{' {
                     let h = after + 2;
-                    let p = h + memchr(b'}', &bytes[h..]).unwrap();
+                    let p = h + bytes[h..].iter().position(|&byte| byte == b'}').unwrap();
                     (&bytes[h..p], p + 1)
                 } else {
                     (&bytes[after + 1..after + 5], after + 5)
@@ -149,9 +149,11 @@ pub(super) fn validate_unicode_escape(
     };
     let (codepoint, end) = if source.get(after_u) == Some(&b'{') {
         let digits_start = after_u + 1;
-        let Some(close) = memchr(b'}', &source[digits_start..]).map(|o| digits_start + o) else {
+        let Some(close_offset) = source[digits_start..].iter().position(|&byte| byte == b'}')
+        else {
             return Err(bad(source.len()));
         };
+        let close = digits_start + close_offset;
         if !(1..=6).contains(&(close - digits_start)) {
             return Err(bad(close + 1));
         }

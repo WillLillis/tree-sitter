@@ -727,7 +727,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                 self.advance_pos();
                 let span = start.strip_quotes();
                 let raw = span.resolve(self.source);
-                let sid = if memchr::memchr(b'\\', raw.as_bytes()).is_some() {
+                let sid = if raw.as_bytes().contains(&b'\\') {
                     unescape_string_into(raw, &mut self.unescape_buf);
                     self.strs.intern(&self.unescape_buf)
                 } else {
