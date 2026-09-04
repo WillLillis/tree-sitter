@@ -99,7 +99,7 @@ impl<'a> Loader<'a> {
         let source_document = self.documents.document(document);
         let source = source_document.text();
 
-        if source.len() >= u32::MAX as usize {
+        if source.len() > u32::MAX as usize {
             Err(LexError::without_span(
                 LexErrorKind::InputTooLarge,
                 document,
