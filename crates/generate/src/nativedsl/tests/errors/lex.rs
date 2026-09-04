@@ -9,6 +9,10 @@ error_tests! { Lex {
         "grammar { language: \"test\n\" }",
         LexErrorKind::NewlineInString
     }
+    error_escaped_newline_in_string {
+        "grammar { language: \"test\\\n\" }",
+        LexErrorKind::NewlineInString
+    }
     error_carriage_return_in_string {
         "grammar { language: \"test\r\" }",
         LexErrorKind::NewlineInString

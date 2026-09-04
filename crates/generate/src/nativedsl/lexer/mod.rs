@@ -244,6 +244,13 @@ impl<'src> Lexer<'src> {
                                 b'u' => {
                                     pos = validate_unicode_escape(source, self.document, esc_pos)?;
                                 }
+                                b'\n' | b'\r' => {
+                                    return Err(LexError::new(
+                                        LexErrorKind::NewlineInString,
+                                        self.document,
+                                        Span::from_usize(start, pos),
+                                    ));
+                                }
                                 _ => {
                                     // SAFETY: source is valid UTF-8 (from &str).
                                     let rest =
