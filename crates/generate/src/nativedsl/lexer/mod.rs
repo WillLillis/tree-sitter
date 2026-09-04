@@ -180,7 +180,8 @@ impl<'src> Lexer<'src> {
             b'0'..=b'9' => self.lex_int(),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_ident(&mut start)?,
             _ => {
-                // SAFETY: source originates from &str (Lexer::new takes &str).
+                // SAFETY: `source` is valid UTF-8, and `start` is a character boundary
+                // because the lexer advances only over ASCII bytes or complete characters.
                 let rest = unsafe { std::str::from_utf8_unchecked(&self.source[start..]) };
                 let ch = rest.chars().next().unwrap();
                 self.pos = start + ch.len_utf8();
@@ -203,74 +204,72 @@ impl<'src> Lexer<'src> {
         let source = self.source;
         let mut pos = self.pos;
         loop {
-            // Fast-skip to the next interesting byte: " or \
-            match memchr2(b'"', b'\\', &source[pos..]) {
-                None => {
-                    Err(LexError::new(
-                        LexErrorKind::UnterminatedString,
-                        self.document,
-                        Span::from_usize(start, source.len()),
-                    ))?;
+            let quote_or_escape = memchr2(b'"', b'\\', &source[pos..]);
+            let chunk_end = quote_or_escape.map_or(source.len(), |offset| pos + offset);
+
+            if let Some(newline) = memchr(b'\n', &source[pos..chunk_end]) {
+                return Err(LexError::new(
+                    LexErrorKind::NewlineInString,
+                    self.document,
+                    Span::from_usize(start, pos + newline),
+                ));
+            }
+
+            let Some(offset) = quote_or_escape else {
+                return Err(LexError::new(
+                    LexErrorKind::UnterminatedString,
+                    self.document,
+                    Span::from_usize(start, source.len()),
+                ));
+            };
+            pos += offset;
+            // SAFETY: memchr2 found a byte at this position, so pos < source.len().
+            match unsafe { *source.get_unchecked(pos) } {
+                b'"' => {
+                    self.pos = pos + 1;
+                    return Ok(TokenKind::StringLit);
                 }
-                Some(offset) => {
-                    if let Some(nl) = memchr2(b'\n', b'\r', &source[pos..pos + offset]) {
+                b'\\' => {
+                    let esc_pos = pos;
+                    pos += 1;
+                    if pos >= source.len() {
                         Err(LexError::new(
-                            LexErrorKind::NewlineInString,
+                            LexErrorKind::UnterminatedEscape,
                             self.document,
-                            Span::from_usize(start, pos + nl),
+                            Span::from_usize(esc_pos, source.len()),
                         ))?;
                     }
-                    pos += offset;
-                    // SAFETY: memchr2 found a byte at this position, so pos < source.len().
+                    // SAFETY: pos < source.len() checked above.
                     match unsafe { *source.get_unchecked(pos) } {
-                        b'"' => {
-                            self.pos = pos + 1;
-                            break;
+                        b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
+                        b'x' => pos = validate_hex_escape(source, self.document, esc_pos)?,
+                        b'u' => {
+                            pos = validate_unicode_escape(source, self.document, esc_pos)?;
                         }
-                        b'\\' => {
-                            let esc_pos = pos;
-                            pos += 1;
-                            if pos >= source.len() {
-                                Err(LexError::new(
-                                    LexErrorKind::UnterminatedEscape,
-                                    self.document,
-                                    Span::from_usize(esc_pos, source.len()),
-                                ))?;
-                            }
-                            // SAFETY: pos < source.len() checked above.
-                            match unsafe { *source.get_unchecked(pos) } {
-                                b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
-                                b'x' => pos = validate_hex_escape(source, self.document, esc_pos)?,
-                                b'u' => {
-                                    pos = validate_unicode_escape(source, self.document, esc_pos)?;
-                                }
-                                b'\n' | b'\r' => {
-                                    return Err(LexError::new(
-                                        LexErrorKind::NewlineInString,
-                                        self.document,
-                                        Span::from_usize(start, pos),
-                                    ));
-                                }
-                                _ => {
-                                    // SAFETY: source is valid UTF-8 (from &str).
-                                    let rest =
-                                        unsafe { std::str::from_utf8_unchecked(&source[pos..]) };
-                                    let ch = rest.chars().next().unwrap();
-                                    Err(LexError::new(
-                                        LexErrorKind::InvalidEscape(ch),
-                                        self.document,
-                                        Span::from_usize(esc_pos, pos + ch.len_utf8()),
-                                    ))?;
-                                }
-                            }
+                        b'\n' => {
+                            return Err(LexError::new(
+                                LexErrorKind::NewlineInString,
+                                self.document,
+                                Span::from_usize(start, pos),
+                            ));
                         }
-                        // SAFETY: memchr2 only returns positions of b'"' or b'\\'.
-                        _ => unreachable!(),
+                        _ => {
+                            // SAFETY: `source` is valid UTF-8, and `pos` follows an ASCII
+                            // backslash found by `memchr2`, so it is a character boundary.
+                            let rest = unsafe { std::str::from_utf8_unchecked(&source[pos..]) };
+                            let ch = rest.chars().next().unwrap();
+                            Err(LexError::new(
+                                LexErrorKind::InvalidEscape(ch),
+                                self.document,
+                                Span::from_usize(esc_pos, pos + ch.len_utf8()),
+                            ))?;
+                        }
                     }
                 }
+                // SAFETY: memchr2 only returns positions of b'"' or b'\\'.
+                _ => unreachable!(),
             }
         }
-        Ok(TokenKind::StringLit)
     }
 
     /// Scan a raw string literal: r"...", r#"..."#, r##"..."##, etc.
@@ -301,33 +300,28 @@ impl<'src> Lexer<'src> {
         // Scan for closing " followed by hash_count #'s
         let mut pos = self.pos;
         loop {
-            match memchr(b'"', &source[pos..]) {
-                None => {
-                    return Err(LexError::new(
-                        LexErrorKind::UnterminatedRawString,
-                        self.document,
-                        Span::from_usize(start, source.len()),
-                    ));
-                }
-                Some(offset) => {
-                    pos += offset + 1; // advance past the "
-                    let mut found = 0u8;
-                    // SAFETY: pos < source.len() is checked by loop condition.
-                    while found < hash_count
-                        && pos < source.len()
-                        && unsafe { *source.get_unchecked(pos) } == b'#'
-                    {
-                        pos += 1;
-                        found += 1;
-                    }
-                    if found == hash_count {
-                        break;
-                    }
-                }
+            let Some(offset) = memchr(b'"', &source[pos..]) else {
+                return Err(LexError::new(
+                    LexErrorKind::UnterminatedRawString,
+                    self.document,
+                    Span::from_usize(start, source.len()),
+                ));
+            };
+            pos += offset + 1; // Advance past the "
+            let mut found = 0u8;
+            while found < hash_count
+                && pos < source.len()
+                // SAFETY: pos < source.len() is checked by the prior condition.
+                && unsafe { *source.get_unchecked(pos) } == b'#'
+            {
+                pos += 1;
+                found += 1;
+            }
+            if found == hash_count {
+                self.pos = pos;
+                return Ok(TokenKind::RawStringLit);
             }
         }
-        self.pos = pos;
-        Ok(TokenKind::RawStringLit)
     }
 
     fn lex_int(&mut self) -> TokenKind {
@@ -356,8 +350,8 @@ impl<'src> Lexer<'src> {
             unsafe { std::str::from_utf8_unchecked(self.source.get_unchecked(*start..self.pos)) };
         if text == "r" {
             match (self.peek(), self.source.get(self.pos + 1).copied()) {
-                // r#<ident> - raw identifier. Skip `r#` so the span and
-                // returned text cover just the bare name (e.g. `let`).
+                // `r#<ident>` is a raw identifier. Exlclude the `r#` prefix from
+                // its token span so reslving the  span yields the bare name.
                 (Some(b'#'), Some(c)) if byte_is(c, CLASS_IDENT_START) => {
                     self.pos += 1; // skip '#'
                     *start = self.pos;

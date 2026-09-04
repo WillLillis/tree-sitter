@@ -46,7 +46,8 @@ pub unsafe fn unescape_string_into(raw: &str, out: &mut String) {
                 i = escape_code_pos + 1;
             }
             b'x' => {
-                // \xHH - 2 hex digits, ASCII range, push as single byte.
+                // SAFETY: the function contract guarantees these bytes exist and are
+                // ASCII hexadecimal digits.
                 let hex = unsafe {
                     std::str::from_utf8_unchecked(&bytes[escape_code_pos + 1..escape_code_pos + 3])
                 };
@@ -69,9 +70,11 @@ pub unsafe fn unescape_string_into(raw: &str, out: &mut String) {
                         escape_code_pos + 5,
                     )
                 };
+                // SAFETY: the function contract guarantees `hex` contains only ASCII
+                // hexadecimal digits.
                 let hex = unsafe { std::str::from_utf8_unchecked(hex) };
                 let codepoint = u32::from_str_radix(hex, 16).unwrap();
-                // SAFETY: lexer rejected surrogates and values > 0x10FFFF.
+                // SAFETY: lexer validation guarantees `codepoint` is a Unicode scalar value.
                 let ch = unsafe { char::from_u32_unchecked(codepoint) };
                 out.push(ch);
                 i = end;
@@ -80,7 +83,8 @@ pub unsafe fn unescape_string_into(raw: &str, out: &mut String) {
         }
     }
 
-    // SAFETY: `i` follows a validated escape and is therefore a UTF-8 boundary.
+    // SAFETY: `i` is zero or immediately follows a validated escape, so it is a
+    // UTF-8 boundary.
     out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..]) });
 }
 

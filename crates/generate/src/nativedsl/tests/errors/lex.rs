@@ -6,15 +6,11 @@ error_tests! { Lex {
         LexErrorKind::UnterminatedString
     }
     error_newline_in_string {
-        "grammar { language: \"test\n\" }",
+        "grammar { language: \"test\n",
         LexErrorKind::NewlineInString
     }
     error_escaped_newline_in_string {
         "grammar { language: \"test\\\n\" }",
-        LexErrorKind::NewlineInString
-    }
-    error_carriage_return_in_string {
-        "grammar { language: \"test\r\" }",
         LexErrorKind::NewlineInString
     }
     error_invalid_escape {
