@@ -728,7 +728,8 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                 let span = start.strip_quotes();
                 let raw = span.resolve(self.source);
                 let sid = if raw.as_bytes().contains(&b'\\') {
-                    unescape_string_into(raw, &mut self.unescape_buf);
+                    // SAFETY: `raw` comes from a `StringLit` token produced by the lexer.
+                    unsafe { unescape_string_into(raw, &mut self.unescape_buf) };
                     self.strs.intern(&self.unescape_buf)
                 } else {
                     self.strs.intern(raw)
