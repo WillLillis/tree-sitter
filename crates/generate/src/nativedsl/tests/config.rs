@@ -351,8 +351,6 @@ fn error_externals_via_function_call() {
 
 #[test]
 fn expect_decl_in_grammar_file() {
-    // A top-level `expect` forward-declares a name (usable in rule bodies); the
-    // grammar block's externals list still does the actual registration.
     let mut g = dsl(r#"
         expect _foo
         grammar { language: "test", externals: [_foo] }
@@ -431,8 +429,8 @@ fn expect_decl_repeated_is_idempotent() {
 
 #[test]
 fn expect_decl_redundant_with_grammar_block() {
-    // `expect _foo` and `externals: [_foo]` declare the same name; the grammar
-    // block's pre-registration skips already-declared names (contains_key check).
+    // `expect _foo` and `externals: [_foo]` declare the same name. The grammar
+    // block's pre-registration skips already-declared names.
     let g = dsl(r#"
         expect _foo
         grammar { language: "test", externals: [_foo, _bar] }
@@ -443,8 +441,7 @@ fn expect_decl_redundant_with_grammar_block() {
 
 #[test]
 fn error_start_unknown_rule() {
-    // Resolver catches `start: <undeclared>` as UnknownIdentifier - no
-    // bespoke lower-time check needed.
+    // Resolver catches `start: <undeclared>` as UnknownIdentifier
     let e = assert_err!(
         dsl_err(
             r#"

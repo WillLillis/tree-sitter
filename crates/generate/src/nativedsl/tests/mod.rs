@@ -354,10 +354,13 @@ pub(super) fn expect_err<E>(r: Result<InputGrammar, E>) -> E {
 /// Structural equality for two grammars that own *separate* pools.
 ///
 /// `RuleId`s are pool-local, so cross-pool comparison has to go through resolved
-/// shape. Comparing serialized `grammar.json` is the tractable form of that, and
-/// it doubles as an assertion that serialize -> parse -> serialize is idempotent.
+/// shape. The start-rule check preserves the one order-sensitive grammar
+/// property.
 #[track_caller]
 pub(super) fn assert_grammar_eq(a: &InputGrammar, b: &InputGrammar) {
+    let a_start = a.variables.first().map(|v| a.pool.resolve(v.name));
+    let b_start = b.variables.first().map(|v| b.pool.resolve(v.name));
+    assert_eq!(a_start, b_start, "start rule differs");
     assert_eq!(
         super::serialize::grammar_to_json(a),
         super::serialize::grammar_to_json(b)

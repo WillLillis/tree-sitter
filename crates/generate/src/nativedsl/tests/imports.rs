@@ -279,7 +279,7 @@ fn import_function_receives_complex_expr() {
     let actual = find_rule(&g, "program");
     let expected = {
         let p = &mut g.pool;
-        // `pair` appears twice; the pool is a DAG so the same id is reused.
+        // `pair` appears twice. The pool is a DAG, so the same id is reused.
         let pair = {
             let a = r_sym!(p, "identifier");
             let colon = r_str!(p, ":");
@@ -298,7 +298,8 @@ fn import_function_receives_complex_expr() {
 
 #[test]
 fn import_diamond() {
-    // A imports B and C, which both import helpers.tsg; each gets its own copy.
+    // A imports B and C, which both import helpers.tsg through the same cfg
+    // environment. The shared helper load is deduplicated.
     let mut g = parse_with_modules(
         &[
             ("helpers.tsg", "let VAL = 10"),
@@ -383,7 +384,7 @@ fn helper_rule_collision_errors() {
 
 #[test]
 fn override_helper_rule() {
-    // An `override` of a helper rule wins in the final grammar; the original is
+    // An `override` of a helper rule wins in the final grammar. The original is
     // still reachable via h::digit (which inlines).
     let mut g = parse_with_modules(
         &[("h.tsg", r#"rule digit { regexp(r"[0-9]") }"#)],
@@ -527,7 +528,7 @@ fn helper_can_define_rules() {
 
 #[test]
 fn helper_rule_uses_grammar_registered_external() {
-    // A helper forward-declares an external and uses it; the grammar registers it
+    // A helper forward-declares an external and uses it. The grammar registers it
     // by bare name, and they connect by name with no qualified reference.
     let mut g = parse_with_modules(
         &[("ext.tsg", "expect _tok\nrule wrapped { seq(_tok, _tok) }\n")],
@@ -677,7 +678,7 @@ fn import_call_depth_shared_across_modules() {
 
 #[test]
 fn import_rule_preserves_metadata_and_reserved() {
-    // h::decorated inlines via import_rule; it must reconstruct the same Rule as
+    // h::decorated inlines via import_rule. It must reconstruct the same Rule as
     // lowering directly, covering the Metadata (prec/field/alias/token) and
     // Reserved arms.
     let g = dsl(r#"
@@ -724,7 +725,7 @@ fn helper_rules_materialize_in_import_source_order() {
 fn override_reaching_helper_top_level_via_macro_is_rejected() {
     // A helper can't inherit, so an `override` reaching its top level via a
     // rules-macro call has nothing to override and is rejected (the macro
-    // definition stays legal; only the call is rejected).
+    // definition stays legal. Only the call is rejected).
     let err = expect_err(parse_with_modules(
         &[(
             "helper.tsg",
@@ -925,7 +926,7 @@ find_rule_tests! {
     }
     // Both arms resolve to the same "hello", and `choice` dedups, so the result
     // has a single member. The expectation is written with one member because
-    // `r_choice!` bypasses dedup - it describes the literal shape.
+    // `r_choice!` bypasses dedup. It describes the literal shape.
     import_same_module_twice {
         r#"
         let h1 = import("import_helpers/helpers.tsg")

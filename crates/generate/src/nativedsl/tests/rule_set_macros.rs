@@ -39,7 +39,7 @@ fn rule_set_macro_str_param_substitution() {
 
 #[test]
 fn rule_set_macro_symref_in_expr_position() {
-    // pair("foo") produces a_foo and b_foo; b_foo's body references
+    // pair("foo") produces a_foo and b_foo. b_foo's body references
     // a_foo by computed name via @concat(...) in expression position.
     let mut g = dsl(r#"
         rules pair(s: str_t) {
@@ -132,7 +132,7 @@ fn dup_macro_with_call_reports_duplicate_reversed() {
 
 #[test]
 fn computed_ref_to_macro_name_rejected() {
-    // `@"m"` computes the name of a macro; without the rule-ness check it would
+    // `@"m"` computes the name of a macro. Without the rule-ness check it would
     // pass existence and lower a dangling NamedSymbol.
     let err = dsl_err(
         r#"
@@ -197,7 +197,7 @@ fn computed_ref_unknown_gets_suggestion() {
 
 rule_names_tests! {
     rule_set_macro_empty_body_is_noop {
-        // An empty `rules` body is allowed; calling it contributes no rules.
+        // An empty `rules` body is allowed. Calling it contributes no rules.
         r#"
         grammar { language: "test" }
         rule program { "p" }
@@ -240,7 +240,7 @@ rule_names_tests! {
         vec!["k_a", "k_b", "k_c"]
     }
     rule_set_macro_cfg_gated_top_level_call {
-        // apply_cfg runs before expand_macro_calls; a cfg-disabled @call should
+        // apply_cfg runs before expand_macro_calls. A cfg-disabled @call should
         // be dropped entirely, leaving no ExpandedRule items behind.
         r#"
         rules extra_rules() {
@@ -283,7 +283,7 @@ rule_names_tests! {
         vec!["x_a", "x_b"]
     }
     rule_set_macro_with_regular_rules_around {
-        // start: program rotates program to position 0; remaining order preserved.
+        // start: program rotates program to position 0. Remaining order is preserved.
         r#"
         rules extras() {
             rule helper_a { "ha" }
@@ -330,7 +330,7 @@ find_rule_tests! {
     }
     rule_set_macro_param_in_combinator_positions {
         // Exercises the Repeat/Optional/Field/Alias/Prec arms of clone_with_subst
-        // at once; a regression in any arm's recursive subst breaks the assertion.
+        // at once. A regression in any arm's recursive subst breaks the assertion.
         r#"
         rules wrap(inner: rule_t, name: rule_t) {
             rule program {
