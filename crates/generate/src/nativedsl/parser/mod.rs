@@ -41,21 +41,17 @@ pub struct Parser<'tok, 'src, 'shared, 'strs> {
     /// Stack of local bindings (macro params and for-loop bindings).
     locals: Vec<(StrId, LocalBinding)>,
     depth: u16,
-    /// `Some` while parsing a `rules` macro def, holding the `SymRef` node ids created.
+    /// Computed-name references collected while parsing a rule-set macro body.
     pending_sym_refs: Option<Vec<NodeId>>,
     unescape_buf: String,
 }
 
-/// Snapshot `self.depth`, run the body (which may `deepen()` one or more times),
-/// then restore depth.
+/// Evaluate `body` and restore `self.depth` after.
 macro_rules! depth_scope {
     ($self:ident, $body:expr) => {{
         let __depth = $self.depth;
         let result = {
-            #[allow(
-                clippy::redundant_closure_call,
-                reason = "IIFE scopes `?` to the closure so depth restores"
-            )]
+            #[allow(clippy::redundant_closure_call, reason = "scope `?` to body")]
             (|| $body)()
         };
         $self.depth = __depth;
@@ -105,9 +101,8 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
 
     #[inline]
     fn current(&self) -> &Token {
-        debug_assert!(self.pos < self.tokens.len());
         // SAFETY: Eof terminates the stream and the parser never advances past it,
-        // so `self.pos` is always in bounds
+        // so `self.pos` is always in bounds.
         unsafe { self.tokens.get_unchecked(self.pos) }
     }
 
@@ -132,7 +127,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         unsafe { self.tokens.get_unchecked(self.pos + 1) }.kind == kind
     }
 
-    /// Advance past the current token.
     const fn advance_pos(&mut self) {
         self.pos += 1;
     }
@@ -168,9 +162,8 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             self.advance_pos();
             Ok(span)
         } else if matches!(kind, TokenKind::StringLit | TokenKind::RawStringLit) {
-            // Names here (field names, object/config keys) are bare identifiers.
-            // A quoted string is the common mistake (it's how grammar.js writes
-            // field names), so point at the quotes rather than a generic error.
+            // Names here (fields, object/config keys) are bare identifiers. A quoted
+            // string is the common mistake (it's how grammar.js writes field names).
             Err(self.error(ParseErrorKind::QuotedName))
         } else {
             Err(self.error(err))
@@ -461,7 +454,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         Ok(id)
     }
 
-    /// Parse an expression (`macro`) or rule-set (`rules`) macro definition
     fn parse_macro_def(&mut self) -> ParseResult<NodeId> {
         let (start, rule_set) = if let Some(start) = self.eat(TokenKind::KwRules) {
             (start, true)
@@ -500,9 +492,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         })?;
         let end = self.expect(TokenKind::RBrace)?;
         let params = self.shared.pools.push_params(&params);
-        // `@` refs are only created inside rule-set bodies (and don't nest), so
-        // pending_sym_refs holds exactly this body's refs (empty otherwise).
-        // Pushed after the body, so the range sits past every body pool entry.
         let sym_ref_ids = self.pending_sym_refs.take().unwrap_or_default();
         let sym_refs = self
             .shared
@@ -523,7 +512,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             .push(Node::Macro(macro_idx), start.merge(end)))
     }
 
-    /// Emits `Node::Call` at item position, consumed by `expand_macro_calls`.
+    /// Emits [`Node::Call`] at item position, consumed by `expand_macro_calls`.
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
         let at_span = self.expect(TokenKind::At)?;
         let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
@@ -547,11 +536,9 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         ))
     }
 
-    /// Parse `rule` / `override rule` decls until `}`, wrap in `Node::RuleSet`.
-    /// Caller consumes the closing brace.
+    /// Parse a rule-set body without consuming the closing brace.
     fn parse_rule_set_body(&mut self, brace_start: Span) -> ParseResult<NodeId> {
-        // Enables `@` computed-rule syntax for this body. Rule-set bodies drain their sym refs
-        // before returning here
+        // Begin collecting computed-name references for this rule-set body.
         debug_assert!(self.pending_sym_refs.is_none());
         self.pending_sym_refs = Some(Vec::new());
         let mut decls = Vec::new();
@@ -559,8 +546,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             let id = self.parse_rule_set_decl()?;
             decls.push(id);
         }
-        // An empty set - written `{}` or left empty after cfg gating - is allowed;
-        // a call to it expands to nothing (see expand_macro_calls).
         let range = self
             .shared
             .pools
@@ -573,8 +558,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             .push(Node::RuleSet(range), brace_start.merge(end)))
     }
 
-    /// A rule-set member: a `rule`/`override rule` decl, optionally preceded by
-    /// one or more `#[cfg(NAME)]` attributes (mirrors `parse_expr_with_cfg`).
+    /// Parse a rule-set declaration, including any leading cfg attributes.
     fn parse_rule_set_decl(&mut self) -> ParseResult<NodeId> {
         if let Some((cfg_start, name)) = self.try_parse_cfg_attribute()? {
             return depth_scope!(self, {
@@ -714,15 +698,13 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         })
     }
 
-    /// Primary expression + post-primary `.field` chaining. Used as the
-    /// operand parser for the `+`/`-` chain in `parse_expr` so RHS doesn't
-    /// recurse into more arithmetic.
+    /// Parse a primary expression and any following field accesses, leaving
+    /// arithmetic operators to `parse_expr`.
     fn parse_postfix(&mut self) -> ParseResult<NodeId> {
         depth_scope!(self, {
             self.deepen()?;
             let mut result = self.parse_primary()?;
-            // `.field` chaining on a non-ident primary, e.g. an object literal
-            // `{ k: v }.k`. (`ident.field` is consumed by `parse_ident_expr`.)
+            // Field accesses on identifiers are consumed by `parse_ident_expr`.
             while self.at(TokenKind::Dot) {
                 let start = self.shared.arena.span(result);
                 self.advance_pos();
@@ -805,8 +787,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             }
             TokenKind::Minus => {
                 self.advance_pos();
-                // parse_postfix (not parse_expr) so unary `-` binds tighter
-                // than the trailing `+`/`-` chain: `-X + Y` is `(-X) + Y`.
+                // Parsing a postfix expression makes unary `-` bind tighter than binary `+` and `-`.
                 let inner = self.parse_postfix()?;
                 Ok(self
                     .shared
@@ -814,7 +795,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                     .push(Node::Neg(inner), start.merge(self.shared.arena.span(inner))))
             }
             TokenKind::At => {
-                // @-computed rule names are only valid inside rule sets
+                // Computed-name references are only valid inside rule-set bodies.
                 if self.pending_sym_refs.is_none() {
                     return Err(self.error(ParseErrorKind::ComputedRuleTopLevel));
                 }
@@ -824,7 +805,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                     Node::SymRef { expr: inner },
                     start.merge(self.shared.arena.span(inner)),
                 );
-                // Record for the enclosing rule-set macro so expand can evaluate it
                 if let Some(ref mut refs) = self.pending_sym_refs {
                     refs.push(id);
                 }
@@ -844,9 +824,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         }
     }
 
-    /// Parse a builtin call (`seq(...)`, `prec(...)`, etc.). Only reached for a keyword
-    /// immediately followed by `(`. A keyword + `(` that isn't a builtin falls through
-    /// to the identifier path, parsing as a macro call named after the keyword.
     fn parse_builtin_call(&mut self, start: Span, kw: TokenKind) -> ParseResult<NodeId> {
         match kw {
             TokenKind::KwSeq | TokenKind::KwChoice => {
@@ -906,7 +883,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             TokenKind::KwAppend => self.parse_append(start),
             TokenKind::KwGrammarConfig => self.parse_grammar_config(start),
             TokenKind::KwFor => self.parse_for(start),
-            // Not a builtin: a keyword + `(` parses as a macro call named after it.
             _ => self.parse_ident_expr(start),
         }
     }
@@ -940,7 +916,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         Ok(self.shared.arena.push(make(inner), start.merge(end)))
     }
 
-    /// Parse `grammar_config(module_expr, field_name)`.
     fn parse_grammar_config(&mut self, start: Span) -> ParseResult<NodeId> {
         self.advance_pos();
         self.expect(TokenKind::LParen)?;
@@ -961,7 +936,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                 field_span,
             )
         })?;
-        // inherits/flags are real fields but not composable values
+        // Inherits and flags are configuration-only fields and cannot be read as values.
         if matches!(field, ConfigField::Inherits | ConfigField::Flags) {
             Err(ParseError::new(
                 ParseErrorKind::GrammarFieldNotReadable(field_name.to_string()),
@@ -977,7 +952,6 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             .push(Node::GrammarConfig { module, field }, start.merge(end)))
     }
 
-    /// Parse a two-argument builtin: `name(first, second)`.
     fn parse_binary<T>(
         &mut self,
         start: Span,
@@ -1031,7 +1005,7 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         let (value, content, end) = match parsed {
             Ok(parsed) => parsed,
             Err(mut err) => {
-                // grammar.js lets prec.left/right omit the precedence (it defaults to 0) we requires it.
+                // Unlike grammar.js, `prec_left` and `prec_right` require an explicit precedence.
                 if let PrecKind::Left | PrecKind::Right = kind
                     && matches!(err.kind, ParseErrorKind::WrongArgumentCount { got: 1, .. })
                 {
