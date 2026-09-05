@@ -32,10 +32,10 @@ pub enum TypeErrorKind {
     ListElementTypeMismatch { first: Ty, got: Ty },
     #[error("object field values have inconsistent types: {first} vs {got}")]
     ObjectFieldTypeMismatch { first: Ty, got: Ty },
-    #[error("object values must be rule_t, str_t, or int_t, got {0}")]
+    #[error("object values cannot be modules or nested objects, got {0}")]
     InvalidObjectValue(Ty),
     #[error(
-        "list elements cannot be {0}; lists allow rule_t, str_t, int_t, or list_t (max 2 levels deep)"
+        "list elements cannot be {0}. Lists allow rule_t, str_t, int_t, tuples, or one nested list"
     )]
     InvalidListElement(Ty),
     #[error("empty {0} requires a type annotation")]
