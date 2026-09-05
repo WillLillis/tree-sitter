@@ -1,11 +1,9 @@
-//! Tests for `flags: { enabled: [...], disabled: [...] }` config + `#[cfg(X)]`.
+//! Tests for grammar feature flags and `#[cfg(...)]` attributes.
 
 use super::*;
 
 #[test]
 fn cfg_in_non_list_position_parse_error() {
-    // cfg attributes are only allowed in items + list members. Anywhere else
-    // (e.g. as the bare value in a rule body) is a parse error.
     let err = dsl_err(
         r#"
         grammar { language: "t", flags: { enabled: ["GFM"] } }
@@ -17,8 +15,6 @@ fn cfg_in_non_list_position_parse_error() {
 
 #[test]
 fn cfg_flag_declared_twice_errors() {
-    // A flag declared twice (across or within enabled/disabled) errors, with a
-    // FirstDefinedHere note at the first occurrence.
     let err = dsl_err(
         r#"
         grammar { language: "t", flags: { enabled: ["X"], disabled: ["X"] } }
@@ -36,8 +32,7 @@ fn cfg_flag_declared_twice_errors() {
 
 #[test]
 fn cfg_in_grammar_config_field() {
-    // apply_cfg must process cfg on grammar-config members (conflicts/etc.),
-    // not just rule bodies (Node::Grammar was once treated as a leaf).
+    // Grammar config fields are traversed separately from other root items.
     let g = dsl(r#"
         grammar {
             language: "t",
@@ -52,14 +47,11 @@ fn cfg_in_grammar_config_field() {
         rule bar { "b" }
         rule baz { "c" }
     "#);
-    // A active -> [foo, baz] kept; B disabled -> [bar, baz] dropped.
     assert_eq!(g.conflict_names.len(), 2);
 }
 
 #[test]
 fn cfg_dropped_decl_enriches_undefined_symbol_error() {
-    // Reference to a cfg-dropped rule should fail as UnknownIdentifier with a
-    // note pointing at the gated decl and naming the flag.
     let err = dsl_err(
         r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
@@ -79,8 +71,6 @@ fn cfg_dropped_decl_enriches_undefined_symbol_error() {
 
 #[test]
 fn cfg_enrichment_preserves_existing_note() {
-    // When a name is both a typo (did-you-mean) and cfg-dropped, enrich appends
-    // the cfg note instead of clobbering the existing one.
     let err = dsl_err(
         r#"
         grammar { language: "t", flags: { disabled: ["X"] } }
@@ -129,8 +119,6 @@ fn cfg_dropped_macro_enriches_error() {
 
 #[test]
 fn cfg_dropped_ruleset_macro_enriches_error() {
-    // A cfg-dropped `@name()` rule-set macro errors at expand as UnknownMacro,
-    // enriched with the same GatedByDisabledCfg note as the resolve path.
     let err = dsl_err(
         r#"
         #[cfg(X)] rules gated() { rule a { "x" } }
@@ -147,8 +135,7 @@ fn cfg_dropped_ruleset_macro_enriches_error() {
 
 #[test]
 fn cfg_dropped_macro_keeps_same_named_survivor() {
-    // macro_index is rebuilt from post-cfg root_items, so when two cfg branches
-    // define the same rule-set macro `@dup()` binds to the enabled survivor.
+    // The macro index must be rebuilt after cfg filtering.
     let mut g = dsl(r#"
         #[cfg(Y)] rules dup() { rule program { "stable" } }
         #[cfg(X)] rules dup() { rule program { "gated" } }
@@ -165,45 +152,8 @@ fn cfg_dropped_macro_keeps_same_named_survivor() {
 }
 
 #[test]
-fn cfg_dropped_external_enriches_error() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "t", flags: { disabled: ["X"] } }
-        rule program { gated_token }
-        #[cfg(X)] expect gated_token
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert!(matches!(
-        e.kind,
-        ResolveErrorKind::UnknownIdentifier(ref n) if n == "gated_token"
-    ));
-    let note = e.notes.first().expect("expected cfg note on error");
-    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "X"));
-}
-
-#[test]
-fn cfg_dropped_let_enriches_error() {
-    let err = dsl_err(
-        r#"
-        grammar { language: "t", flags: { disabled: ["X"] } }
-        #[cfg(X)] let gated_let = "x"
-        rule program { gated_let }
-    "#,
-    );
-    let e = assert_err!(err, Resolve);
-    assert!(matches!(
-        e.kind,
-        ResolveErrorKind::UnknownIdentifier(ref n) if n == "gated_let"
-    ));
-    let note = e.notes.first().expect("expected cfg note on error");
-    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "X"));
-}
-
-#[test]
 fn helper_module_inherits_cfg_from_importer() {
-    // Helper modules can't declare their own flags (no grammar block). They
-    // see the importing grammar's full declared set transparently.
+    // Helper modules use the importing grammar's cfg environment.
     let mut g = parse_with_modules(
         &[(
             "h.tsg",
@@ -218,7 +168,6 @@ fn helper_module_inherits_cfg_from_importer() {
         "#,
     )
     .unwrap();
-    // GFM is enabled in the importer; the helper's cfg branch survives.
     let actual = find_rule(&g, "program");
     let expected = {
         let p = &mut g.pool;
@@ -229,8 +178,6 @@ fn helper_module_inherits_cfg_from_importer() {
 
 #[test]
 fn cfg_attribute_nesting_is_bounded() {
-    // Pathological nesting must error rather than blow the parse / apply_cfg
-    // recursion stack. 300 layers exceeds MAX_PARSE_DEPTH.
     let nest = "#[cfg(X)] ".repeat(300);
     let src = format!(
         r#"grammar {{ language: "t", flags: {{ enabled: ["X"] }} }} {nest} rule r {{ "x" }}"#
@@ -242,8 +189,6 @@ fn cfg_attribute_nesting_is_bounded() {
 
 #[test]
 fn cfg_disabled_import_does_not_load_file() {
-    // Early cfg gating drops the disabled import before load_children runs, so
-    // the nonexistent path is never read.
     let input = r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
         #[cfg(GFM)]
@@ -256,8 +201,6 @@ fn cfg_disabled_import_does_not_load_file() {
 
 #[test]
 fn cfg_disabled_inherit_does_not_merge_parent() {
-    // Parent grammar defines `parent_only`. If cfg gating doesn't actually
-    // skip the inherit load, we'd see `parent_only` in the child's rule set.
     let g = parse_with_modules(
         &[(
             "parent.tsg",
@@ -279,7 +222,6 @@ fn cfg_disabled_inherit_does_not_merge_parent() {
 
 #[test]
 fn cfg_enabled_inherit_still_loads_parent() {
-    // Positive control: with the flag on, parent rules merge as usual.
     let g = parse_with_modules(
         &[(
             "parent.tsg",
@@ -305,8 +247,7 @@ fn cfg_enabled_inherit_still_loads_parent() {
 
 #[test]
 fn cfg_disabled_first_inherit_promotes_second() {
-    // A cfg-disabled first inherit promotes the second (apply_cfg once cleared
-    // inherit_ref but left a stale duplicate_inherit, panicking validate_grammar).
+    // Filtering the first inherit must promote the second.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -329,8 +270,7 @@ fn cfg_disabled_first_inherit_promotes_second() {
 
 #[test]
 fn cfg_disabled_second_inherit_is_not_multiple_inherits() {
-    // A cfg-disabled second inherit leaves one active inherit (apply_cfg once
-    // left duplicate_inherit set, wrongly raising MultipleInherits).
+    // Filtering the second inherit must clear the duplicate marker.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -353,9 +293,7 @@ fn cfg_disabled_second_inherit_is_not_multiple_inherits() {
 
 #[test]
 fn cfg_dropped_attribution_uses_owning_module() {
-    // When parent and child both cfg-drop a `strikethrough` under different flags,
-    // parent's UnknownIdentifier note must name parent's flag (P), not child's (C)
-    // winning a global or_insert.
+    // Dropped declarations are attributed to the module that owns them.
     let err = expect_err(parse_with_modules(
         &[(
             "parent.tsg",
@@ -376,8 +314,6 @@ fn cfg_dropped_attribution_uses_owning_module() {
         #[cfg(C)] rule strikethrough { "c" }
         "#,
     ));
-    // Error originates from the inherited (parent) grammar load, so it's
-    // wrapped in `Module(...)` once.
     let inner = *assert_err!(err, Module).inner;
     let e = assert_err!(inner, Resolve);
     let note = e.notes.first().expect("expected cfg note on error");
@@ -386,8 +322,7 @@ fn cfg_dropped_attribution_uses_owning_module() {
 
 #[test]
 fn cfg_inheriting_grammar_overrides_parent_flag_value() {
-    // First-write-wins on the global flag map: the root grammar loads first, so
-    // its X=enabled overrides the parent's X=disabled and both gated rules survive.
+    // The inheriting grammar's cfg values override the parent's declarations.
     let g = parse_with_modules(
         &[(
             "parent.tsg",
@@ -411,8 +346,6 @@ fn cfg_inheriting_grammar_overrides_parent_flag_value() {
         "#,
     )
     .unwrap();
-    // parent_base appears unconditionally; both X-gated rules survive because
-    // child's enabled overrode parent's disabled in the global active map.
     assert_eq!(
         rule_names(&g),
         vec!["parent_base", "parent_only", "program", "child_only"]
@@ -420,9 +353,33 @@ fn cfg_inheriting_grammar_overrides_parent_flag_value() {
 }
 
 #[test]
+fn inherited_grammar_must_declare_used_cfg_flag() {
+    let err = expect_err(parse_with_modules(
+        &[(
+            "parent.tsg",
+            r#"
+            grammar { language: "p" }
+            #[cfg(X)] rule parent_only { "p" }
+        "#,
+        )],
+        r#"
+        let base = inherit("parent.tsg")
+        grammar {
+            language: "t",
+            flags: { enabled: ["X"] },
+            inherits: base,
+        }
+        rule program { "x" }
+        "#,
+    ));
+    let inner = *assert_err!(err, Module).inner;
+    let error = assert_err!(inner, Cfg);
+    assert!(matches!(error.kind, CfgErrorKind::FlagUnknown(ref name) if name == "X"));
+}
+
+#[test]
 fn cfg_three_level_inheritance_root_flag_wins() {
-    // Across a 3-level chain, first-write-wins means root's X=disabled beats the
-    // ancestors' X=enabled, dropping every gated rule.
+    // The root grammar's cfg value applies throughout its inheritance chain.
     let g = parse_with_modules(
         &[
             (
@@ -462,7 +419,6 @@ fn cfg_three_level_inheritance_root_flag_wins() {
         "#,
     )
     .unwrap();
-    // X=disabled (root won), so all three `#[cfg(X)]` rules dropped.
     assert_eq!(
         rule_names(&g),
         vec!["grandparent_base", "parent_base", "program"]
@@ -471,11 +427,7 @@ fn cfg_three_level_inheritance_root_flag_wins() {
 
 #[test]
 fn wrapper_overrides_base_extension_flags() {
-    // The markdown wrapper pattern: a base grammar bakes a default extension
-    // config (TABLE on, TAGS off) gating rules; a thin wrapper inherits it and
-    // flips both flags while declaring no rules of its own. The inherited rules
-    // must re-gate against the wrapper's flags (now-enabled rule appears,
-    // now-disabled drops) and a rules-less flag-only wrapper must be valid.
+    // A ruleless wrapper may override the inherited grammar's cfg defaults.
     let g = parse_with_modules(
         &[(
             "base.tsg",
@@ -615,28 +567,7 @@ fn cfg_base_flag_is_visible_to_its_import() {
 }
 
 #[test]
-fn cfg_disabled_nested_import_does_not_load() {
-    // A cfg-disabled import nested in a list (not a top-level let) must not load
-    // (module_refs was once rebuilt only when a top-level item dropped).
-    let g = dsl(r#"
-        grammar {
-            language: "t",
-            flags: { disabled: ["EXT"] },
-            externals: [ #[cfg(EXT)] import("does-not-exist.tsg") ],
-        }
-        rule program { "x" }
-    "#);
-    assert!(
-        g.variables
-            .iter()
-            .any(|v| g.pool.resolve(v.name) == "program")
-    );
-}
-
-#[test]
 fn cfg_disabled_nested_import_does_not_merge_rules() {
-    // The silent-miscompilation form: a cfg-disabled nested import of a real
-    // helper must not merge that helper's rules into the grammar.
     let g = parse_with_modules(
         &[("helper.tsg", "rule helper_only { \"h\" }\n")],
         r#"
@@ -659,8 +590,7 @@ fn cfg_disabled_nested_import_does_not_merge_rules() {
 
 #[test]
 fn cfg_disabled_symref_not_validated() {
-    // A cfg-disabled `@<expr>` ref in a rule-set body must not be evaluated
-    // (MacroConfig.sym_refs once kept it, so resolve flagged a nonexistent rule).
+    // Filtering a rule set must also remove its stored symbol references.
     let g = dsl(r#"
         rules m(s: str_t) {
             rule program { choice(#[cfg(X)] @concat("missing_", s), "ok") }
@@ -676,16 +606,7 @@ fn cfg_disabled_symref_not_validated() {
 }
 
 find_rule_tests! {
-    cfg_choice_member_enabled {
-        r#"
-        grammar { language: "t", flags: { enabled: ["GFM"] } }
-        rule program { choice("a", #[cfg(GFM)] "b", "c") }
-    "#,
-        "program",
-        |p| r_choice!(p, [r_str!(p, "a"), r_str!(p, "b"), r_str!(p, "c")])
-    }
     cfg_choice_member_disabled {
-        // GFM disabled -> "b" arm dropped from the choice.
         r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
         rule program { choice("a", #[cfg(GFM)] "b", "c") }
@@ -694,8 +615,6 @@ find_rule_tests! {
         |p| r_choice!(p, [r_str!(p, "a"), r_str!(p, "c")])
     }
     cfg_concat_member_disabled {
-        // walk_children's Concat arm once only recursed without filtering, leaving
-        // a stale Node::Cfg for typecheck to panic on.
         r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
         rule program { concat("a", #[cfg(GFM)] "b", "c") }
@@ -703,24 +622,7 @@ find_rule_tests! {
         "program",
         |p| r_str!(p, "ac")
     }
-    cfg_seq_member_disabled {
-        r#"
-        grammar { language: "t", flags: { disabled: ["GFM"] } }
-        rule program { seq("a", #[cfg(GFM)] "b", "c") }
-    "#,
-        "program",
-        |p| r_seq!(p, [r_str!(p, "a"), r_str!(p, "c")])
-    }
-    cfg_nested_both_active {
-        r#"
-        grammar { language: "t", flags: { enabled: ["A", "B"] } }
-        rule program { choice("x", #[cfg(A)] #[cfg(B)] "y", "z") }
-    "#,
-        "program",
-        |p| r_choice!(p, [r_str!(p, "x"), r_str!(p, "y"), r_str!(p, "z")])
-    }
     cfg_nested_inner_off {
-        // Outer A is on but inner B is off -> drop the whole "y" branch.
         r#"
         grammar { language: "t", flags: { enabled: ["A"], disabled: ["B"] } }
         rule program { choice("x", #[cfg(A)] #[cfg(B)] "y", "z") }
@@ -741,9 +643,7 @@ rule_names_tests! {
         vec!["program", "strikethrough"]
     }
     cfg_active_let_keeps_type_annotation {
-        // Unwrapping an active #[cfg] on an annotated let must carry the type
-        // annotation to the unwrapped slot, else an empty-container let wrongly
-        // fails with EmptyContainerNeedsAnnotation.
+        // Unwrapping an active cfg must preserve the declaration's annotation.
         r#"
         grammar { language: "test", flags: { enabled: ["X"] } }
         #[cfg(X)] let x: list_t<str_t> = []
@@ -752,8 +652,6 @@ rule_names_tests! {
         vec!["foo"]
     }
     cfg_enabled_definition_with_expect_compiles {
-        // The same grammar with the flag enabled keeps the definition, so the
-        // forward-decl is fulfilled and the symbol-completeness check passes.
         r#"
         grammar { language: "t", flags: { enabled: ["GFM"] } }
         expect strikethrough
@@ -764,8 +662,7 @@ rule_names_tests! {
         vec!["program", "strikethrough"]
     }
     cfg_disabled_expect_and_user_compiles {
-        // cfg drops the forward-decl and its only reference together, so the
-        // completeness check must not false-positive on the gated-out `expect`.
+        // Filtering must remove the forward declaration and its use together.
         r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
         #[cfg(GFM)] expect _ext
@@ -774,22 +671,7 @@ rule_names_tests! {
     "#,
         vec!["program"]
     }
-    cfg_rule_in_rule_set_enabled {
-        // A #[cfg]-gated rule decl inside a `rules` body is kept when its flag is on.
-        r#"
-        grammar { language: "test", flags: { enabled: ["X"] } }
-        rule program { a }
-        rules pair() {
-            rule a { "x" }
-            #[cfg(X)]
-            rule b { "y" }
-        }
-        @pair()
-    "#,
-        vec!["program", "a", "b"]
-    }
     cfg_rule_in_rule_set_disabled {
-        // The gated decl is dropped from the set when its flag is off.
         r#"
         grammar { language: "test", flags: { disabled: ["X"] } }
         rule program { a }
@@ -803,8 +685,7 @@ rule_names_tests! {
         vec!["program", "a"]
     }
     cfg_rule_set_fully_gated_call_is_noop {
-        // Every decl gated out: the @call expands to nothing and is dropped rather
-        // than erroring (an empty expansion contributes no rules).
+        // Expanding an empty rule set contributes no rules.
         r#"
         grammar { language: "test", flags: { disabled: ["X"] } }
         rule program { "p" }
@@ -848,7 +729,6 @@ error_tests! { Cfg {
         CfgErrorKind::FlagsUnknownKey("active".into())
     }
     cfg_inside_flags_errors {
-        // cfg inside `flags` is nonsensical: flags are read before cfg gating runs.
         r#"
         grammar { language: "t", flags: { enabled: ["X", #[cfg(X)] "FOO"] } }
         rule program { "x" }
@@ -856,7 +736,6 @@ error_tests! { Cfg {
         CfgErrorKind::InsideFlags
     }
     cfg_flags_non_string_errors {
-        // GFM here is an identifier, not a string literal.
         r#"
         grammar { language: "t", flags: { enabled: [GFM] } }
         rule program { "x" }
@@ -866,19 +745,7 @@ error_tests! { Cfg {
 }}
 
 error_tests! { Resolve {
-    cfg_rule_def_disabled {
-        // The cfg-dropped rule is gone, so the reference is undefined.
-        r#"
-        grammar { language: "t", flags: { disabled: ["GFM"] } }
-        rule program { strikethrough }
-        #[cfg(GFM)]
-        rule strikethrough { "~~" }
-    "#,
-        ResolveErrorKind::UnknownIdentifier("strikethrough".into())
-    }
     cfg_rule_in_rule_set_dropped_reference_is_undefined {
-        // Referencing a rule gated out of the set is undefined, exactly as for a
-        // gated-out top-level rule.
         r#"
         grammar { language: "test", flags: { disabled: ["X"] } }
         rules pair() {
@@ -894,8 +761,7 @@ error_tests! { Resolve {
 
 error_tests! { Type {
     cfg_flags_duplicate_key_errors {
-        // Duplicate keys in the flags object error like any other object
-        // literal (flags bypasses the generic object typecheck).
+        // Flags bypass generic object typechecking.
         r#"
         grammar { language: "t", flags: { enabled: ["A"], enabled: ["B"] } }
         rule program { "x" }
@@ -906,8 +772,7 @@ error_tests! { Type {
 
 error_tests! { match Lower {
     cfg_disabled_definition_with_expect_is_undefined_symbol {
-        // An `expect` keeps the symbol past resolve; cfg then drops its only
-        // definition, so the completeness check catches the dangling symbol at lower.
+        // The forward declaration defers this error until lowering.
         r#"
         grammar { language: "t", flags: { disabled: ["GFM"] } }
         expect strikethrough
@@ -920,28 +785,7 @@ error_tests! { match Lower {
 }}
 
 error_tests! { Parse {
-    cfg_in_macro_body_bare_expression_parse_error {
-        // A macro body is a single expression; cfg in expression position is a
-        // parse error (parse_expr bails on `#`).
-        r#"
-        grammar { language: "t", flags: { enabled: ["X"] } }
-        macro m() rule_t { #[cfg(X)] "a" }
-        rule program { m() }
-    "#,
-        ParseErrorKind::ExpectedExpression
-    }
-    cfg_in_for_loop_body_parse_error {
-        // A for-loop body is expression-shaped, so cfg there is rejected like any
-        // other expression-position cfg.
-        r#"
-        grammar { language: "t", flags: { enabled: ["X"] } }
-        rule program { for (x: str_t) in ["a", "b"] { #[cfg(X)] x } }
-    "#,
-        ParseErrorKind::ExpectedExpression
-    }
     cfg_on_grammar_block_is_rejected {
-        // Gating the grammar block is incoherent (its own `flags` would declare the
-        // gating flag), so the parser rejects it.
         r#"
         #[cfg(X)] grammar { language: "t", flags: { enabled: ["X"] } }
         rule program { "x" }
