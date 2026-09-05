@@ -7,16 +7,20 @@ use super::{
         MacroKind, ModuleContext, Node, NodeId, ObjectField, Param, PrecKind, RepeatKind,
         SharedAst, Span, Spanned,
     },
-    lexer::{Token, TokenKind, unescape_string_into},
+    lexer::{Token, TokenKind, is_ident_str},
     typecheck::{
         DataTy, ScalarTy, Ty,
         types::{TUPLE_MAX_ARITY, TupleSig},
     },
 };
 
+use escape::{EscapeError, unescape_string_into};
+
 mod error;
+mod escape;
 
 pub use error::{ParseErrorKind, ParseResult};
+pub use escape::EscapeErrorKind;
 
 const MAX_PARSE_DEPTH: u16 = 192;
 
@@ -175,6 +179,19 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
 
     fn error(&self, kind: ParseErrorKind) -> ParseError {
         ParseError::new(kind, self.ctx.document, self.span())
+    }
+
+    const fn escape_error(&self, error: EscapeError, content: Span) -> ParseError {
+        let EscapeError { kind, range } = error;
+
+        ParseError::new(
+            ParseErrorKind::InvalidEscape(kind),
+            self.ctx.document,
+            Span::new(
+                content.start + range.start as u32,
+                content.start + range.end as u32,
+            ),
+        )
     }
 
     fn dup_err(&self, kind: ParseErrorKind, span: Span, first_span: Span) -> ParseError {
@@ -351,8 +368,18 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
             }
             match field {
                 ConfigField::Language => {
-                    let s = self.expect_string()?;
-                    config.language = Some(self.strs.intern(s.strip_quotes().resolve(self.source)));
+                    let span = self.expect_string()?.strip_quotes();
+                    let language = span.resolve(self.source);
+
+                    if !is_ident_str(language) {
+                        Err(ParseError::new(
+                            ParseErrorKind::InvalidLanguageName,
+                            self.ctx.document,
+                            span,
+                        ))?;
+                    }
+
+                    config.language = Some(self.strs.intern(language));
                 }
                 ConfigField::Inherits => config.inherits = Some(self.parse_expr()?),
                 ConfigField::Extras => config.extras = Some(self.parse_expr()?),
@@ -728,8 +755,9 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                 let span = start.strip_quotes();
                 let raw = span.resolve(self.source);
                 let sid = if raw.as_bytes().contains(&b'\\') {
-                    // SAFETY: `raw` comes from a `StringLit` token produced by the lexer.
-                    unsafe { unescape_string_into(raw, &mut self.unescape_buf) };
+                    if let Err(e) = unescape_string_into(raw, &mut self.unescape_buf) {
+                        Err(self.escape_error(e, span))?;
+                    }
                     self.strs.intern(&self.unescape_buf)
                 } else {
                     self.strs.intern(raw)
@@ -1041,7 +1069,17 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
     fn parse_reserved_expr(&mut self, start: Span) -> ParseResult<NodeId> {
         let (context, content, end) = self.parse_binary(start, TokenKind::KwReserved, |this| {
             let span = this.expect_string()?.strip_quotes();
-            Ok(this.strs.intern(span.resolve(this.source)))
+            let context = span.resolve(this.source);
+
+            if !is_ident_str(context) {
+                Err(ParseError::new(
+                    ParseErrorKind::InvalidReservedContextName,
+                    this.ctx.document,
+                    span,
+                ))?;
+            }
+
+            Ok(this.strs.intern(context))
         })?;
         Ok(self
             .shared
@@ -1075,11 +1113,23 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
         if self.at(TokenKind::RParen) {
             return Err(self.err_arg_count(kw, 1, 0, start));
         }
-        // Path stays literal (no unescape): a backslash is a path char, not an escape.
-        let path_span = self.expect_string()?;
+        let path = self.expect_string()?.strip_quotes();
+
+        if let Some(offset) = path
+            .resolve(self.source)
+            .as_bytes()
+            .iter()
+            .position(|&byte| byte == b'\\')
+        {
+            let backslash_start = path.start + offset as u32;
+            Err(ParseError::new(
+                ParseErrorKind::BackslashInModulePath,
+                self.ctx.document,
+                Span::new(backslash_start, backslash_start + 1),
+            ))?;
+        }
         self.expect_close_args(kw, 1, start)?;
         let end = self.expect(TokenKind::RParen)?;
-        let path = path_span.strip_quotes();
         let node = match kw {
             TokenKind::KwImport => Node::Import { path, module: None },
             TokenKind::KwInherit => Node::Inherit { path, module: None },

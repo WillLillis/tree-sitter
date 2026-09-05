@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::MAX_PARSE_DEPTH;
+use super::{MAX_PARSE_DEPTH, escape::EscapeErrorKind};
 use crate::nativedsl::{
     ParseError,
     lexer::TokenKind,
@@ -23,6 +23,16 @@ pub enum ParseErrorKind {
     ExpectedIdent,
     #[error("expected string literal")]
     ExpectedString,
+    #[error(transparent)]
+    InvalidEscape(EscapeErrorKind),
+    #[error(
+        "grammar language must start with an ASCII letter or '_' and contain only ASCII letters, digits, or '_'"
+    )]
+    InvalidLanguageName,
+    #[error("reserved context name must be an identifier")]
+    InvalidReservedContextName,
+    #[error("backslashes are not allowed in module paths. Use '/' as the directory separator")]
+    BackslashInModulePath,
     #[error("expected name")]
     ExpectedName,
     #[error("expected an identifier, not a quoted string")]
@@ -33,7 +43,7 @@ pub enum ParseErrorKind {
     IntegerOverflow,
     #[error("expected type")]
     ExpectedType,
-    #[error("expected a top-level item (grammar, rule, override, let, macro, rules, external)")]
+    #[error("expected a `grammar` block, declaration, or rule-set macro call (`@name(...)`)")]
     ExpectedItem,
     #[error("unknown type '{0}'")]
     UnknownType(String),

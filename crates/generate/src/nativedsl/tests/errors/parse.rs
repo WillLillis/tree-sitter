@@ -1,6 +1,79 @@
+use crate::nativedsl::EscapeErrorKind;
+
 use super::super::*;
 
 error_tests! { Parse {
+    error_invalid_escape {
+        r#"grammar { language: "test" } rule program { "x\q" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::Invalid('q'))
+    }
+    error_non_ascii_escape {
+        "grammar { language: \"test\" } rule program { \"x\\é\" }",
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::Invalid('é'))
+    }
+    error_hex_escape_too_short {
+        r#"grammar { language: "test" } rule program { "x\x0" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidHex)
+    }
+    error_hex_escape_non_hex {
+        r#"grammar { language: "test" } rule program { "x\xZZ" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidHex)
+    }
+    // A multibyte character where a hex digit is expected must not produce a
+    // diagnostic span that slices through the character.
+    error_hex_escape_multibyte {
+        "grammar { language: \"test\" } rule program { \"x\\x)\u{3a3}\" }",
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidHex)
+    }
+    error_hex_escape_out_of_ascii_range {
+        r#"grammar { language: "test" } rule program { "x\x80" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidHex)
+    }
+    error_unicode_escape_too_short {
+        r#"grammar { language: "test" } rule program { "x\u123" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_multibyte {
+        "grammar { language: \"test\" } rule program { \"x\\u00\u{3a3}\" }",
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_braced_empty {
+        r#"grammar { language: "test" } rule program { "x\u{}" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_braced_unclosed {
+        r#"grammar { language: "test" } rule program { "x\u{1234" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_surrogate {
+        r#"grammar { language: "test" } rule program { "x\uD800" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_out_of_range {
+        r#"grammar { language: "test" } rule program { "x\u{110000}" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_braced_too_long {
+        r#"grammar { language: "test" } rule program { "x\u{1234567}" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_unicode_escape_braced_surrogate {
+        r#"grammar { language: "test" } rule program { "x\u{D800}" }"#,
+        ParseErrorKind::InvalidEscape(EscapeErrorKind::InvalidUnicode)
+    }
+    error_invalid_language_name {
+        r#"grammar { language: "te\nst" } rule program { "x" }"#,
+        ParseErrorKind::InvalidLanguageName
+    }
+    error_invalid_reserved_context_name {
+        r#"grammar { language: "test" } rule program { reserved("de\fault", "x") }"#,
+        ParseErrorKind::InvalidReservedContextName
+    }
+    error_backslash_in_module_path {
+        r#"let helper = import("dir\helper.tsg") grammar { language: "test" } rule program
+        { "x" }"#,
+        ParseErrorKind::BackslashInModulePath
+    }
     error_unknown_grammar_field {
         r#"grammar { language: "test", bogus: "x" } rule program { "x" }"#,
         ParseErrorKind::UnknownGrammarField("bogus".into())

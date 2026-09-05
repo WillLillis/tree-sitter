@@ -69,7 +69,7 @@ pub use document::{DocumentId, DocumentMap, DocumentRef, DocumentSpan};
 pub use expand_macro_calls::ExpandErrorKind;
 pub use lexer::{LexErrorKind, LexResult};
 pub use lower::{DisallowedItemKind, LowerErrorKind, LowerResult, LoweringState};
-pub use parser::{ParseErrorKind, ParseResult};
+pub use parser::{EscapeErrorKind, ParseErrorKind, ParseResult};
 pub use resolve::{ResolveErrorKind, ResolveResult};
 pub use typecheck::{
     Constraint, ContainerKind, DataTy, ElemTy, InnerTy, ModuleTy, ScalarTy, TupleSig, Ty,

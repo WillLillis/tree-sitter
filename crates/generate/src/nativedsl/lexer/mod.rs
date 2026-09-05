@@ -1,22 +1,17 @@
 //! The byte-level tokenizer.
 //!
 //! Splits into [`token`] (the [`TokenKind`]/[`Token`] vocabulary, shared with
-//! the parser), [`error`] ([`LexErrorKind`]), and [`escape`] (escape-sequence
-//! decoding/validation); this file is the machine.
+//! the parser), and [`error`] ([`LexErrorKind`]).
 
 mod error;
-mod escape;
 mod token;
 
 pub use error::{LexErrorKind, LexResult};
-pub(crate) use escape::unescape_string_into;
 pub use token::{Token, TokenKind};
 
 use memchr::{memchr, memchr2};
 
 use crate::nativedsl::{DocumentId, DocumentRef, LexError, ast::Span};
-
-use escape::{validate_hex_escape, validate_unicode_escape};
 
 /// Byte classification flags for the lexer's hot loops.
 const CLASS_WHITESPACE: u8 = 0b0000_0001;
@@ -90,8 +85,7 @@ impl<'src> Lexer<'src> {
     ///
     /// # Errors
     ///
-    /// Returns [`LexError`] on unterminated strings, invalid escapes, or
-    /// unexpected characters.
+    /// Returns [`LexError`] on unterminated strings or unexpected characters.
     pub fn tokenize(&mut self) -> LexResult<Vec<Token>> {
         self.pos = 0;
         self.comment_starts.clear();
@@ -239,32 +233,19 @@ impl<'src> Lexer<'src> {
                             Span::from_usize(esc_pos, source.len()),
                         ))?;
                     }
-                    // SAFETY: pos < source.len() checked above.
-                    match unsafe { *source.get_unchecked(pos) } {
-                        b'"' | b'\\' | b'n' | b't' | b'r' | b'0' => pos += 1,
-                        b'x' => pos = validate_hex_escape(source, self.document, esc_pos)?,
-                        b'u' => {
-                            pos = validate_unicode_escape(source, self.document, esc_pos)?;
-                        }
-                        b'\n' => {
-                            return Err(LexError::new(
-                                LexErrorKind::NewlineInString,
-                                self.document,
-                                Span::from_usize(start, pos),
-                            ));
-                        }
-                        _ => {
-                            // SAFETY: `source` is valid UTF-8, and `pos` follows an ASCII
-                            // backslash found by `memchr2`, so it is a character boundary.
-                            let rest = unsafe { std::str::from_utf8_unchecked(&source[pos..]) };
-                            let ch = rest.chars().next().unwrap();
-                            Err(LexError::new(
-                                LexErrorKind::InvalidEscape(ch),
-                                self.document,
-                                Span::from_usize(esc_pos, pos + ch.len_utf8()),
-                            ))?;
-                        }
+                    // SAFETY: `pos < source.len()` checked above.
+                    if unsafe { *source.get_unchecked(pos) == b'\n' } {
+                        return Err(LexError::new(
+                            LexErrorKind::NewlineInString,
+                            self.document,
+                            Span::from_usize(start, pos),
+                        ));
                     }
+                    // Escape validity is checked when the parser interprets the
+                    // literal. Skip one byte so an escaped quote cannot terminate the
+                    // token. Any remaining UTF-8 continuation bytes are ordinary input
+                    // to the next byte search.
+                    pos += 1;
                 }
                 // SAFETY: memchr2 only returns positions of b'"' or b'\\'.
                 _ => unreachable!(),

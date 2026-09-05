@@ -227,3 +227,18 @@ impl DslError {
         }
     }
 }
+
+pub struct DiagnosticChar(pub char);
+
+impl std::fmt::Display for DiagnosticChar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let displayed = self.0.escape_debug();
+        let escaped = self.0.escape_default();
+
+        if displayed.clone().eq(escaped.clone()) {
+            write!(f, "{displayed}")
+        } else {
+            write!(f, "{displayed} ({escaped})")
+        }
+    }
+}
