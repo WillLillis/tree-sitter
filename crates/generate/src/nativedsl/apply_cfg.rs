@@ -1,7 +1,7 @@
-//! Cfg attribute evaluation. Runs between parse and resolve. Drops disabled
-//! `#[cfg(X)]` subtrees in place; unwraps active ones.
+//! Evaluates cfg attributes between parsing and resolution. Disabled subtrees
+//! are removed and active ones are unwrapped in place.
 //!
-//! Active flags are scoped to the current module path. A module's declarations
+//! Active flags are scoped to the current module path. A module's flag declarations
 //! apply throughout its subtree, while flags from its parent take precedence.
 
 use std::collections::hash_map::Entry;
@@ -176,7 +176,7 @@ impl CfgState {
     }
 }
 
-/// Walk this module's AST: drop disabled cfg subtrees, unwrap active ones.
+/// Remove disabled cfg subtrees and unwrap active ones in a module's AST.
 pub(super) fn apply_cfg(
     shared: &mut SharedAst,
     ctx: &mut ModuleContext,
@@ -184,7 +184,8 @@ pub(super) fn apply_cfg(
     state: &CfgState,
     kind: ModuleKind,
 ) -> CfgResult<()> {
-    ctx.module_refs.clear(); // rebuilt during cfg walk
+    // Rebuild module references during the cfg walk.
+    ctx.module_refs.clear();
     let mut w = Walker {
         shared: &mut *shared,
         state,
@@ -201,13 +202,12 @@ pub(super) fn apply_cfg(
         .as_ref()
         .into_iter()
         .flat_map(GrammarConfig::node_fields)
-        // `flags` already consumed by `merge_module_flags`
+        // Flags were consumed by `merge_module_flags`.
         .filter(|(field, _)| !matches!(field, ConfigField::Flags))
     {
         w.walk(id)?;
     }
-    // Compact root_items, repointing each surviving entry at the id the walk
-    // surfaced.
+    // Compact root items and replace active cfg wrappers with their children.
     let mut has_forward_decls = false;
     let original_len = ctx.root_items.len();
     let mut write = 0;
@@ -229,24 +229,20 @@ struct Walker<'a> {
     state: &'a CfgState,
     kind: ModuleKind,
     document: DocumentId,
-    /// Resolves cfg names in [`Self::walk_cfg`].
     strs: &'a StrPool,
-    /// Local declared set for the grammar visibility check
+    /// Flags declared by this module.
     cfg_declared: &'a FxHashMap<StrId, Span>,
-    /// cfg-dropped top-level decls for `enrich_resolve_error` to use later.
+    /// Top-level declarations removed by cfg, retained for later diagnostics.
     cfg_dropped: &'a mut FxHashMap<StrId, NodeId>,
-    /// The module's import/inherit refs, rebuilt from the surviving AST as the
-    /// walk visits each one - a nested cfg-dropped ref is never collected.
+    /// Surviving import and inherit nodes, rebuilt during the walk.
     module_refs: &'a mut Vec<NodeId>,
-    /// Write head into the active rule-set macro's `sym_refs` range while its
-    /// body is walked. `None` outside a macro body. Surviving `@<expr>` refs are
-    /// compacted to the front of the range in place.
+    /// Next slot in the current rule-set macro's `sym_refs` range.
+    /// `None` outside a rule-set macro body.
     sym_ref_cursor: Option<u32>,
 }
 
 impl Walker<'_> {
-    /// `Ok(Some(id))` = keep `id` (an active cfg resolves to its unwrapped child's id)
-    /// `Ok(None)` = drop. Shrinks filtered list ranges in place.
+    /// Return the surviving node after applying cfg, or `None` if it is disabled.
     fn walk(&mut self, id: NodeId) -> CfgResult<Option<NodeId>> {
         if let &Node::Cfg {
             name,
@@ -267,8 +263,8 @@ impl Walker<'_> {
         name_offset: u32,
         child: NodeId,
     ) -> CfgResult<Option<NodeId>> {
-        // Grammar modules require a local declaration. Helper modules transparently
-        // see the importing grammar's declared set.
+        // Grammar modules require local flag declarations. Helper modules use the
+        // active environment inherited from their importer.
         let active = match self.kind {
             ModuleKind::Grammar => self
                 .cfg_declared
@@ -293,7 +289,7 @@ impl Walker<'_> {
             while let &Node::Cfg { child: inner, .. } = self.shared.arena.get(item) {
                 item = inner;
             }
-            // Record a dropped named top-level decl for `enrich_resolve_error`.
+            // Retain a dropped top-level declaration for `enrich_resolve_error`.
             let dropped_name = match self.shared.arena.get(item) {
                 Node::Rule { name, .. } | Node::Let { name, .. } | Node::Forward { name } => {
                     Some(*name)
@@ -306,7 +302,7 @@ impl Walker<'_> {
             }
             Ok(None)
         } else {
-            // Active: surface the unwrapped child's id so the parent references it directly.
+            // Replace an active cfg wrapper with its child.
             self.walk(child)
         }
     }
@@ -314,15 +310,13 @@ impl Walker<'_> {
     fn walk_children(&mut self, id: NodeId) -> CfgResult<()> {
         let node = *self.shared.arena.get(id);
         match node {
-            // List-shaped variants whose members can be cfg-gated. Filter dropped
-            // members in place, shrink the node's range on change.
+            // Filter cfg-gated elements in place.
             #[rustfmt::skip]
             Node::SeqOrChoice { range, .. } | Node::List(range)
             | Node::Concat(range) | Node::RuleSet(range) => {
                 self.filter(id, range)?;
             }
-            // Fixed-arity / positional members can't be cfg-gated, but recurse to
-            // reach any cfg nested deeper inside each.
+            // Positional children cannot be cfg-gated directly, but may contain nested cfg.
             Node::Tuple(r) => {
                 for i in r.as_range() {
                     let c = self.shared.pools.children[i];
@@ -350,8 +344,7 @@ impl Walker<'_> {
             | Node::For { body: c, .. } => {
                 self.walk(c)?;
             }
-            // SymRef (`@<expr>` in a rule-set body): compact it to the front of
-            // the enclosing macro's sym_refs range in place, then walk the expr.
+            // Compact this reference into the enclosing macro's `sym_refs` range.
             Node::SymRef { expr } => {
                 if let Some(w) = self.sym_ref_cursor.as_mut() {
                     self.shared.pools.children[*w as usize] = id;
@@ -371,9 +364,7 @@ impl Walker<'_> {
                     self.walk(c)?;
                 }
             }
-            // Macro: prune its sym_refs to the cfg-surviving subset by compacting
-            // the range in place as the body is walked, then shrink its length to
-            // the survivors.
+            // Compact surviving `sym_refs` while walking the body, then shrink the range.
             Node::Macro(macro_id) => {
                 let sym_refs = self.shared.pools.get_macro(macro_id).sym_refs;
                 let body = self.shared.pools.get_macro(macro_id).body;
@@ -382,17 +373,13 @@ impl Walker<'_> {
                 let kept = (self.sym_ref_cursor.take().unwrap() - sym_refs.start) as u16;
                 self.shared.pools.get_macro_mut(macro_id).sym_refs.len = kept;
             }
-            // Import/inherit ref: collected so resolve and lower see the
-            // surviving set.
             Node::Import { .. } | Node::Inherit { .. } => self.module_refs.push(id),
-            // Leaves: nothing to descend into.
             #[rustfmt::skip]
             Node::Grammar | Node::Forward { .. } | Node::StringLit(_) | Node::IntLit(_)
             | Node::Ident(_) | Node::Blank | Node::Eof | Node::MacroParam { .. }
             | Node::ForBinding { .. } => {}
-            // `Cfg` is intercepted by walk(), `ExpandedRule`/`ModuleRule` are emitted by
-            // expand/resolve (after apply_cfg), `Unreachable` is the arena sentinel.
-            // None can legitimately reach here.
+            // `Cfg` is handled by `walk`, resolved variants are created later, and
+            // `Unreachable` is the arena sentinel.
             #[rustfmt::skip]
             Node::Cfg { .. } | Node::ExpandedRule(_) | Node::ModuleRule { .. }
             | Node::Unreachable => unreachable!(),
@@ -400,9 +387,8 @@ impl Walker<'_> {
         Ok(())
     }
 
-    /// Filter a child range in place and shrink `id`'s range to match. Walk each
-    /// `NodeId` slot, then overwrite earlier slots with survivors. Slots past the
-    /// new end are orphaned but no `ChildRange` references them.
+    /// Compact surviving children in place and update `id` to the shortened range.
+    /// Slots after the new end remain unreferenced.
     fn filter(&mut self, id: NodeId, range: ChildRange) -> CfgResult<()> {
         let start = range.start as usize;
         let mut write = start;
@@ -415,7 +401,7 @@ impl Walker<'_> {
         }
         let new_len = (write - start) as u16;
         if new_len < range.len {
-            // Safe: caller passes a node that has a child range.
+            // `filter` is only called for nodes with child ranges.
             self.shared.arena.get_mut(id).child_range_mut().unwrap().len = new_len;
         }
         Ok(())
