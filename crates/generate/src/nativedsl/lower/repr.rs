@@ -17,11 +17,11 @@ pub enum Value {
     Int(i32),
     Str(StrId),
     Rule(RuleId),
-    /// Index into `Evaluator::object_pool`.
+    /// Index into [`IrPools::object_pool`].
     Object(u32),
-    /// Range into `Evaluator::value_children`.
+    /// Range into [`IrPools::value_children`].
     List(ChildRange),
-    /// Range into `Evaluator::value_children`.
+    /// Range into [`IrPools::value_children`].
     Tuple(ChildRange),
     Module(ModuleId),
 }

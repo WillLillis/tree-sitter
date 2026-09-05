@@ -38,7 +38,7 @@ pub enum LowerErrorKind {
     ModuleTooMany,
     #[error("module dependency chain too deep (max {MAX_MODULE_DEPTH})")]
     ModuleDepthExceeded,
-    #[error("imported files cannot contain a {}", format_disallowed(*.0))]
+    #[error("imported files cannot contain {}", format_disallowed(*.0))]
     ModuleDisallowedItem(DisallowedItemKind),
     #[error("cycle while loading module")]
     ModuleCycle,
@@ -71,8 +71,8 @@ pub enum LowerErrorKind {
 
 const fn format_disallowed(kind: DisallowedItemKind) -> &'static str {
     match kind {
-        DisallowedItemKind::OverrideRule => "override rule",
-        DisallowedItemKind::GrammarBlock => "grammar block",
-        DisallowedItemKind::Inherit => "call to inherit()",
+        DisallowedItemKind::OverrideRule => "override rules",
+        DisallowedItemKind::GrammarBlock => "grammar blocks",
+        DisallowedItemKind::Inherit => "inherit() calls",
     }
 }
