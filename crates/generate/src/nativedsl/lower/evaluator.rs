@@ -152,22 +152,22 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     }
 
     fn get_val(&self, id: ValueId) -> &Value {
-        // Safety: id came from alloc_val, which hands out sequential indices into
-        // self.state.ir.values. That pool is append-only and never reset for the
+        // SAFETY: id came from `alloc_val`, which hands out sequential indices into
+        // `self.state.ir.values`. That pool is append-only and never reset for the
         // life of the `LoweringState`.
         unsafe { self.state.ir.values.get_unchecked(id.0 as usize) }
     }
 
-    fn alloc_list(&mut self, items: &[ValueId], span: Span) -> LowerResult<ValueId> {
+    fn alloc_list(&mut self, items: &[ValueId]) -> ValueId {
         let start = self.state.ir.value_children.len() as u32;
-        let len = self.checked_len(items.len(), span)?;
         self.state.ir.value_children.extend_from_slice(items);
-        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
+        self.finish_list(start, items.len())
     }
 
-    fn finish_list(&mut self, start: u32, len: usize, span: Span) -> LowerResult<ValueId> {
-        let len = self.checked_len(len, span)?;
-        Ok(self.alloc_val(Value::List(ChildRange::new(start, len))))
+    fn finish_list(&mut self, start: u32, len: usize) -> ValueId {
+        // Config list fields were bounded when their source module was lowered.
+        debug_assert!(u16::try_from(len).is_ok());
+        self.alloc_val(Value::List(ChildRange::new(start, len as u16)))
     }
 
     fn alloc_object(&mut self, map: FxHashMap<StrId, ValueId>) -> ValueId {
@@ -253,7 +253,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
         match *self.get_val(id) {
             Value::Rule(rid) => rid,
             Value::Str(sid) => self.alloc_rule(Rule::String(sid)),
-            // Guarded by typecheck: only rule-like values reach her.
+            // Guarded by typecheck: only rule-like values reach here.
             _ => unreachable!(),
         }
     }
@@ -345,19 +345,19 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     ) -> LowerResult<ValueId> {
         use ConfigField as C;
         let grammar = self.previous[usize::from(mod_idx)].lowered().unwrap();
-        match field {
-            C::Language => Ok(self.alloc_val(Value::Str(grammar.name))),
-            C::Extras => self.rule_list_val(&grammar.extra_roots, span),
-            C::Externals => self.rule_list_val(&grammar.external_roots, span),
-            C::Inline => self.symbol_list_val(&grammar.inline_names, span),
-            C::Supertypes => self.symbol_list_val(&grammar.supertype_names, span),
+        let val = match field {
+            C::Language => self.alloc_val(Value::Str(grammar.name)),
+            C::Extras => self.rule_list_val(&grammar.extra_roots),
+            C::Externals => self.rule_list_val(&grammar.external_roots),
+            C::Inline => self.symbol_list_val(&grammar.inline_names),
+            C::Supertypes => self.symbol_list_val(&grammar.supertype_names),
             C::Conflicts => {
                 let vals: Vec<ValueId> = grammar
                     .conflict_names
                     .iter()
-                    .map(|g| self.symbol_list_val(g, span))
-                    .collect::<LowerResult<_>>()?;
-                self.alloc_list(&vals, span)
+                    .map(|g| self.symbol_list_val(g))
+                    .collect::<Vec<_>>();
+                self.alloc_list(&vals)
             }
             C::Precedences => {
                 let vals: Vec<ValueId> = grammar
@@ -372,53 +372,54 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                             };
                             self.state.ir.value_children.push(vid);
                         }
-                        self.finish_list(inner_start, group.len(), span)
+                        self.finish_list(inner_start, group.len())
                     })
-                    .collect::<LowerResult<_>>()?;
-                self.alloc_list(&vals, span)
+                    .collect::<Vec<_>>();
+                self.alloc_list(&vals)
             }
             C::Word => {
                 if let Some(name) = &grammar.word_name {
-                    Ok(self.owned_symbol_val(*name))
+                    self.owned_symbol_val(*name)
                 } else {
-                    Err(self.err(LowerErrorKind::ConfigFieldUnset, span))
+                    return Err(self.err(LowerErrorKind::ConfigFieldUnset, span));
                 }
             }
             C::Start => match grammar.variables.first() {
-                Some(first) => Ok(self.owned_symbol_val(first.name)),
-                None => Err(self.err(LowerErrorKind::ConfigFieldUnset, span)),
+                Some(first) => self.owned_symbol_val(first.name),
+                None => return Err(self.err(LowerErrorKind::ConfigFieldUnset, span)),
             },
             C::Reserved => {
                 let n = grammar.reserved_sets.len();
                 let mut map = FxHashMap::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
                 for rwc in &grammar.reserved_sets {
-                    let words_vid = self.rule_list_val(&rwc.roots, span)?;
+                    let words_vid = self.rule_list_val(&rwc.roots);
                     map.insert(rwc.name, words_vid);
                 }
-                Ok(self.alloc_object(map))
+                self.alloc_object(map)
             }
             C::Inherits | C::Flags => unreachable!(),
-        }
+        };
+        Ok(val)
     }
 
-    fn rule_list_val(&mut self, rules_data: &[RuleId], span: Span) -> LowerResult<ValueId> {
+    fn rule_list_val(&mut self, rules_data: &[RuleId]) -> ValueId {
         let start = self.state.ir.value_children.len() as u32;
         self.state.ir.value_children.reserve(rules_data.len());
         for &rid in rules_data {
             let vid = self.alloc_val(Value::Rule(rid));
             self.state.ir.value_children.push(vid);
         }
-        self.finish_list(start, rules_data.len(), span)
+        self.finish_list(start, rules_data.len())
     }
 
-    fn symbol_list_val(&mut self, names: &[StrId], span: Span) -> LowerResult<ValueId> {
+    fn symbol_list_val(&mut self, names: &[StrId]) -> ValueId {
         let start = self.state.ir.value_children.len() as u32;
         self.state.ir.value_children.reserve(names.len());
         for &name in names {
             let vid = self.owned_symbol_val(name);
             self.state.ir.value_children.push(vid);
         }
-        self.finish_list(start, names.len(), span)
+        self.finish_list(start, names.len())
     }
 
     /// Evaluate an expression node to a [`ValueId`].
@@ -468,12 +469,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
             }
             Task::ExtractRule => {
                 let vid = self.pop_val();
-                let rid = match *self.get_val(vid) {
-                    Value::Rule(rid) => rid,
-                    Value::Str(s) => self.alloc_rule(Rule::String(s)),
-                    // Guarded by typecheck: only rule-like values reach here.
-                    _ => unreachable!(),
-                };
+                let rid = self.value_to_rule(vid);
                 self.push_rule_id(rid);
                 Ok(())
             }
@@ -676,6 +672,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
     fn dispatch_rule(&mut self, id: NodeId) {
         match self.shared.arena.get(id) {
             Node::Ident(IdentKind::Rule(name)) => self.push_rule(Rule::NamedSymbol(*name)),
+            &Node::ModuleRule { rule, .. } => self.push_rule_id(rule),
             Node::StringLit(sid) => self.push_rule(Rule::String(*sid)),
             Node::Blank => self.push_rule(Rule::Blank),
             Node::Eof => self.push_rule(Rule::Eof),
@@ -752,6 +749,8 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                     self.push_task(Task::Expr(target));
                 }
             }
+            // Dynamic rule-valued expressions are evaluated before extraction.
+            // Typecheck rejects every other remaining node in a rule context.
             _ => {
                 self.push_task(Task::ExtractRule);
                 self.push_task(Task::Expr(id));
@@ -848,7 +847,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let base = self.pop_combine_base();
                 let is_list = matches!(node, Node::List(_));
                 let start = self.state.ir.value_children.len() as u32;
-                let len = self.checked_len(self.state.scratch.val_scratch.len() - base, span)?;
+                let count = self.state.scratch.val_scratch.len() - base;
+                let len = if is_list {
+                    self.checked_len(count, span)?
+                } else {
+                    // Typecheck limits tuples to eight elements.
+                    count as u16
+                };
                 self.state
                     .ir
                     .value_children
