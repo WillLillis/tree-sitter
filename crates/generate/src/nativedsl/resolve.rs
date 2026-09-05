@@ -25,6 +25,27 @@ use crate::{
 
 use std::collections::hash_map::Entry;
 
+pub type ResolveResult<T> = Result<T, ResolveError>;
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum ResolveErrorKind {
+    #[error("imported module has no member '{0}'")]
+    ImportMemberNotFound(String),
+    #[error("duplicate declaration '{0}'")]
+    DuplicateDeclaration(String),
+    #[error("unknown identifier '{0}'")]
+    UnknownIdentifier(String),
+    #[error("computed rule name '{0}' does not name a rule")]
+    ComputedNameNotARule(String),
+    #[error("'{0}' shadows an existing declaration")]
+    ShadowedBinding(String),
+    #[error(
+        "`externals` must be a list of token names, strings, or `regexp()` expressions, \
+       formed with list literals, `append()`, or variable/config references"
+    )]
+    InvalidExternalsExpression,
+}
+
 /// Intermediate resolve environment used during phase 1. Maps declaration
 /// names to their resolved kind (for Ident rewriting) and span
 /// (for duplicate checking / "first defined here" notes). The kind never
@@ -102,9 +123,6 @@ pub fn resolve(
         }
     }
 
-    // The resolve work-stack holds at most one item's branch frontier (measured
-    // ~20-80% of root_items across the corpus); root_items.len() is a cheap seed
-    // that covers the realistic worst case and avoids the growth reallocs.
     let mut stack = Vec::with_capacity(ctx.root_items.len());
     for &item_id in &ctx.root_items {
         resolve_item(&mut shared.arena, &rcx, item_id, &mut stack)?;
@@ -228,7 +246,7 @@ fn collect_decls(
                     ctx,
                 )?;
             }
-            // Forward-decls (`expect X`) are registered last (below)
+            // Forward-declarations are registered after all real declarations.
             _ => {}
         }
     }
@@ -251,12 +269,10 @@ fn collect_decls(
                 ctx,
             )?;
         }
-        // Inherited external tokens are referenceable by bare name too, just
-        // like inherited rules). Anonymous externals (string/pattern) have no
-        // name to bring into scope. A base may list one of its own rules in
-        // `externals` (an external-scanner token with a grammar-rule fallback),
-        // putting the name in both lists; it's one symbol, already registered by
-        // the rule loop, so skip it rather than colliding with ourselves.
+        // Inherited named external tokens are referenceable by bare name, like
+        // inherited rules. Anonymous externals have no name to bring into scope.
+        // A base rule may also appear in `externals`, so skip names already
+        // registered by the rule loop.
         let mut base_variable_names: Option<FxHashSet<StrId>> = None;
         for ext in &base_grammar.external_roots {
             if let Rule::NamedSymbol(name) = pool.node(*ext)
@@ -310,11 +326,9 @@ fn collect_decls(
         ec.collect(ext_id)?;
     }
 
-    // Forward-decls (`expect X`) name a symbol provided elsewhere: a rule (here or
-    // in an imported helper), an external token, or an inherited rule. Registered
-    // last, so a real definition from any pass above fulfills the declaration
-    // rather than colliding with it; the name is added only if still undefined (an
-    // unfulfilled `expect` is then caught by the lower symbol-completeness check).
+    // Forward-declarations name a symbol provided elsewhere. Register them only
+    // when no real declaration fulfilled the name; lower reports unfulfilled
+    // declarations during its symbol-completeness check.
     if ctx.has_forward_decls {
         for &item_id in root_items {
             let Node::Forward { name } = shared.arena.get(item_id) else {
@@ -330,7 +344,7 @@ fn collect_decls(
     Ok(decls)
 }
 
-///  State for recursively collecting external token names.
+/// State for recursively collecting external token names.
 struct ExternalNameCtx<'a> {
     shared: &'a SharedAst,
     ctx: &'a ModuleContext,
@@ -380,7 +394,7 @@ impl ExternalNameCtx<'_> {
                 self.collect(left)?;
                 self.collect(right)?;
             }
-            // Literals don't introduce names, inherited values already registered.
+            // Literals and config references don't introduce names.
             #[rustfmt::skip]
             Node::StringLit(_) | Node::IntLit(_) | Node::DynRegex { .. } | Node::GrammarConfig { .. }
             | Node::FieldAccess { .. } | Node::QualifiedAccess { .. } => {}
@@ -522,7 +536,6 @@ fn resolve_node(
             stack.push(Resolve::Member(id));
             Some(obj)
         }
-        // Variadic: Seq, Choice, List, Tuple, Concat, RuleSet.
         #[rustfmt::skip]
         Node::SeqOrChoice { range, .. } | Node::List(range) | Node::Tuple(range)
         | Node::Concat(range) | Node::RuleSet(range) => descend(stack, rcx.pools.child_slice(range)),
@@ -675,27 +688,6 @@ pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<N
         }
     }
     None
-}
-
-pub type ResolveResult<T> = Result<T, ResolveError>;
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum ResolveErrorKind {
-    #[error("imported module has no member '{0}'")]
-    ImportMemberNotFound(String),
-    #[error("duplicate declaration '{0}'")]
-    DuplicateDeclaration(String),
-    #[error("unknown identifier '{0}'")]
-    UnknownIdentifier(String),
-    #[error("computed rule name '{0}' does not name a rule")]
-    ComputedNameNotARule(String),
-    #[error("'{0}' shadows an existing declaration")]
-    ShadowedBinding(String),
-    #[error(
-        "`externals` must be a list of token names, strings, or `regexp()` expressions, \
-       formed with list literals, `append()`, or variable/config references"
-    )]
-    InvalidExternalsExpression,
 }
 
 /// Build an `UnknownIdentifier` error, attaching a "did you mean" note if appropriate
