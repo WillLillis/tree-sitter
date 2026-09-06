@@ -362,8 +362,8 @@ fn append_concatenates_lists() {
 
 #[test]
 fn inherit_from_grammar_that_imports() {
-    // The base itself imports a helper, so its evaluator must offset module-table
-    // indices by base_id (base global_id > 0, its import > 1).
+    // The base imports a helper whose rule is used by its grammar.
+    // This ensures nested module references remain valid during inheritance.
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar_with_import.tsg")
         grammar { language: "derived", inherits: base }
@@ -434,8 +434,8 @@ fn nested_inheritance_merges_all_rules() {
 
 #[test]
 fn nested_inheritance_qualified_access_to_grandparent_via_parent() {
-    // child references parent::identifier (defined in grandparent); parent's
-    // lowering merged it into parent.lowered.variables, so resolution succeeds.
+    // The child references parent::identifier, which is defined in the
+    // grandparent. The parent's lowering merges it into parent.lowered.variables.
     let g = dsl(r#"
         let parent = inherit("inherit_base/nested_parent.tsg")
         grammar { language: "child", inherits: parent }
@@ -605,7 +605,7 @@ fn inherited_external_qualified_access() {
 #[test]
 fn inherited_external_bare_reference() {
     // An inherited external is referenceable by bare name, like an inherited
-    // rule (and like grammar.js's `$.name`) - not only via `base::name`.
+    // rule (as in grammar.js's `$.name`), not only via `base::name`.
     let mut g = parse_with_modules(
         &[(
             "base.tsg",
@@ -631,7 +631,7 @@ fn inherited_external_bare_reference() {
 fn inherited_rule_also_in_externals() {
     // A base may list one of its own rules in `externals` (external-scanner token
     // with a grammar-rule fallback), so the name is in both variables and
-    // external_roots; inheriting it must not double-register in the child.
+    // external_roots. Inheriting it must not double-register in the child.
     let mut g = parse_with_modules(
         &[(
             "base.tsg",
@@ -655,7 +655,7 @@ fn inherited_rule_also_in_externals() {
 #[test]
 fn config_only_base_is_allowed() {
     // A config-only base (no rules) is a native-DSL extension: it can't compile
-    // standalone but contributes config to a child; only the root's rule count
+    // standalone but contributes config to a child. Only the root's rule count
     // is enforced.
     let mut g = parse_with_modules(
         &[(

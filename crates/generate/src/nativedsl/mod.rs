@@ -331,8 +331,7 @@ pub(crate) fn collect_imported_rules(
 ///
 /// # Errors
 ///
-/// Returns [`DslError`] if any pipeline stage fails.
-/// // TODO: Result type def?
+/// Returns [`NativeDslError`] if any pipeline stage fails.
 pub fn parse_native_dsl(input: &str, grammar_path: &Path) -> Result<InputGrammar, NativeDslError> {
     let mut documents = DocumentMap::default();
     let mut shared = SharedAst::new(input.len() / 10);

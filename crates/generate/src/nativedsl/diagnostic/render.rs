@@ -142,7 +142,7 @@ impl std::fmt::Display for NativeDslError {
             render_error(f, current, &self.documents)?;
 
             // Each wrapper carries its reference location in the parent document.
-            // Render teh chain from the innnermost reference outward.
+            // Render the chain from the innermost reference outward.
             for module in modules.iter().rev() {
                 writeln!(f)?;
                 render_document_span(
@@ -175,7 +175,6 @@ fn render_error(
         return Ok(());
     };
 
-    // TODO: Change argument type of `Source`?
     render_snippet(
         f,
         Source {
@@ -329,7 +328,7 @@ impl SpanContext<'_> {
             memchr::memchr(b'\n', &bytes[line_start..]).map_or(bytes.len(), |pos| line_start + pos);
         let line_text = &source_text[line_start..line_end];
         // The line's leading text before the span. The caret line renders it via
-        // CaretIndent (tabs kept, other chars one space each) so the caret lands
+        // CaretPad (tabs kept, other chars one space each) so the caret lands
         // on the same tab stops as the source line under any terminal tab width.
         let caret_prefix = &source_text[line_start..offset];
         let col = caret_prefix.chars().count() + 1;

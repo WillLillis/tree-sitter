@@ -78,7 +78,8 @@ mod tests {
 
     #[test]
     fn suggest_short_names_have_tight_threshold() {
-        // Threshold for 2-char target is 2/3 + 1 = 1; "ab" -> "xy" is distance 2.
+        // The threshold for a 2-character target is 2/3 + 1 = 1.
+        // "ab" -> "xy" has distance 2.
         let candidates = ["xy"];
         assert_eq!(suggest_name("ab", candidates.iter().copied()), None);
     }

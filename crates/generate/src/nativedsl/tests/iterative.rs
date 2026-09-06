@@ -12,8 +12,7 @@ use crate::rules::RulePool;
 /// A `program` rule whose body is an `n`-deep `token(token(...blank...))` chain,
 /// plus a minimal grammar `ModuleContext` (config carries only `language`), built
 /// directly (no parser). `token(rule_t)` is `rule_t` and `blank` is `rule_t`, so
-/// the chain resolves, type-checks, and lowers - the one builder serves all three
-/// deep tests.
+/// the chain resolves and type-checks. The builder serves both deep tests.
 fn deep_token_chain(n: usize) -> (SharedAst, ModuleContext, RulePool, DocumentMap) {
     let mut pool = RulePool::default();
     let source = String::from("program");
@@ -61,9 +60,9 @@ fn resolve_deep_nesting_does_not_overflow() {
 
 #[test]
 fn typecheck_deep_nesting_does_not_overflow() {
-    // The same `token(token(...blank))` chain type-checks (token(rule_t) is
-    // rule_t); 50k deep would overflow a recursive `type_of`, but the iterative
-    // walk handles it.
+    // The same `token(token(...blank))` chain type-checks because `token(rule_t)`
+    // is `rule_t`. A 50k-deep chain would overflow a recursive `type_of`, but the
+    // iterative walk handles it.
     let (shared, ctx, pool, documents) = deep_token_chain(50_000);
     let mut env = TypeEnv::default();
     let source = documents.document(ctx.document).text();
