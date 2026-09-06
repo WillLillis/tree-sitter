@@ -14,8 +14,8 @@ use crate::{
     nativedsl::{
         Export, ImportedRule, LoweredGrammar, Module, ModuleId, NoteMessage, ResolveError,
         ast::{
-            AstPools, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, Param, SharedAst,
-            Span, Spanned,
+            AstPools, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
+            Spanned,
         },
         diagnostic::suggest_name,
     },
@@ -37,8 +37,6 @@ pub enum ResolveErrorKind {
     UnknownIdentifier(String),
     #[error("computed rule name '{0}' does not name a rule")]
     ComputedNameNotARule(String),
-    #[error("'{0}' shadows an existing declaration")]
-    ShadowedBinding(String),
     #[error(
         "`externals` must be a list of token names, strings, or `regexp()` expressions, \
        formed with list literals, `append()`, or variable/config references"
@@ -151,24 +149,6 @@ fn insert_decl(
             Ok(())
         }
     }
-}
-
-/// Reject a macro-param / for-binding name that shadows a top-level declaration.
-fn check_shadowing(rcx: &ResolveCtx, bindings: &[Param]) -> ResolveResult<()> {
-    for binding in bindings {
-        if let Some(&Spanned {
-            span: first_span, ..
-        }) = rcx.decls.get(&binding.name.value)
-        {
-            return Err(ResolveError::with_note(
-                ResolveErrorKind::ShadowedBinding(rcx.strs.resolve(binding.name.value).to_string()),
-                rcx.ctx.document,
-                binding.name.span,
-                rcx.ctx.note(NoteMessage::FirstDefinedHere, first_span),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Pass 1: scan top-level items and register all declared names.
@@ -439,10 +419,7 @@ fn resolve_item(
         }
         Node::Macro(macro_id) => {
             let macro_cfg = rcx.pools.get_macro(*macro_id);
-            let params = macro_cfg.params;
             let body = macro_cfg.body;
-            // Macro params must not shadow any top-level declaration
-            check_shadowing(rcx, rcx.pools.param_slice(params))?;
             // Resolve the body once: an expression body directly, a rule-set body
             // through resolve_children -> each Rule/ComputedRule decl.
             resolve_expr(arena, rcx, body, stack)
@@ -558,7 +535,6 @@ fn resolve_node(
         },
         Node::For { for_id, body } => {
             let config = rcx.pools.get_for(for_id);
-            check_shadowing(rcx, rcx.pools.param_slice(config.bindings))?;
             stack.push(Resolve::Node(body));
             Some(config.iterable)
         }

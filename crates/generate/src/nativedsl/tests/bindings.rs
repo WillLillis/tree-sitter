@@ -520,32 +520,19 @@ fn tuple_in_object_annotation_checks() {
 }
 
 #[test]
-fn error_macro_param_shadows_let() {
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            let X: str_t = "shadowed"
-            macro wrap(X: rule_t) rule_t { seq("(", X, ")") }
-            rule program { wrap(identifier) }
-            rule identifier { regexp("[a-z]+") }"#
-        ),
-        Resolve
-    );
-    assert_eq!(e.kind, ResolveErrorKind::ShadowedBinding("X".into()));
+fn macro_param_may_shadow_let() {
+    dsl(r#"grammar { language: "test" }
+        let X: int_t = 1
+        macro wrap(X: str_t) str_t { X }
+        rule program { wrap("x") }"#);
 }
 
 #[test]
-fn error_for_binding_shadows_rule() {
-    // For bindings follow the same no-shadowing rule as macro params.
-    let e = assert_err!(
-        dsl_err(
-            r#"grammar { language: "test" }
-            rule item { "i" }
-            rule program { seq(for (item: rule_t) in ["a", "b"] { item }) }"#
-        ),
-        Resolve
-    );
-    assert_eq!(e.kind, ResolveErrorKind::ShadowedBinding("item".into()));
+fn for_binding_may_shadow_rule() {
+    dsl(r#"grammar { language: "test" }
+        rule item { "top-level" }
+        rule other { "other" }
+        rule program { choice(for (item: rule_t) in [other] { item }) }"#);
 }
 
 #[test]
