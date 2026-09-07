@@ -18,6 +18,7 @@ use crate::{
             Spanned,
         },
         diagnostic::suggest_name,
+        expand_macro_calls::ExpandedRuleDecl,
     },
     rules::{Rule, RulePool},
     strpool::{StrId, StrPool},
@@ -51,6 +52,23 @@ pub enum ResolveErrorKind {
 /// we know what it resolves to.
 type Decls = FxHashMap<StrId, Spanned<DeclKind>>;
 
+pub(crate) struct CollectedDecls {
+    decls: Decls,
+    override_names: FxHashSet<StrId>,
+    deferred_qualified_calls: Vec<(usize, NodeId)>,
+}
+
+impl CollectedDecls {
+    #[must_use]
+    pub(crate) const fn has_qualified_calls(&self) -> bool {
+        !self.deferred_qualified_calls.is_empty()
+    }
+
+    pub(crate) fn qualified_calls(&self) -> &[(usize, NodeId)] {
+        &self.deferred_qualified_calls
+    }
+}
+
 /// What a declared name denotes
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DeclKind {
@@ -80,8 +98,7 @@ struct ResolveCtx<'a> {
     modules: &'a [Module],
 }
 
-/// Collects declarations, registers inherited names, and resolves `Node::Ident`
-/// nodes from `Unresolved` to `Rule` / `Var`.
+/// Resolve all names in a module.
 ///
 /// # Errors
 ///
@@ -95,13 +112,25 @@ pub fn resolve(
     base: Option<(&LoweredGrammar, Span)>,
     imported_rules: &[ImportedRule],
 ) -> ResolveResult<()> {
-    let decls = collect_decls(shared, ctx, pool, base, imported_rules, current_module)?;
+    let mut collected = collect_decls(shared, ctx, pool, base, imported_rules, current_module)?;
+    finish_decls(&mut collected, shared, ctx, pool, base, imported_rules)?;
+    resolve_with_decls(shared, ctx, pool, modules, &collected)
+}
+
+pub(crate) fn resolve_with_decls(
+    shared: &mut SharedAst,
+    ctx: &ModuleContext,
+    pool: &RulePool,
+    modules: &[Module],
+    collected: &CollectedDecls,
+) -> ResolveResult<()> {
+    let decls = &collected.decls;
 
     let rcx = ResolveCtx {
         pools: &shared.pools,
         ctx,
         strs: pool.strs(),
-        decls: &decls,
+        decls,
         modules,
     };
 
@@ -127,6 +156,54 @@ pub fn resolve(
     }
 
     Ok(())
+}
+
+/// Resolve the targets of top-level qualified calls before late expansion.
+///
+/// This uses the same object-alias and export table lookup as the normal resolve
+/// walk, but records each target's export kind so rule-set calls can be expanded
+/// without duplicating module resolution in the expansion pass.
+pub(crate) fn resolve_qualified_call_targets(
+    shared: &mut SharedAst,
+    ctx: &ModuleContext,
+    pool: &RulePool,
+    modules: &[Module],
+    collected: &CollectedDecls,
+) -> ResolveResult<FxHashMap<NodeId, (StrId, Export)>> {
+    let rcx = ResolveCtx {
+        pools: &shared.pools,
+        ctx,
+        strs: pool.strs(),
+        decls: &collected.decls,
+        modules,
+    };
+    let mut stack = Vec::new();
+    let mut targets = FxHashMap::default();
+
+    for &(_, call_id) in &collected.deferred_qualified_calls {
+        expect_pat!(Node::Call { name, .. }, *shared.arena.get(call_id));
+        expect_pat!(
+            Node::QualifiedAccess {
+                obj,
+                member,
+                member_offset,
+            },
+            *shared.arena.get(name)
+        );
+
+        // Resolve nested qualified accesses and the initial module alias before
+        // looking up the final member.
+        resolve_expr(&mut shared.arena, &rcx, obj, &mut stack)?;
+        let Some(module) = resolve_module_id(&shared.arena, obj) else {
+            // User error, let it propagate to resolve/typecheck diagnostics.
+            continue;
+        };
+        let export =
+            resolve_qualified_member(&rcx, &mut shared.arena, module, name, member, member_offset)?;
+        targets.insert(call_id, (member, export));
+    }
+
+    Ok(targets)
 }
 
 fn insert_decl(
@@ -160,14 +237,14 @@ fn insert_decl(
 /// before the externals walk so that an `externals` field referencing an
 /// inherited rule is correctly identified as a known name rather than being
 /// re-registered as a fresh external token.
-fn collect_decls(
+pub(crate) fn collect_decls(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
     pool: &RulePool,
     base: Option<(&LoweredGrammar, Span)>,
     imported_rules: &[ImportedRule],
     current_module: ModuleId,
-) -> ResolveResult<Decls> {
+) -> ResolveResult<CollectedDecls> {
     let root_items = &ctx.root_items;
     let external_capacity = ctx
         .grammar_config
@@ -181,9 +258,10 @@ fn collect_decls(
         + external_capacity;
     let mut decls = FxHashMap::with_capacity_and_hasher(decl_capacity, FxBuildHasher);
     let mut override_names = FxHashSet::default();
+    let mut deferred_qualified_calls = Vec::new();
 
     // Register rules, macros, and lets upfront (forward references allowed).
-    for &item_id in root_items {
+    for (slot, &item_id) in root_items.iter().enumerate() {
         let span = shared.arena.span(item_id);
         match shared.arena.get(item_id) {
             Node::Rule {
@@ -226,10 +304,33 @@ fn collect_decls(
                     ctx,
                 )?;
             }
+            Node::Call { name, .. }
+                if matches!(shared.arena.get(*name), Node::QualifiedAccess { .. }) =>
+            {
+                deferred_qualified_calls.push((slot, item_id));
+            }
             // Forward-declarations are registered after all real declarations.
             _ => {}
         }
     }
+
+    Ok(CollectedDecls {
+        decls,
+        override_names,
+        deferred_qualified_calls,
+    })
+}
+
+pub(crate) fn finish_decls(
+    collected: &mut CollectedDecls,
+    shared: &SharedAst,
+    ctx: &ModuleContext,
+    pool: &RulePool,
+    base: Option<(&LoweredGrammar, Span)>,
+    imported_rules: &[ImportedRule],
+) -> ResolveResult<()> {
+    let decls = &mut collected.decls;
+    let override_names = &mut collected.override_names;
 
     // Register inherited rule names. Collisions with local non-`override` rules error
     if let Some((base_grammar, inherit_span)) = base {
@@ -241,7 +342,7 @@ fn collect_decls(
                 continue;
             }
             insert_decl(
-                &mut decls,
+                decls,
                 pool.strs(),
                 var.name,
                 DeclKind::Rule,
@@ -263,14 +364,7 @@ fn collect_decls(
                 if base_variable_names.contains(&name) {
                     continue;
                 }
-                insert_decl(
-                    &mut decls,
-                    pool.strs(),
-                    name,
-                    DeclKind::Rule,
-                    inherit_span,
-                    ctx,
-                )?;
+                insert_decl(decls, pool.strs(), name, DeclKind::Rule, inherit_span, ctx)?;
             }
         }
     }
@@ -281,7 +375,7 @@ fn collect_decls(
         // source is no longer skipped and collides (see the base loop above).
         if !override_names.remove(&ir.name) {
             insert_decl(
-                &mut decls,
+                decls,
                 pool.strs(),
                 ir.name,
                 DeclKind::Rule,
@@ -300,7 +394,7 @@ fn collect_decls(
             shared,
             ctx,
             strs: pool.strs(),
-            decls: &mut decls,
+            decls,
             expanding_lets: FxHashSet::default(),
         };
         ec.collect(ext_id)?;
@@ -310,7 +404,7 @@ fn collect_decls(
     // when no real declaration fulfilled the name; lower reports unfulfilled
     // declarations during its symbol-completeness check.
     if ctx.has_forward_decls {
-        for &item_id in root_items {
+        for &item_id in &ctx.root_items {
             let Node::Forward { name } = shared.arena.get(item_id) else {
                 continue;
             };
@@ -321,7 +415,27 @@ fn collect_decls(
         }
     }
 
-    Ok(decls)
+    Ok(())
+}
+
+pub(crate) fn register_expanded_decls(
+    collected: &mut CollectedDecls,
+    generated: impl IntoIterator<Item = ExpandedRuleDecl>,
+    strs: &StrPool,
+    ctx: &ModuleContext,
+) -> ResolveResult<()> {
+    for ExpandedRuleDecl {
+        name,
+        is_override,
+        span,
+    } in generated
+    {
+        insert_decl(&mut collected.decls, strs, name, DeclKind::Rule, span, ctx)?;
+        if is_override {
+            collected.override_names.insert(name);
+        }
+    }
+    Ok(())
 }
 
 /// State for recursively collecting external token names.
@@ -571,14 +685,16 @@ fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Resolv
     );
     // None when obj isn't a module ref; the type checker reports the error.
     if let Some(idx) = resolve_module_id(arena, obj) {
-        resolve_qualified_member(rcx, arena, idx, id, member, member_offset)?;
+        // The export kind is only needed by the deferred top-level-call pass
+        _ = resolve_qualified_member(rcx, arena, idx, id, member, member_offset)?;
     }
     Ok(())
 }
 
 /// Resolve a `QualifiedAccess { obj, member }` against the target module's
 /// export table:
-///   - `let` / `macro` -> `Ident(Var | Macro)`
+///   - `let` -> `Ident(Var)`
+///   - expression/rule-set macro -> `Ident(Macro)`
 ///   - lowered rule / external -> `ModuleRule`
 ///   - not found -> error
 fn resolve_qualified_member(
@@ -588,11 +704,20 @@ fn resolve_qualified_member(
     node_id: NodeId,
     member: StrId,
     member_offset: u32,
-) -> ResolveResult<()> {
+) -> ResolveResult<Export> {
     let target = &rcx.modules[usize::from(module)];
-    match target.export(member) {
-        Some(Export::Local(kind)) => arena.set(node_id, Node::Ident(kind)),
-        Some(Export::Rule(rule)) => arena.set(
+    let Some(export) = target.export(member) else {
+        let member_len = rcx.strs.resolve(member).len() as u32;
+        let member_span = Span::new(member_offset, member_offset + member_len);
+        return Err(import_member_not_found(rcx, target, member, member_span));
+    };
+
+    match export {
+        Export::Variable(let_id) => arena.set(node_id, Node::Ident(IdentKind::Var(let_id))),
+        Export::ExpressionMacro(macro_id) | Export::RuleSetMacro(macro_id) => {
+            arena.set(node_id, Node::Ident(IdentKind::Macro(macro_id)));
+        }
+        Export::Rule(rule) => arena.set(
             node_id,
             Node::ModuleRule {
                 module,
@@ -600,13 +725,9 @@ fn resolve_qualified_member(
                 rule,
             },
         ),
-        None => {
-            let member_len = rcx.strs.resolve(member).len() as u32;
-            let member_span = Span::new(member_offset, member_offset + member_len);
-            Err(import_member_not_found(rcx, target, member, member_span))?;
-        }
     }
-    Ok(())
+
+    Ok(export)
 }
 
 /// Build an `ImportMemberNotFound` error, attaching a "did you mean" note when appropriate
@@ -654,9 +775,7 @@ pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<N
     for _ in 0..arena.len() {
         match arena.get(obj) {
             Node::Ident(IdentKind::Var(let_id)) => {
-                let Node::Let { value, .. } = arena.get(*let_id) else {
-                    return None;
-                };
+                expect_pat!(Node::Let { value, .. }, arena.get(*let_id));
                 obj = *value;
             }
             Node::Inherit { .. } | Node::Import { .. } => return Some(obj),

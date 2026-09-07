@@ -81,9 +81,12 @@ use std::path::Path;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
 
-use crate::grammars::{PrecedenceEntry, ReservedWordContext, Variable};
+use crate::{
+    grammars::{PrecedenceEntry, ReservedWordContext, Variable},
+    nativedsl::ast::{MacroId, MacroKind, NodeId},
+};
 
-use ast::{IdentKind, ModuleContext, Node, SharedAst, Span};
+use ast::{ModuleContext, Node, SharedAst, Span};
 use loader::Loader;
 use typecheck::TypeEnv;
 
@@ -193,8 +196,12 @@ pub enum Module {
 /// What a name exported by a module resolves to
 #[derive(Clone, Copy, Debug)]
 pub enum Export {
-    /// An AST-level `let` or `macro` (resolves to `Ident(Var | Macro)`).
-    Local(IdentKind),
+    /// An AST-level `let` binding (resolved to `Indent(Var)`).
+    Variable(NodeId),
+    /// An expression macro (resolves to `Ident(Macro)`).
+    ExpressionMacro(MacroId),
+    /// A rule-set macro (resolves to `Ident(Macro)` after expansion).
+    RuleSetMacro(MacroId),
     /// A rule / external in the module's lowered output (resolves to
     /// `Node::ModuleRule`).
     Rule(RuleId),
@@ -251,15 +258,19 @@ pub fn build_exports(
     // is both a rule and an external. Rules are inserted before externals, so it
     // resolves to the rule.
     for &item_id in &ctx.root_items {
-        let (name, kind) = match shared.arena.get(item_id) {
-            Node::Let { name, .. } => (*name, IdentKind::Var(item_id)),
-            Node::Macro(macro_id) => (
-                shared.pools.get_macro(*macro_id).name.value,
-                IdentKind::Macro(*macro_id),
-            ),
+        let (name, export) = match shared.arena.get(item_id) {
+            Node::Let { name, .. } => (*name, Export::Variable(item_id)),
+            Node::Macro(macro_id) => {
+                let config = shared.pools.get_macro(*macro_id);
+                let export = match config.kind {
+                    MacroKind::Expression(_) => Export::ExpressionMacro(*macro_id),
+                    MacroKind::RuleSet => Export::RuleSetMacro(*macro_id),
+                };
+                (config.name.value, export)
+            }
             _ => continue,
         };
-        exports.entry(name).or_insert(Export::Local(kind));
+        exports.entry(name).or_insert(export);
     }
 
     exports.reserve(variables.len() + external_roots.len());

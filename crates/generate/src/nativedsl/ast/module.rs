@@ -114,6 +114,8 @@ pub struct ModuleContext {
     pub let_types: FxHashMap<NodeId, Ty>,
     /// Half-open range of nodes this module owns in the shared arena.
     node_range: std::ops::Range<NodeId>,
+    /// A second owned range for nodes created after child modules have loaded.
+    late_node_range: Option<std::ops::Range<NodeId>>,
 }
 
 impl ModuleContext {
@@ -130,6 +132,7 @@ impl ModuleContext {
             computed_refs: Vec::new(),
             let_types: FxHashMap::default(),
             node_range: node_start..node_start,
+            late_node_range: None,
         }
     }
 
@@ -167,12 +170,30 @@ impl ModuleContext {
         &self,
         arena: &'a NodeArena,
     ) -> impl Iterator<Item = (NodeId, &'a Node)> {
-        arena.iter_range(self.node_range.clone())
+        let primary = arena.iter_range(self.node_range.clone());
+        let late = self
+            .late_node_range
+            .clone()
+            .into_iter()
+            .flat_map(|range| arena.iter_range(range));
+        primary.chain(late)
     }
 
     pub(crate) fn set_node_end(&mut self, end: NodeId) {
         debug_assert!(end.index() >= self.node_range.end.index());
         self.node_range.end = end;
+    }
+
+    pub(crate) fn start_late_nodes(&mut self, start: NodeId) {
+        debug_assert!(start.index() >= self.node_range.end.index());
+        debug_assert!(self.late_node_range.is_none());
+        self.late_node_range = Some(start..start);
+    }
+
+    pub(crate) fn set_late_node_end(&mut self, end: NodeId) {
+        let range = self.late_node_range.as_mut().unwrap();
+        debug_assert!(end.index() >= range.end.index());
+        range.end = end;
     }
 
     /// Build a [`Note`] anchored to this module's source.

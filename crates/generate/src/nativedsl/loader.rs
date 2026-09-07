@@ -6,9 +6,9 @@ use crate::{
     IoError,
     nativedsl::{
         DisallowedItemKind, DocumentId, DocumentMap, DocumentSpan, DslError, DslResult, Export,
-        LexError, LexErrorKind, LowerError, LowerErrorKind, LoweringState, MAX_MODULE_DEPTH,
-        Module, ModuleError, ModuleId, ModuleIdSet, NoteMessage, ResolveError, TypeError,
-        TypeErrorKind,
+        ImportedRule, LexError, LexErrorKind, LowerError, LowerErrorKind, LoweringState,
+        MAX_MODULE_DEPTH, Module, ModuleError, ModuleId, ModuleIdSet, NoteMessage, ResolveError,
+        TypeError, TypeErrorKind,
         apply_cfg::{CfgEnvId, CfgState, apply_cfg},
         ast::{IdentKind, ModuleContext, Node, NodeId, SharedAst, Span},
         expand_macro_calls, lexer, lower, parser,
@@ -147,20 +147,7 @@ impl<'a> Loader<'a> {
         let imported_rules =
             super::collect_imported_rules(&self.shared.arena, &ctx.module_refs, self.modules);
 
-        // Resolve identifiers
-        let base = ctx
-            .inherit_module(&self.shared.arena)
-            .and_then(|(idx, span)| self.modules[usize::from(idx)].lowered().map(|g| (g, span)));
-        resolve::resolve(
-            self.shared,
-            &ctx,
-            self.pool,
-            self.modules,
-            global_id,
-            base,
-            &imported_rules,
-        )
-        .map_err(|e| self.enrich_resolve_error(&ctx, e))?;
+        self.resolve_current_module(&mut ctx, global_id, &imported_rules)?;
 
         // Child modules already populated `self.env` during their own `load_module` calls.
         let source = self.documents.document(document).text();
@@ -212,6 +199,54 @@ impl<'a> Loader<'a> {
         self.modules.push(module);
 
         Ok(global_id)
+    }
+
+    fn resolve_current_module(
+        &mut self,
+        ctx: &mut ModuleContext,
+        global_id: ModuleId,
+        imported_rules: &[ImportedRule],
+    ) -> DslResult<()> {
+        let base = ctx
+            .inherit_module(&self.shared.arena)
+            .and_then(|(idx, span)| self.modules[usize::from(idx)].lowered().map(|g| (g, span)));
+
+        let mut collected =
+            resolve::collect_decls(self.shared, ctx, self.pool, base, imported_rules, global_id)
+                .map_err(|e| self.enrich_resolve_error(ctx, e))?;
+        if collected.has_qualified_calls() {
+            let targets = resolve::resolve_qualified_call_targets(
+                self.shared,
+                ctx,
+                self.pool,
+                self.modules,
+                &collected,
+            )
+            .map_err(|e| self.enrich_resolve_error(ctx, e))?;
+            ctx.start_late_nodes(self.shared.arena.next_id());
+            let generated = expand_macro_calls::expand_qualified_macro_calls(
+                self.shared,
+                self.pool.strs_mut(),
+                ctx,
+                collected.qualified_calls(),
+                &targets,
+            )?;
+            ctx.set_late_node_end(self.shared.arena.next_id());
+            resolve::register_expanded_decls(&mut collected, generated, self.pool.strs(), ctx)
+                .map_err(|e| self.enrich_resolve_error(ctx, e))?;
+        }
+        resolve::finish_decls(
+            &mut collected,
+            self.shared,
+            ctx,
+            self.pool,
+            base,
+            imported_rules,
+        )
+        .map_err(|e| self.enrich_resolve_error(ctx, e))?;
+        resolve::resolve_with_decls(self.shared, ctx, self.pool, self.modules, &collected)
+            .map_err(|e| self.enrich_resolve_error(ctx, e))?;
+        Ok(())
     }
 
     fn load_child_module(
@@ -307,12 +342,11 @@ impl<'a> Loader<'a> {
             let canonical = resolve_path(&candidate, ctx.document, path)?;
             let gid = self.load_child_module(ctx.document, &canonical, path, kind)?;
 
-            match self.shared.arena.get_mut(node_id) {
-                Node::Inherit { module, .. } | Node::Import { module, .. } => {
-                    *module = Some(gid);
-                }
-                _ => unreachable!(),
-            }
+            expect_pat!(
+                (Node::Inherit { module, .. } | Node::Import { module, .. }),
+                self.shared.arena.get_mut(node_id)
+            );
+            *module = Some(gid);
         }
 
         Ok(())
@@ -446,7 +480,7 @@ impl<'a> Loader<'a> {
                 let Some(module) = self.modules.iter().find(|module| {
                     matches!(
                         module.export(name),
-                        Some(Export::Local(IdentKind::Var(id))) if id == let_id
+                        Some(Export::Variable(id)) if id == let_id
                     )
                 }) else {
                     return e;

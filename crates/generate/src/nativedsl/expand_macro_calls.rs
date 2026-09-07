@@ -7,15 +7,15 @@
 //! (the expression-macro mechanism). Only the rule *name* is materialized here,
 //! since resolve needs it.
 //!
-//! Only local macros are visible at item position; qualified calls aren't
-//! supported (the parser rejects `@mod::foo(...)`).
+//! Local calls are expanded before child modules load. Qualified rule-set calls
+//! are expanded in a late pass once child modules are available.
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ExpandError, NoteMessage,
+    ExpandError, Export, NoteMessage,
     ast::{
         Expansion, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span,
         Spanned,
@@ -48,6 +48,21 @@ pub enum ExpandErrorKind {
     InvalidRuleName(String),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ExpandedRuleDecl {
+    pub name: StrId,
+    pub is_override: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy)]
+struct MacroCallSite {
+    macro_id: MacroId,
+    name_id: StrId,
+    call_id: NodeId,
+    root_slot: usize,
+}
+
 pub fn expand_macro_calls(
     shared: &mut SharedAst,
     strs: &mut StrPool,
@@ -68,6 +83,10 @@ pub fn expand_macro_calls(
         let Node::Call { name, .. } = *shared.arena.get(id) else {
             continue;
         };
+        if matches!(shared.arena.get(name), Node::QualifiedAccess { .. }) {
+            // Qualified calls are resolved and expanded after child modules load.
+            continue;
+        }
         expect_pat!(
             Node::Ident(IdentKind::Unresolved(name_id)),
             *shared.arena.get(name)
@@ -75,13 +94,98 @@ pub fn expand_macro_calls(
         if duplicates.contains(&name_id) {
             continue;
         }
-        expand_one_call(shared, strs, ctx, &macros, id, i, &mut name_buf)?;
+        let Some(&macro_id) = macros.get(&name_id) else {
+            let mut err = ExpandError::new(
+                ExpandErrorKind::UnknownMacro(strs.resolve(name_id).to_owned()),
+                ctx.document,
+                shared.arena.span(name),
+            );
+            if let Some(&cfg_node) = ctx.cfg_dropped.get(&name_id)
+                && let Node::Cfg { name: flag, .. } = *shared.arena.get(cfg_node)
+            {
+                err.add_note(ctx.note(
+                    NoteMessage::GatedByDisabledCfg(strs.resolve(flag).to_owned()),
+                    shared.arena.span(cfg_node),
+                ));
+            }
+            return Err(err);
+        };
+        expand_call_with_id(
+            shared,
+            strs,
+            ctx,
+            MacroCallSite {
+                macro_id,
+                name_id,
+                call_id: id,
+                root_slot: i,
+            },
+            &mut name_buf,
+            None,
+        )?;
     }
-    // A zero-decl expansion contributes nothing, so drop any Call left in place
-    // (a duplicate-skipped call also lands here; resolve rejects the dup anyway).
-    ctx.root_items
-        .retain(|&id| !matches!(shared.arena.get(id), Node::Call { .. }));
+    // A zero-decl expansion contributes nothing, so drop any unqualified Call
+    // left in place. Qualified calls remain for the late expansion pass.
+    ctx.root_items.retain(|&id| match shared.arena.get(id) {
+        Node::Call { name, .. } => matches!(shared.arena.get(*name), Node::QualifiedAccess { .. }),
+        _ => true,
+    });
     Ok(())
+}
+
+/// Expand rule-set calls whose macro is exported by an imported or inherited
+/// module. Child modules must already be loaded before this function runs.
+pub(crate) fn expand_qualified_macro_calls(
+    shared: &mut SharedAst,
+    strs: &mut StrPool,
+    ctx: &mut ModuleContext,
+    calls: &[(usize, NodeId)],
+    targets: &FxHashMap<NodeId, (StrId, Export)>,
+) -> Result<Vec<ExpandedRuleDecl>, ExpandError> {
+    let mut name_buf = String::new();
+    let mut generated = Vec::new();
+    for &(slot, call_id) in calls {
+        let Some(&(member, export)) = targets.get(&call_id) else {
+            // Resolution could not identify a module receiver. Leave the call
+            // for the normal resolver to report as a user-facing error.
+            continue;
+        };
+        expect_pat!(Node::Call { name, .. }, *shared.arena.get(call_id));
+        let macro_id = match export {
+            Export::RuleSetMacro(id) => id,
+            Export::ExpressionMacro(_) => {
+                return Err(ExpandError::new(
+                    ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(member).to_owned()),
+                    ctx.document,
+                    shared.arena.span(name),
+                ));
+            }
+            Export::Variable(_) | Export::Rule(_) => {
+                return Err(ExpandError::new(
+                    ExpandErrorKind::UnknownMacro(strs.resolve(member).to_owned()),
+                    ctx.document,
+                    shared.arena.span(name),
+                ));
+            }
+        };
+        expand_call_with_id(
+            shared,
+            strs,
+            ctx,
+            MacroCallSite {
+                macro_id,
+                name_id: member,
+                call_id,
+                root_slot: slot,
+            },
+            &mut name_buf,
+            Some(&mut generated),
+        )?;
+    }
+    ctx.root_items.retain(|&id| {
+        !targets.contains_key(&id) || !matches!(shared.arena.get(id), Node::Call { .. })
+    });
+    Ok(generated)
 }
 
 /// The local top-level macro table (name -> id) plus the set of names declared
@@ -105,42 +209,22 @@ fn collect_macros(
     (macros, dups)
 }
 
-fn expand_one_call(
+fn expand_call_with_id(
     shared: &mut SharedAst,
     strs: &mut StrPool,
     ctx: &mut ModuleContext,
-    macros: &FxHashMap<StrId, MacroId>,
-    call_id: NodeId,
-    slot: usize,
+    call: MacroCallSite,
     name_buf: &mut String,
+    mut generated: Option<&mut Vec<ExpandedRuleDecl>>,
 ) -> Result<(), ExpandError> {
-    let Node::Call { name, args } = *shared.arena.get(call_id) else {
-        unreachable!()
-    };
+    let MacroCallSite {
+        macro_id,
+        name_id,
+        call_id,
+        root_slot,
+    } = call;
+    expect_pat!(Node::Call { name, args }, *shared.arena.get(call_id));
     let name_span = shared.arena.span(name);
-    expect_pat!(
-        Node::Ident(IdentKind::Unresolved(name_id)),
-        *shared.arena.get(name)
-    );
-    let Some(macro_id) = macros.get(&name_id).copied() else {
-        let mut err = ExpandError::new(
-            ExpandErrorKind::UnknownMacro(strs.resolve(name_id).to_string()),
-            ctx.document,
-            name_span,
-        );
-        // If the name was a cfg-dropped macro, say so - parity with the
-        // GatedByDisabledCfg enrichment a cfg-dropped expression-macro
-        // reference gets at resolve.
-        if let Some(&cfg_node) = ctx.cfg_dropped.get(&name_id)
-            && let Node::Cfg { name: flag, .. } = *shared.arena.get(cfg_node)
-        {
-            err.add_note(ctx.note(
-                NoteMessage::GatedByDisabledCfg(strs.resolve(flag).to_owned()),
-                shared.arena.span(cfg_node),
-            ));
-        }
-        return Err(err);
-    };
     // Snapshot before recursive calls reborrow shared mutably.
     let config = shared.pools.get_macro(macro_id);
     let kind = config.kind;
@@ -148,18 +232,16 @@ fn expand_one_call(
     let body_id = config.body;
     let MacroKind::RuleSet = kind else {
         return Err(ExpandError::new(
-            ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(name_id).to_string()),
+            ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(name_id).to_owned()),
             ctx.document,
             name_span,
         ));
     };
-    let Node::RuleSet(rule_range) = *shared.arena.get(body_id) else {
-        unreachable!()
-    };
+    expect_pat!(Node::RuleSet(rule_range), *shared.arena.get(body_id));
     if args.len as usize != param_count {
         return Err(ExpandError::new(
             ExpandErrorKind::ArgCountMismatch {
-                macro_name: strs.resolve(name_id).to_string(),
+                macro_name: strs.resolve(name_id).to_owned(),
                 expected: param_count,
                 got: args.len as usize,
             },
@@ -212,8 +294,15 @@ fn expand_one_call(
             args,
         });
         let expanded = shared.arena.push(Node::ExpandedRule(expand_id), call_span);
+        if let Some(generated) = generated.as_deref_mut() {
+            generated.push(ExpandedRuleDecl {
+                name,
+                is_override,
+                span: call_span,
+            });
+        }
         if offset == 0 {
-            ctx.root_items[slot] = expanded;
+            ctx.root_items[root_slot] = expanded;
         } else {
             ctx.root_items.push(expanded);
         }

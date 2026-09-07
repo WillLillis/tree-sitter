@@ -516,14 +516,23 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
     fn parse_top_level_call(&mut self) -> ParseResult<NodeId> {
         let at_span = self.expect(TokenKind::At)?;
         let name_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
-        if self.at(TokenKind::ColonColon) {
-            return Err(self.error(ParseErrorKind::QualifiedRuleSetCall));
-        }
         let name = self.strs.intern(name_span.resolve(self.source));
-        let name_id = self
+        let mut name_id = self
             .shared
             .arena
             .push(Node::Ident(IdentKind::Unresolved(name)), name_span);
+        while self.eat(TokenKind::ColonColon).is_some() {
+            let member_span = self.expect_ident_or_kw(ParseErrorKind::ExpectedIdent)?;
+            let member = self.strs.intern(member_span.resolve(self.source));
+            name_id = self.shared.arena.push(
+                Node::QualifiedAccess {
+                    obj: name_id,
+                    member,
+                    member_offset: member_span.start,
+                },
+                name_span.merge(member_span),
+            );
+        }
         self.expect(TokenKind::LParen)?;
         let args = self.comma_sep_children(TokenKind::RParen, Self::parse_expr)?;
         let end = self.expect(TokenKind::RParen)?;

@@ -27,6 +27,31 @@ macro delimited(item: rule_t) rule_t { seq(item, repeat(seq(DELIM, item))) }
 }
 
 #[test]
+fn import_rule_set_macro_at_item_position() {
+    let mut g = parse_with_modules(
+        &[(
+            "rules.tsg",
+            r#"
+                rules make(s: str_t) { rule generated { s } }
+            "#,
+        )],
+        r#"
+            let h = import("rules.tsg")
+            grammar { language: "test", start: generated }
+            @h::make("x")
+        "#,
+    )
+    .unwrap();
+
+    let generated = find_rule(&g, "generated");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, generated, expected);
+}
+
+#[test]
 fn import_member_not_found_suggests_close_name() {
     // A misspelled member access gets a did-you-mean note, like in-module errors.
     let err = dsl_err(
@@ -96,6 +121,21 @@ fn import_call_member_not_macro_points_to_definition() {
     let document = err.document(note.location.document);
     assert_eq!(document.path().file_name().unwrap(), "values.tsg");
     assert_eq!(note.location.span.resolve(document.text()), "let PREC = 1");
+}
+
+#[test]
+fn import_top_level_call_member_not_macro_is_rejected() {
+    let err = expect_err(parse_with_module_documents(
+        &[("values.tsg", "let PREC = 1")],
+        r#"
+            let h = import("values.tsg")
+            grammar { language: "test" }
+            rule program { "x" }
+            @h::PREC()
+        "#,
+    ));
+    let e = assert_err!(err.error, Expand);
+    assert_eq!(e.kind, ExpandErrorKind::UnknownMacro("PREC".into()));
 }
 
 #[test]

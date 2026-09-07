@@ -42,6 +42,34 @@ fn inherit_inline_in_config() {
 }
 
 #[test]
+fn inherited_rule_set_macro_at_item_position() {
+    let mut g = parse_with_modules(
+        &[(
+            "base.tsg",
+            r#"
+                rules make(s: str_t) { rule generated { s } }
+                grammar { language: "base", start: base_rule }
+                rule base_rule { "base" }
+            "#,
+        )],
+        r#"
+            let base = inherit("base.tsg")
+            grammar { language: "derived", inherits: base, start: generated }
+            @base::make("x")
+        "#,
+    )
+    .unwrap();
+
+    let generated = find_rule(&g, "generated");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, generated, expected);
+    assert!(rule_names(&g).contains(&"base_rule"));
+}
+
+#[test]
 fn inherit_config_append_inline() {
     let g = dsl(r#"
         let base = inherit("inherit_base/grammar.tsg")

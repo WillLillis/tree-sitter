@@ -89,8 +89,6 @@ pub enum ParseErrorKind {
     RuleSetBodyRequiresRuleDecl,
     #[error("`@` computed-rule syntax is only valid inside a `rules` macro body")]
     ComputedRuleTopLevel,
-    #[error("qualified calls to rule-set macros are not supported")]
-    QualifiedRuleSetCall,
 }
 
 fn format_arg_count(expected: u8, name: TokenKind, got: usize) -> String {

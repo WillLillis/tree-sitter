@@ -277,13 +277,6 @@ error_tests! { Parse {
         grammar { language: "derived", inherits: base, extras: grammar_config(base, flags) }"#,
         ParseErrorKind::GrammarFieldNotReadable("flags".into())
     }
-    error_qualified_rule_set_call {
-        r#"let h = import("import_helpers/helpers.tsg")
-        grammar { language: "test" }
-        rule program { "x" }
-        @h::pair()"#,
-        ParseErrorKind::QualifiedRuleSetCall
-    }
 }}
 
 #[test]
