@@ -1,4 +1,5 @@
 use super::*;
+use crate::nativedsl::Note;
 use crate::rules::{Precedence, Rule};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -122,6 +123,18 @@ fn computed_ref_error_in_imported_macro_body_blames_defining_document() {
     );
 }
 
+/// Assert the sole note is a `DefinedHere` resolving to `decl` in `file`.
+#[track_caller]
+fn assert_defined_here(err: &NativeDslError, notes: &[Note], file: &str, decl: &str) {
+    let [note] = notes else {
+        panic!("expected one definition note, got {notes:?}");
+    };
+    assert_eq!(note.message, NoteMessage::DefinedHere);
+    let document = err.document(note.location.document);
+    assert_eq!(document.path().file_name().unwrap(), file);
+    assert_eq!(note.location.span.resolve(document.text()), decl);
+}
+
 #[test]
 fn import_member_not_found_suggests_close_name() {
     // A misspelled member access gets a did-you-mean note, like in-module errors.
@@ -205,8 +218,51 @@ fn import_top_level_call_member_not_macro_is_rejected() {
             @h::PREC()
         "#,
     ));
-    let e = assert_err!(err.error, Expand);
-    assert_eq!(e.kind, ExpandErrorKind::UnknownMacro("PREC".into()));
+    let e = assert_err!(&err.error, Expand);
+    assert_eq!(e.kind, ExpandErrorKind::NotARuleSetMacro("PREC".into()));
+    assert_defined_here(&err, e.notes.as_slice(), "values.tsg", "let PREC = 1");
+}
+
+#[test]
+fn import_top_level_call_member_is_rule_is_rejected() {
+    let err = expect_err(parse_with_module_documents(
+        &[("helpers.tsg", r#"rule word { "w" }"#)],
+        r#"
+            let h = import("helpers.tsg")
+            grammar { language: "test" }
+            rule program { "x" }
+            @h::word()
+        "#,
+    ));
+    let e = assert_err!(&err.error, Expand);
+    assert_eq!(e.kind, ExpandErrorKind::NotARuleSetMacro("word".into()));
+    assert_defined_here(
+        &err,
+        e.notes.as_slice(),
+        "helpers.tsg",
+        r#"rule word { "w" }"#,
+    );
+}
+
+#[test]
+fn import_top_level_call_member_is_expression_macro_is_rejected() {
+    let err = expect_err(parse_with_module_documents(
+        &[("helpers.tsg", "macro m(x: rule_t) rule_t { x }")],
+        r#"
+            let h = import("helpers.tsg")
+            grammar { language: "test" }
+            rule program { "x" }
+            @h::m()
+        "#,
+    ));
+    let e = assert_err!(&err.error, Expand);
+    assert_eq!(e.kind, ExpandErrorKind::ExpressionMacroAsItem("m".into()));
+    assert_defined_here(
+        &err,
+        e.notes.as_slice(),
+        "helpers.tsg",
+        "macro m(x: rule_t) rule_t { x }",
+    );
 }
 
 #[test]

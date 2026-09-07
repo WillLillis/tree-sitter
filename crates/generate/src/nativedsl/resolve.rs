@@ -70,6 +70,16 @@ impl CollectedDecls {
     }
 }
 
+/// A top level qualified call's resolved callee.
+#[derive(Clone, Copy)]
+pub(crate) struct QualifiedTarget {
+    /// Module the receiver names, the one declaring `member`.
+    pub module: ModuleId,
+    /// Member name after `::`.
+    pub member: StrId,
+    pub export: Export,
+}
+
 /// What a declared name denotes
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DeclKind {
@@ -171,7 +181,7 @@ pub(crate) fn resolve_qualified_call_targets(
     pool: &RulePool,
     modules: &[Module],
     collected: &CollectedDecls,
-) -> ResolveResult<FxHashMap<NodeId, (StrId, Export)>> {
+) -> ResolveResult<FxHashMap<NodeId, QualifiedTarget>> {
     let rcx = ResolveCtx {
         pools: &shared.pools,
         ctx,
@@ -226,7 +236,14 @@ pub(crate) fn resolve_qualified_call_targets(
         };
         let export =
             resolve_qualified_member(&rcx, &mut shared.arena, module, name, member, member_offset)?;
-        targets.insert(call_id, (member, export));
+        targets.insert(
+            call_id,
+            QualifiedTarget {
+                module,
+                member,
+                export,
+            },
+        );
     }
 
     Ok(targets)

@@ -20,7 +20,7 @@ use super::{
     lexer::is_ident_str,
 };
 use crate::{
-    nativedsl::{DocumentId, DocumentSpan, Module},
+    nativedsl::{DocumentId, DocumentSpan, Module, resolve::QualifiedTarget},
     strpool::{StrId, StrPool},
 };
 
@@ -41,6 +41,8 @@ pub enum ExpandErrorKind {
     },
     #[error("computed rule name expression must be a string literal, parameter, or concat(...)")]
     NonStringInName,
+    #[error("'{0}' is not a rule-set macro and cannot be invoked at top level")]
+    NotARuleSetMacro(String),
     #[error("computed rule name '{0}' is not a valid identifier")]
     InvalidRuleName(String),
 }
@@ -139,35 +141,37 @@ pub(crate) fn expand_qualified_macro_calls(
     ctx: &mut ModuleContext,
     modules: &[Module],
     calls: &[(usize, NodeId)],
-    targets: &FxHashMap<NodeId, (StrId, Export)>,
+    targets: &FxHashMap<NodeId, QualifiedTarget>,
 ) -> Result<Vec<ExpandedRuleDecl>, ExpandError> {
     let mut name_buf = String::new();
     let mut generated = Vec::new();
     for &(slot, call_id) in calls {
-        let Some(&(member, export)) = targets.get(&call_id) else {
+        let Some(&QualifiedTarget {
+            module,
+            member,
+            export,
+        }) = targets.get(&call_id)
+        else {
             // Resolution could not identify a module receiver. Leave the call
             // for the normal resolver to report as a user-facing error.
             continue;
         };
         expect_pat!(Node::Call { name, .. }, *shared.arena.get(call_id));
-        let macro_id = match export {
-            Export::RuleSetMacro(id) => id,
-            Export::ExpressionMacro(_) => {
-                return Err(ExpandError::new(
-                    ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(member).to_owned()),
-                    ctx.document,
-                    shared.arena.span(name),
-                ));
+        // `@name(...)` only invokes a rule set macro, anything else is a kind mismatch.
+        let Export::RuleSetMacro(macro_id) = export else {
+            let member_name = strs.resolve(member).to_owned();
+            let kind = if matches!(export, Export::ExpressionMacro(_)) {
+                ExpandErrorKind::ExpressionMacroAsItem(member_name)
+            } else {
+                ExpandErrorKind::NotARuleSetMacro(member_name)
+            };
+            let mut err = ExpandError::new(kind, ctx.document, shared.arena.span(name));
+            let def = &modules[usize::from(module)];
+            if let Some(decl) = export_decl_span(shared, def, member) {
+                err.add_note(def.ctx().note(NoteMessage::DefinedHere, decl));
             }
-            Export::Variable(_) | Export::Rule(_) => {
-                return Err(ExpandError::new(
-                    ExpandErrorKind::UnknownMacro(strs.resolve(member).to_owned()),
-                    ctx.document,
-                    shared.arena.span(name),
-                ));
-            }
+            return Err(err);
         };
-        let def_mod = shared.pools.get_macro(macro_id).def_module();
         expand_call_with_id(
             shared,
             strs,
@@ -178,7 +182,7 @@ pub(crate) fn expand_qualified_macro_calls(
                 call_id,
                 root_slot: slot,
             },
-            modules[usize::from(def_mod)].ctx().document,
+            modules[usize::from(module)].ctx().document,
             &mut name_buf,
             Some(&mut generated),
         )?;
@@ -386,4 +390,17 @@ fn eval_name_into(
             span,
         )),
     }
+}
+
+/// Span of `member`'s declaration in `module`, to anchor a `DefinedHere` note.
+fn export_decl_span(shared: &SharedAst, module: &Module, member: StrId) -> Option<Span> {
+    module.ctx().root_items.iter().find_map(|&id| {
+        let name = match *shared.arena.get(id) {
+            Node::Let { name, .. } | Node::Rule { name, .. } => name,
+            Node::Macro(macro_id) => shared.pools.get_macro(macro_id).name.value,
+            Node::ExpandedRule(expand_id) => shared.pools.get_expansion(expand_id).name,
+            _ => return None,
+        };
+        (name == member).then(|| shared.arena.span(id))
+    })
 }
