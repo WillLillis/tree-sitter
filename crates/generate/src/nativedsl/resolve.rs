@@ -12,7 +12,8 @@ use thiserror::Error;
 
 use crate::{
     nativedsl::{
-        Export, ImportedRule, LoweredGrammar, Module, ModuleId, NoteMessage, ResolveError,
+        DocumentSpan, Export, ImportedRule, LoweredGrammar, Module, ModuleId, Note, NoteMessage,
+        ResolveError,
         ast::{
             AstPools, IdentKind, MacroId, ModuleContext, Node, NodeArena, NodeId, SharedAst, Span,
             Spanned,
@@ -136,17 +137,17 @@ pub(crate) fn resolve_with_decls(
 
     // Validate computed-name references (`@<expr>`), evaluated under each call's
     // args at expand, against the complete name table.
-    for &Spanned { value: name, span } in &ctx.computed_refs {
+    for &(name, at) in &ctx.computed_refs {
         // Must resolve to a rule: lower emits a NamedSymbol for whatever name
         // this is, so a let/macro match would lower a dangling symbol.
         match rcx.decls.get(&name).map(|d| d.value) {
             Some(DeclKind::Rule) => {}
             Some(_) => Err(ResolveError::new(
                 ResolveErrorKind::ComputedNameNotARule(rcx.strs.resolve(name).to_string()),
-                rcx.ctx.document,
-                span,
+                at.document,
+                at.span,
             ))?,
-            None => Err(unknown_ident_error(&rcx, rcx.strs.resolve(name), span))?,
+            None => Err(unknown_ident_error(&rcx, rcx.strs.resolve(name), at))?,
         }
     }
 
@@ -160,9 +161,10 @@ pub(crate) fn resolve_with_decls(
 
 /// Resolve the targets of top-level qualified calls before late expansion.
 ///
-/// This uses the same object-alias and export table lookup as the normal resolve
-/// walk, but records each target's export kind so rule-set calls can be expanded
-/// without duplicating module resolution in the expansion pass.
+/// Receivers that cannot be resolved yet, or that do not name a module, are left
+/// deferred. No target is recorded and the call survives into `root_items`, where
+/// `resolve_with_decls` and typecheck diagnose it against the full declaration
+/// table.
 pub(crate) fn resolve_qualified_call_targets(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
@@ -192,10 +194,34 @@ pub(crate) fn resolve_qualified_call_targets(
         );
 
         // Resolve nested qualified accesses and the initial module alias before
-        // looking up the final member.
-        resolve_expr(&mut shared.arena, &rcx, obj, &mut stack)?;
-        let Some(module) = resolve_module_id(&shared.arena, obj) else {
-            // User error, let it propagate to resolve/typecheck diagnostics.
+        // looking up the final member. Failures defer to be caught by `resolve_with_decls`
+        // and typecheck against the full declaration table.
+        if resolve_expr(&mut shared.arena, &rcx, obj, &mut stack).is_err() {
+            continue;
+        }
+        // Follow `let` aliases to the underlying import/inherit, resolving each
+        // value on demand: this pass runs before resolve_with_decls, so alias
+        // values may still be unresolved. A chain longer than the arena has
+        // cycled. Let typecheck report the cycle on the surviving call.
+        let mut module = None;
+        let mut target = obj;
+        for _ in 0..shared.arena.len() {
+            match *shared.arena.get(target) {
+                Node::Ident(IdentKind::Var(let_id)) => {
+                    expect_pat!(Node::Let { value, .. }, *shared.arena.get(let_id));
+                    if resolve_expr(&mut shared.arena, &rcx, value, &mut stack).is_err() {
+                        break;
+                    }
+                    target = value;
+                }
+                Node::Inherit { module: idx, .. } | Node::Import { module: idx, .. } => {
+                    module = idx;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let Some(module) = module else {
             continue;
         };
         let export =
@@ -522,6 +548,13 @@ fn resolve_item(
         &Node::Rule { body: inner, .. } | &Node::Let { value: inner, .. } => {
             resolve_expr(arena, rcx, inner, stack)
         }
+        &Node::Call { name, args } => {
+            resolve_expr(arena, rcx, name, stack)?;
+            for &arg in rcx.pools.child_slice(args) {
+                resolve_expr(arena, rcx, arg, stack)?;
+            }
+            Ok(())
+        }
         // The template body is shared and resolved once via the Macro item,
         // here we only resolve the call's args (module-scope expressions).
         &Node::ExpandedRule(expand_id) => {
@@ -599,8 +632,8 @@ fn resolve_node(
         // any remaining `Ident(Unresolved)` is a top-level reference.
         Node::Ident(IdentKind::Unresolved(name)) => {
             let Some(&Spanned { value: kind, .. }) = rcx.decls.get(&name) else {
-                let span = arena.span(id);
-                return Err(unknown_ident_error(rcx, rcx.strs.resolve(name), span));
+                let at = DocumentSpan::new(rcx.ctx.document, arena.span(id));
+                return Err(unknown_ident_error(rcx, rcx.strs.resolve(name), at));
             };
             arena.resolve_as(id, kind.to_ident(name));
             None
@@ -785,8 +818,8 @@ pub(super) fn resolve_module_ref(arena: &NodeArena, mut obj: NodeId) -> Option<N
     None
 }
 
-/// Build an `UnknownIdentifier` error, attaching a "did you mean" note if appropriate
-fn unknown_ident_error(rcx: &ResolveCtx, name: &str, span: Span) -> ResolveError {
+/// Build an `UnknownIdentifier` error, attaching a "did you mean" note if appropriate.
+fn unknown_ident_error(rcx: &ResolveCtx, name: &str, at: DocumentSpan) -> ResolveError {
     let kind = ResolveErrorKind::UnknownIdentifier(name.to_string());
     let candidates = rcx.decls.keys().map(|&id| rcx.strs.resolve(id)).chain(
         super::lexer::TokenKind::EXPRESSION_KEYWORD_NAMES
@@ -796,11 +829,13 @@ fn unknown_ident_error(rcx: &ResolveCtx, name: &str, span: Span) -> ResolveError
     if let Some(suggestion) = suggest_name(name, candidates) {
         return ResolveError::with_note(
             kind,
-            rcx.ctx.document,
-            span,
-            rcx.ctx
-                .note(NoteMessage::DidYouMean(suggestion.to_string()), span),
+            at.document,
+            at.span,
+            Note {
+                message: NoteMessage::DidYouMean(suggestion.to_string()),
+                location: at,
+            },
         );
     }
-    ResolveError::new(kind, rcx.ctx.document, span)
+    ResolveError::new(kind, at.document, at.span)
 }

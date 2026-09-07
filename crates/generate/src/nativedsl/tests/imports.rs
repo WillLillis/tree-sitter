@@ -31,9 +31,9 @@ fn import_rule_set_macro_at_item_position() {
     let mut g = parse_with_modules(
         &[(
             "rules.tsg",
-            r#"
+            r"
                 rules make(s: str_t) { rule generated { s } }
-            "#,
+            ",
         )],
         r#"
             let h = import("rules.tsg")
@@ -49,6 +49,77 @@ fn import_rule_set_macro_at_item_position() {
         r_str!(p, "x")
     };
     assert_rule_eq(&g.pool, generated, expected);
+}
+
+#[test]
+fn import_rule_set_macro_through_module_alias_at_item_position() {
+    let mut g = parse_with_modules(
+        &[(
+            "rules.tsg",
+            r"
+                rules make(s: str_t) { rule generated { s } }
+            ",
+        )],
+        r#"
+            let h = import("rules.tsg")
+            let g = h
+            grammar { language: "test", start: generated }
+            @g::make("x")
+        "#,
+    )
+    .unwrap();
+
+    let generated = find_rule(&g, "generated");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, generated, expected);
+}
+
+#[test]
+fn expand_error_in_imported_macro_body_blames_defining_document() {
+    let err = expect_err(parse_with_module_documents(
+        &[(
+            "helpers.tsg",
+            r#"rules make(n: str_t) { rule @concat(n, "-x") { "y" } }"#,
+        )],
+        r#"
+            let h = import("helpers.tsg")
+            grammar { language: "test" }
+            rule program { "p" }
+            @h::make("1bad")
+        "#,
+    ));
+    let e = assert_err!(&err.error, Expand);
+    assert_eq!(e.kind, ExpandErrorKind::InvalidRuleName("1bad-x".into()));
+    let doc = err.document(e.document);
+    assert_eq!(doc.path().file_name().unwrap(), "helpers.tsg");
+    assert_eq!(e.span.unwrap().resolve(doc.text()), r#"concat(n, "-x")"#);
+}
+
+#[test]
+fn computed_ref_error_in_imported_macro_body_blames_defining_document() {
+    let err = expect_err(parse_with_module_documents(
+        &[(
+            "helpers.tsg",
+            r#"rules make(n: str_t) { rule @n { seq("a", @concat(n, "_tail")) } }"#,
+        )],
+        r#"
+            let h = import("helpers.tsg")
+            grammar { language: "test" }
+            rule program { "p" }
+            @h::make("x")
+        "#,
+    ));
+    let e = assert_err!(&err.error, Resolve);
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("x_tail".into()));
+    let doc = err.document(e.document);
+    assert_eq!(doc.path().file_name().unwrap(), "helpers.tsg");
+    assert_eq!(
+        e.span.unwrap().resolve(doc.text()),
+        r#"@concat(n, "_tail")"#
+    );
 }
 
 #[test]
@@ -136,6 +207,195 @@ fn import_top_level_call_member_not_macro_is_rejected() {
     ));
     let e = assert_err!(err.error, Expand);
     assert_eq!(e.kind, ExpandErrorKind::UnknownMacro("PREC".into()));
+}
+
+#[test]
+fn top_level_qualified_call_with_scalar_receiver_is_rejected() {
+    let e = assert_err!(
+        dsl_err(
+            r#"
+                let value = 1
+                grammar { language: "test" }
+                rule program { "x" }
+                @value::make()
+            "#,
+        ),
+        Type
+    );
+    assert!(matches!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::INT,
+        }
+    ));
+}
+
+#[test]
+fn top_level_qualified_call_with_rule_receiver_is_rejected() {
+    let e = assert_err!(
+        dsl_err(
+            r#"
+                grammar { language: "test" }
+                rule program { "x" }
+                @program::make()
+            "#,
+        ),
+        Type
+    );
+    assert!(matches!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::RULE,
+        }
+    ));
+}
+
+#[test]
+fn top_level_qualified_call_with_non_module_middle_segment_is_rejected() {
+    let err = expect_err(parse_with_modules(
+        &[("rules.tsg", r#"rules make() { rule generated { "x" } }"#)],
+        r#"
+            let h = import("rules.tsg")
+            grammar { language: "test" }
+            rule program { "x" }
+            @h::make::more()
+        "#,
+    ));
+    let e = assert_err!(err, Type);
+    assert_eq!(e.kind, TypeErrorKind::MacroUsedAsValue("h::make".into()));
+}
+
+#[test]
+fn top_level_qualified_call_with_undeclared_receiver_is_rejected() {
+    let e = assert_err!(
+        dsl_err(
+            r#"
+                grammar { language: "test" }
+                rule program { "x" }
+                @undef::foo()
+            "#,
+        ),
+        Resolve
+    );
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("undef".into()));
+}
+
+/// `r` is an inherited rule name, i.e. one only `finish_decls` registers.
+const INHERIT_BASE: &str = r#"
+    grammar { language: "base", start: r }
+    rule r { "b" }
+"#;
+
+#[test]
+fn top_level_qualified_call_with_inherited_rule_receiver_is_rejected() {
+    // Deferring the receiver gets this instead of a bogus UnknownIdentifier.
+    let err = expect_err(parse_with_modules(
+        &[("base.tsg", INHERIT_BASE)],
+        r#"
+            let base = inherit("base.tsg")
+            grammar { language: "derived", inherits: base }
+            rule extra { r }
+            @r::make("x")
+        "#,
+    ));
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::RULE,
+        }
+    );
+}
+
+#[test]
+fn top_level_qualified_call_with_alias_to_inherited_rule_is_rejected() {
+    let err = expect_err(parse_with_modules(
+        &[("base.tsg", INHERIT_BASE)],
+        r#"
+            let base = inherit("base.tsg")
+            let g = r
+            grammar { language: "derived", inherits: base }
+            rule extra { r }
+            @g::make("x")
+        "#,
+    ));
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::RULE,
+        }
+    );
+}
+
+#[test]
+fn top_level_qualified_call_with_external_token_receiver_is_rejected() {
+    let e = assert_err!(
+        dsl_err(
+            r#"
+                grammar { language: "test", externals: [tok] }
+                rule program { "x" }
+                @tok::foo()
+            "#,
+        ),
+        Type
+    );
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::RULE,
+        }
+    );
+}
+
+#[test]
+fn qualified_call_on_inherited_rule_in_expression_position_matches_item_position() {
+    let err = expect_err(parse_with_modules(
+        &[("base.tsg", INHERIT_BASE)],
+        r#"
+            let base = inherit("base.tsg")
+            grammar { language: "derived", inherits: base }
+            rule extra { r::make("x") }
+        "#,
+    ));
+    let e = assert_err!(err, Type);
+    assert_eq!(
+        e.kind,
+        TypeErrorKind::TypeMismatch {
+            expected: Ty::ANY_MODULE,
+            got: Ty::RULE,
+        }
+    );
+}
+
+#[test]
+fn import_rule_set_macro_through_module_reexport_at_item_position() {
+    // `m`'s value is a `h::sub` access the on-demand resolve rewrites mid-walk.
+    let mut g = parse_with_modules(
+        &[
+            ("sub.tsg", "rules make(s: str_t) { rule generated { s } }"),
+            ("rules.tsg", r#"let sub = import("sub.tsg")"#),
+        ],
+        r#"
+            let h = import("rules.tsg")
+            let m = h::sub
+            grammar { language: "test", start: generated }
+            @m::make("x")
+        "#,
+    )
+    .unwrap();
+
+    let generated = find_rule(&g, "generated");
+    let expected = {
+        let p = &mut g.pool;
+        r_str!(p, "x")
+    };
+    assert_rule_eq(&g.pool, generated, expected);
 }
 
 #[test]

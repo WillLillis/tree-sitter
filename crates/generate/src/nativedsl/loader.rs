@@ -228,6 +228,7 @@ impl<'a> Loader<'a> {
                 self.shared,
                 self.pool.strs_mut(),
                 ctx,
+                self.modules,
                 collected.qualified_calls(),
                 &targets,
             )?;

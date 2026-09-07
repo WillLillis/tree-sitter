@@ -16,14 +16,11 @@ use thiserror::Error;
 
 use super::{
     ExpandError, Export, NoteMessage,
-    ast::{
-        Expansion, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span,
-        Spanned,
-    },
+    ast::{Expansion, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span},
     lexer::is_ident_str,
 };
 use crate::{
-    nativedsl::DocumentId,
+    nativedsl::{DocumentId, DocumentSpan, Module},
     strpool::{StrId, StrPool},
 };
 
@@ -120,6 +117,7 @@ pub fn expand_macro_calls(
                 call_id: id,
                 root_slot: i,
             },
+            ctx.document,
             &mut name_buf,
             None,
         )?;
@@ -139,6 +137,7 @@ pub(crate) fn expand_qualified_macro_calls(
     shared: &mut SharedAst,
     strs: &mut StrPool,
     ctx: &mut ModuleContext,
+    modules: &[Module],
     calls: &[(usize, NodeId)],
     targets: &FxHashMap<NodeId, (StrId, Export)>,
 ) -> Result<Vec<ExpandedRuleDecl>, ExpandError> {
@@ -168,6 +167,7 @@ pub(crate) fn expand_qualified_macro_calls(
                 ));
             }
         };
+        let def_mod = shared.pools.get_macro(macro_id).def_module();
         expand_call_with_id(
             shared,
             strs,
@@ -178,6 +178,7 @@ pub(crate) fn expand_qualified_macro_calls(
                 call_id,
                 root_slot: slot,
             },
+            modules[usize::from(def_mod)].ctx().document,
             &mut name_buf,
             Some(&mut generated),
         )?;
@@ -214,6 +215,8 @@ fn expand_call_with_id(
     strs: &mut StrPool,
     ctx: &mut ModuleContext,
     call: MacroCallSite,
+    // document where the macro was defined
+    def_document: DocumentId,
     name_buf: &mut String,
     mut generated: Option<&mut Vec<ExpandedRuleDecl>>,
 ) -> Result<(), ExpandError> {
@@ -275,7 +278,7 @@ fn expand_call_with_id(
                 let name = eval_name(
                     shared,
                     strs,
-                    ctx.document,
+                    def_document,
                     args_start,
                     name_expr,
                     name_span,
@@ -313,8 +316,9 @@ fn expand_call_with_id(
     for &sym_ref in shared.pools.child_slice(sym_refs) {
         expect_pat!(Node::SymRef { expr }, *shared.arena.get(sym_ref));
         let span = shared.arena.span(sym_ref);
-        let name = eval_name(shared, strs, ctx.document, args_start, expr, span, name_buf)?;
-        ctx.computed_refs.push(Spanned::new(name, span));
+        let name = eval_name(shared, strs, def_document, args_start, expr, span, name_buf)?;
+        ctx.computed_refs
+            .push((name, DocumentSpan::new(def_document, span)));
     }
     Ok(())
 }

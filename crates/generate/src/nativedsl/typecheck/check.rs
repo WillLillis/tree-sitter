@@ -140,6 +140,10 @@ pub(super) fn check_item(cx: Cx<'_>, id: NodeId, env: &mut TypeEnv) -> TypeResul
             }
             Ok(())
         }
+        Node::Call { .. } => {
+            type_of(cx, id, env, Constraint::None)?;
+            Ok(())
+        }
         Node::Forward { .. } => Ok(()),
         // Dispatcher only calls this for top-level item nodes.
         _ => unreachable!(),

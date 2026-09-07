@@ -3,7 +3,7 @@
 
 use rustc_hash::FxHashMap;
 
-use super::{Node, NodeArena, NodeId, Span, Spanned};
+use super::{Node, NodeArena, NodeId, Span};
 use crate::{
     nativedsl::{DocumentId, DocumentSpan, ModuleId, Note, NoteMessage, typecheck::Ty},
     strpool::StrId,
@@ -108,8 +108,9 @@ pub struct ModuleContext {
     /// node id. Drives `GatedByDisabledCfg` enrichment.
     pub cfg_dropped: FxHashMap<StrId, NodeId>,
     /// Computed-name references (`@<expr>`) from rule-set macro instances,
-    /// evaluated under each call's args at expand time, paired with their span.
-    pub computed_refs: Vec<Spanned<StrId>>,
+    /// evaluated under each call's args at expand time. The macro's defining
+    /// module is included alongside.
+    pub computed_refs: Vec<(StrId, DocumentSpan)>,
     /// Optional `let name: ty` annotations, keyed by the `Node::Let` id. Stored
     pub let_types: FxHashMap<NodeId, Ty>,
     /// Half-open range of nodes this module owns in the shared arena.
