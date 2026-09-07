@@ -258,12 +258,20 @@ fn insert_decl(
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
     match decls.entry(name) {
-        Entry::Occupied(entry) => Err(ResolveError::with_note(
-            ResolveErrorKind::DuplicateDeclaration(strs.resolve(name).to_string()),
-            ctx.document,
-            span,
-            ctx.note(NoteMessage::FirstDefinedHere, entry.get().span),
-        )),
+        Entry::Occupied(entry) => {
+            let existing = entry.get().span;
+            let (duplicate, first) = if existing.start > span.start {
+                (existing, span)
+            } else {
+                (span, existing)
+            };
+            Err(ResolveError::with_note(
+                ResolveErrorKind::DuplicateDeclaration(strs.resolve(name).to_string()),
+                ctx.document,
+                duplicate,
+                ctx.note(NoteMessage::FirstDefinedHere, first),
+            ))
+        }
         Entry::Vacant(entry) => {
             entry.insert(Spanned::new(kind, span));
             Ok(())

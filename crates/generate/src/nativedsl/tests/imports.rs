@@ -455,6 +455,33 @@ fn import_rule_set_macro_through_module_reexport_at_item_position() {
 }
 
 #[test]
+fn qualified_call_before_colliding_rule_blames_the_later_rule() {
+    let src = "let h = import(\"helpers.tsg\")\n\
+               grammar { language: \"test\", start: program }\n\
+               @h::make(\"x\")\n\
+               rule generated { \"y\" }\n\
+               rule program { \"x\" }\n";
+    let err = expect_err(parse_with_module_documents(
+        &[(
+            "helpers.tsg",
+            "rules make(s: str_t) { rule generated { s } }",
+        )],
+        src,
+    ));
+    let e = assert_err!(&err.error, Resolve);
+    assert_eq!(
+        e.kind,
+        ResolveErrorKind::DuplicateDeclaration("generated".into())
+    );
+    let [note] = e.notes.as_slice() else {
+        panic!("expected one note, got {:?}", e.notes);
+    };
+    assert_eq!(note.message, NoteMessage::FirstDefinedHere);
+    assert_eq!(e.span.unwrap().resolve(src), "rule generated { \"y\" }");
+    assert_eq!(note.location.span.resolve(src), "@h::make(\"x\")");
+}
+
+#[test]
 fn error_import_disallowed_items() {
     for (content, expected) in [
         (
