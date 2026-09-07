@@ -1,5 +1,4 @@
-//! Inlines top-level rule-set macro invocations between `apply_cfg` and
-//! `resolve`.
+//! Inlines top-level rule-set macro invocations.
 //!
 //! Each `Node::Call` at item position becomes one `Node::ExpandedRule` per decl
 //! in the macro's body. Each `ExpandedRule` records the shared body and the call's
@@ -152,8 +151,8 @@ pub(crate) fn expand_qualified_macro_calls(
             export,
         }) = targets.get(&call_id)
         else {
-            // Resolution could not identify a module receiver. Leave the call
-            // for the normal resolver to report as a user-facing error.
+            // The receiver never resolved to a module. The call stays in
+            // `root_items` for resolve and typecheck to diagnose.
             continue;
         };
         expect_pat!(Node::Call { name, .. }, *shared.arena.get(call_id));

@@ -1,10 +1,14 @@
 //! Pre-typecheck name resolution for the native grammar DSL.
 //!
-//! Two passes over the parsed AST:
+//! The loader runs these phases over one module, in order:
 //!
-//! - [`collect_decls`] gathers top-level names (rules, macros, lets, externals, inherited rules)
-//! - [`resolve`] rewrites `Ident(Unresolved)` nodes to `Ident(Rule | Var(_) | Macro(_))` and
-//!   resolves `mod::name` accesses against imported modules.
+//! - [`collect_decls`] registers the names the module's own items declare
+//! - [`resolve_qualified_call_targets`] resolves the callee of every top-level
+//!   `@mod::name(..)`, which `expand_macro_calls` then inlines
+//! - [`register_expanded_decls`] registers the names those expansions produced
+//! - [`finish_decls`] adds inherited, imported, external, and forward names
+//! - [`resolve_with_decls`] rewrites `Ident(Unresolved)` nodes to
+//!   `Ident(Rule | Var(_) | Macro(_))` and resolves `mod::name` accesses
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -109,7 +113,11 @@ struct ResolveCtx<'a> {
     modules: &'a [Module],
 }
 
-/// Resolve all names in a module.
+/// Run [`collect_decls`], [`finish_decls`], and [`resolve_with_decls`] over a
+/// module.
+///
+/// Resolving a top-level `@mod::name(..)` needs its child module loaded, so
+/// those items are left untouched in `root_items`.
 ///
 /// # Errors
 ///

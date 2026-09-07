@@ -196,7 +196,7 @@ pub enum Module {
 /// What a name exported by a module resolves to
 #[derive(Clone, Copy, Debug)]
 pub enum Export {
-    /// An AST-level `let` binding (resolved to `Indent(Var)`).
+    /// An AST-level `let` binding (resolves to `Ident(Var)`).
     Variable(NodeId),
     /// An expression macro (resolves to `Ident(Macro)`).
     ExpressionMacro(MacroId),
