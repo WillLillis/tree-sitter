@@ -454,8 +454,56 @@ impl<'a> Loader<'a> {
         e
     }
 
+    fn enrich_type_error(&self, current: &ModuleContext, e: TypeError) -> TypeError {
+        match e.kind {
+            TypeErrorKind::UndefinedMacro(_) => self.note_undefined_macro(current, e),
+            TypeErrorKind::ArgCountMismatch { .. }
+            | TypeErrorKind::TypeMismatch { .. }
+            | TypeErrorKind::ConstraintMismatch { .. } => self.note_macro_definition(current, e),
+            _ => e,
+        }
+    }
+
+    /// Point at the macro whose signature the call violated. The parameter list
+    /// that rejected the call is not visible from the call site, and for an
+    /// imported macro it is not even in the same file.
+    fn note_macro_definition(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
+        let Some(span) = e.span else {
+            return e;
+        };
+        let arena = &self.shared.arena;
+        let Some(macro_id) = current.iter_own_nodes(arena).find_map(|(id, node)| {
+            let Node::Call { name, args } = *node else {
+                return None;
+            };
+            let Node::Ident(IdentKind::Macro(macro_id)) = *arena.get(name) else {
+                return None;
+            };
+            // An arity error spans the call, an argument error spans the argument.
+            let matched = arena.span(id) == span
+                || self
+                    .shared
+                    .pools
+                    .child_slice(args)
+                    .iter()
+                    .any(|&arg| arena.span(arg) == span);
+            matched.then_some(macro_id)
+        }) else {
+            return e;
+        };
+        let config = self.shared.pools.get_macro(macro_id);
+        // The defining module is absent from `modules` while it is itself being
+        // checked, which is exactly the case where the macro is local.
+        let def = self
+            .modules
+            .get(usize::from(config.def_module()))
+            .map_or(current, Module::ctx);
+        e.add_note(def.note(NoteMessage::DefinedHere, config.name.span));
+        e
+    }
+
     /// Attach a cross-module definition note when a qualified call targets a non-macro export.
-    fn enrich_type_error(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
+    fn note_undefined_macro(&self, current: &ModuleContext, mut e: TypeError) -> TypeError {
         let TypeErrorKind::UndefinedMacro(_) = e.kind else {
             return e;
         };
