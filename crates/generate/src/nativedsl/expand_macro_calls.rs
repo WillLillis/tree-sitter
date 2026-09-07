@@ -66,16 +66,15 @@ pub fn expand_macro_calls(
     strs: &mut StrPool,
     ctx: &mut ModuleContext,
 ) -> Result<(), ExpandError> {
-    // A name declared by more than one top-level macro is rejected by resolve
-    // as a duplicate. Skip expanding its calls so we don't surface an arbitrary
-    // arg-count or kind error against whichever definition the macro table
-    // kept - collect_decls rejects the dup before pass 2 runs.
-    let (macros, duplicates) = collect_macros(shared, ctx);
     // Walk only the original indices. Each Call writes its first expanded rule
-    // into its own slot; the rest are pushed to the end. A call whose set has
+    // into its own slot. The rest are pushed to the end. A call whose set has
     // zero decls (empty or fully cfg-gated) leaves its Call node in the slot.
     let original_len = ctx.root_items.len();
     let mut name_buf = String::new();
+    // Built on the first local call
+    let mut tables = None;
+    // Set when a call is left in `root_items` unexpanded.
+    let mut unexpanded = false;
     for i in 0..original_len {
         let id = ctx.root_items[i];
         let Node::Call { name, .. } = *shared.arena.get(id) else {
@@ -89,7 +88,11 @@ pub fn expand_macro_calls(
             Node::Ident(IdentKind::Unresolved(name_id)),
             *shared.arena.get(name)
         );
+        let (macros, duplicates) = tables.get_or_insert_with(|| collect_macros(shared, ctx));
+        // A name declared by more than one top-level macro is rejected by resolve
+        // as a duplicate. Skip expanding its calls and let `collect_decls` reject.
         if duplicates.contains(&name_id) {
+            unexpanded = true;
             continue;
         }
         let Some(&macro_id) = macros.get(&name_id) else {
@@ -108,7 +111,7 @@ pub fn expand_macro_calls(
             }
             return Err(err);
         };
-        expand_call_with_id(
+        let n_decls = expand_call_with_id(
             shared,
             strs,
             ctx,
@@ -122,13 +125,18 @@ pub fn expand_macro_calls(
             &mut name_buf,
             None,
         )?;
+        unexpanded |= n_decls == 0;
     }
     // A zero-decl expansion contributes nothing, so drop any unqualified Call
     // left in place. Qualified calls remain for the late expansion pass.
-    ctx.root_items.retain(|&id| match shared.arena.get(id) {
-        Node::Call { name, .. } => matches!(shared.arena.get(*name), Node::QualifiedAccess { .. }),
-        _ => true,
-    });
+    if unexpanded {
+        ctx.root_items.retain(|&id| match shared.arena.get(id) {
+            Node::Call { name, .. } => {
+                matches!(shared.arena.get(*name), Node::QualifiedAccess { .. })
+            }
+            _ => true,
+        });
+    }
     Ok(())
 }
 
@@ -213,6 +221,8 @@ fn collect_macros(
     (macros, dups)
 }
 
+/// Materialize one `ExpandedRule` per decl in the macro's body, returning how
+/// many.
 fn expand_call_with_id(
     shared: &mut SharedAst,
     strs: &mut StrPool,
@@ -222,7 +232,7 @@ fn expand_call_with_id(
     def_document: DocumentId,
     name_buf: &mut String,
     mut generated: Option<&mut Vec<ExpandedRuleDecl>>,
-) -> Result<(), ExpandError> {
+) -> Result<u16, ExpandError> {
     let MacroCallSite {
         macro_id,
         name_id,
@@ -323,7 +333,7 @@ fn expand_call_with_id(
         ctx.computed_refs
             .push((name, DocumentSpan::new(def_document, span)));
     }
-    Ok(())
+    Ok(rule_range.len)
 }
 
 /// Accepts string literals, macro params (resolved into args), and
