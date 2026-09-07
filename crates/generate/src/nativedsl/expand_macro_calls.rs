@@ -47,13 +47,6 @@ pub enum ExpandErrorKind {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct ExpandedRuleDecl {
-    pub name: StrId,
-    pub is_override: bool,
-    pub span: Span,
-}
-
-#[derive(Clone, Copy)]
 struct MacroCallSite {
     macro_id: MacroId,
     name_id: StrId,
@@ -123,7 +116,6 @@ pub fn expand_macro_calls(
             },
             ctx.document,
             &mut name_buf,
-            None,
         )?;
         unexpanded |= n_decls == 0;
     }
@@ -142,6 +134,9 @@ pub fn expand_macro_calls(
 
 /// Expand rule-set calls whose macro is exported by an imported or inherited
 /// module. Child modules must already be loaded before this function runs.
+///
+/// The rules produced are the `ExpandedRule` nodes pushed here, which
+/// `register_expanded_decls` reads back off the module's late node range.
 pub(crate) fn expand_qualified_macro_calls(
     shared: &mut SharedAst,
     strs: &mut StrPool,
@@ -149,9 +144,8 @@ pub(crate) fn expand_qualified_macro_calls(
     modules: &[Module],
     calls: &[(usize, NodeId)],
     targets: &FxHashMap<NodeId, QualifiedTarget>,
-) -> Result<Vec<ExpandedRuleDecl>, ExpandError> {
+) -> Result<(), ExpandError> {
     let mut name_buf = String::new();
-    let mut generated = Vec::new();
     for &(slot, call_id) in calls {
         let Some(&QualifiedTarget {
             module,
@@ -191,13 +185,12 @@ pub(crate) fn expand_qualified_macro_calls(
             },
             modules[usize::from(module)].ctx().document,
             &mut name_buf,
-            Some(&mut generated),
         )?;
     }
     ctx.root_items.retain(|&id| {
         !targets.contains_key(&id) || !matches!(shared.arena.get(id), Node::Call { .. })
     });
-    Ok(generated)
+    Ok(())
 }
 
 /// The local top-level macro table (name -> id) plus the set of names declared
@@ -231,7 +224,6 @@ fn expand_call_with_id(
     // document where the macro was defined
     def_document: DocumentId,
     name_buf: &mut String,
-    mut generated: Option<&mut Vec<ExpandedRuleDecl>>,
 ) -> Result<u16, ExpandError> {
     let MacroCallSite {
         macro_id,
@@ -310,13 +302,6 @@ fn expand_call_with_id(
             args,
         });
         let expanded = shared.arena.push(Node::ExpandedRule(expand_id), call_span);
-        if let Some(generated) = generated.as_deref_mut() {
-            generated.push(ExpandedRuleDecl {
-                name,
-                is_override,
-                span: call_span,
-            });
-        }
         if offset == 0 {
             ctx.root_items[root_slot] = expanded;
         } else {

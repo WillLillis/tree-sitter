@@ -53,6 +53,37 @@ fn import_rule_set_macro_at_item_position() {
 }
 
 #[test]
+fn import_multi_rule_set_macro_at_item_position() {
+    let mut g = parse_with_modules(
+        &[(
+            "rules.tsg",
+            r#"
+                rules pair(s: str_t) {
+                    rule @concat("a_", s) { "x" }
+                    rule @concat("b_", s) { seq(@concat("a_", s), "y") }
+                }
+            "#,
+        )],
+        r#"
+            let h = import("rules.tsg")
+            grammar { language: "test", start: a_foo }
+            rule uses_b { b_foo }
+            @h::pair("foo")
+        "#,
+    )
+    .unwrap();
+
+    let names: Vec<&str> = g.variables.iter().map(|v| g.pool.resolve(v.name)).collect();
+    assert_eq!(names, vec!["a_foo", "uses_b", "b_foo"]);
+    let actual = find_rule(&g, "b_foo");
+    let expected = {
+        let p = &mut g.pool;
+        r_seq!(p, [r_sym!(p, "a_foo"), r_str!(p, "y")])
+    };
+    assert_rule_eq(&g.pool, actual, expected);
+}
+
+#[test]
 fn import_rule_set_macro_through_module_alias_at_item_position() {
     let mut g = parse_with_modules(
         &[(

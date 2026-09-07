@@ -23,7 +23,6 @@ use crate::{
             Spanned,
         },
         diagnostic::suggest_name,
-        expand_macro_calls::ExpandedRuleDecl,
     },
     rules::{Rule, RulePool},
     strpool::{StrId, StrPool},
@@ -477,21 +476,29 @@ pub(crate) fn finish_decls(
     Ok(())
 }
 
+/// Register the rules that qualified rule-set expansion produced, reading them
+/// back off the nodes it pushed. Runs before [`finish_decls`], so a generated
+/// `override rule` still claims its inherited name.
 pub(crate) fn register_expanded_decls(
     collected: &mut CollectedDecls,
-    generated: impl IntoIterator<Item = ExpandedRuleDecl>,
+    shared: &SharedAst,
     strs: &StrPool,
     ctx: &ModuleContext,
 ) -> ResolveResult<()> {
-    for ExpandedRuleDecl {
-        name,
-        is_override,
-        span,
-    } in generated
-    {
-        insert_decl(&mut collected.decls, strs, name, DeclKind::Rule, span, ctx)?;
-        if is_override {
-            collected.override_names.insert(name);
+    for (id, node) in ctx.late_nodes(&shared.arena) {
+        expect_pat!(Node::ExpandedRule(expand_id), *node);
+        let exp = shared.pools.get_expansion(expand_id);
+        let span = shared.arena.span(id);
+        insert_decl(
+            &mut collected.decls,
+            strs,
+            exp.name,
+            DeclKind::Rule,
+            span,
+            ctx,
+        )?;
+        if exp.is_override {
+            collected.override_names.insert(exp.name);
         }
     }
     Ok(())

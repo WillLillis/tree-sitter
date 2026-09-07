@@ -224,7 +224,7 @@ impl<'a> Loader<'a> {
             )
             .map_err(|e| self.enrich_resolve_error(ctx, e))?;
             ctx.start_late_nodes(self.shared.arena.next_id());
-            let generated = expand_macro_calls::expand_qualified_macro_calls(
+            expand_macro_calls::expand_qualified_macro_calls(
                 self.shared,
                 self.pool.strs_mut(),
                 ctx,
@@ -233,7 +233,7 @@ impl<'a> Loader<'a> {
                 &targets,
             )?;
             ctx.set_late_node_end(self.shared.arena.next_id());
-            resolve::register_expanded_decls(&mut collected, generated, self.pool.strs(), ctx)
+            resolve::register_expanded_decls(&mut collected, self.shared, self.pool.strs(), ctx)
                 .map_err(|e| self.enrich_resolve_error(ctx, e))?;
         }
         resolve::finish_decls(

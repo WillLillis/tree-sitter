@@ -171,13 +171,22 @@ impl ModuleContext {
         &self,
         arena: &'a NodeArena,
     ) -> impl Iterator<Item = (NodeId, &'a Node)> {
-        let primary = arena.iter_range(self.node_range.clone());
-        let late = self
-            .late_node_range
+        arena
+            .iter_range(self.node_range.clone())
+            .chain(self.late_nodes(arena))
+    }
+
+    /// Iterate the nodes this module allocated after its children loaded.
+    ///
+    /// `arena` must be the shared arena backing this context.
+    pub(crate) fn late_nodes<'a>(
+        &self,
+        arena: &'a NodeArena,
+    ) -> impl Iterator<Item = (NodeId, &'a Node)> {
+        self.late_node_range
             .clone()
             .into_iter()
-            .flat_map(|range| arena.iter_range(range));
-        primary.chain(late)
+            .flat_map(|range| arena.iter_range(range))
     }
 
     pub(crate) fn set_node_end(&mut self, end: NodeId) {
