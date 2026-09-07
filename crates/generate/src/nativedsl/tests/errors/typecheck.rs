@@ -395,14 +395,10 @@ fn error_alias_to_module_rule_suggests_bare_name() {
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::InvalidAliasTarget(Ty::RULE));
-    assert!(
-        matches!(
-            &e.notes[..],
-            [n] if matches!(&n.message, NoteMessage::UseBareName(s) if s == "identifier")
-        ),
-        "expected UseBareName note, got {:?}",
-        e.notes
-    );
+    let [note] = e.notes.as_slice() else {
+        panic!("expected one note, got {:?}", e.notes);
+    };
+    assert_eq!(note.message, NoteMessage::UseBareName("identifier".into()));
 }
 
 #[test]
@@ -416,13 +412,12 @@ fn error_module_rule_in_name_position_suggests_bare_name() {
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::ExpectedRuleName);
-    assert!(
-        matches!(
-            &e.notes[..],
-            [n] if matches!(&n.message, NoteMessage::UseBareName(s) if s == "_inline_rule")
-        ),
-        "expected UseBareName note, got {:?}",
-        e.notes
+    let [note] = e.notes.as_slice() else {
+        panic!("expected one note, got {:?}", e.notes);
+    };
+    assert_eq!(
+        note.message,
+        NoteMessage::UseBareName("_inline_rule".into())
     );
 }
 

@@ -22,12 +22,9 @@ fn cfg_flag_declared_twice_errors() {
     "#,
     );
     let e = assert_err!(err, Cfg);
-    assert!(matches!(
-        e.kind,
-        CfgErrorKind::FlagDeclaredTwice(ref n) if n == "X"
-    ));
+    assert_eq!(e.kind, CfgErrorKind::FlagDeclaredTwice("X".into()));
     let note = e.notes.first().expect("expected FirstDefinedHere note");
-    assert!(matches!(note.message, NoteMessage::FirstDefinedHere));
+    assert_eq!(note.message, NoteMessage::FirstDefinedHere);
 }
 
 #[test]
@@ -61,12 +58,12 @@ fn cfg_dropped_decl_enriches_undefined_symbol_error() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert!(matches!(
+    assert_eq!(
         e.kind,
-        ResolveErrorKind::UnknownIdentifier(ref n) if n == "strikethrough"
-    ));
+        ResolveErrorKind::UnknownIdentifier("strikethrough".into())
+    );
     let note = e.notes.first().expect("expected cfg note on error");
-    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "GFM"));
+    assert_eq!(note.message, NoteMessage::GatedByDisabledCfg("GFM".into()));
 }
 
 #[test]
@@ -80,10 +77,7 @@ fn cfg_enrichment_preserves_existing_note() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert!(matches!(
-        e.kind,
-        ResolveErrorKind::UnknownIdentifier(ref n) if n == "widget"
-    ));
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("widget".into()));
     let kinds: Vec<_> = e.notes.iter().map(|n| &n.message).collect();
     assert!(
         kinds
@@ -109,12 +103,9 @@ fn cfg_dropped_macro_enriches_error() {
     "#,
     );
     let e = assert_err!(err, Resolve);
-    assert!(matches!(
-        e.kind,
-        ResolveErrorKind::UnknownIdentifier(ref n) if n == "gated"
-    ));
+    assert_eq!(e.kind, ResolveErrorKind::UnknownIdentifier("gated".into()));
     let note = e.notes.first().expect("expected cfg note on error");
-    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "X"));
+    assert_eq!(note.message, NoteMessage::GatedByDisabledCfg("X".into()));
 }
 
 #[test]
@@ -128,9 +119,9 @@ fn cfg_dropped_ruleset_macro_enriches_error() {
     "#,
     );
     let e = assert_err!(err, Expand);
-    assert!(matches!(e.kind, ExpandErrorKind::UnknownMacro(ref n) if n == "gated"));
+    assert_eq!(e.kind, ExpandErrorKind::UnknownMacro("gated".into()));
     let note = e.notes.first().expect("expected cfg note on error");
-    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "X"));
+    assert_eq!(note.message, NoteMessage::GatedByDisabledCfg("X".into()));
 }
 
 #[test]
@@ -184,7 +175,7 @@ fn cfg_attribute_nesting_is_bounded() {
     );
     let err = dsl_err(&src);
     let e = assert_err!(err, Parse);
-    assert!(matches!(e.kind, ParseErrorKind::NestingTooDeep));
+    assert_eq!(e.kind, ParseErrorKind::NestingTooDeep);
 }
 
 #[test]
@@ -317,7 +308,7 @@ fn cfg_dropped_attribution_uses_owning_module() {
     let inner = *assert_err!(err, Module).inner;
     let e = assert_err!(inner, Resolve);
     let note = e.notes.first().expect("expected cfg note on error");
-    assert!(matches!(note.message, NoteMessage::GatedByDisabledCfg(ref f) if f == "P"));
+    assert_eq!(note.message, NoteMessage::GatedByDisabledCfg("P".into()));
 }
 
 #[test]
@@ -374,7 +365,7 @@ fn inherited_grammar_must_declare_used_cfg_flag() {
     ));
     let inner = *assert_err!(err, Module).inner;
     let error = assert_err!(inner, Cfg);
-    assert!(matches!(error.kind, CfgErrorKind::FlagUnknown(ref name) if name == "X"));
+    assert_eq!(error.kind, CfgErrorKind::FlagUnknown("X".into()));
 }
 
 #[test]
@@ -487,15 +478,7 @@ fn cfg_base_flag_does_not_leak_to_sibling_import() {
         let err = expect_err(parse_with_modules(&modules, &root));
         let inner = *assert_err!(err, Module).inner;
         let error = assert_err!(inner, Cfg);
-        assert!(
-            matches!(
-                error.kind,
-                CfgErrorKind::FlagUnknown(ref name)
-                    if name == "BASE_FEATURE"
-            ),
-            "got {:?}",
-            error.kind
-        );
+        assert_eq!(error.kind, CfgErrorKind::FlagUnknown("BASE_FEATURE".into()));
     }
 }
 
@@ -523,14 +506,7 @@ fn cfg_cached_helper_respects_current_flags() {
 
     let inner = *assert_err!(err, Module).inner;
     let error = assert_err!(inner, Cfg);
-    assert!(
-        matches!(
-            error.kind,
-            CfgErrorKind::FlagUnknown(ref name) if name == "F"
-        ),
-        "got {:?}",
-        error.kind
-    );
+    assert_eq!(error.kind, CfgErrorKind::FlagUnknown("F".into()));
 }
 
 #[test]

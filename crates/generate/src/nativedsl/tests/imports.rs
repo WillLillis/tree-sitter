@@ -278,13 +278,13 @@ fn top_level_qualified_call_with_scalar_receiver_is_rejected() {
         ),
         Type
     );
-    assert!(matches!(
+    assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
             expected: Ty::ANY_MODULE,
             got: Ty::INT,
         }
-    ));
+    );
 }
 
 #[test]
@@ -299,13 +299,13 @@ fn top_level_qualified_call_with_rule_receiver_is_rejected() {
         ),
         Type
     );
-    assert!(matches!(
+    assert_eq!(
         e.kind,
         TypeErrorKind::TypeMismatch {
             expected: Ty::ANY_MODULE,
             got: Ty::RULE,
         }
-    ));
+    );
 }
 
 #[test]

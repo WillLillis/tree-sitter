@@ -111,14 +111,10 @@ fn error_self_ref_in_container_reports_cycle() {
         Type
     );
     assert_eq!(e.kind, TypeErrorKind::CircularLet("X".into()));
-    assert!(
-        matches!(
-            e.notes.first().map(|n| &n.message),
-            Some(NoteMessage::SelfReferenceHere)
-        ),
-        "expected a self-reference note: {:?}",
-        e.notes
-    );
+    let [note] = e.notes.as_slice() else {
+        panic!("expected a self-reference note, got {:?}", e.notes);
+    };
+    assert_eq!(note.message, NoteMessage::SelfReferenceHere);
 }
 
 #[test]
