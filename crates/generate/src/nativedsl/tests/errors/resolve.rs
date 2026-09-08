@@ -75,28 +75,37 @@ error_tests! { Resolve {
         rule program { "x" }"#,
         ResolveErrorKind::InvalidExternalsExpression
     }
-    error_self_referential_let_in_externals {
-        r#"let C = C
-        grammar { language: "test", externals: [C] }
-        rule program { "x" }"#,
-        ResolveErrorKind::InvalidExternalsExpression
-    }
     error_config_access_unknown_field {
         r#"let base = inherit("inherit_base/grammar.tsg")
         grammar { language: "derived", inherits: base }
         let x = base::bogus"#,
         ResolveErrorKind::ImportMemberNotFound("bogus".into())
     }
-    // Mutual let references should not cause infinite recursion in
-    // collect_external_names.
     error_mutual_let_ref_in_externals {
         r#"let A: list_t<rule_t> = B
         let B: list_t<rule_t> = A
         grammar { language: "test", externals: A }
         rule program { "x" }"#,
-        ResolveErrorKind::InvalidExternalsExpression
+        ResolveErrorKind::CircularLet("A".into())
     }
 }}
+
+#[test]
+fn error_self_referential_let_in_externals_reports_cycle() {
+    let e = assert_err!(
+        dsl_err(
+            r#"let C = C
+            grammar { language: "test", externals: [C] }
+            rule program { "x" }"#
+        ),
+        Resolve
+    );
+    assert_eq!(e.kind, ResolveErrorKind::CircularLet("C".into()));
+    let [note] = e.notes.as_slice() else {
+        panic!("expected a self-reference note, got {:?}", e.notes);
+    };
+    assert_eq!(note.message, NoteMessage::SelfReferenceHere);
+}
 
 #[test]
 fn error_self_ref_in_container_reports_cycle() {

@@ -42,6 +42,8 @@ pub enum ResolveErrorKind {
     UnknownIdentifier(String),
     #[error("computed rule name '{0}' does not name a rule")]
     ComputedNameNotARule(String),
+    #[error("let '{0}' is defined in terms of itself")]
+    CircularLet(String),
     #[error(
         "`externals` must be a list of token names, strings, or `regexp()` expressions, \
        formed with list literals, `append()`, or variable/config references"
@@ -515,10 +517,14 @@ impl ExternalNameCtx<'_> {
                 match self.decls.get(&name).map(|d| d.value) {
                     Some(DeclKind::Var(let_id)) => {
                         if !self.expanding_lets.insert(name) {
-                            return Err(ResolveError::new(
-                                ResolveErrorKind::InvalidExternalsExpression,
+                            return Err(ResolveError::with_note(
+                                ResolveErrorKind::CircularLet(self.strs.resolve(name).to_string()),
                                 self.ctx.document,
-                                self.shared.arena.span(id),
+                                self.shared.arena.span(let_id),
+                                self.ctx.note(
+                                    NoteMessage::SelfReferenceHere,
+                                    self.shared.arena.span(id),
+                                ),
                             ));
                         }
                         expect_pat!(Node::Let { value, .. }, *self.shared.arena.get(let_id));
