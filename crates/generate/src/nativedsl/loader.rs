@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     IoError,
     nativedsl::{
-        DisallowedItemKind, DocumentId, DocumentMap, DocumentSpan, DslError, DslResult, Export,
+        DisallowedItemKind, DocumentId, DocumentMap, DocumentSpan, DslError, DslResult,
         ImportedRule, LexError, LexErrorKind, LowerError, LowerErrorKind, LoweringState,
         MAX_MODULE_DEPTH, Module, ModuleError, ModuleId, ModuleIdSet, NoteMessage, ResolveError,
         TypeError, TypeErrorKind,
@@ -522,42 +522,33 @@ impl<'a> Loader<'a> {
             return e;
         };
 
-        let (module, member) = match *arena.get(callee) {
+        let (ctx, decl) = match *arena.get(callee) {
             Node::Ident(IdentKind::Var(let_id)) => {
-                expect_pat!(Node::Let { name, .. }, *arena.get(let_id));
-                let Some(module) = self.modules.iter().find(|module| {
-                    matches!(
-                        module.export(name),
-                        Some(Export::Variable(id)) if id == let_id
-                    )
+                let Some(module) = self.modules.iter().find(|m| m.ctx().owns_node(let_id)) else {
+                    return e;
+                };
+                (module.ctx(), let_id)
+            }
+            Node::ModuleRule { module, member, .. } => {
+                let ctx = self.modules[usize::from(module)].ctx();
+                let Some(decl) = ctx.root_items.iter().copied().find(|&id| {
+                    let decl_name = match *arena.get(id) {
+                        Node::Rule { name, .. } => name,
+                        Node::ExpandedRule(expand_id) => {
+                            self.shared.pools.get_expansion(expand_id).name
+                        }
+                        _ => return false,
+                    };
+                    decl_name == member
                 }) else {
                     return e;
                 };
-                (module, name)
-            }
-            Node::ModuleRule { module, member, .. } => {
-                let module = &self.modules[usize::from(module)];
-                (module, member)
+                (ctx, decl)
             }
             _ => return e,
         };
 
-        let Some(decl) = module.ctx().root_items.iter().copied().find(|&id| {
-            let decl_name = match *arena.get(id) {
-                Node::Let { name, .. } | Node::Rule { name, .. } => name,
-                Node::ExpandedRule(expand_id) => self.shared.pools.get_expansion(expand_id).name,
-                _ => return false,
-            };
-            decl_name == member
-        }) else {
-            return e;
-        };
-
-        e.add_note(
-            module
-                .ctx()
-                .note(NoteMessage::DefinedHere, arena.span(decl)),
-        );
+        e.add_note(ctx.note(NoteMessage::DefinedHere, arena.span(decl)));
         e
     }
 

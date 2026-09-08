@@ -189,6 +189,15 @@ impl ModuleContext {
             .flat_map(|range| arena.iter_range(range))
     }
 
+    /// Whether `id` lies in one of this module's owned arena ranges.
+    #[must_use]
+    pub fn owns_node(&self, id: NodeId) -> bool {
+        let contains = |r: &std::ops::Range<NodeId>| {
+            r.start.index() <= id.index() && id.index() < r.end.index()
+        };
+        contains(&self.node_range) || self.late_node_range.as_ref().is_some_and(contains)
+    }
+
     pub(crate) fn set_node_end(&mut self, end: NodeId) {
         debug_assert!(end.index() >= self.node_range.end.index());
         self.node_range.end = end;
