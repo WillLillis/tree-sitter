@@ -230,13 +230,14 @@ pub(crate) fn resolve_qualified_call_targets(
         let Some(module) = module else {
             continue;
         };
-        let export =
-            resolve_qualified_member(&rcx, &mut shared.arena, module, name, member, member_offset)?;
-        *target = Some(QualifiedTarget {
+        *target = Some(resolve_qualified_member(
+            &rcx,
+            &mut shared.arena,
             module,
+            name,
             member,
-            export,
-        });
+            member_offset,
+        )?);
     }
 
     Ok(())
@@ -748,7 +749,7 @@ fn resolve_member(arena: &mut NodeArena, rcx: &ResolveCtx, id: NodeId) -> Resolv
     );
     // None when obj isn't a module ref; the type checker reports the error.
     if let Some(idx) = resolve_module_id(arena, obj) {
-        // The export kind is only needed by the deferred top-level-call pass
+        // The resolved target is only needed by the deferred top-level-call pass
         _ = resolve_qualified_member(rcx, arena, idx, id, member, member_offset)?;
     }
     Ok(())
@@ -767,7 +768,7 @@ fn resolve_qualified_member(
     node_id: NodeId,
     member: StrId,
     member_offset: u32,
-) -> ResolveResult<Export> {
+) -> ResolveResult<QualifiedTarget> {
     let target = &rcx.modules[usize::from(module)];
     let Some(export) = target.export(member) else {
         let member_len = rcx.strs.resolve(member).len() as u32;
@@ -790,7 +791,11 @@ fn resolve_qualified_member(
         ),
     }
 
-    Ok(export)
+    Ok(QualifiedTarget {
+        module,
+        member,
+        export,
+    })
 }
 
 /// Build an `ImportMemberNotFound` error, attaching a "did you mean" note when appropriate
