@@ -60,7 +60,7 @@ impl<'a> DocumentRef<'a> {
 }
 
 /// Source documents used by one native DSL compilation.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DocumentMap {
     #[serde(with = "indexmap::map::serde_seq")]
     documents: IndexMap<PathBuf, String, FxBuildHasher>,

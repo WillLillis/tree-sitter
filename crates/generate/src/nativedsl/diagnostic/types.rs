@@ -22,7 +22,7 @@ pub type TypeError = Diagnostic<TypeErrorKind>;
 pub type LowerError = Diagnostic<LowerErrorKind>;
 
 /// Diagnostic error shared by all pipeline stages.
-#[derive(Debug, Serialize, Deserialize, Error)]
+#[derive(Debug, Serialize, Deserialize, Error, PartialEq, Eq)]
 pub struct Diagnostic<K> {
     pub kind: K,
     pub document: DocumentId,
@@ -76,7 +76,7 @@ impl<K: std::fmt::Display> std::fmt::Display for Diagnostic<K> {
 /// values index the document map owned by [`NativeDslError`](crate::nativedsl::NativeDslError).
 /// Public callers should retain `NativeDslError` and use this type to inspect the
 /// error kind. By itself, this type cannot resolve source text or paths.
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 #[error(transparent)]
 pub enum DslError {
     Lex(#[from] LexError),
@@ -90,7 +90,7 @@ pub enum DslError {
 }
 
 /// Error from loading a child module.
-#[derive(Debug, Serialize, Deserialize, Error)]
+#[derive(Debug, Serialize, Deserialize, Error, PartialEq, Eq)]
 #[error("{inner}")]
 pub struct ModuleError {
     #[source]
@@ -115,7 +115,7 @@ impl ModuleError {
 }
 
 /// Secondary annotation on an error, pointing to a related source location.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Note {
     pub message: NoteMessage,
     pub location: DocumentSpan,

@@ -101,7 +101,7 @@ impl SnippetKind<'_> {
 ///
 /// Owns both the pipeline's [`DslError`] and every source document referenced by
 /// its diagnostics. Retain this wrapper to render locations or resolve a [`DocumentId`].
-#[derive(Debug, Error, Serialize, Deserialize)]
+#[derive(Debug, Error, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeDslError {
     #[source]
     pub error: DslError,

@@ -18,7 +18,7 @@ pub enum DisallowedItemKind {
     Inherit,
 }
 
-#[derive(Debug, Serialize, Deserialize, Error)]
+#[derive(Debug, Serialize, Deserialize, Error, PartialEq, Eq)]
 pub enum LowerErrorKind {
     #[error("missing grammar block")]
     MissingGrammarBlock,
