@@ -242,11 +242,7 @@ fn helper_lower_error_carries_helper_source() {
     let DslError::Lower(e) = &err.error else {
         panic!("expected lower error, got {:?}", err.error)
     };
-    assert!(
-        matches!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000)),
-        "got {:?}",
-        e.kind
-    );
+    assert_eq!(e.kind, LowerErrorKind::IntegerOverflow(3_000_000_000));
     let document = err.document(e.document);
     let src = document.text();
     let path = document.path();
@@ -314,7 +310,7 @@ fn error_inherit_cycle() {
                 current = &m.inner;
             }
             DslError::Lower(e) => {
-                assert!(matches!(e.kind, LowerErrorKind::ModuleCycle));
+                assert_eq!(e.kind, LowerErrorKind::ModuleCycle);
                 break;
             }
             other => panic!("unexpected error variant: {other:?}"),

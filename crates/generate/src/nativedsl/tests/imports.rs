@@ -565,11 +565,7 @@ fn error_import_disallowed_items() {
         let DslError::Lower(e) = outer.inner.as_ref() else {
             panic!("expected Lower error, got {:?}", outer.inner)
         };
-        assert!(
-            matches!(&e.kind, LowerErrorKind::ModuleDisallowedItem(k) if *k == expected),
-            "got {:?}",
-            e.kind
-        );
+        assert_eq!(e.kind, LowerErrorKind::ModuleDisallowedItem(expected));
     }
 }
 
@@ -647,7 +643,7 @@ fn error_too_many_modules() {
     // u8::MAX, which should surface as `ModuleTooMany`.
     let err = too_many_modules_err("grammar { language: \"test\" }\nrule program { \"x\" }\n");
     let e = assert_err!(err, Lower);
-    assert!(matches!(e.kind, LowerErrorKind::ModuleTooMany));
+    assert_eq!(e.kind, LowerErrorKind::ModuleTooMany);
 }
 
 #[test]
@@ -660,11 +656,7 @@ fn error_too_many_modules_fires_before_lowering() {
         "grammar { language: \"test\" }\nrule program { prec(2147483647 + 1, \"x\") }\n",
     );
     let e = assert_err!(err, Lower);
-    assert!(
-        matches!(e.kind, LowerErrorKind::ModuleTooMany),
-        "expected ModuleTooMany, got {:?}",
-        e.kind
-    );
+    assert_eq!(e.kind, LowerErrorKind::ModuleTooMany);
 }
 
 #[test]
@@ -1008,10 +1000,9 @@ fn helper_hole_unregistered_external_is_rejected() {
     "#,
     ));
     let e = assert_err!(err, Lower);
-    assert!(
-        matches!(&e.kind, LowerErrorKind::UndefinedSymbols(names) if *names == ["_tok"]),
-        "got {:?}",
-        e.kind
+    assert_eq!(
+        e.kind,
+        LowerErrorKind::UndefinedSymbols(vec!["_tok".into()])
     );
 }
 
