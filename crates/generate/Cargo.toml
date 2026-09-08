@@ -19,7 +19,7 @@ path = "src/generate.rs"
 workspace = true
 
 [features]
-default = [ "qjs-rt" ]
+default = [ "nativedsl", "qjs-rt" ]
 load = [ "dep:semver" ]
 nativedsl = [ "dep:anstyle" ]
 qjs-rt = [ "load", "rquickjs", "pathdiff" ]
