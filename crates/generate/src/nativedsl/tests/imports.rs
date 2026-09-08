@@ -53,6 +53,38 @@ fn import_rule_set_macro_at_item_position() {
 }
 
 #[test]
+fn import_rule_set_macro_with_empty_body_is_noop() {
+    let g = parse_with_modules(
+        &[("rules.tsg", "rules empty() {}")],
+        r#"
+            let h = import("rules.tsg")
+            grammar { language: "test" }
+            rule program { "p" }
+            @h::empty()
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(rule_names(&g), ["program"]);
+}
+
+#[test]
+fn import_rule_set_macro_gated_to_zero_rules_is_noop() {
+    let g = parse_with_modules(
+        &[("rules.tsg", r#"rules gated() { #[cfg(X)] rule a { "x" } }"#)],
+        r#"
+            let h = import("rules.tsg")
+            grammar { language: "test", flags: { disabled: ["X"] } }
+            rule program { "p" }
+            @h::gated()
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(rule_names(&g), ["program"]);
+}
+
+#[test]
 fn import_multi_rule_set_macro_at_item_position() {
     let mut g = parse_with_modules(
         &[(
