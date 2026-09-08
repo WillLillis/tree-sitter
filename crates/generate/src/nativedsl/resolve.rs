@@ -122,29 +122,6 @@ struct ResolveCtx<'a> {
     modules: &'a [Module],
 }
 
-/// Run [`collect_decls`], [`finish_decls`], and [`resolve_with_decls`] over a
-/// module.
-///
-/// Resolving a top-level `@mod::name(..)` needs its child module loaded, so
-/// those items are left untouched in `root_items`.
-///
-/// # Errors
-///
-/// Returns `ResolveError` if name resolution fails.
-pub fn resolve(
-    shared: &mut SharedAst,
-    ctx: &ModuleContext,
-    pool: &RulePool,
-    modules: &[Module],
-    current_module: ModuleId,
-    base: Option<(&LoweredGrammar, Span)>,
-    imported_rules: &[ImportedRule],
-) -> ResolveResult<()> {
-    let mut collected = collect_decls(shared, ctx, pool, base, imported_rules, current_module)?;
-    finish_decls(&mut collected, shared, ctx, pool, base, imported_rules)?;
-    resolve_with_decls(shared, ctx, pool, modules, &collected)
-}
-
 pub(crate) fn resolve_with_decls(
     shared: &mut SharedAst,
     ctx: &ModuleContext,

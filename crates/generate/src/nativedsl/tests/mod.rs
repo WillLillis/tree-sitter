@@ -302,7 +302,6 @@ mod config;
 mod errors;
 mod imports;
 mod inheritance;
-mod iterative;
 mod rule_set_macros;
 mod types;
 
