@@ -59,7 +59,7 @@ type Decls = FxHashMap<StrId, Spanned<DeclKind>>;
 pub(crate) struct CollectedDecls {
     decls: Decls,
     override_names: FxHashSet<StrId>,
-    deferred_qualified_calls: Vec<(usize, NodeId)>,
+    deferred_qualified_calls: Vec<DeferredQualifiedCall>,
 }
 
 impl CollectedDecls {
@@ -68,9 +68,19 @@ impl CollectedDecls {
         !self.deferred_qualified_calls.is_empty()
     }
 
-    pub(crate) fn qualified_calls(&self) -> &[(usize, NodeId)] {
+    pub(crate) fn qualified_calls(&self) -> &[DeferredQualifiedCall] {
         &self.deferred_qualified_calls
     }
+}
+
+/// A top-level `@mod::name(..)`, left for expansion once child modules load.
+pub(crate) struct DeferredQualifiedCall {
+    /// Index of the call in `root_items`.
+    pub slot: usize,
+    pub call_id: NodeId,
+    /// Filled in by [`resolve_qualified_call_targets`], and left `None` when
+    /// the receiver does not name a module.
+    pub target: Option<QualifiedTarget>,
 }
 
 /// A top level qualified call's resolved callee.
@@ -179,16 +189,16 @@ pub(crate) fn resolve_with_decls(
 /// Resolve the targets of top-level qualified calls before late expansion.
 ///
 /// Receivers that cannot be resolved yet, or that do not name a module, are left
-/// deferred. No target is recorded and the call survives into `root_items`, where
-/// `resolve_with_decls` and typecheck diagnose it against the full declaration
-/// table.
+/// deferred. The call's `target` stays `None` and the call survives into
+/// `root_items`, where `resolve_with_decls` and typecheck diagnose it against the
+/// full declaration table.
 pub(crate) fn resolve_qualified_call_targets(
     shared: &mut SharedAst,
     ctx: &ModuleContext,
     pool: &RulePool,
     modules: &[Module],
-    collected: &CollectedDecls,
-) -> ResolveResult<FxHashMap<NodeId, QualifiedTarget>> {
+    collected: &mut CollectedDecls,
+) -> ResolveResult<()> {
     let rcx = ResolveCtx {
         pools: &shared.pools,
         ctx,
@@ -197,10 +207,12 @@ pub(crate) fn resolve_qualified_call_targets(
         modules,
     };
     let mut stack = Vec::new();
-    let mut targets = FxHashMap::default();
 
-    for &(_, call_id) in &collected.deferred_qualified_calls {
-        expect_pat!(Node::Call { name, .. }, *shared.arena.get(call_id));
+    for DeferredQualifiedCall {
+        call_id, target, ..
+    } in &mut collected.deferred_qualified_calls
+    {
+        expect_pat!(Node::Call { name, .. }, *shared.arena.get(*call_id));
         expect_pat!(
             Node::QualifiedAccess {
                 obj,
@@ -221,15 +233,15 @@ pub(crate) fn resolve_qualified_call_targets(
         // values may still be unresolved. A chain longer than the arena has
         // cycled. Let typecheck report the cycle on the surviving call.
         let mut module = None;
-        let mut target = obj;
+        let mut target_id = obj;
         for _ in 0..shared.arena.len() {
-            match *shared.arena.get(target) {
+            match *shared.arena.get(target_id) {
                 Node::Ident(IdentKind::Var(let_id)) => {
                     expect_pat!(Node::Let { value, .. }, *shared.arena.get(let_id));
                     if resolve_expr(&mut shared.arena, &rcx, value, &mut stack).is_err() {
                         break;
                     }
-                    target = value;
+                    target_id = value;
                 }
                 Node::Inherit { module: idx, .. } | Node::Import { module: idx, .. } => {
                     module = idx;
@@ -243,17 +255,14 @@ pub(crate) fn resolve_qualified_call_targets(
         };
         let export =
             resolve_qualified_member(&rcx, &mut shared.arena, module, name, member, member_offset)?;
-        targets.insert(
-            call_id,
-            QualifiedTarget {
-                module,
-                member,
-                export,
-            },
-        );
+        *target = Some(QualifiedTarget {
+            module,
+            member,
+            export,
+        });
     }
 
-    Ok(targets)
+    Ok(())
 }
 
 fn insert_decl(
@@ -365,7 +374,11 @@ pub(crate) fn collect_decls(
             Node::Call { name, .. }
                 if matches!(shared.arena.get(*name), Node::QualifiedAccess { .. }) =>
             {
-                deferred_qualified_calls.push((slot, item_id));
+                deferred_qualified_calls.push(DeferredQualifiedCall {
+                    slot,
+                    call_id: item_id,
+                    target: None,
+                });
             }
             // Forward-declarations are registered after all real declarations.
             _ => {}

@@ -19,7 +19,10 @@ use super::{
     lexer::is_ident_str,
 };
 use crate::{
-    nativedsl::{DocumentId, DocumentSpan, Module, resolve::QualifiedTarget},
+    nativedsl::{
+        DocumentId, DocumentSpan, Module,
+        resolve::{DeferredQualifiedCall, QualifiedTarget},
+    },
     strpool::{StrId, StrPool},
 };
 
@@ -142,16 +145,22 @@ pub(crate) fn expand_qualified_macro_calls(
     strs: &mut StrPool,
     ctx: &mut ModuleContext,
     modules: &[Module],
-    calls: &[(usize, NodeId)],
-    targets: &FxHashMap<NodeId, QualifiedTarget>,
+    calls: &[DeferredQualifiedCall],
 ) -> Result<(), ExpandError> {
     let mut name_buf = String::new();
-    for &(slot, call_id) in calls {
-        let Some(&QualifiedTarget {
+    // When a rule set macro's expanded body is empty
+    let mut empty_expansion = false;
+    for &DeferredQualifiedCall {
+        slot,
+        call_id,
+        target,
+    } in calls
+    {
+        let Some(QualifiedTarget {
             module,
             member,
             export,
-        }) = targets.get(&call_id)
+        }) = target
         else {
             // The receiver never resolved to a module. The call stays in
             // `root_items` for resolve and typecheck to diagnose.
@@ -173,7 +182,7 @@ pub(crate) fn expand_qualified_macro_calls(
             }
             return Err(err);
         };
-        expand_call_with_id(
+        let n_decls = expand_call_with_id(
             shared,
             strs,
             ctx,
@@ -186,10 +195,12 @@ pub(crate) fn expand_qualified_macro_calls(
             modules[usize::from(module)].ctx().document,
             &mut name_buf,
         )?;
+        empty_expansion |= n_decls == 0;
     }
-    ctx.root_items.retain(|&id| {
-        !targets.contains_key(&id) || !matches!(shared.arena.get(id), Node::Call { .. })
-    });
+    if empty_expansion {
+        ctx.root_items
+            .retain(|&id| !calls.iter().any(|c| c.target.is_some() && c.call_id == id));
+    }
     Ok(())
 }
 

@@ -215,12 +215,12 @@ impl<'a> Loader<'a> {
             resolve::collect_decls(self.shared, ctx, self.pool, base, imported_rules, global_id)
                 .map_err(|e| self.enrich_resolve_error(ctx, e))?;
         if collected.has_qualified_calls() {
-            let targets = resolve::resolve_qualified_call_targets(
+            resolve::resolve_qualified_call_targets(
                 self.shared,
                 ctx,
                 self.pool,
                 self.modules,
-                &collected,
+                &mut collected,
             )
             .map_err(|e| self.enrich_resolve_error(ctx, e))?;
             ctx.start_late_nodes(self.shared.arena.next_id());
@@ -230,7 +230,6 @@ impl<'a> Loader<'a> {
                 ctx,
                 self.modules,
                 collected.qualified_calls(),
-                &targets,
             )?;
             ctx.set_late_node_end(self.shared.arena.next_id());
             resolve::register_expanded_decls(&mut collected, self.shared, self.pool.strs(), ctx)
