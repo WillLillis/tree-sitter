@@ -186,6 +186,32 @@ fn computed_ref_error_in_imported_macro_body_blames_defining_document() {
     );
 }
 
+#[test]
+fn qualified_rule_set_arity_error_notes_definition() {
+    let err = expect_err(parse_with_module_documents(
+        &[(
+            "helpers.tsg",
+            r"rules one(s: str_t) { rule generated { s } }",
+        )],
+        r#"
+            let h = import("helpers.tsg")
+            grammar { language: "test" }
+            rule program { "p" }
+            @h::one("a", "b")
+        "#,
+    ));
+    let e = assert_err!(&err.error, Expand);
+    assert_eq!(
+        e.kind,
+        ExpandErrorKind::ArgCountMismatch {
+            macro_name: "one".into(),
+            expected: 1,
+            got: 2,
+        }
+    );
+    assert_defined_here(&err, &e.notes, "helpers.tsg", "one");
+}
+
 /// Assert the sole note is a `DefinedHere` resolving to `decl` in `file`.
 #[track_caller]
 fn assert_defined_here(err: &NativeDslError, notes: &[Note], file: &str, decl: &str) {

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ExpandError, Export, NoteMessage,
+    ExpandError, Export, Note, NoteMessage,
     ast::{Expansion, IdentKind, MacroId, MacroKind, ModuleContext, Node, NodeId, SharedAst, Span},
     lexer::is_ident_str,
 };
@@ -249,6 +249,7 @@ fn expand_call_with_id(
     let kind = config.kind;
     let param_count = config.params.len as usize;
     let body_id = config.body;
+    let def_name_span = config.name.span;
     let MacroKind::RuleSet = kind else {
         return Err(ExpandError::new(
             ExpandErrorKind::ExpressionMacroAsItem(strs.resolve(name_id).to_owned()),
@@ -258,7 +259,7 @@ fn expand_call_with_id(
     };
     expect_pat!(Node::RuleSet(rule_range), *shared.arena.get(body_id));
     if args.len as usize != param_count {
-        return Err(ExpandError::new(
+        return Err(ExpandError::with_note(
             ExpandErrorKind::ArgCountMismatch {
                 macro_name: strs.resolve(name_id).to_owned(),
                 expected: param_count,
@@ -266,6 +267,10 @@ fn expand_call_with_id(
             },
             ctx.document,
             shared.arena.span(call_id),
+            Note {
+                message: NoteMessage::DefinedHere,
+                location: DocumentSpan::new(def_document, def_name_span),
+            },
         ));
     }
     // Read template decls by absolute index. Each instance records the shared
