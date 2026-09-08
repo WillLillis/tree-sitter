@@ -537,8 +537,6 @@ fn for_binding_may_shadow_rule() {
 
 #[test]
 fn for_binding_shadows_macro_param() {
-    // Locals may shadow enclosing locals (only top-level declarations are
-    // protected); the innermost binding wins.
     let mut g = dsl(r#"grammar { language: "test" }
         rule a { "x" }
         rule b { "y" }
