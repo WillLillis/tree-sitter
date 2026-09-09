@@ -37,8 +37,8 @@ pub struct Loader<'a> {
 pub(super) enum ModuleKind {
     /// Grammar file (root or inherited). Must have grammar block, may have rules.
     Grammar,
-    /// Helper file (imported). Anything except a grammar block or override rule.
-    Helper,
+    /// Library file (imported). Anything except a grammar block or override rule.
+    Library,
 }
 
 /// A reference to a module loaded into [`Loader::modules`].
@@ -128,7 +128,7 @@ impl<'a> Loader<'a> {
 
         match kind {
             ModuleKind::Grammar => self.validate_grammar(&ctx)?,
-            ModuleKind::Helper => self.validate_import_items(&ctx)?,
+            ModuleKind::Library => self.validate_import_items(&ctx)?,
         }
 
         // Inline top-level rule-set macro invocations into `ExpandedRule` decls.
@@ -143,7 +143,7 @@ impl<'a> Loader<'a> {
         let global_id = ModuleId::from_index(self.modules.len())
             .ok_or_else(|| LowerError::without_span(LowerErrorKind::ModuleTooMany, document))?;
 
-        // Flatten the transitive helper imports once
+        // Flatten the transitive library imports once
         let imported_rules =
             super::collect_imported_rules(&self.shared.arena, &ctx.module_refs, self.modules);
 
@@ -177,8 +177,8 @@ impl<'a> Loader<'a> {
                     exports,
                 }
             }
-            ModuleKind::Helper => {
-                let lowered_rules = lower::lower_helper(
+            ModuleKind::Library => {
+                let lowered_rules = lower::lower_library(
                     self.state,
                     self.pool,
                     self.shared,
@@ -188,7 +188,7 @@ impl<'a> Loader<'a> {
                 )?;
                 let exports =
                     super::build_exports(self.shared, &ctx, self.pool, &lowered_rules, &[]);
-                Module::Helper {
+                Module::Library {
                     ctx,
                     lowered_rules,
                     exports,
@@ -323,7 +323,7 @@ impl<'a> Loader<'a> {
         for &node_id in &ctx.module_refs {
             let (kind, &path) = match self.shared.arena.get(node_id) {
                 Node::Inherit { path, module: None } => (ModuleKind::Grammar, path),
-                Node::Import { path, module: None } => (ModuleKind::Helper, path),
+                Node::Import { path, module: None } => (ModuleKind::Library, path),
                 Node::Inherit {
                     module: Some(_), ..
                 }

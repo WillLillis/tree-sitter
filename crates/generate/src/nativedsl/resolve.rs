@@ -420,7 +420,7 @@ pub(crate) fn finish_decls(
         }
     }
 
-    // Register bare names for every transitively imported helper rule.
+    // Register bare names for every transitively imported library rule.
     for ir in imported_rules {
         // First source of an overridden name claims the override. A later
         // source is no longer skipped and collides (see the base loop above).

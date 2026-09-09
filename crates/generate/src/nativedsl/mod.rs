@@ -177,9 +177,9 @@ impl LoweredGrammar {
 /// A loaded and resolved module.
 #[derive(Debug)]
 pub enum Module {
-    /// `Helper` modules come from `import(...)` and expose let/macro/rule/external
+    /// `Library` modules come from `import(...)` and expose let/macro/rule/external
     /// bindings. Their rules are lowered eagerly into `lowered_rules`.
-    Helper {
+    Library {
         ctx: ModuleContext,
         lowered_rules: Vec<Variable>,
         exports: FxHashMap<StrId, Export>,
@@ -211,7 +211,7 @@ impl Module {
     #[must_use]
     pub const fn ctx(&self) -> &ModuleContext {
         match self {
-            Self::Helper { ctx, .. } | Self::Grammar { ctx, .. } => ctx,
+            Self::Library { ctx, .. } | Self::Grammar { ctx, .. } => ctx,
         }
     }
 
@@ -219,7 +219,7 @@ impl Module {
     pub fn lowered(&self) -> Option<&LoweredGrammar> {
         match self {
             Self::Grammar { lowered, .. } => Some(lowered),
-            Self::Helper { .. } => None,
+            Self::Library { .. } => None,
         }
     }
 
@@ -227,7 +227,7 @@ impl Module {
     #[must_use]
     pub fn export(&self, name: StrId) -> Option<Export> {
         let exports = match self {
-            Self::Helper { exports, .. } | Self::Grammar { exports, .. } => exports,
+            Self::Library { exports, .. } | Self::Grammar { exports, .. } => exports,
         };
         exports.get(&name).copied()
     }
@@ -235,7 +235,7 @@ impl Module {
     /// The names this module exports, for "did you mean" suggestions.
     pub(crate) fn export_keys(&self) -> impl Iterator<Item = StrId> {
         let exports = match self {
-            Self::Helper { exports, .. } | Self::Grammar { exports, .. } => exports,
+            Self::Library { exports, .. } | Self::Grammar { exports, .. } => exports,
         };
         exports.keys().copied()
     }
@@ -286,7 +286,7 @@ pub fn build_exports(
     exports
 }
 
-/// A rule provided by a transitively imported helper.
+/// A rule provided by a transitively imported library.
 #[derive(Clone, Copy)]
 pub struct ImportedRule {
     pub name: StrId,
@@ -295,7 +295,7 @@ pub struct ImportedRule {
     pub ref_span: Span,
 }
 
-/// Collect rules from transitive helper imports in source order. Each helper is
+/// Collect rules from transitive library imports in source order. Each library is
 /// visited once.
 pub(crate) fn collect_imported_rules(
     arena: &ast::NodeArena,
@@ -324,7 +324,7 @@ pub(crate) fn collect_imported_rules(
             continue;
         }
         let module = &modules[usize::from(idx)];
-        if let Module::Helper { lowered_rules, .. } = module {
+        if let Module::Library { lowered_rules, .. } = module {
             for &Variable { name, root } in lowered_rules {
                 rules.push(ImportedRule {
                     name,

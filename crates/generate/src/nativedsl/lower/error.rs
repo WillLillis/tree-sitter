@@ -28,7 +28,7 @@ pub enum LowerErrorKind {
     MissingLanguageField,
     #[error("only one inherit() call is allowed per grammar")]
     MultipleInherits,
-    #[error("override rule(s) not found in base grammar or imported helpers: {}", .0.join(", "))]
+    #[error("override rule(s) not found in base grammar or imported libraries: {}", .0.join(", "))]
     OverrideRuleNotFound(Vec<String>),
     #[error("failed to resolve '{}': {}", .0.path.as_deref().unwrap_or_else(|| Path::new("<unknown>")).display(), .0.error)]
     ModuleResolveFailed(IoError),

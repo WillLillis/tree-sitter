@@ -265,7 +265,7 @@ fn undefined_symbols_error(
 }
 
 /// A `forward-declared here` note anchored at the `expect <name>` decl, searched
-/// in this grammar then any imported helper so the note renders against the file
+/// in this grammar then any imported library so the note renders against the file
 /// that made the promise. `None` if no `expect` declares `name`.
 fn forward_decl_note(
     shared: &SharedAst,
@@ -277,7 +277,7 @@ fn forward_decl_note(
         return Some(current.note(NoteMessage::ForwardDeclaredHere, span));
     }
     previous.iter().find_map(|module| match module {
-        Module::Helper { ctx, .. } => forward_decl_span(shared, ctx, name)
+        Module::Library { ctx, .. } => forward_decl_span(shared, ctx, name)
             .map(|span| ctx.note(NoteMessage::ForwardDeclaredHere, span)),
         Module::Grammar { .. } => None,
     })
@@ -294,7 +294,7 @@ fn forward_decl_span(shared: &SharedAst, ctx: &ModuleContext, name: StrId) -> Op
 }
 
 /// One lowered top-level item, tagged so grammar lowering can separate overrides
-/// and helper lowering can reject them. Built in source order.
+/// and library lowering can reject them. Built in source order.
 struct LoweredItem {
     variable: Variable,
     is_override: bool,
@@ -303,7 +303,7 @@ struct LoweredItem {
 }
 
 /// Walk `root_items`, evaluating lets and lowering each rule / expanded rule to
-/// a `RuleId` in source order. Shared by grammar and helper lowering; the caller
+/// a `RuleId` in source order. Shared by grammar and library lowering; the caller
 /// decides what to do with the `override`-tagged items.
 fn lower_items(eval: &mut Evaluator) -> LowerResult<Vec<LoweredItem>> {
     let mut items = Vec::with_capacity(eval.root_ctx.root_items.len());
@@ -348,12 +348,12 @@ fn lower_items(eval: &mut Evaluator) -> LowerResult<Vec<LoweredItem>> {
     Ok(items)
 }
 
-/// Lower a helper module's rules into a name-keyed list.
+/// Lower a library module's rules into a name-keyed list.
 ///   - Lets/macros are evaluated through the same Evaluator as grammar lowering;
 ///   - `external` decls and macros register names but don't materialize. Grammar
 ///     blocks and direct override rules are rejected by validation; an override
 ///     reaching the top level via a called macro is rejected below.
-pub fn lower_helper(
+pub fn lower_library(
     state: &mut LoweringState,
     pool: &mut RulePool,
     shared: &SharedAst,
@@ -365,7 +365,7 @@ pub fn lower_helper(
     let mut rules = Vec::new();
     for it in lower_items(&mut eval)? {
         if it.is_override {
-            // A helper can't inherit, so an `override` reaching its top level via
+            // A library can't inherit, so an `override` reaching its top level via
             // a called rules-macro (a direct `override rule` is rejected earlier
             // by validate_import_items) has nothing to override. Reject it rather
             // than silently demoting it to a plain rule.
@@ -512,7 +512,7 @@ fn build_grammar(
 
     variables.extend(result.rules);
 
-    // Imported helper rules can also be override targets.
+    // Imported library rules can also be override targets.
     for ir in imported_rules {
         let final_rule = overrides.remove(&ir.name).map_or(ir.rule, |s| s.value);
         variables.push(Variable {
@@ -550,7 +550,7 @@ fn build_grammar(
 
     // Tree-sitter's start symbol is `variables[0]` (a non-terminal), so honor
     // `start: <rule>` by rotating the named rule into position 0. Inherited,
-    // local, and helper rules are all in `variables`. An external token is a
+    // local, and library rules are all in `variables`. An external token is a
     // valid rule reference but lives in `external_tokens`, not `variables`, so
     // it can't be the start symbol.
     if let Some((name, span)) = result.start {

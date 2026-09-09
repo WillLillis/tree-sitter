@@ -263,14 +263,14 @@ impl Walker<'_> {
         name_offset: u32,
         child: NodeId,
     ) -> CfgResult<Option<NodeId>> {
-        // Grammar modules require local flag declarations. Helper modules use the
+        // Grammar modules require local flag declarations. Library modules use the
         // active environment inherited from their importer.
         let active = match self.kind {
             ModuleKind::Grammar => self
                 .cfg_declared
                 .contains_key(&name)
                 .then(|| self.state.active.get(&name).copied().unwrap_or(false)),
-            ModuleKind::Helper => self.state.active.get(&name).copied(),
+            ModuleKind::Library => self.state.active.get(&name).copied(),
         };
 
         let Some(active) = active else {
