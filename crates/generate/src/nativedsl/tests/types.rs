@@ -79,8 +79,8 @@ compile_tests! {
         rule a { "a" }
         rule b { "b" }"#
     }
-    module_t_annotation {
-        r#"let h: module_t = import("import_helpers/helpers.tsg")
+    library_t_annotation {
+        r#"let h: library_t = import("import_helpers/helpers.tsg")
         grammar { language: "test" }
         rule program { h::comma_sep1(identifier) }
         rule identifier { regexp("[a-z]+") }"#

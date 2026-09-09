@@ -367,13 +367,7 @@ fn top_level_qualified_call_with_scalar_receiver_is_rejected() {
         ),
         Type
     );
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::INT,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::MemberAccessRequiresModule(Ty::INT));
 }
 
 #[test]
@@ -388,13 +382,7 @@ fn top_level_qualified_call_with_rule_receiver_is_rejected() {
         ),
         Type
     );
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::RULE,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::MemberAccessRequiresModule(Ty::RULE));
 }
 
 #[test]
@@ -446,13 +434,7 @@ fn top_level_qualified_call_with_inherited_rule_receiver_is_rejected() {
         "#,
     ));
     let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::RULE,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::MemberAccessRequiresModule(Ty::RULE));
 }
 
 #[test]
@@ -468,13 +450,7 @@ fn top_level_qualified_call_with_alias_to_inherited_rule_is_rejected() {
         "#,
     ));
     let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::RULE,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::MemberAccessRequiresModule(Ty::RULE));
 }
 
 #[test]
@@ -489,13 +465,7 @@ fn top_level_qualified_call_with_external_token_receiver_is_rejected() {
         ),
         Type
     );
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::RULE,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::MemberAccessRequiresModule(Ty::RULE));
 }
 
 #[test]
@@ -509,13 +479,7 @@ fn qualified_call_on_inherited_rule_in_expression_position_matches_item_position
         "#,
     ));
     let e = assert_err!(err, Type);
-    assert_eq!(
-        e.kind,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::RULE,
-        }
-    );
+    assert_eq!(e.kind, TypeErrorKind::MemberAccessRequiresModule(Ty::RULE));
 }
 
 #[test]
@@ -1446,10 +1410,9 @@ error_tests! { Type {
         let x = { a: 1 }
         rule program { x::something("y") }
     "#,
-        TypeErrorKind::TypeMismatch {
-            expected: Ty::ANY_MODULE,
-            got: Ty::Data(DataTy::Object(InnerTy::Scalar(ScalarTy::Int))),
-        }
+        TypeErrorKind::MemberAccessRequiresModule(Ty::Data(DataTy::Object(InnerTy::Scalar(
+            ScalarTy::Int,
+        ))))
     }
     error_import_wrong_arg_count {
         r#"

@@ -596,7 +596,8 @@ impl<'tok, 'src, 'shared, 'strs> Parser<'tok, 'src, 'shared, 'strs> {
                 "rule_t" => Ok((Ty::RULE, id_span)),
                 "str_t" => Ok((Ty::STR, id_span)),
                 "int_t" => Ok((Ty::INT, id_span)),
-                "module_t" => Ok((Ty::ANY_MODULE, id_span)),
+                "grammar_t" => Ok((Ty::ANY_GRAMMAR, id_span)),
+                "library_t" => Ok((Ty::ANY_LIBRARY, id_span)),
                 "list_t" => {
                     self.expect(TokenKind::Lt)?;
                     let (inner_ty, inner_span) = self.parse_type()?;

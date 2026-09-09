@@ -425,7 +425,7 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
                 cx,
                 &mut env.results,
                 demand,
-                Ty::Module(ModuleTy::Import(idx)),
+                Ty::Module(ModuleTy::Library(idx)),
                 span,
             )?;
             None
@@ -555,11 +555,11 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
         }
         Node::GrammarConfig { module, .. } => {
             push_combine(&mut env.work, id, demand);
-            push_eval(
-                &mut env.work,
-                module,
-                Demand::emitting(Constraint::Exact(Ty::ANY_MODULE)),
-            );
+            // No demand on the module expr: Exact(ANY_GRAMMAR) here would reject
+            // imports with a generic mismatch before the combine arm can issue
+            // GrammarConfigRequiresInherit with its inherit() suggestion. The arm
+            // classifies all three cases (grammar, library, non-module) itself.
+            push_eval(&mut env.work, module, Demand::emitting(Constraint::None));
             None
         }
         Node::Alias { content, target } => {
@@ -627,7 +627,13 @@ fn eval(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeResult
                 member_offset,
             } = *shared.arena.get(name)
             {
-                type_of(cx, obj, env, Constraint::Exact(Ty::ANY_MODULE))?;
+                let obj_ty = type_of(cx, obj, env, Constraint::None)?;
+                if !matches!(obj_ty, Ty::Module(_)) {
+                    return Err(cx.error(
+                        TypeErrorKind::MemberAccessRequiresModule(obj_ty),
+                        shared.arena.span(obj),
+                    ));
+                }
                 let member = strs.resolve(member);
                 return Err(cx.error(
                     TypeErrorKind::ImportMacroNotFound(member.to_string()),
@@ -787,23 +793,34 @@ fn combine(cx: Cx<'_>, env: &mut TypeEnv, id: NodeId, demand: Demand) -> TypeRes
         Node::Call { name, .. } => macro_call_result(cx, name, span)?,
         Node::GrammarConfig { module, field } => {
             let module_ty = pop_result(&mut env.results);
-            if !matches!(module_ty, Ty::Module(ModuleTy::Grammar(_))) {
-                let err_kind = TypeErrorKind::GrammarConfigRequiresInherit;
-                let arg_span = shared.arena.span(module);
-                if let Some(ref_id) = resolve_module_ref(&shared.arena, module)
-                    && let Node::Import { path, .. } = shared.arena.get(ref_id)
-                {
-                    let path_text = cx.text(*path);
-                    return Err(cx.with_note(
-                        err_kind,
-                        arg_span,
-                        ctx.note(
-                            NoteMessage::DidYouMean(format!("inherit(\"{path_text}\")")),
-                            shared.arena.span(ref_id),
-                        ),
+            match module_ty {
+                Ty::Module(ModuleTy::Grammar(_) | ModuleTy::AnyGrammar) => {}
+                Ty::Module(ModuleTy::Library(_) | ModuleTy::AnyLibrary) => {
+                    let err_kind = TypeErrorKind::GrammarConfigRequiresInherit;
+                    let arg_span = shared.arena.span(module);
+                    if let Some(ref_id) = resolve_module_ref(&shared.arena, module)
+                        && let Node::Import { path, .. } = shared.arena.get(ref_id)
+                    {
+                        let path_text = cx.text(*path);
+                        return Err(cx.with_note(
+                            err_kind,
+                            arg_span,
+                            ctx.note(
+                                NoteMessage::DidYouMean(format!("inherit(\"{path_text}\")")),
+                                shared.arena.span(ref_id),
+                            ),
+                        ));
+                    }
+                    return Err(cx.error(err_kind, arg_span));
+                }
+                got => {
+                    return Err(mismatch(
+                        cx,
+                        Ty::ANY_GRAMMAR,
+                        got,
+                        shared.arena.span(module),
                     ));
                 }
-                return Err(cx.error(err_kind, arg_span));
             }
             use crate::nativedsl::ast::ConfigField as C;
             match field {

@@ -185,16 +185,19 @@ impl std::fmt::Display for ElemTy {
 }
 
 /// Module types: results of `import(...)` / `inherit(...)` and the user-facing
-/// `module_t` annotation.
+/// `library_t` / `grammar_t` annotations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleTy {
     /// Result of `import(...)`. Carries the module-list index.
-    Import(ModuleId),
+    Library(ModuleId),
     /// Result of `inherit(...)`. Carries the module-list index.
     Grammar(ModuleId),
-    /// User-facing `module_t` annotation. Matches any concrete module via
+    /// User-facing `library_t` annotation. Matches any imported library via
     /// [`Ty::is_compatible`].
-    Any,
+    AnyLibrary,
+    /// User-facing `grammar_t` annotation. Matches any inherited grammar via
+    /// [`Ty::is_compatible`].
+    AnyGrammar,
 }
 
 impl Ty {
@@ -209,7 +212,8 @@ impl Ty {
     pub const OBJ_LIST_RULE: Self = Self::Data(DataTy::Object(InnerTy::List(ElemTy::Scalar(
         ScalarTy::Rule,
     ))));
-    pub const ANY_MODULE: Self = Self::Module(ModuleTy::Any);
+    pub const ANY_LIBRARY: Self = Self::Module(ModuleTy::AnyLibrary);
+    pub const ANY_GRAMMAR: Self = Self::Module(ModuleTy::AnyGrammar);
 
     /// True for `rule_t` or `str_t` (str widens to rule).
     #[must_use]
@@ -221,17 +225,19 @@ impl Ty {
     }
 
     /// Check if `self` is assignable to `expected`.
-    ///
-    /// Any module satisfies any module-typed expectation. The surface
-    /// language only exposes `module_t` (= [`ModuleTy::Any`]) as an
-    /// annotation, so specific-vs-specific module checks aren't reachable
-    /// today; the broader rule keeps things simple and won't trip future
-    /// macro signatures that declare specific module shapes.
     #[must_use]
     pub fn is_compatible(self, expected: Self) -> bool {
         match (self, expected) {
             (Self::Data(a), Self::Data(b)) => a.is_compatible(b),
-            (Self::Module(_), Self::Module(_)) => true,
+            (Self::Module(got), Self::Module(want)) => match want {
+                ModuleTy::AnyGrammar => {
+                    matches!(got, ModuleTy::Grammar(_) | ModuleTy::AnyGrammar)
+                }
+                ModuleTy::AnyLibrary => {
+                    matches!(got, ModuleTy::Library(_) | ModuleTy::AnyLibrary)
+                }
+                ModuleTy::Library(_) | ModuleTy::Grammar(_) => got == want,
+            },
             _ => self == expected,
         }
     }
@@ -394,7 +400,8 @@ impl std::fmt::Display for Ty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Data(d) => d.fmt(f),
-            Self::Module(_) => f.write_str("module_t"),
+            Self::Module(ModuleTy::Grammar(_) | ModuleTy::AnyGrammar) => f.write_str("grammar_t"),
+            Self::Module(ModuleTy::Library(_) | ModuleTy::AnyLibrary) => f.write_str("library_t"),
         }
     }
 }

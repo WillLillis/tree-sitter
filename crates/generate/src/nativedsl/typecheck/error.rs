@@ -77,7 +77,7 @@ pub enum TypeErrorKind {
     ImportMacroNotFound(String),
     #[error("member access with `::` requires a module bound by import() or inherit(), got {0}")]
     MemberAccessRequiresModule(Ty),
-    #[error("module_t cannot be a macro parameter or return type")]
+    #[error("a module type cannot be a macro parameter or return type")]
     ModuleTypeNotAllowed,
     #[error("duplicate parameter name '{0}'")]
     DuplicateParameter(String),

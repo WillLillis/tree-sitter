@@ -103,12 +103,12 @@ error_tests! { Parse {
         ParseErrorKind::UnknownType("spread_t".into())
     }
     error_list_of_module_rejected {
-        r#"grammar { language: "test" } let x: list_t<module_t> = [] rule program { "x" }"#,
-        ParseErrorKind::ListInnerType(Ty::ANY_MODULE)
+        r#"grammar { language: "test" } let x: list_t<library_t> = [] rule program { "x" }"#,
+        ParseErrorKind::ListInnerType(Ty::ANY_LIBRARY)
     }
     error_obj_of_module_rejected {
-        r#"grammar { language: "test" } let x: obj_t<module_t> = { a: 1 } rule program { "x" }"#,
-        ParseErrorKind::ObjectInnerType(Ty::ANY_MODULE)
+        r#"grammar { language: "test" } let x: obj_t<library_t> = { a: 1 } rule program { "x" }"#,
+        ParseErrorKind::ObjectInnerType(Ty::ANY_LIBRARY)
     }
     error_list_triple_nesting_rejected {
         r#"grammar { language: "test" } let x: list_t<list_t<list_t<rule_t>>> = [] rule program { "x" }"#,

@@ -1,12 +1,12 @@
 use super::super::*;
 
 error_tests! { Type {
-    error_module_macro_param_rejected {
-        r#"grammar { language: "test" } macro f(m: module_t) rule_t { "x" } rule program { "x" }"#,
+    error_library_macro_param_rejected {
+        r#"grammar { language: "test" } macro f(m: library_t) rule_t { "x" } rule program { "x" }"#,
         TypeErrorKind::ModuleTypeNotAllowed
     }
-    error_module_macro_return_rejected {
-        r#"grammar { language: "test" } macro g() module_t { "x" } rule program { "x" }"#,
+    error_library_macro_return_rejected {
+        r#"grammar { language: "test" } macro g() library_t { "x" } rule program { "x" }"#,
         TypeErrorKind::ModuleTypeNotAllowed
     }
     error_duplicate_fn_param {
@@ -74,11 +74,11 @@ error_tests! { Type {
         rule program { "x" }"#,
         TypeErrorKind::TypeMismatch { expected: Ty::INT, got: Ty::STR }
     }
-    error_module_t_annotation_mismatch {
+    error_library_t_annotation_mismatch {
         r#"grammar { language: "test" }
-        let X: module_t = "not_a_module"
+        let X: library_t = "not_a_module"
         rule program { "x" }"#,
-        TypeErrorKind::TypeMismatch { expected: Ty::ANY_MODULE, got: Ty::STR }
+        TypeErrorKind::TypeMismatch { expected: Ty::ANY_LIBRARY, got: Ty::STR }
     }
     error_inherits_without_inherit {
         r#"grammar { language: "test", inherits: "not_inherit" }
