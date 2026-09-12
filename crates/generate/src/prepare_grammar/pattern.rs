@@ -69,7 +69,7 @@ struct Expander<'a> {
 }
 
 /// Parse a token pattern into an [`Hir`], folding any `i` flag manually.
-pub fn parse(pattern: &str, case_insensitive: bool) -> Result<Hir, Box<RegexError>> {
+pub(super) fn parse(pattern: &str, case_insensitive: bool) -> Result<Hir, Box<RegexError>> {
     let mut ast = ParserBuilder::new()
         .build()
         .parse(pattern)

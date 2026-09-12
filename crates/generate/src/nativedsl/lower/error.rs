@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::MAX_CALL_DEPTH;
+use crate::IoError;
 use crate::nativedsl::{LowerError, MAX_MODULE_COUNT, MAX_MODULE_DEPTH};
-use crate::{IoError, RegexError};
 
 pub type LowerResult<T> = Result<T, LowerError>;
 
@@ -65,8 +65,6 @@ pub enum LowerErrorKind {
     CallDepthExceeded(Vec<(String, PathBuf, usize, usize)>), // name, path, line, col
     #[error("integer overflow: {0} does not fit in i32")]
     IntegerOverflow(i64),
-    #[error("invalid regular expression: {}", .0.kind)]
-    InvalidRegex(Box<RegexError>),
     #[error("let '{0}' is defined in terms of itself")]
     CircularLet(String),
 }

@@ -7,7 +7,6 @@ use anstyle::{AnsiColor, Color, Style};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::types::RegexDiagnostic;
 use super::{DslError, NoteMessage};
 use crate::nativedsl::{DocumentId, DocumentMap, DocumentRef, DocumentSpan, ast::Span};
 
@@ -186,11 +185,6 @@ fn render_error(
         SnippetKind::Error,
     )?;
 
-    if let Some(regex) = error.regex_diagnostic() {
-        writeln!(f)?;
-        render_regex_diagnostic(f, &regex)?;
-    }
-
     for note in error.notes() {
         writeln!(f)?;
         render_document_span(
@@ -238,43 +232,20 @@ fn render_document_span(
     )
 }
 
-fn render_regex_diagnostic(
-    f: &mut std::fmt::Formatter<'_>,
-    regex: &RegexDiagnostic<'_>,
-) -> std::fmt::Result {
-    writeln!(f, " {EQUALS} evaluated regex pattern:")?;
-    let ctx = SpanContext::new(regex.primary, regex.pattern);
-    render_snippet_body(f, &ctx, SnippetKind::Error, Numbering::None)?;
-    write!(f, " {ERROR}: {}", regex.kind)?;
-
-    if let Some(first_occurrence) = regex.first_occurrence {
-        writeln!(f)?;
-        let ctx = SpanContext::new(first_occurrence, regex.pattern);
-        render_snippet_body(
-            f,
-            &ctx,
-            SnippetKind::Note(&NoteMessage::FirstOccurrenceHere),
-            Numbering::None,
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Whether a snippet's gutter shows source line numbers.
-#[derive(Clone, Copy, PartialEq)]
-enum Numbering {
-    Lines,
-    None,
-}
-
 /// Render a source snippet with a location header, source line, and underline.
 fn render_snippet(
     f: &mut std::fmt::Formatter<'_>,
     src: Source<'_>,
     kind: SnippetKind<'_>,
 ) -> std::fmt::Result {
+    let show_prev_line = matches!(kind, SnippetKind::Error);
+    let marker = kind.marker();
     let ctx = SpanContext::new(src.span, src.text);
+    let underline = Paint(
+        marker.style,
+        marker.glyph.to_string().repeat(ctx.underline_len),
+    );
+    let gutter = ctx.gutter_width;
 
     writeln!(
         f,
@@ -283,24 +254,6 @@ fn render_snippet(
         ctx.line_num,
         ctx.col
     )?;
-    render_snippet_body(f, &ctx, kind, Numbering::Lines)
-}
-
-fn render_snippet_body(
-    f: &mut std::fmt::Formatter<'_>,
-    ctx: &SpanContext<'_>,
-    kind: SnippetKind<'_>,
-    numbering: Numbering,
-) -> std::fmt::Result {
-    let numbered = numbering == Numbering::Lines;
-    let show_prev_line = numbered && matches!(kind, SnippetKind::Error);
-    let marker = kind.marker();
-    let underline = Paint(
-        marker.style,
-        marker.glyph.to_string().repeat(ctx.underline_len),
-    );
-    let gutter = if numbered { ctx.gutter_width } else { 1 };
-
     writeln!(f, " {:>gutter$} {PIPE}", "")?;
     if show_prev_line && let Some(prev_text) = ctx.prev_line_text {
         writeln!(
@@ -309,16 +262,12 @@ fn render_snippet_body(
             Paint(CYAN_STYLE, ctx.prev_line_num)
         )?;
     }
-    if numbered {
-        writeln!(
-            f,
-            " {:>gutter$} {PIPE} {}",
-            Paint(CYAN_STYLE, ctx.line_num),
-            ctx.line_text,
-        )?;
-    } else {
-        writeln!(f, " {:>gutter$} {PIPE} {}", "", ctx.line_text)?;
-    }
+    writeln!(
+        f,
+        " {:>gutter$} {PIPE} {}",
+        Paint(CYAN_STYLE, ctx.line_num),
+        ctx.line_text,
+    )?;
     write!(
         f,
         " {pad:>gutter$} {PIPE} {indent}{underline}",

@@ -1,57 +1,6 @@
 use super::super::*;
-use crate::{PatternSpan, RegexError, RegexErrorKind};
 
 error_tests! { match Lower {
-    error_invalid_regex_raw_literal {
-        r#"grammar { language: "test" }
-        rule main { regexp(r"[abc") }"#,
-        LowerErrorKind::InvalidRegex(re) if re.as_ref() == &RegexError {
-            pattern: "[abc".into(),
-            kind: RegexErrorKind::ClassUnclosed,
-            span: Some(PatternSpan { start: 0, end: 1 }),
-            aux_span: None,
-        }
-    }
-    error_invalid_regex_escaped_literal {
-        r#"grammar { language: "test" }
-        rule main { regexp("[ab\x63") }"#,
-        LowerErrorKind::InvalidRegex(re) if re.as_ref() == &RegexError {
-            pattern: "[abc".into(),
-            kind: RegexErrorKind::ClassUnclosed,
-            span: Some(PatternSpan { start: 0, end: 1 }),
-            aux_span: None,
-        }
-    }
-    error_invalid_regex_computed_pattern {
-        r#"grammar { language: "test" }
-        rule main { regexp(concat("[ab", "c")) }"#,
-        LowerErrorKind::InvalidRegex(re) if re.as_ref() == &RegexError {
-            pattern: "[abc".into(),
-            kind: RegexErrorKind::ClassUnclosed,
-            span: Some(PatternSpan { start: 0, end: 1 }),
-            aux_span: None,
-        }
-    }
-    error_invalid_regex_duplicate_capture {
-        r#"grammar { language: "test" }
-        rule main { regexp(r"(?P<a>x)(?P<a>y)") }"#,
-        LowerErrorKind::InvalidRegex(re) if re.as_ref() == &RegexError {
-            pattern: "(?P<a>x)(?P<a>y)".into(),
-            kind: RegexErrorKind::GroupNameDuplicate,
-            span: Some(PatternSpan { start: 12, end: 13 }),
-            aux_span: Some(PatternSpan { start: 4, end: 5 }),
-        }
-    }
-    error_invalid_regex_with_flags {
-        r#"grammar { language: "test" }
-        rule main { regexp(r"(?-u:\p{Greek})", "i") }"#,
-        LowerErrorKind::InvalidRegex(re) if re.as_ref() == &RegexError {
-            pattern: r"(?-u:\p{Greek})".into(),
-            kind: RegexErrorKind::UnicodeNotAllowed,
-            span: Some(PatternSpan { start: 5, end: 14 }),
-            aux_span: None,
-        }
-    }
     // obj_t<X> carries the value type, not the key set, so a missing field on a
     // computed object can't be caught at typecheck - lower reports it with the keys.
     error_field_not_found_on_computed_object {
