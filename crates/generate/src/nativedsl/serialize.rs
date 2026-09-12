@@ -2,7 +2,7 @@
 
 use crate::grammars::{InputGrammar, PrecedenceEntry};
 use crate::parse_grammar::{PrecedenceValueJSON, RuleJSON};
-use crate::rules::{Alias, Associativity, Precedence, Rule, RuleId, RulePool};
+use crate::rules::{Alias, Associativity, Precedence, Rule, RuleId, RulePool, SymbolView};
 use crate::strpool::StrId;
 
 use serde_json::{Map, Value};
@@ -134,8 +134,13 @@ fn build_rule(pool: &RulePool, id: RuleId) -> RuleJSON {
         Rule::NamedSymbol(n) => RuleJSON::SYMBOL {
             name: pool.resolve(n).into(),
         },
-        Rule::Sym { index, .. } => RuleJSON::SYMBOL {
-            name: format!("__symbol_{index}"),
+        Rule::Sym(symbol) => RuleJSON::SYMBOL {
+            name: match symbol.view() {
+                SymbolView::External(i) => format!("__symbol_{}", usize::from(i)),
+                SymbolView::Terminal(i) => format!("__symbol_{}", usize::from(i)),
+                SymbolView::NonTerminal(i) => format!("__symbol_{}", usize::from(i)),
+                SymbolView::End | SymbolView::EndOfNonTerminalExtra => unreachable!(),
+            },
         },
         Rule::Choice(range) => RuleJSON::CHOICE {
             members: pool
