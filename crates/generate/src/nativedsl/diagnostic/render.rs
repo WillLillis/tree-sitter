@@ -50,7 +50,7 @@ fn color_enabled() -> bool {
 const PIPE: Paint<&str> = Paint(CYAN_STYLE, "|");
 const ARROW: Paint<&str> = Paint(CYAN_STYLE, "-->");
 const ELLIP: Paint<&str> = Paint(CYAN_STYLE, "...");
-const EQUALS: Paint<&str> = Paint(CYAN_STYLE, "=");
+const EQUALS: Paint<&str> = Paint(CYAN_STYLE, "===");
 const ERROR: Paint<&str> = Paint(RED_STYLE, "error");
 const NOTE: Paint<&str> = Paint(CYAN_STYLE, "note");
 
@@ -208,7 +208,7 @@ fn render_error(
         writeln!(f, " {EQUALS} call trace:")?;
         for (i, (name, path, line, col)) in trace.iter().enumerate() {
             if elided > 0 && i == show {
-                writeln!(f, "   {ELLIP} ... {elided} more frames ...")?;
+                writeln!(f, "   {ELLIP} {elided} more frames ...")?;
             }
             if i >= show && i < trace.len().saturating_sub(show) {
                 continue;
