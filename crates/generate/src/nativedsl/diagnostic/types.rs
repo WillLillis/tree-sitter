@@ -10,6 +10,7 @@ use crate::nativedsl::{
     expand_macro_calls::ExpandErrorKind, lexer::LexErrorKind, lower::LowerErrorKind,
     parser::ParseErrorKind, resolve::ResolveErrorKind, typecheck::TypeErrorKind,
 };
+use crate::{PatternSpan, RegexError, RegexErrorKind};
 
 pub type DslResult<T> = Result<T, DslError>;
 
@@ -126,6 +127,8 @@ pub struct Note {
 pub enum NoteMessage {
     /// Points to the first location involved in a duplicate or repeated construct.
     FirstDefinedHere,
+    /// Points to the first occurrence of a repeated construct inside an evaluated pattern.
+    FirstOccurrenceHere,
     /// Points to the declaration associated with the primary error.
     DefinedHere,
     /// Points to the `inherit()` call that selected the grammar's base.
@@ -152,6 +155,7 @@ impl std::fmt::Display for NoteMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::FirstDefinedHere => write!(f, "first defined here"),
+            Self::FirstOccurrenceHere => write!(f, "first occurrence here"),
             Self::DefinedHere => write!(f, "defined here"),
             Self::BaseInheritedHere => write!(f, "base grammar inherited here"),
             Self::ReferencedFromHere => write!(f, "referenced from here"),
@@ -170,6 +174,25 @@ impl std::fmt::Display for NoteMessage {
             }
             Self::SelfReferenceHere => write!(f, "self-reference here"),
         }
+    }
+}
+
+pub struct RegexDiagnostic<'a> {
+    pub pattern: &'a str,
+    pub primary: Span,
+    pub kind: &'a RegexErrorKind,
+    pub first_occurrence: Option<Span>,
+}
+
+impl<'a> RegexDiagnostic<'a> {
+    fn from_error(error: &'a RegexError) -> Option<Self> {
+        let span = |s: PatternSpan| Span::new(s.start, s.end);
+        Some(Self {
+            pattern: &error.pattern,
+            primary: span(error.span?),
+            kind: &error.kind,
+            first_occurrence: error.aux_span.map(span),
+        })
     }
 }
 
@@ -222,6 +245,17 @@ impl DslError {
             && let LowerErrorKind::CallDepthExceeded(trace) = &e.kind
         {
             Some(trace)
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn regex_diagnostic(&self) -> Option<RegexDiagnostic<'_>> {
+        if let Self::Lower(e) = self
+            && let LowerErrorKind::InvalidRegex(re) = &e.kind
+        {
+            RegexDiagnostic::from_error(re)
         } else {
             None
         }

@@ -878,7 +878,7 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 self.state.scratch.concat_buf = result;
                 self.push_val(Value::Str(sid));
             }
-            Node::DynRegex { .. } => {
+            Node::DynRegex { pattern, .. } => {
                 let base = self.pop_combine_base();
                 let pattern_vid = self.state.scratch.val_scratch[base];
                 let flags_vid = self.state.scratch.val_scratch.get(base + 1).copied();
@@ -886,6 +886,13 @@ impl<'a, 'ast> Evaluator<'a, 'ast> {
                 let ps = self.str_id(pattern_vid);
                 let fs =
                     flags_vid.map_or(crate::strpool::StrPool::EMPTY_STR_ID, |fv| self.str_id(fv));
+                let case_insensitive = self.pool.resolve(fs).contains('i');
+                if let Err(e) =
+                    crate::prepare_grammar::pattern::parse(self.pool.resolve(ps), case_insensitive)
+                {
+                    let span = self.shared.arena.span(*pattern);
+                    return Err(self.err(LowerErrorKind::InvalidRegex(e), span));
+                }
                 let rid = self.alloc_rule(Rule::Pattern(ps, fs));
                 self.push_val(Value::Rule(rid));
             }
