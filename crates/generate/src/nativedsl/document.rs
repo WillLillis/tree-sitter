@@ -67,7 +67,7 @@ pub struct DocumentMap {
 }
 
 impl DocumentMap {
-    pub(crate) fn insert(&mut self, path: PathBuf, source: String) -> DocumentId {
+    pub fn insert(&mut self, path: PathBuf, source: String) -> DocumentId {
         let (index, _) = self.documents.insert_full(path, source);
         DocumentId(index as u32)
     }
@@ -81,7 +81,7 @@ impl DocumentMap {
     }
 
     #[must_use]
-    pub(crate) fn id_for_path(&self, path: &Path) -> Option<DocumentId> {
+    pub fn id_for_path(&self, path: &Path) -> Option<DocumentId> {
         self.documents
             .get_index_of(path)
             .map(|idx| DocumentId(idx as u32))
