@@ -1006,6 +1006,8 @@ bool ts_query_is_pattern_rooted(const TSQuery *self, uint32_t pattern_index);
 bool ts_query_is_pattern_non_local(const TSQuery *self, uint32_t pattern_index);
 
 /*
+ * @deprecated will be removed in 0.29.
+ *
  * Check if a given pattern is guaranteed to match once a given step is reached.
  * The step is specified by its byte offset in the query's source code.
  */

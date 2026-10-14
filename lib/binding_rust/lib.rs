@@ -3048,6 +3048,7 @@ impl Query {
     /// A query step is 'definite' if its parent pattern will be guaranteed to
     /// match successfully once it reaches the step.
     #[doc(alias = "ts_query_is_pattern_guaranteed_at_step")]
+    #[deprecated(since = "0.28.0", note = "Will be removed in 0.29")]
     #[must_use]
     pub fn is_pattern_guaranteed_at_step(&self, byte_offset: usize) -> bool {
         unsafe {

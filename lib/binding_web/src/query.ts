@@ -1018,6 +1018,8 @@ export class Query {
   }
 
   /**
+   * @deprecated since version 0.28.0, will be removed in 0.29.
+   *
    * Check if a given step in a query is 'definite'.
    *
    * A query step is 'definite' if its parent pattern will be guaranteed to
