@@ -33,6 +33,8 @@ void ts_tree_cursor_current_status(
   TSSymbol *supertypes,
   unsigned *supertype_count
 );
+uint32_t ts_tree_cursor_current_stack_index(const TSTreeCursor *_self);
+bool ts_tree_cursor_has_later_named_siblings_at(const TSTreeCursor *_self, uint32_t index);
 
 TreeCursorStep ts_tree_cursor_goto_first_child_internal(TSTreeCursor *_self);
 TreeCursorStep ts_tree_cursor_goto_next_sibling_internal(TSTreeCursor *_self);

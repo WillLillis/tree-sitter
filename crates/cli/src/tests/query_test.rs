@@ -46,7 +46,7 @@ fn test_query_errors_on_invalid_syntax() {
             Query::new(&language, "(if_statement").unwrap_err().message,
             [
                 "(if_statement", //
-                "             ^",
+                "^",
             ]
             .join("\n")
         );
@@ -127,7 +127,7 @@ fn test_query_errors_on_invalid_syntax() {
                 .message,
             [
                 "((identifier) (#a?)", //
-                "                   ^",
+                "^",
             ]
             .join("\n")
         );
@@ -150,8 +150,8 @@ fn test_query_errors_on_invalid_syntax() {
                 .unwrap_err()
                 .message,
             [
-                r"((identifier) @x (#eq? @x a",
-                r"                           ^",
+                r"((identifier) @x (#eq? @x a", //
+                r"                 ^",
             ]
             .join("\n")
         );
@@ -164,7 +164,7 @@ fn test_query_errors_on_invalid_syntax() {
             [
                 //
                 r"(statement_block .)",
-                r"                  ^"
+                r"                 ^"
             ]
             .join("\n")
         );
@@ -495,6 +495,23 @@ fn test_query_errors_on_impossible_patterns() {
                 .join("\n"),
             })
         );
+        assert_eq!(
+            Query::new(
+                &js_lang,
+                "(binary_expression left: (identifier) left: (identifier))"
+            ),
+            Err(QueryError {
+                kind: QueryErrorKind::Structure,
+                row: 0,
+                offset: 38,
+                column: 38,
+                message: [
+                    "(binary_expression left: (identifier) left: (identifier))",
+                    "                                      ^",
+                ]
+                .join("\n"),
+            })
+        );
 
         Query::new(
             &js_lang,
@@ -617,12 +634,12 @@ fn test_query_errors_on_impossible_patterns() {
             Query::new(&js_lang, "(identifier/identifier)").unwrap_err(),
             QueryError {
                 row: 0,
-                offset: 0,
-                column: 0,
+                offset: 1,
+                column: 1,
                 kind: QueryErrorKind::Structure,
                 message: [
                     "(identifier/identifier)", //
-                    "^"
+                    " ^"
                 ]
                 .join("\n")
             }
@@ -633,12 +650,12 @@ fn test_query_errors_on_impossible_patterns() {
                 Query::new(&js_lang, "(statement/identifier)").unwrap_err(),
                 QueryError {
                     row: 0,
-                    offset: 0,
-                    column: 0,
+                    offset: 11,
+                    column: 11,
                     kind: QueryErrorKind::Structure,
                     message: [
                         "(statement/identifier)", //
-                        "^"
+                        "           ^"
                     ]
                     .join("\n")
                 }
@@ -647,17 +664,91 @@ fn test_query_errors_on_impossible_patterns() {
                 Query::new(&js_lang, "(statement/pattern)").unwrap_err(),
                 QueryError {
                     row: 0,
-                    offset: 0,
-                    column: 0,
+                    offset: 11,
+                    column: 11,
                     kind: QueryErrorKind::Structure,
                     message: [
                         "(statement/pattern)", //
-                        "^"
+                        "           ^"
                     ]
                     .join("\n")
                 }
             );
         }
+        assert_eq!(
+            Query::new(&js_lang, "(statement/declaration)").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 11,
+                column: 11,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(statement/declaration)", //
+                    "           ^"
+                ]
+                .join("\n")
+            }
+        );
+        assert_eq!(
+            Query::new(&js_lang, "(arguments (statement_block)?)").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 11,
+                column: 11,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(arguments (statement_block)?)", //
+                    "           ^"
+                ]
+                .join("\n")
+            }
+        );
+        assert_eq!(
+            Query::new(&js_lang, "(expression/binary_expression (statement_block))").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 30,
+                column: 30,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(expression/binary_expression (statement_block))", //
+                    "                              ^"
+                ]
+                .join("\n")
+            }
+        );
+
+        // A field whose parent the pattern does not name must be possible under
+        // some node.
+        Query::new(&js_lang, "parameters: (formal_parameters) @x").unwrap();
+        assert_eq!(
+            Query::new(&js_lang, "parameters: (number) @x").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 0,
+                column: 0,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "parameters: (number) @x", //
+                    "^"
+                ]
+                .join("\n")
+            }
+        );
+        assert_eq!(
+            Query::new(&js_lang, "(_ parameters: (number) @x)").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 3,
+                column: 3,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(_ parameters: (number) @x)", //
+                    "   ^"
+                ]
+                .join("\n")
+            }
+        );
     });
 }
 
@@ -2597,6 +2688,116 @@ fn test_query_matches_with_supertypes() {
 }
 
 #[test]
+fn test_query_supertype_child_patterns_require_subtypes() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+
+        for child in [
+            "(identifier)",
+            "[(identifier) (number)]",
+            "((identifier))",
+            "_",
+            "\"(\"",
+            "(MISSING identifier)",
+            "(identifier)+",
+            "(identifier) (number)",
+            "arguments: (_)",
+            "(unknown_node_type)",
+        ] {
+            for (prefix, suffix) in [
+                ("(primary_expression ", ")"),
+                ("(arguments (primary_expression ", "))"),
+            ] {
+                let source = format!("{prefix}{child}{suffix}");
+                assert_eq!(
+                    Query::new(&language, &source),
+                    Err(QueryError {
+                        kind: QueryErrorKind::Structure,
+                        row: 0,
+                        offset: prefix.len(),
+                        column: prefix.len(),
+                        message: format!("{source}\n{}^", " ".repeat(prefix.len())),
+                    })
+                );
+            }
+        }
+
+        // Negated fields and predicates are not child patterns.
+        Query::new(
+            &language,
+            r#"(primary_expression !arguments (#eq? @x "a")) @x"#,
+        )
+        .unwrap();
+
+        let query = Query::new(
+            &language,
+            r"
+            (primary_expression/call_expression function: (identifier) @function)
+            (binary_expression left: (primary_expression/identifier) @left)
+            [(primary_expression/identifier) (primary_expression/number)] @operand
+            ",
+        )
+        .unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "a + b;\nf(x);\n",
+            &[
+                (1, vec![("left", "a")]),
+                (2, vec![("operand", "a")]),
+                (2, vec![("operand", "b")]),
+                (0, vec![("function", "f")]),
+                (2, vec![("operand", "f")]),
+                (2, vec![("operand", "x")]),
+            ],
+        );
+    });
+}
+
+#[test]
+fn test_query_subtype_reached_through_a_hidden_rule() {
+    allocations::record(|| {
+        // `_expression` wraps most of its subtypes through the hidden
+        // `_expression_except_range`.
+        let language = get_language("rust");
+        let query =
+            Query::new(&language, "(arguments (_expression/identifier) @argument)").unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "fn main() { f(x, 1, y); }",
+            &[(0, vec![("argument", "x")]), (0, vec![("argument", "y")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_subtype_reached_through_a_nested_supertype() {
+    allocations::record(|| {
+        // `expression` wraps `identifier` through `primary_expression`, and
+        // `statement` wraps `function_declaration` through `declaration`.
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            r"
+            (arguments (expression/identifier) @argument)
+            (statement/function_declaration) @statement
+            ",
+        )
+        .unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "f(x, 1);\nfunction g() {}\nexport function h() {}\n",
+            &[
+                (0, vec![("argument", "x")]),
+                (1, vec![("statement", "function g() {}")]),
+            ],
+        );
+    });
+}
+
+#[test]
 #[expect(clippy::reversed_empty_ranges, reason = "testing empty range behavior")]
 fn test_query_matches_within_byte_range() {
     allocations::record(|| {
@@ -4519,11 +4720,11 @@ fn test_query_start_end_byte_for_pattern() {
     let query = Query::new(&language, &source).unwrap();
 
     assert_eq!(query.start_byte_for_pattern(0), 0);
-    assert_eq!(query.end_byte_for_pattern(0), "\"+\" @operator\n".len());
+    assert_eq!(query.end_byte_for_pattern(0), "\"+\" @operator".len());
     assert_eq!(query.start_byte_for_pattern(5), patterns_1.len());
     assert_eq!(
         query.end_byte_for_pattern(5),
-        patterns_1.len() + "(identifier) @a\n".len()
+        patterns_1.len() + "(identifier) @a".len()
     );
     assert_eq!(
         query.start_byte_for_pattern(7),
@@ -4531,7 +4732,7 @@ fn test_query_start_end_byte_for_pattern() {
     );
     assert_eq!(
         query.end_byte_for_pattern(7),
-        patterns_1.len() + patterns_2.len() + "((identifier) @b (#match? @b i))\n".len()
+        patterns_1.len() + patterns_2.len() + "((identifier) @b (#match? @b i))".len()
     );
 }
 
@@ -4904,6 +5105,11 @@ fn test_query_is_pattern_rooted() {
             ]",
             is_rooted: false,
         },
+        Row {
+            description: "sibling after a node with an alternative inside it",
+            pattern: r"((call [(identifier) (attribute)]) (comment))",
+            is_rooted: false,
+        },
     ];
 
     allocations::record(|| {
@@ -4981,6 +5187,12 @@ fn test_query_is_pattern_non_local() {
         Row {
             description: "siblings that can occur in a class body, wildcard root",
             pattern: r"(_ (method_definition) (method_definition)) @foo",
+            language: get_language("javascript"),
+            is_non_local: false,
+        },
+        Row {
+            description: "siblings whose first can occur in a class body",
+            pattern: r#"((method_definition) "}")"#,
             language: get_language("javascript"),
             is_non_local: true,
         },
@@ -5343,8 +5555,6 @@ fn test_query_quantified_captures() {
             // This should be identical to the `*` quantifier.
             captures: &[
                 ("comment", "// foo"),
-                ("comment", "// foo"),
-                ("comment", "// foo"),
                 ("comment", "// bar"),
                 ("comment", "// baz"),
             ],
@@ -5485,10 +5695,10 @@ fn test_query_error_does_not_oob() {
         Query::new(&language, "(clas").unwrap_err(),
         QueryError {
             row: 0,
-            offset: 1,
-            column: 1,
-            kind: QueryErrorKind::NodeType,
-            message: "\"clas\"".to_string()
+            offset: 0,
+            column: 0,
+            kind: QueryErrorKind::Syntax,
+            message: ["(clas", "^"].join("\n")
         }
     );
 }
@@ -5517,7 +5727,8 @@ fn test_consecutive_zero_or_modifiers() {
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&query, zero_tree.root_node(), zero_source.as_bytes());
-        assert!(matches.next().is_some());
+        // A match needs at least one node, and the source has no comments.
+        assert!(matches.next().is_none());
 
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&query, three_tree.root_node(), three_source.as_bytes());
@@ -6444,5 +6655,1190 @@ fn test_last_child_anchor_looks_past_hidden_node() {
         let source = "enum E { A };\nint x;\nint y;\n";
 
         assert_query_matches(&language, &query, source, &[(0, vec![("last", "int y;")])]);
+    });
+}
+
+#[test]
+fn test_query_keeps_every_capture_of_a_node() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(&language, "(identifier) @a @b @c @d").unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            "f(x);",
+            &[
+                (0, vec![("a", "f"), ("b", "f"), ("c", "f"), ("d", "f")]),
+                (0, vec![("a", "x"), ("b", "x"), ("c", "x"), ("d", "x")]),
+            ],
+        );
+    });
+}
+
+#[test]
+fn test_query_checks_every_negated_field() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            "
+            (if_statement
+                !left !right !operator !object !property !arguments !function !body
+                !alternative) @if
+            ",
+        )
+        .unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            "if (a) {}\nif (b) {} else {}",
+            &[(0, vec![("if", "if (a) {}")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_errors_on_misplaced_predicates() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+
+        // After a field name.
+        assert_eq!(
+            Query::new(
+                &language,
+                r#"(call_expression (identifier) @x function: (#eq? @x "f"))"#
+            )
+            .unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 44,
+                column: 44,
+                kind: QueryErrorKind::Syntax,
+                message: [
+                    r#"(call_expression (identifier) @x function: (#eq? @x "f"))"#, //
+                    "                                            ^",
+                ]
+                .join("\n"),
+            }
+        );
+
+        // At the top level, outside of a pattern.
+        assert_eq!(
+            Query::new(&language, "((identifier) @x)\n(#eq? @x \"f\")").unwrap_err(),
+            QueryError {
+                row: 1,
+                offset: 19,
+                column: 1,
+                kind: QueryErrorKind::Syntax,
+                message: [
+                    r#"(#eq? @x "f")"#, //
+                    " ^",
+                ]
+                .join("\n"),
+            }
+        );
+
+        // As one of the patterns of an alternation.
+        assert_eq!(
+            Query::new(&language, r#"[(identifier) @x (#eq? @x "f")]"#).unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 18,
+                column: 18,
+                kind: QueryErrorKind::Syntax,
+                message: [
+                    r#"[(identifier) @x (#eq? @x "f")]"#, //
+                    "                  ^",
+                ]
+                .join("\n"),
+            }
+        );
+    });
+}
+
+#[test]
+fn test_query_errors_on_unknown_escapes() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+
+        assert_eq!(
+            Query::new(&language, r#"((identifier) @x (#match? @x "^\d+$"))"#).unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 31,
+                column: 31,
+                kind: QueryErrorKind::Syntax,
+                message: [
+                    r#"((identifier) @x (#match? @x "^\d+$"))"#, //
+                    "                               ^",
+                ]
+                .join("\n"),
+            }
+        );
+    });
+}
+
+#[test]
+fn test_query_first_child_anchor_before_an_unmatched_repetition() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(&language, "(arguments . (comment)* @c (identifier) @id)").unwrap();
+
+        assert_query_matches(&language, &query, "f(x);", &[(0, vec![("id", "x")])]);
+    });
+}
+
+#[test]
+fn test_query_anchor_after_an_unmatched_repetition() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            "(program (comment)* @doc . (function_declaration) @fn)",
+        )
+        .unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            "// a\nclass X {}\nfunction foo() {}",
+            &[(0, vec![("fn", "function foo() {}")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_last_child_anchor_after_a_repetition() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(&language, r#"(array (","? (number) @n)+ .)"#).unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            "[1, 2, 3];",
+            &[(0, vec![("n", "1"), ("n", "2"), ("n", "3")])],
+        );
+
+        let query = Query::new(
+            &language,
+            "(program . (lexical_declaration) @declaration . (empty_statement)* @empty .) @program",
+        )
+        .unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "const x = 1;;;",
+            &[(
+                0,
+                vec![
+                    ("program", "const x = 1;;;"),
+                    ("declaration", "const x = 1;"),
+                    ("empty", ";"),
+                    ("empty", ";"),
+                ],
+            )],
+        );
+    });
+}
+
+#[test]
+fn test_query_last_child_anchor_after_a_skipped_optional() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(&language, "(array (array (number)) @inner . (string)? .)").unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            "[[1], x];\n[x, [2]];\n[[3], \"s\"];",
+            &[(0, vec![("inner", "[2]")]), (0, vec![("inner", "[3]")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_repetition_of_a_pattern_that_can_match_nothing() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+
+        // `((number)?)+` matches the same as `(number)*`.
+        for pattern in ["(array ((number)?)+ @n)", "(array (number)* @n)"] {
+            let query = Query::new(&language, pattern).unwrap();
+            assert_query_matches(
+                &language,
+                &query,
+                "[1, 2, 3];",
+                &[
+                    (0, vec![("n", "1")]),
+                    (0, vec![("n", "2")]),
+                    (0, vec![("n", "3")]),
+                ],
+            );
+            assert_query_matches(&language, &query, "[];", &[(0, vec![])]);
+        }
+    });
+}
+
+#[test]
+fn test_query_anchor_after_a_supertype_skips_anonymous_nodes() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            "(binary_expression (expression) @l . (identifier) @r)",
+        )
+        .unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            "a + b;",
+            &[(0, vec![("l", "a"), ("r", "b")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_matches_starting_before_the_byte_range() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            "([(comment) (lexical_declaration)] @c (function_declaration) @f)",
+        )
+        .unwrap();
+        let source = "// c\nfunction foo() {}";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let matches = cursor.set_byte_range(5..source.len()).matches(
+            &query,
+            tree.root_node(),
+            source.as_bytes(),
+        );
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[(0, vec![("c", "// c"), ("f", "function foo() {}")])]
+        );
+    });
+}
+
+#[test]
+fn test_query_skips_matches_outside_the_byte_range() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(&language, "((comment) @a (function_declaration) @b)").unwrap();
+        let source = "// a\nfunction foo() {}\nlet x = 1;";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let matches =
+            cursor
+                .set_byte_range(23..33)
+                .matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(collect_matches(matches, &query, source), &[]);
+
+        let matches =
+            cursor
+                .set_byte_range(5..22)
+                .matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[(0, vec![("a", "// a"), ("b", "function foo() {}")])]
+        );
+    });
+}
+
+#[test]
+fn test_query_matches_starting_before_the_byte_range_inside_a_repetition() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query =
+            Query::new(&language, "((method_definition) @m (field_definition) @f)").unwrap();
+        let source = "class A {\n  a() {}\n  b = 1;\n}";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let matches =
+            cursor
+                .set_byte_range(21..26)
+                .matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[(0, vec![("m", "a() {}"), ("f", "b = 1")])]
+        );
+    });
+}
+
+#[test]
+fn test_query_matches_starting_in_a_repetition_before_the_byte_range() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(&language, r#"((method_definition) @m "}" @b)"#).unwrap();
+        // The methods are in the class body's hidden repetition, which ends
+        // before the range, and the brace in the range is after it.
+        let source = "class A { a() {} b() {} }";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let matches =
+            cursor
+                .set_byte_range(24..25)
+                .matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[
+                (0, vec![("m", "a() {}"), ("b", "}")]),
+                (0, vec![("m", "b() {}"), ("b", "}")]),
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_query_with_extras_as_children() {
+    allocations::record(|| {
+        let language = get_language("rust");
+
+        // The comment is a child of the call, between its function and its arguments.
+        let query =
+            Query::new(&language, "(call_expression (line_comment) @c (arguments))").unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "f // a\n(1);",
+            &[(0, vec![("c", "// a")])],
+        );
+
+        // A comment can be a node's only named child.
+        let query = Query::new(&language, "(unit_expression (_) @c)").unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "( /* c */ );",
+            &[(0, vec![("c", "/* c */")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_errors_on_impossible_anchored_children() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+
+        // A binary expression's first named child is always its `left`, and its
+        // last is always its `right`.
+        assert_eq!(
+            Query::new(&language, "(binary_expression . right: (_))").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 21,
+                column: 21,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(binary_expression . right: (_))", //
+                    "                     ^",
+                ]
+                .join("\n"),
+            }
+        );
+        assert_eq!(
+            Query::new(&language, "(binary_expression left: (_) .)").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 19,
+                column: 19,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(binary_expression left: (_) .)", //
+                    "                   ^",
+                ]
+                .join("\n"),
+            }
+        );
+        assert_eq!(
+            Query::new(&language, "(binary_expression . [left: (_) right: (_)])").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 32,
+                column: 32,
+                kind: QueryErrorKind::Structure,
+                message: [
+                    "(binary_expression . [left: (_) right: (_)])", //
+                    "                                ^",
+                ]
+                .join("\n"),
+            }
+        );
+
+        // An anchor before the first child still lets anonymous nodes be skipped.
+        let query = Query::new(&language, r#"(object . "}" @b)"#).unwrap();
+        assert_query_matches(&language, &query, "x = {};", &[(0, vec![("b", "}")])]);
+    });
+}
+
+#[test]
+fn test_query_fields_of_nodes_inside_hidden_rules() {
+    let grammar = r#"
+export default grammar({
+  name: "fields_inside_hidden_rules",
+
+  extras: $ => [/\s/, $.comment],
+
+  rules: {
+    source_file: $ => repeat($.binding),
+
+    binding: $ => seq('let', field('outer', $._binding), ';'),
+
+    _binding: $ => seq(field('inner', $.name), '=', $.name),
+
+    name: _ => /[a-z]+/,
+
+    comment: _ => token(seq('/*', /[^*]*/, '*/')),
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let source = "let a /* c */ = b;";
+
+    // A node keeps its own field inside a hidden rule that is in another one.
+    let query = Query::new(&language, "(binding inner: (name) @n)").unwrap();
+    assert_query_matches(&language, &query, source, &[(0, vec![("n", "a")])]);
+
+    // An extra inside a hidden rule is in the rule's field.
+    let query = Query::new(&language, "(binding outer: (comment) @c)").unwrap();
+    assert_query_matches(&language, &query, source, &[(0, vec![("c", "/* c */")])]);
+}
+
+#[test]
+fn test_query_drops_a_shorter_match_when_a_child_has_its_parents_extent() {
+    allocations::record(|| {
+        let language = get_language("java");
+        let query = Query::new(&language, "(type_list (type_identifier)? @name) @list").unwrap();
+
+        // `ISpeak` spans the whole type list, which has no other child.
+        assert_query_matches(
+            &language,
+            &query,
+            "class Dog implements ISpeak {}",
+            &[(0, vec![("list", "ISpeak"), ("name", "ISpeak")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_captures_each_repeated_capture_once() {
+    allocations::record(|| {
+        let language = get_language("json");
+        let query = Query::new(&language, "(pair (string)+ @key)").unwrap();
+        let source = r#"{ "a": 1, "b": 2 }"#;
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_captures(captures, &query, source),
+            &[("key", "\"a\""), ("key", "\"b\"")]
+        );
+    });
+}
+
+#[test]
+fn test_query_captures_a_node_for_each_match_that_has_it() {
+    allocations::record(|| {
+        let language = get_language("cpp");
+        let query = Query::new(
+            &language,
+            "(raw_string_literal delimiter: (raw_string_delimiter) @delimiter (raw_string_content) _ @next)",
+        )
+        .unwrap();
+        let source = r#"auto s = R"FOO(d)FOO";"#;
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        // Each of the three nodes after the content makes a match with the same
+        // delimiter.
+        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[
+                (0, vec![("delimiter", "FOO"), ("next", ")")]),
+                (0, vec![("delimiter", "FOO"), ("next", "FOO")]),
+                (0, vec![("delimiter", "FOO"), ("next", "\"")]),
+            ]
+        );
+
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_captures(captures, &query, source),
+            &[
+                ("delimiter", "FOO"),
+                ("delimiter", "FOO"),
+                ("delimiter", "FOO"),
+                ("next", ")"),
+                ("next", "FOO"),
+                ("next", "\""),
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_query_captures_only_the_captures_of_matches() {
+    allocations::record(|| {
+        let language = get_language("c");
+        let query = Query::new(&language, "(preproc_include _ @include path: (_))").unwrap();
+        let source = "#include \"a.h\"\n#include <b.h>\n";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        // The paths are not captured, because no other path comes after them.
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_captures(captures, &query, source),
+            &[("include", "#include"), ("include", "#include")]
+        );
+    });
+}
+
+#[test]
+fn test_query_alternation_that_can_match_nothing() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            "(variable_declarator name: (identifier) @name value: [(function_expression)* (arrow_function)])",
+        )
+        .unwrap();
+
+        // The alternation matches no nodes when its first pattern does.
+        assert_query_matches(
+            &language,
+            &query,
+            "let a = 1;\nlet b = () => 2;",
+            &[(0, vec![("name", "a")]), (0, vec![("name", "b")])],
+        );
+    });
+}
+
+#[test]
+fn test_query_captures_an_empty_node_at_the_start() {
+    allocations::record(|| {
+        let language = get_test_fixture_language("epsilon_external_tokens");
+        let query = Query::new(&language, "(zero_width) @empty").unwrap();
+        let source = "hello";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[(0, vec![("empty", "")])]
+        );
+
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(collect_captures(captures, &query, source), &[("empty", "")]);
+    });
+}
+
+#[test]
+fn test_query_match_in_a_byte_range_keeps_to_its_node() {
+    allocations::record(|| {
+        let language = get_language("bash");
+        let query = Query::new(&language, "(command (_)* @child)").unwrap();
+        let source = "echo a$\necho b\n";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        // The range ends inside the first command, so the second command's
+        // children are not in its match.
+        let matches =
+            cursor
+                .set_byte_range(4..6)
+                .matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[(0, vec![("child", "echo"), ("child", "a$")])]
+        );
+    });
+}
+
+#[test]
+fn test_query_captures_outside_the_byte_range_are_skipped() {
+    allocations::record(|| {
+        let language = get_language("php/php");
+        let query =
+            Query::new(&language, "(nowdoc (nowdoc_body) @body (heredoc_end) @end)").unwrap();
+        let source =
+            "<?php\n$foo = \"?>\";\n$foo = <<<EOF\n  ?>\n  EOF;\n$foo = <<<'EOF'\n  ?>\n  EOF;\n";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+
+        // The nowdoc starts in the range, but its body and end come after it.
+        let matches =
+            cursor
+                .set_byte_range(28..57)
+                .matches(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_matches(matches, &query, source),
+            &[(0, vec![("body", "\n  ?>"), ("end", "EOF")])]
+        );
+
+        let captures =
+            cursor
+                .set_byte_range(28..57)
+                .captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(collect_captures(captures, &query, source), &[]);
+    });
+}
+
+#[test]
+fn test_query_disabled_pattern_with_a_wildcard_root() {
+    allocations::record(|| {
+        let language = get_language("json");
+        let mut query = Query::new(&language, "(_) @any").unwrap();
+        query.disable_pattern(0);
+
+        assert_query_matches(&language, &query, "1", &[]);
+    });
+}
+
+#[test]
+fn test_query_alternation_in_the_first_branch_of_an_alternation() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            "(program [[(lexical_declaration) (expression_statement)] (if_statement)] @statement)",
+        )
+        .unwrap();
+        assert_query_matches(&language, &query, "a;", &[(0, vec![("statement", "a;")])]);
+
+        let language = get_language("c");
+        let query = Query::new(
+            &language,
+            "(declaration (primitive_type) @type [[(attributed_declarator) @attributed (identifier) @name] (init_declarator) @init]) @declaration",
+        )
+        .unwrap();
+        assert_query_matches(
+            &language,
+            &query,
+            "int k;",
+            &[(
+                0,
+                vec![("declaration", "int k;"), ("type", "int"), ("name", "k")],
+            )],
+        );
+    });
+}
+
+#[test]
+fn test_query_node_type_that_two_rules_are_aliased_to() {
+    let grammar = r#"
+export default grammar({
+  name: "shared_alias_name",
+
+  rules: {
+    source_file: $ => repeat($.function),
+
+    // Both alternatives are an `lhs` in the tree, but only the second has
+    // atoms as its children.
+    function: $ => choice(
+      seq(alias($.lhs_decl, $.lhs), ':', $.name, ';'),
+      seq(alias($.lhs_defn, $.lhs), '=', $.name, ';'),
+    ),
+    lhs_decl: $ => alias($._atoms, $.function_name),
+    lhs_defn: $ => $._atoms,
+    _atoms: $ => repeat1($.atom),
+
+    atom: _ => /[a-z]+/,
+    name: _ => /[A-Z][a-z]*/,
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let query = Query::new(&language, "(function (lhs (atom) @atom))").unwrap();
+    assert_query_matches(
+        &language,
+        &query,
+        "f : T;\nf x = T;",
+        &[(0, vec![("atom", "f")]), (0, vec![("atom", "x")])],
+    );
+}
+
+#[test]
+fn test_query_parents_whose_node_types_are_aliases_or_tokens() {
+    let grammar = r#"
+export default grammar({
+  name: "parent_node_types",
+
+  rules: {
+    source_file: $ => repeat(choice($.list, $.pair)),
+
+    // An `items` node is a repetition under an alias.
+    list: $ => seq('[', alias(repeat(field('item', $.word)), $.items), ']'),
+
+    // A `word` is a token, or a pair under an alias, whose node type is the
+    // token's.
+    pair: $ => seq('(', alias($._words, $.word), ')'),
+    _words: $ => seq(repeat1($.word), ',', $.word),
+
+    word: _ => /[a-z]+/,
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    // Patterns whose parent can be any node.
+    let query = Query::new(&language, r#"(_ "," @comma) item: (word) @item"#).unwrap();
+    assert_query_matches(
+        &language,
+        &query,
+        "[a b] (c, d)",
+        &[
+            (1, vec![("item", "a")]),
+            (1, vec![("item", "b")]),
+            (0, vec![("comma", ",")]),
+        ],
+    );
+
+    // The words before the comma are in a repetition before the range.
+    let source = "(a b, c)";
+    let query = Query::new(&language, r#"((word) @word "," @comma)"#).unwrap();
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let mut cursor = QueryCursor::new();
+    let matches = cursor
+        .set_byte_range(4..5)
+        .matches(&query, tree.root_node(), source.as_bytes());
+    assert_eq!(
+        collect_matches(matches, &query, source),
+        &[
+            (0, vec![("word", "a"), ("comma", ",")]),
+            (0, vec![("word", "b"), ("comma", ",")]),
+        ]
+    );
+}
+
+#[test]
+fn test_query_field_that_a_supertype_gives_to_several_children() {
+    let grammar = r#"
+export default grammar({
+  name: "field_in_a_supertype",
+
+  supertypes: $ => [$._param],
+
+  rules: {
+    source_file: $ => repeat($.params),
+    params: $ => seq('(', repeat1($._param), ')'),
+
+    // The field is on a branch of a supertype, so older generators leave it
+    // out of the field map of `params`.
+    _param: $ => choice(field('bind', $.name), $.wildcard),
+
+    name: _ => /[a-z]+/,
+    wildcard: _ => '_',
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let query = Query::new(
+        &language,
+        "(params bind: (name) @first bind: (name) @second)",
+    )
+    .unwrap();
+    assert_query_matches(
+        &language,
+        &query,
+        "(a _ b)",
+        &[(0, vec![("first", "a"), ("second", "b")])],
+    );
+}
+
+#[test]
+fn test_query_groups_whose_patterns_a_match_can_all_skip() {
+    let grammar = r#"
+export default grammar({
+  name: "skippable_groups",
+
+  rules: {
+    source_file: $ => repeat(choice($.pair, $.list)),
+    pair: $ => seq('<', field('item', choice($.a, $.b)), '>'),
+    list: $ => seq('[', repeat($.a), ']', $.b),
+    a: _ => 'a',
+    b: _ => 'b',
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    // A pair has one item, and the group in the first field can match nothing.
+    let query = Query::new(&language, "(pair item: ((a)?) item: (b) @b)").unwrap();
+    assert_query_matches(&language, &query, "< b >", &[(0, vec![("b", "b")])]);
+
+    // After the group, a match can start at an `a` before the range.
+    let source = "[ a a ] b";
+    let query = Query::new(&language, "(((b)?) (a) @a (b) @b)").unwrap();
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let mut cursor = QueryCursor::new();
+    let matches = cursor
+        .set_byte_range(8..9)
+        .matches(&query, tree.root_node(), source.as_bytes());
+    assert_eq!(
+        collect_matches(matches, &query, source),
+        &[
+            (0, vec![("a", "a"), ("b", "b")]),
+            (0, vec![("a", "a"), ("b", "b")]),
+        ]
+    );
+}
+
+#[test]
+fn test_query_matches_starting_in_a_repetition_with_a_field_before_the_byte_range() {
+    let grammar = r#"
+export default grammar({
+  name: "field_on_a_repetition",
+
+  rules: {
+    source_file: $ => repeat($.list),
+    // The field is on the repetition: each `a` is an `item` of the list, but
+    // the repetition's own children have no field.
+    list: $ => seq('[', field('item', repeat($.a)), ']', $.b),
+    a: _ => 'a',
+    b: _ => 'b',
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    // The alternation lets the group start with a field.
+    let source = "[ a a ] b";
+    let query = Query::new(&language, "([item: (a)] @a (b) @b)").unwrap();
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+    let tree = parser.parse(source, None).unwrap();
+    let mut cursor = QueryCursor::new();
+    let matches = cursor
+        .set_byte_range(8..9)
+        .matches(&query, tree.root_node(), source.as_bytes());
+    assert_eq!(
+        collect_matches(matches, &query, source),
+        &[
+            (0, vec![("a", "a"), ("b", "b")]),
+            (0, vec![("a", "a"), ("b", "b")]),
+        ]
+    );
+}
+
+#[test]
+fn test_query_extra_in_the_field_of_a_hidden_node() {
+    let grammar = r#"
+export default grammar({
+  name: "extra_in_a_field",
+
+  extras: $ => [/\s/, $.comment],
+
+  rules: {
+    source_file: $ => repeat(choice($.address, $.label)),
+
+    // The field is on a repetition of hidden tokens, so the only node that
+    // can be in it is an extra between two of them.
+    address: $ => seq('[', field('hint', repeat(choice(/BYTE/, /WORD/))), $.name, ']'),
+
+    // No extra can be inside a token.
+    label: $ => seq('@', field('id', $._id)),
+    _id: _ => /[0-9]+/,
+
+    name: _ => /[a-z]+/,
+    comment: _ => /#[^\n]*/,
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let query = Query::new(&language, "(address hint: (comment) @comment)").unwrap();
+    assert_query_matches(
+        &language,
+        &query,
+        "[BYTE # note\n WORD x]",
+        &[(0, vec![("comment", "# note")])],
+    );
+
+    assert_eq!(
+        Query::new(&language, "(label id: (_) @id)"),
+        Err(QueryError {
+            kind: QueryErrorKind::Structure,
+            row: 0,
+            offset: 7,
+            column: 7,
+            message: ["(label id: (_) @id)", "       ^"].join("\n"),
+        })
+    );
+}
+
+#[test]
+fn test_query_field_inside_a_supertype() {
+    let grammar = r#"
+export default grammar({
+  name: "field_inside_a_supertype",
+
+  supertypes: $ => [$._param],
+
+  rules: {
+    source_file: $ => repeat($.params),
+    params: $ => seq('(', repeat1(field('item', $._param)), ')'),
+
+    // A `name` gets the field inside the supertype, and a `wildcard` the one
+    // around it.
+    _param: $ => choice(field('bind', $.name), $.wildcard),
+
+    name: _ => /[a-z]+/,
+    wildcard: _ => '_',
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let query = Query::new(
+        &language,
+        "(params bind: (_param/name) @name item: (_param/wildcard) @wildcard)",
+    )
+    .unwrap();
+    assert_query_matches(
+        &language,
+        &query,
+        "(a _)",
+        &[(0, vec![("name", "a"), ("wildcard", "_")])],
+    );
+
+    // A node's field is the innermost one around it.
+    assert_eq!(
+        Query::new(&language, "(params item: (_param/name) @name)"),
+        Err(QueryError {
+            kind: QueryErrorKind::Structure,
+            row: 0,
+            offset: 8,
+            column: 8,
+            message: ["(params item: (_param/name) @name)", "        ^"].join("\n"),
+        })
+    );
+}
+
+#[test]
+fn test_query_alternation_order_does_not_decide_a_structure_error() {
+    allocations::record(|| {
+        let language = get_language("javascript");
+
+        // A statement block can never be an argument, so its branch is an error
+        // whichever comes first.
+        for (source, offset) in [
+            ("(arguments [(statement_block) (identifier)])", 12),
+            ("(arguments [(identifier) (statement_block)])", 25),
+        ] {
+            assert_eq!(
+                Query::new(&language, source),
+                Err(QueryError {
+                    kind: QueryErrorKind::Structure,
+                    row: 0,
+                    offset,
+                    column: offset,
+                    message: format!("{source}\n{}^", " ".repeat(offset)),
+                })
+            );
+        }
+    });
+}
+
+#[test]
+fn test_query_captures_nothing_of_patterns_that_do_not_match() {
+    allocations::record(|| {
+        let language = get_language("java");
+        let query = Query::new(
+            &language,
+            "(superclass (MISSING)) @missing (superclass (ERROR)) @error",
+        )
+        .unwrap();
+        let source = "class A extends B {}";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(collect_captures(captures, &query, source), &[]);
+
+        let language = get_language("javascript");
+        let query = Query::new(
+            &language,
+            r"
+            (lexical_declaration (variable_declarator [(string) (template_string) (binary_expression (string))])) @string
+            (lexical_declaration (variable_declarator (call_expression [(template_string) (binary_expression (string))]))) @call
+            ",
+        )
+        .unwrap();
+        let source = "const a = `x`;\nconst b = f`x`;\nconst c = \"x\";";
+
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_captures(captures, &query, source),
+            &[
+                ("string", "const a = `x`;"),
+                ("call", "const b = f`x`;"),
+                ("string", "const c = \"x\";"),
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_query_captures_each_repeated_statement_once() {
+    allocations::record(|| {
+        let language = get_language("c");
+        let query = Query::new(
+            &language,
+            "(call_expression) @call (expression_statement)+ @statement",
+        )
+        .unwrap();
+        let source = "int main(int a) {\n    foo = bar();\n    foo = bar();\n}";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut cursor = QueryCursor::new();
+        let captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        assert_eq!(
+            collect_captures(captures, &query, source),
+            &[
+                ("statement", "foo = bar();"),
+                ("call", "bar()"),
+                ("statement", "foo = bar();"),
+                ("call", "bar()"),
+            ]
+        );
+    });
+}
+
+#[test]
+fn test_query_optional_comments_before_each_declaration() {
+    allocations::record(|| {
+        let language = get_language("c");
+        let query = Query::new(
+            &language,
+            "(translation_unit (comment)* @comment . (declaration) @declaration)",
+        )
+        .unwrap();
+
+        // A declaration with no comment before it matches with none, after one
+        // that has some.
+        assert_query_matches(
+            &language,
+            &query,
+            "// doc\nint a;\nint b;",
+            &[
+                (0, vec![("comment", "// doc"), ("declaration", "int a;")]),
+                (0, vec![("declaration", "int b;")]),
+            ],
+        );
+        assert_query_matches(
+            &language,
+            &query,
+            "// two\n// comments\nint a;\n\n// one comment\nint b;\n\nint c;",
+            &[
+                (
+                    0,
+                    vec![
+                        ("comment", "// two"),
+                        ("comment", "// comments"),
+                        ("declaration", "int a;"),
+                    ],
+                ),
+                (
+                    0,
+                    vec![("comment", "// one comment"), ("declaration", "int b;")],
+                ),
+                (0, vec![("declaration", "int c;")]),
+            ],
+        );
     });
 }
