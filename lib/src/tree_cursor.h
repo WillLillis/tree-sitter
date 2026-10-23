@@ -28,11 +28,11 @@ void ts_tree_cursor_current_status(
   const TSTreeCursor *_self,
   TSFieldId *field_id,
   bool *has_later_siblings,
-  bool *has_later_named_siblings,
-  bool *can_have_later_siblings_with_this_field,
-  TSSymbol *supertypes,
-  unsigned *supertype_count
+  bool *can_have_later_siblings_with_this_field
 );
+uint32_t ts_tree_cursor_visible_ancestor_index(const TSTreeCursor *_self, uint32_t count);
+bool ts_tree_cursor_has_later_named_siblings_at(const TSTreeCursor *_self, uint32_t index);
+bool ts_tree_cursor_is_wrapped_in_supertype(const TSTreeCursor *self, TSSymbol supertype);
 
 TreeCursorStep ts_tree_cursor_goto_first_child_internal(TSTreeCursor *_self);
 TreeCursorStep ts_tree_cursor_goto_next_sibling_internal(TSTreeCursor *_self);

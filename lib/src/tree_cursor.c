@@ -507,17 +507,11 @@ void ts_tree_cursor_current_status(
   const TSTreeCursor *_self,
   TSFieldId *field_id,
   bool *has_later_siblings,
-  bool *has_later_named_siblings,
-  bool *can_have_later_siblings_with_this_field,
-  TSSymbol *supertypes,
-  unsigned *supertype_count
+  bool *can_have_later_siblings_with_this_field
 ) {
   const TreeCursor *self = (const TreeCursor *)_self;
-  unsigned max_supertypes = *supertype_count;
   *field_id = 0;
-  *supertype_count = 0;
   *has_later_siblings = false;
-  *has_later_named_siblings = false;
   *can_have_later_siblings_with_this_field = false;
 
   // Walk up the tree, visiting the current node and its invisible ancestors,
@@ -551,16 +545,9 @@ void ts_tree_cursor_current_status(
     );
     if (i != self->stack.size - 1 && entry_metadata.visible) break;
 
-    // Record any supertypes
-    if (entry_metadata.supertype && *supertype_count < max_supertypes) {
-      supertypes[*supertype_count] = entry_symbol;
-      (*supertype_count)++;
-    }
-
-    // Determine if the current node has later siblings. A later *anonymous*
-    // sibling settles `has_later_siblings` but says nothing about later *named*
-    // siblings.
-    if (!*has_later_named_siblings) {
+    // Determine if the current node has later siblings. The visible children of
+    // a hidden sibling are later siblings too.
+    if (!*has_later_siblings) {
       unsigned sibling_count = parent_entry->subtree->ptr->child_count;
       unsigned structural_child_index = entry->structural_child_index;
       if (!ts_subtree_extra(*entry->subtree)) structural_child_index++;
@@ -570,18 +557,9 @@ void ts_tree_cursor_current_status(
           self->tree->language,
           subtree_symbol(sibling, structural_child_index)
         );
-        if (sibling_metadata.visible) {
+        if (sibling_metadata.visible || ts_subtree_visible_child_count(sibling) > 0) {
           *has_later_siblings = true;
-          if (sibling_metadata.named) {
-            *has_later_named_siblings = true;
-            break;
-          }
-        } else if (ts_subtree_visible_child_count(sibling) > 0) {
-          *has_later_siblings = true;
-          if (sibling.ptr->named_child_count > 0) {
-            *has_later_named_siblings = true;
-            break;
-          }
+          break;
         }
         if (!ts_subtree_extra(sibling)) structural_child_index++;
       }
@@ -621,6 +599,90 @@ void ts_tree_cursor_current_status(
       }
     }
   }
+}
+
+// Private - Returns the index in the cursor's stack of the current node's
+// visible ancestor that is `count` visible levels above it. `count` must be at
+// most the cursor's depth.
+uint32_t ts_tree_cursor_visible_ancestor_index(const TSTreeCursor *_self, uint32_t count) {
+  const TreeCursor *self = (const TreeCursor *)_self;
+  uint32_t index = self->stack.size - 1;
+  while (count > 0) {
+    ts_assert(index > 0);
+    index--;
+    if (ts_tree_cursor_is_entry_visible(self, index)) count--;
+  }
+  return index;
+}
+
+// Private - Returns whether the node at `index` in the cursor's stack has a
+// later named sibling, looking through its invisible ancestors, up to the first
+// visible one.
+bool ts_tree_cursor_has_later_named_siblings_at(const TSTreeCursor *_self, uint32_t index) {
+  const TreeCursor *self = (const TreeCursor *)_self;
+  for (unsigned i = index; i > 0; i--) {
+    TreeCursorEntry *entry = array_get(&self->stack, i);
+    TreeCursorEntry *parent_entry = array_get(&self->stack, i - 1);
+    const TSSymbol *alias_sequence = ts_language_alias_sequence(
+      self->tree->language,
+      parent_entry->subtree->ptr->production_id
+    );
+
+    #define subtree_symbol(subtree, structural_child_index) \
+      ((                                                    \
+        !ts_subtree_extra(subtree) &&                       \
+        alias_sequence &&                                   \
+        alias_sequence[structural_child_index]              \
+      ) ?                                                   \
+        alias_sequence[structural_child_index] :            \
+        ts_subtree_symbol(subtree))
+
+    TSSymbol entry_symbol = subtree_symbol(*entry->subtree, entry->structural_child_index);
+    if (i != index && ts_language_symbol_metadata(self->tree->language, entry_symbol).visible) break;
+
+    unsigned sibling_count = parent_entry->subtree->ptr->child_count;
+    unsigned structural_child_index = entry->structural_child_index;
+    if (!ts_subtree_extra(*entry->subtree)) structural_child_index++;
+    for (unsigned j = entry->child_index + 1; j < sibling_count; j++) {
+      Subtree sibling = ts_subtree_children(*parent_entry->subtree)[j];
+      TSSymbolMetadata sibling_metadata = ts_language_symbol_metadata(
+        self->tree->language,
+        subtree_symbol(sibling, structural_child_index)
+      );
+      if (sibling_metadata.visible) {
+        if (sibling_metadata.named) return true;
+      } else if (ts_subtree_visible_child_count(sibling) > 0) {
+        if (sibling.ptr->named_child_count > 0) return true;
+      }
+      if (!ts_subtree_extra(sibling)) structural_child_index++;
+    }
+
+    #undef subtree_symbol
+  }
+  return false;
+}
+
+// Private - Returns whether the current node is wrapped in `supertype`: whether
+// the node or one of its invisible ancestors, up to the first visible one, is
+// that supertype.
+bool ts_tree_cursor_is_wrapped_in_supertype(const TSTreeCursor *_self, TSSymbol supertype) {
+  const TreeCursor *self = (const TreeCursor *)_self;
+  for (uint32_t i = self->stack.size - 1; i > 0; i--) {
+    const TreeCursorEntry *entry = array_get(&self->stack, i);
+    const TreeCursorEntry *parent_entry = array_get(&self->stack, i - 1);
+    const TSSymbol alias = ts_subtree_extra(*entry->subtree) ? 0 : ts_language_alias_at(
+      self->tree->language,
+      parent_entry->subtree->ptr->production_id,
+      entry->structural_child_index
+    );
+    const TSSymbol symbol = alias ? alias : ts_subtree_symbol(*entry->subtree);
+    if (
+      i != self->stack.size - 1 &&
+      ts_language_symbol_metadata(self->tree->language, symbol).visible
+    ) break;
+    if (symbol == supertype) return true;
+  }
+  return false;
 }
 
 uint32_t ts_tree_cursor_current_depth(const TSTreeCursor *_self) {
