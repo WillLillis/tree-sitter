@@ -545,16 +545,16 @@ describe('Query', () => {
       const query = new Query(JavaScript, source);
 
       expect(query.startIndexForPattern(0)).toBe(0);
-      expect(query.endIndexForPattern(0)).toBe('"+" @operator\n'.length);
+      expect(query.endIndexForPattern(0)).toBe('"+" @operator'.length);
       expect(query.startIndexForPattern(5)).toBe(patterns1.length);
       expect(query.endIndexForPattern(5)).toBe(
-        patterns1.length + '(identifier) @a\n'.length
+        patterns1.length + '(identifier) @a'.length
       );
       expect(query.startIndexForPattern(7)).toBe(patterns1.length + patterns2.length);
       expect(query.endIndexForPattern(7)).toBe(
         patterns1.length +
         patterns2.length +
-        '((identifier) @b (#match? @b i))\n'.length
+        '((identifier) @b (#match? @b i))'.length
       );
     });
   });
