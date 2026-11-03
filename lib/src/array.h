@@ -152,6 +152,14 @@ extern "C" {
 /// Get the size of the array contents
 #define array_elem_size(self) (sizeof *(self)->contents)
 
+/// Sort the array in place using `int compare(const void *, const void *)`.
+/// The comparator receives pointers to two elements and returns a negative
+/// value if the first comes before the second, zero if they compare equal,
+/// or a positive value if the first comes after the second.
+/// Equal elements may change order.
+#define array_sort(self, compare) \
+  _array__sort((void *)(self)->contents, (self)->size, array_elem_size(self), compare)
+
 /// Search a sorted array for a given `needle` value, using the given `compare`
 /// callback to determine the order.
 ///
@@ -296,6 +304,315 @@ static inline void *_array__splice(void *self_contents, uint32_t *size, uint32_t
   *size += new_count - old_count;
 
   return new_contents;
+}
+
+// Three-way quicksort based on Bentley and McIlroy's "Engineering a Sort
+// Function" (1993), with Musser's introsort depth limit and heapsort fallback.
+
+// Swaps up to 16 bytes between regions that are disjoint or identical.
+static inline void _array__sort_swap_chunk(
+  unsigned char *left,
+  unsigned char *right,
+  size_t length
+) {
+  unsigned char left_chunk[16];
+  unsigned char right_chunk[16];
+  memcpy(left_chunk, left, length);
+  memcpy(right_chunk, right, length);
+  memcpy(left, right_chunk, length);
+  memcpy(right, left_chunk, length);
+}
+
+// Swaps two elements of `element_size` bytes.
+static inline void _array__sort_swap(
+  unsigned char *left,
+  unsigned char *right,
+  size_t element_size
+) {
+  // Fixed chunk sizes encourage inlining of the `memcpy` calls.
+  size_t offset = 0;
+  for (; element_size - offset >= 16; offset += 16) {
+    _array__sort_swap_chunk(left + offset, right + offset, 16);
+  }
+  if (element_size - offset >= 8) {
+    _array__sort_swap_chunk(left + offset, right + offset, 8);
+    offset += 8;
+  }
+  if (element_size - offset >= 4) {
+    _array__sort_swap_chunk(left + offset, right + offset, 4);
+    offset += 4;
+  }
+  if (element_size - offset >= 2) {
+    _array__sort_swap_chunk(left + offset, right + offset, 2);
+    offset += 2;
+  }
+  if (element_size - offset >= 1) {
+    _array__sort_swap_chunk(left + offset, right + offset, 1);
+  }
+}
+
+// Swaps two disjoint runs of `count` elements each.
+static inline void _array__sort_swap_run(
+  unsigned char *left,
+  unsigned char *right,
+  size_t count,
+  size_t element_size
+) {
+  for (size_t i = 0; i < count; i++) {
+    _array__sort_swap(
+      left + i * element_size,
+      right + i * element_size,
+      element_size
+    );
+  }
+}
+
+// Returns the pointer to the median element according to `compare`.
+static inline unsigned char *_array__sort_median(
+  unsigned char *a,
+  unsigned char *b,
+  unsigned char *c,
+  int (*compare)(const void *, const void *)
+) {
+  if (compare(a, b) < 0) {
+    if (compare(b, c) < 0) return b;
+    return compare(a, c) < 0 ? c : a;
+  }
+  if (compare(b, c) > 0) return b;
+  return compare(a, c) < 0 ? a : c;
+}
+
+// Sorts `count` elements in place using insertion sort.
+static inline void _array__sort_insertion(
+  unsigned char *contents,
+  size_t count,
+  size_t element_size,
+  int (*compare)(const void *, const void *)
+) {
+  for (size_t i = 1; i < count; i++) {
+    for (
+      unsigned char *element = contents + i * element_size;
+      element > contents && compare(element - element_size, element) > 0;
+      element -= element_size
+    ) {
+      _array__sort_swap(element - element_size, element, element_size);
+    }
+  }
+}
+
+// Restores heap order at `root`. Its child subtrees must already be max-heaps.
+static inline void _array__sort_sift(
+  unsigned char *contents,
+  size_t root,
+  size_t count,
+  size_t element_size,
+  int (*compare)(const void *, const void *)
+) {
+  while (root < count / 2) {
+    size_t child = root * 2 + 1;
+    if (
+      child + 1 < count &&
+      compare(
+        contents + child * element_size,
+        contents + (child + 1) * element_size
+      ) < 0
+    ) {
+      child++;
+    }
+    if (
+      compare(
+        contents + root * element_size,
+        contents + child * element_size
+      ) >= 0
+    ) return;
+
+    _array__sort_swap(
+      contents + root * element_size,
+      contents + child * element_size,
+      element_size
+    );
+    root = child;
+  }
+}
+
+// Sorts `count` elements in place using heapsort.
+static inline void _array__sort_heap(
+  unsigned char *contents,
+  size_t count,
+  size_t element_size,
+  int (*compare)(const void *, const void *)
+) {
+  if (count < 2) return;
+
+  // Build the max-heap from the last parent back to the root.
+  for (size_t root = count / 2; root > 0; root--) {
+    _array__sort_sift(
+      contents,
+      root - 1,
+      count,
+      element_size,
+      compare
+    );
+  }
+
+  // Move each maximum to the end and restore the remaining heap.
+  for (size_t last = count - 1; last > 0; last--) {
+    _array__sort_swap(
+      contents,
+      contents + last * element_size,
+      element_size
+    );
+    _array__sort_sift(contents, 0, last, element_size, compare);
+  }
+}
+
+// Ranges shorter than this use insertion sort.
+#define TS_ARRAY_SORT_INSERTION_CUTOFF 7
+
+// Ranges longer than this take their pivot from a median of three medians.
+#define TS_ARRAY_SORT_NINTHER_CUTOFF 40
+
+// Maximum number of pending ranges for a uint32_t element count.
+#define TS_ARRAY_SORT_STACK_SIZE 32
+
+// A contiguous range of elements still to be sorted.
+typedef struct {
+  unsigned char *start;
+  uint32_t count;
+  // Remaining partition levels before switching to heapsort.
+  uint32_t depth;
+} ArraySortRange;
+
+// Sorts `count` elements in place according to `compare`.
+static inline void _array__sort(
+  void *contents,
+  uint32_t count,
+  size_t element_size,
+  int (*compare)(const void *, const void *)
+) {
+  unsigned char *bytes = (unsigned char *)contents;
+  if (count >= TS_ARRAY_SORT_INSERTION_CUTOFF) {
+    uint32_t sorted_end = 1;
+    while (
+      sorted_end < count &&
+      compare(
+        bytes + (sorted_end - 1) * element_size,
+        bytes + sorted_end * element_size
+      ) <= 0
+    ) sorted_end++;
+    if (sorted_end == count) return;
+  }
+
+  uint32_t depth_limit = 0;
+  for (uint32_t n = count; n > 1; n >>= 1) depth_limit += 2;
+  ArraySortRange range = {bytes, count, depth_limit};
+  // Save the larger partition and process the smaller one first. Each added
+  // stack entry reduces the active range to at most half its size, so 32
+  // entries cover any uint32_t element count.
+  ArraySortRange pending[TS_ARRAY_SORT_STACK_SIZE];
+  uint32_t pending_count = 0;
+  for (;;) {
+    unsigned char *const first = range.start;
+    const size_t range_count = range.count;
+    if (range_count < TS_ARRAY_SORT_INSERTION_CUTOFF) {
+      _array__sort_insertion(first, range_count, element_size, compare);
+    } else if (range.depth == 0) {
+      // Avoid quadratic work from repeatedly unbalanced partitions.
+      _array__sort_heap(first, range_count, element_size, compare);
+    } else {
+      unsigned char *const end = first + range_count * element_size;
+      unsigned char *pivot = first + (range_count / 2) * element_size;
+      if (range_count > TS_ARRAY_SORT_INSERTION_CUTOFF) {
+        unsigned char *low = first;
+        unsigned char *high = end - element_size;
+        if (range_count > TS_ARRAY_SORT_NINTHER_CUTOFF) {
+          const size_t step = (range_count / 8) * element_size;
+          low = _array__sort_median(low, low + step, low + 2 * step, compare);
+          pivot = _array__sort_median(pivot - step, pivot, pivot + step, compare);
+          high = _array__sort_median(high - 2 * step, high - step, high, compare);
+        }
+        pivot = _array__sort_median(low, pivot, high, compare);
+      }
+      _array__sort_swap(first, pivot, element_size);
+
+      // The pivot stays at `first`. The regions are:
+      //   [first, equal_end)           equal to pivot
+      //   [equal_end, less_end)        less than pivot
+      //   [less_end, greater_start]    unclassified
+      //   (greater_start, equal_start] greater than pivot
+      //   (equal_start, end)           equal to pivot
+      unsigned char *equal_end = first + element_size;
+      unsigned char *less_end = equal_end;
+      unsigned char *greater_start = end - element_size;
+      unsigned char *equal_start = greater_start;
+      for (;;) {
+        int order;
+        while (
+          less_end <= greater_start &&
+          (order = compare(less_end, first)) <= 0
+        ) {
+          if (order == 0) {
+            _array__sort_swap(equal_end, less_end, element_size);
+            equal_end += element_size;
+          }
+          less_end += element_size;
+        }
+        while (
+          less_end <= greater_start &&
+          (order = compare(greater_start, first)) >= 0
+        ) {
+          if (order == 0) {
+            _array__sort_swap(greater_start, equal_start, element_size);
+            equal_start -= element_size;
+          }
+          greater_start -= element_size;
+        }
+        if (less_end > greater_start) break;
+        _array__sort_swap(less_end, greater_start, element_size);
+        less_end += element_size;
+        greater_start -= element_size;
+      }
+
+      // Move the elements equal to the pivot into the middle.
+      const size_t less_count = (size_t)(less_end - equal_end) / element_size;
+      const size_t greater_count =
+        (size_t)(equal_start - greater_start) / element_size;
+      const size_t left_equal = (size_t)(equal_end - first) / element_size;
+      const size_t right_equal =
+        (size_t)(end - equal_start) / element_size - 1;
+      _array__sort_swap_run(
+        first,
+        less_end - (left_equal < less_count ? left_equal : less_count) * element_size,
+        left_equal < less_count ? left_equal : less_count,
+        element_size
+      );
+      _array__sort_swap_run(
+        less_end,
+        end - (right_equal < greater_count ? right_equal : greater_count) * element_size,
+        right_equal < greater_count ? right_equal : greater_count,
+        element_size
+      );
+
+      const uint32_t next_depth = range.depth - 1;
+      const ArraySortRange left = {first, (uint32_t)less_count, next_depth};
+      const ArraySortRange right = {
+        end - greater_count * element_size,
+        (uint32_t)greater_count,
+        next_depth
+      };
+      const bool left_is_smaller = left.count <= right.count;
+      const ArraySortRange smaller = left_is_smaller ? left : right;
+      const ArraySortRange larger = left_is_smaller ? right : left;
+      if (larger.count > 1) {
+        ts_assert(pending_count < TS_ARRAY_SORT_STACK_SIZE);
+        pending[pending_count++] = larger;
+      }
+      range = smaller;
+      continue;
+    }
+    if (pending_count == 0) return;
+    range = pending[--pending_count];
+  }
 }
 
 /// A binary search routine, based on Rust's `std::slice::binary_search_by`.
