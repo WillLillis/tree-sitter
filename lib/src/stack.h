@@ -43,6 +43,25 @@ uint32_t ts_stack_halted_version_count(Stack *self);
 // empty, this returns the initial state, 1.
 TSStateId ts_stack_state(const Stack *self, StackVersion version);
 
+// Get the state and the byte position that popping `depth` non-extra subtrees
+// off the given version of the stack would expose, as a reduction of `depth`
+// children would. Returns false if the stack is shallower than that, or if it
+// branches before reaching it.
+bool ts_stack_state_at_depth(
+  const Stack *self,
+  StackVersion version,
+  uint32_t depth,
+  TSStateId *state,
+  uint32_t *byte_position
+);
+
+// Get or set the lowest byte position that a keyword check on the given version
+// of the stack has read, while no node starting at or below it has been reduced
+// since (UINT32_MAX if none).
+uint32_t ts_stack_keyword_context_start(const Stack *self, StackVersion version);
+
+void ts_stack_set_keyword_context_start(Stack *self, StackVersion version, uint32_t byte_position);
+
 // Get the last external token associated with a given version of the stack.
 Subtree ts_stack_last_external_token(const Stack *self, StackVersion version);
 

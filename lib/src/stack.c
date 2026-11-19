@@ -56,6 +56,7 @@ typedef struct {
   StackNode *node;
   StackSummary *summary;
   uint32_t node_count_at_last_error;
+  uint32_t keyword_context_start;
   Subtree last_external_token;
   Subtree lookahead_when_paused;
   StackStatus status;
@@ -288,10 +289,12 @@ static StackVersion ts_stack__add_version(
   StackVersion original_version,
   StackNode *node
 ) {
+  StackHead *original = array_get(&self->heads, original_version);
   StackHead head = {
     .node = node,
-    .node_count_at_last_error = array_get(&self->heads, original_version)->node_count_at_last_error,
-    .last_external_token = array_get(&self->heads, original_version)->last_external_token,
+    .node_count_at_last_error = original->node_count_at_last_error,
+    .keyword_context_start = original->keyword_context_start,
+    .last_external_token = original->last_external_token,
     .status = StackStatusActive,
     .lookahead_when_paused = NULL_SUBTREE,
   };
@@ -473,6 +476,39 @@ uint32_t ts_stack_halted_version_count(Stack *self) {
 
 TSStateId ts_stack_state(const Stack *self, StackVersion version) {
   return array_get(&self->heads, version)->node->state;
+}
+
+bool ts_stack_state_at_depth(
+  const Stack *self,
+  StackVersion version,
+  uint32_t depth,
+  TSStateId *state,
+  uint32_t *byte_position
+) {
+  const StackNode *node = array_get(&self->heads, version)->node;
+  uint32_t count = 0;
+  while (count < depth) {
+    if (node->link_count != 1) return false;
+    StackLink link = node->links[0];
+    // Count links the way `stack__iter` counts a reduction's children: every one but an extra.
+    if (!link.subtree.ptr || !ts_subtree_extra(link.subtree)) count++;
+    node = link.node;
+  }
+  *state = node->state;
+  *byte_position = node->position.bytes;
+  return true;
+}
+
+uint32_t ts_stack_keyword_context_start(const Stack *self, StackVersion version) {
+  return array_get(&self->heads, version)->keyword_context_start;
+}
+
+void ts_stack_set_keyword_context_start(
+  Stack *self,
+  StackVersion version,
+  uint32_t byte_position
+) {
+  array_get(&self->heads, version)->keyword_context_start = byte_position;
 }
 
 Length ts_stack_position(const Stack *self, StackVersion version) {
@@ -715,6 +751,9 @@ bool ts_stack_merge(Stack *self, StackVersion version1, StackVersion version2) {
   if (head1->node->state == ERROR_STATE) {
     head1->node_count_at_last_error = head1->node->node_count;
   }
+  if (head2->keyword_context_start < head1->keyword_context_start) {
+    head1->keyword_context_start = head2->keyword_context_start;
+  }
   ts_stack_remove_version(self, version2);
   return true;
 }
@@ -774,6 +813,7 @@ void ts_stack_clear(Stack *self) {
     .status = StackStatusActive,
     .last_external_token = NULL_SUBTREE,
     .lookahead_when_paused = NULL_SUBTREE,
+    .keyword_context_start = UINT32_MAX,
   }));
 }
 

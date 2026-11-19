@@ -1,0 +1,39 @@
+==============================================
+keyword after a list
+==============================================
+
+a ( x if ;
+
+---
+
+(source_file
+  (pair
+    (list
+      (identifier))))
+
+==============================================
+keyword text as an identifier in a list
+==============================================
+
+b ( x if ;
+
+---
+
+(source_file
+  (pair
+    (list
+      (identifier)
+      (identifier))))
+
+==============================================
+keyword text as an identifier starting a list
+==============================================
+
+b ( if ;
+
+---
+
+(source_file
+  (pair
+    (list
+      (identifier))))

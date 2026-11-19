@@ -79,12 +79,20 @@ static const uint32_t MAX_VERSION_COUNT_OVERFLOW = 4;
 static const uint32_t MAX_SUMMARY_DEPTH = 16;
 static const uint32_t MAX_COST_DIFFERENCE = 18 * ERROR_COST_PER_SKIPPED_TREE;
 static const uint32_t OP_COUNT_PER_PARSER_CALLBACK_CHECK = 100;
+static const uint32_t MAX_KEYWORD_CHECK_STEPS = 64;
+#define WORD_ACTION_CACHE_SIZE 64
+#define MAX_KEYWORD_CHECK_STATES 16
 
 typedef struct {
   Subtree token;
   Subtree last_external_token;
   uint32_t byte_index;
 } TokenCache;
+
+typedef struct {
+  TSStateId state;
+  uint16_t action_index;
+} WordActionCacheEntry;
 
 struct TSParser {
   Lexer lexer;
@@ -111,6 +119,8 @@ struct TSParser {
   bool has_scanner_error;
   bool canceled_balancing;
   bool has_error;
+  bool keyword_context_active;
+  WordActionCacheEntry word_action_cache[WORD_ACTION_CACHE_SIZE];
 };
 
 typedef struct {
@@ -1042,7 +1052,19 @@ static StackVersion ts_parser__reduce(
     if (end_of_non_terminal_extra && next_state == state) {
       parent.ptr->extra = true;
     }
-    if (is_fragile || pop.size > 1 || initial_version_count > 1) {
+    // If a keyword check on this version read the stack below this node's start, the node depends
+    // on more than its parse state, so it can't be reused. A node starting at or below everything
+    // the check read has a parse state that accounts for it, so it clears the version's record.
+    bool depends_on_keyword_context = false;
+    if (self->keyword_context_active) {
+      uint32_t context_start = ts_stack_keyword_context_start(self->stack, slice_version);
+      if (ts_stack_position(self->stack, slice_version).bytes > context_start) {
+        depends_on_keyword_context = true;
+      } else {
+        ts_stack_set_keyword_context_start(self->stack, slice_version, UINT32_MAX);
+      }
+    }
+    if (is_fragile || pop.size > 1 || initial_version_count > 1 || depends_on_keyword_context) {
       parent.ptr->fragile_left = true;
       parent.ptr->fragile_right = true;
       parent.ptr->parse_state = TS_TREE_STATE_NONE;
@@ -1617,6 +1639,138 @@ static bool ts_parser__check_progress(TSParser *self, Subtree *lookahead, const 
   return true;
 }
 
+// Whether `keyword` would be shifted on this version after the reductions it triggers in `state`.
+// Returns true where it can't tell, which keeps the keyword. Sets `context_start` to the byte
+// position of the deepest stack entry whose state it read, or to UINT32_MAX if it read none.
+static bool ts_parser__keyword_is_viable(
+  TSParser *self,
+  StackVersion version,
+  TSStateId state,
+  TSSymbol keyword,
+  uint32_t *context_start
+) {
+  // The states pushed by simulated reductions, above what's left of the stack.
+  TSStateId pushed[MAX_KEYWORD_CHECK_STATES];
+  uint32_t pushed_count = 0;
+  // How many subtrees the simulated reductions have popped off the stack itself.
+  uint32_t stack_depth = 0;
+
+  *context_start = UINT32_MAX;
+  for (uint32_t step = 0; step < MAX_KEYWORD_CHECK_STEPS; step++) {
+    TableEntry entry;
+    ts_language_table_entry(self->language, state, keyword, &entry);
+    if (entry.action_count == 0) return false;
+
+    // A shift means the keyword is valid here. More than one action is a conflict, where there's
+    // no telling which path wins.
+    const TSParseAction *reduce = NULL;
+    for (uint32_t i = 0; i < entry.action_count; i++) {
+      if (entry.actions[i].type != TSParseActionTypeReduce) return true;
+      if (reduce) return true;
+      reduce = &entry.actions[i];
+    }
+
+    // Pop the reduction's children: the states pushed above first, then the stack's own.
+    uint32_t child_count = reduce->reduce.child_count;
+    if (child_count <= pushed_count) {
+      pushed_count -= child_count;
+    } else {
+      stack_depth += child_count - pushed_count;
+      pushed_count = 0;
+    }
+
+    TSStateId below;
+    if (pushed_count > 0) {
+      below = pushed[pushed_count - 1];
+    } else if (
+      !ts_stack_state_at_depth(self->stack, version, stack_depth, &below, context_start)
+    ) {
+      return true;
+    }
+    state = ts_language_next_state(self->language, below, reduce->reduce.symbol);
+
+    // A merged state drops a keyword from its reserved words when it has actions for it, so the
+    // state the keyword was lexed in may not show that it was reserved. Where a state on the way
+    // reserves it, keep it.
+    if (ts_language_is_reserved_word(self->language, state, keyword)) return true;
+
+    if (pushed_count == MAX_KEYWORD_CHECK_STATES) return true;
+    pushed[pushed_count++] = state;
+  }
+  return true;
+}
+
+// A merged parse state can have reductions for a keyword that come from another context, where
+// this version's context would read the keyword's text as the word token. Where the keyword's
+// actions differ from the word token's, simulate the keyword's reductions. If it wouldn't be
+// shifted after them, switch the lookahead and `table_entry` to the word token. Returns whether
+// to check again in the next state, after a reduction both tokens share.
+static bool ts_parser__check_keyword(
+  TSParser *self,
+  StackVersion version,
+  TSStateId state,
+  Subtree *lookahead,
+  TableEntry *table_entry
+) {
+  // Merged states shift the same tokens, so only a reduction can come from another context.
+  if (table_entry->action_count == 0 || table_entry->actions[0].type != TSParseActionTypeReduce) {
+    return false;
+  }
+  const TSLanguage *language = self->language;
+  TSSymbol keyword = ts_subtree_leaf_symbol(*lookahead);
+  if (keyword == language->keyword_capture_token) return false;
+
+  // The word token's actions in this state, cached by state. A zeroed entry reads as state 0, the
+  // error state, which has no reductions and so never gets here.
+  WordActionCacheEntry *cached = &self->word_action_cache[state % WORD_ACTION_CACHE_SIZE];
+  if (cached->state != state) {
+    cached->state = state;
+    cached->action_index = ts_language_lookup(language, state, language->keyword_capture_token);
+  }
+  const TSParseActionEntry *word_entry = &language->parse_actions[cached->action_index];
+  const TSParseAction *word_actions = (const TSParseAction *)(word_entry + 1);
+  if (word_actions == table_entry->actions) return true;
+
+  // Keep the keyword where the word token isn't valid, or where the keyword is reserved.
+  if (word_entry->entry.count == 0) return false;
+  if (ts_language_is_reserved_word(language, state, keyword)) return false;
+
+  // Record how far down the stack the decision looked, for `ts_parser__reduce`.
+  uint32_t context_start;
+  bool viable = ts_parser__keyword_is_viable(self, version, state, keyword, &context_start);
+  if (context_start < ts_stack_keyword_context_start(self->stack, version)) {
+    ts_stack_set_keyword_context_start(self->stack, version, context_start);
+    self->keyword_context_active = true;
+  }
+  if (viable) return false;
+
+  // Break a node reused from the old tree down to its first leaf, the keyword. Every node above
+  // the keyword contains it, so descend all the way: `ts_parser__breakdown_lookahead` stops at the
+  // first node whose parse state is this one, which is usually the reused node itself.
+  if (ts_subtree_child_count(*lookahead) > 0) {
+    Subtree leaf = reusable_node_tree(&self->reusable_node);
+    while (reusable_node_descend(&self->reusable_node)) {
+      leaf = reusable_node_tree(&self->reusable_node);
+    }
+    ts_subtree_retain(leaf);
+    ts_subtree_release(&self->tree_pool, *lookahead);
+    *lookahead = leaf;
+  }
+
+  LOG(
+    "switch from_keyword:%s, to_word_token:%s",
+    SYM_NAME(keyword),
+    SYM_NAME(language->keyword_capture_token)
+  );
+  MutableSubtree mutable_lookahead = ts_subtree_make_mut(&self->tree_pool, *lookahead);
+  ts_subtree_set_symbol(&mutable_lookahead, language->keyword_capture_token, language);
+  *lookahead = ts_subtree_from_mut(mutable_lookahead);
+  table_entry->action_count = word_entry->entry.count;
+  table_entry->is_reusable = word_entry->entry.reusable;
+  table_entry->actions = word_actions;
+  return false;
+}
+
 static bool ts_parser__advance(
   TSParser *self,
   StackVersion version,
@@ -1646,6 +1800,17 @@ static bool ts_parser__advance(
     );
   }
 
+  // Whether `ts_parser__check_keyword` should look at the lookahead: a keyword, or a node reused
+  // from the old tree whose first leaf is one.
+  bool keyword_pending = false;
+  if (lookahead.ptr) {
+    Subtree first_leaf = lookahead;
+    while (ts_subtree_child_count(first_leaf) > 0) {
+      first_leaf = ts_subtree_children(first_leaf)[0];
+    }
+    keyword_pending = ts_subtree_is_keyword(first_leaf);
+  }
+
   bool needs_lex = !lookahead.ptr;
   for (;;) {
     // Otherwise, re-run the lexer.
@@ -1653,6 +1818,7 @@ static bool ts_parser__advance(
       needs_lex = false;
       lookahead = ts_parser__lex(self, version, state);
       if (self->has_scanner_error) return false;
+      keyword_pending = lookahead.ptr && ts_subtree_is_keyword(lookahead);
 
       if (lookahead.ptr) {
         ts_parser__set_cached_token(self, position, last_external_token, lookahead);
@@ -1671,6 +1837,12 @@ static bool ts_parser__advance(
     // time a fixed number of parse actions has been processed.
     if (!ts_parser__check_progress(self, &lookahead, &position, 1)) {
       return false;
+    }
+
+    // Before taking a keyword's reductions, check that this version would shift the keyword after
+    // them. This can switch the lookahead to the word token.
+    if (keyword_pending) {
+      keyword_pending = ts_parser__check_keyword(self, version, state, &lookahead, &table_entry);
     }
 
     // Process each parse action for the current lookahead token in
@@ -2071,6 +2243,7 @@ bool ts_parser_set_language(TSParser *self, const TSLanguage *language) {
   ts_parser_reset(self);
   ts_language_delete(self->language);
   self->language = NULL;
+  memset(self->word_action_cache, 0, sizeof(self->word_action_cache));
 
   if (language) {
     if (
@@ -2151,6 +2324,7 @@ void ts_parser_reset(TSParser *self) {
   self->has_scanner_error = false;
   self->has_error = false;
   self->canceled_balancing = false;
+  self->keyword_context_active = false;
   self->parse_options = (TSParseOptions) {0};
   self->parse_state = (TSParseState) {0};
 }
@@ -2251,6 +2425,17 @@ TSTree *ts_parser_parse(
     // After advancing each version of the stack, re-sort the versions by their cost,
     // removing any versions that are no longer worth pursuing.
     uint32_t min_error_cost = ts_parser__condense_stack(self);
+
+    // Let reductions skip the keyword context check again once no version has a record left.
+    if (self->keyword_context_active) {
+      self->keyword_context_active = false;
+      for (StackVersion i = 0; i < ts_stack_version_count(self->stack); i++) {
+        if (ts_stack_keyword_context_start(self->stack, i) != UINT32_MAX) {
+          self->keyword_context_active = true;
+          break;
+        }
+      }
+    }
 
     // If there's already a finished parse tree that's better than any in-progress version,
     // then terminate parsing. Clear the parse stack to remove any extra references to subtrees

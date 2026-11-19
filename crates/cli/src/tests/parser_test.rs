@@ -948,6 +948,136 @@ fn test_parsing_after_editing_text_before_a_node_starting_with_a_keyword() {
 }
 
 #[test]
+fn test_parsing_after_editing_text_before_a_node_starting_with_a_merged_state_keyword() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&get_test_fixture_language(
+            "reuse_node_starting_with_merged_state_keyword",
+        ))
+        .unwrap();
+
+    // After `a (`, `if` starts a `cond`.
+    let mut code = b"a ( if ; x".to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    assert_eq!(
+        tree.root_node().to_sexp(),
+        "(source_file (pair) (cond (identifier)))"
+    );
+
+    // After `b (`, `if` can only be an identifier, so the `cond` that it starts can't be reused.
+    perform_edit(
+        &mut tree,
+        &mut code,
+        &Edit {
+            position: 0,
+            deleted_length: 1,
+            inserted_text: b"b".to_vec(),
+        },
+    )
+    .unwrap();
+    tree = parser.parse(&code, Some(&tree)).unwrap();
+    let fresh = parser.parse(&code, None).unwrap();
+    assert_eq!(
+        fresh.root_node().to_sexp(),
+        "(source_file (pair (identifier)) (identifier))"
+    );
+    assert_eq!(tree.root_node().to_sexp(), fresh.root_node().to_sexp());
+}
+
+#[test]
+fn test_parsing_after_editing_text_before_a_node_containing_a_merged_state_keyword() {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&get_test_fixture_language(
+            "reuse_node_containing_merged_state_keyword",
+        ))
+        .unwrap();
+
+    // After `b ( x`, `if` is the `list`'s second identifier.
+    let mut code = b"b ( x if ;".to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    assert_eq!(
+        tree.root_node().to_sexp(),
+        "(source_file (pair (list (identifier) (identifier))))"
+    );
+
+    // After `a ( x`, `if` follows the `list`, so the `list` that contains it can't be reused.
+    perform_edit(
+        &mut tree,
+        &mut code,
+        &Edit {
+            position: 0,
+            deleted_length: 1,
+            inserted_text: b"a".to_vec(),
+        },
+    )
+    .unwrap();
+    tree = parser.parse(&code, Some(&tree)).unwrap();
+    let fresh = parser.parse(&code, None).unwrap();
+    assert_eq!(
+        fresh.root_node().to_sexp(),
+        "(source_file (pair (list (identifier))))"
+    );
+    assert_eq!(tree.root_node().to_sexp(), fresh.root_node().to_sexp());
+}
+
+#[test]
+fn test_parsing_after_undoing_an_edit_that_made_a_keyword_a_label() {
+    let mut parser = Parser::new();
+    parser.set_language(&get_language("go")).unwrap();
+
+    let mut code = concat!(
+        "package main\n",
+        "\n",
+        "func main() {\n",
+        "  select {\n",
+        "  case <-c:\n",
+        "    f()\n",
+        "  default:\n",
+        "  }\n",
+        "}\n",
+    )
+    .as_bytes()
+    .to_vec();
+    let mut tree = parser.parse(&code, None).unwrap();
+    assert!(tree.root_node().to_sexp().contains("(default_case)"));
+
+    // Closing the `select` early leaves `default` where it can only be a label.
+    perform_edit(
+        &mut tree,
+        &mut code,
+        &Edit {
+            position: 39,
+            deleted_length: 0,
+            inserted_text: b"}".to_vec(),
+        },
+    )
+    .unwrap();
+    tree = parser.parse(&code, Some(&tree)).unwrap();
+    assert!(
+        tree.root_node()
+            .to_sexp()
+            .contains("(labeled_statement label: (label_name))")
+    );
+
+    // Undoing the edit must not reuse the `labeled_statement` that `default` starts.
+    perform_edit(
+        &mut tree,
+        &mut code,
+        &Edit {
+            position: 39,
+            deleted_length: 1,
+            inserted_text: Vec::new(),
+        },
+    )
+    .unwrap();
+    tree = parser.parse(&code, Some(&tree)).unwrap();
+    let fresh = parser.parse(&code, None).unwrap();
+    assert!(fresh.root_node().to_sexp().contains("(default_case)"));
+    assert_eq!(tree.root_node().to_sexp(), fresh.root_node().to_sexp());
+}
+
+#[test]
 fn test_parsing_after_editing_text_before_a_trailing_comment() {
     let mut parser = Parser::new();
     parser.set_language(&get_language("javascript")).unwrap();

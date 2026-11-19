@@ -1,0 +1,25 @@
+==============================================
+keyword after a
+==============================================
+
+a ( if ; x
+
+---
+
+(source_file
+  (pair)
+  (cond
+    (identifier)))
+
+==============================================
+keyword text as an identifier after b
+==============================================
+
+b ( if ; x
+
+---
+
+(source_file
+  (pair
+    (identifier))
+  (identifier))
